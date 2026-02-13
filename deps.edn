@@ -1,0 +1,44 @@
+{:paths ["src/clj" "src/java" "target/classes"]
+
+ :deps {;; Anomaly - standardized error categories
+        com.blockether/anomaly {:mvn/version "1.0.1"}
+        ;; HTTP client
+        org.babashka/http-client {:mvn/version "0.4.22"}
+        ;; Filesystem utilities
+        babashka/fs {:mvn/version "0.5.25"}
+        ;; JSON parsing
+        com.cnuernber/charred {:mvn/version "1.034"}
+        ;; Structured logging
+        com.taoensso/trove {:mvn/version "1.1.0"}
+        ;; Nippy - binary serialization (for pageindex)
+        com.taoensso/nippy {:mvn/version "3.6.0"}
+        ;; Token counting (OpenAI compatible)
+        com.knuddels/jtokkit {:mvn/version "1.1.0"}
+        ;; SCI - Small Clojure Interpreter (for RLM sandbox)
+        org.babashka/sci {:mvn/version "0.12.51"}
+        ;; PDFBox - PDF processing (for pageindex)
+        org.apache.pdfbox/pdfbox {:mvn/version "3.0.6"}
+        ;; Core.async - for parallel processing (for pageindex)
+        org.clojure/core.async {:mvn/version "1.8.741"}
+        ;; Datalevin - embedded datalog database (for RLM history)
+        datalevin/datalevin {:mvn/version "0.9.17"}}
+
+ :aliases
+ {:dev {:extra-paths ["test"]
+        :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}}
+
+  :test {:extra-paths ["test"]
+         :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}
+         :main-opts ["-m" "lazytest.main"]}
+
+  :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.12"}
+                 slipset/deps-deploy {:mvn/version "0.2.2"}}
+          :ns-default build}
+
+  :antq {:deps {com.github.liquidz/antq {:mvn/version "RELEASE"}}
+         :main-opts ["-m" "antq.core"]}
+
+  :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.2"}}
+           :exec-fn deps-deploy.deps-deploy/deploy
+           :exec-args {:installer :remote
+                       :artifact "target/svar.jar"}}}}
