@@ -33,5 +33,11 @@ jobs:
       - name: Check Clojure syntax
         run: clojure -M -e "(println \"Syntax check passed\")"
 
+      - name: Run tests
+        run: clojure -M:test
+
+      - name: Run README doc tests
+        run: clojure -M:test --md README.md
+
       - name: Build jar
         run: clojure -T:build jar

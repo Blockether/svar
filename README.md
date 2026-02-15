@@ -154,9 +154,9 @@ SVAR works with any text-producing LLM because parsing happens post-step. The SA
 (svar/str->data-with-spec "{name: \"John Smith\", age: 42,}" person-spec)
 ;; => {:name "John Smith", :age 42}
 
-;; Schemaless parsing — no spec needed
+;; Schemaless parsing — no spec needed, returns {:value <data>, :warnings [...]}
 (svar/str->data "{\"city\": \"Paris\", \"population\": 2161000}")
-;; => {:city "Paris", :population 2161000}
+;; => {:value {:city "Paris", :population 2161000}, :warnings []}
 
 ;; Serialize Clojure data to JSON
 (svar/data->str {:name "John" :age 42})
@@ -680,9 +680,9 @@ Serialize Clojure data to/from LLM-compatible strings:
 (svar/data->str {:name "John" :age 42})
 ;; => "{\"name\":\"John\",\"age\":42}"
 
-;; Parse (schemaless — no spec needed)
+;; Parse (schemaless — no spec needed, returns {:value <data>, :warnings [...]})
 (svar/str->data "{\"name\": \"John\", \"age\": 42}")
-;; => {:name "John", :age 42}
+;; => {:value {:name "John", :age 42}, :warnings []}
 ```
 
 ## RLM — Recursive Language Model
