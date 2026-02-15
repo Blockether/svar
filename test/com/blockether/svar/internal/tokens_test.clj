@@ -44,9 +44,9 @@
   "Tests for max input token calculation"
 
   (describe "default output reserve"
-            (it "no output reserve by default (full context available)"
+            (it "uses default reserve of 0 (trust API)"
                 (let [result (sut/max-input-tokens "gpt-4o")]
-        ;; 128000 - 0 = 128000 (full context available)
+        ;; 128000 - 0 (default reserve) = 128000
                   (expect (= 128000 result)))))
 
   (describe "custom output reserve"

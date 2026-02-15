@@ -3,11 +3,16 @@
    
    Provides:
    - `image->base64` - Convert BufferedImage to base64 PNG string
-   - `extract-text-from-image` - Extract text from a single BufferedImage (vision)
-   - `extract-text-from-pdf` - Extract text from all pages of a PDF (vision)
-   - `extract-text-from-text-file` - Extract from text/markdown file (direct text)
+   - `image->bytes` - Convert BufferedImage to PNG byte array
+   - `image->bytes-region` - Extract and convert a bounding-box region to PNG bytes
+   - `extract-image-region` - Crop a BufferedImage to a bounding-box region
+   - `scale-and-clamp-bbox` - Scale and clamp bounding box coordinates to image dimensions
+   - `extract-text-from-image` - Extract structured nodes from a single BufferedImage (vision)
+   - `extract-text-from-pdf` - Extract structured nodes from all pages of a PDF (vision)
+   - `extract-text-from-text-file` - Extract from text/markdown file (LLM, no image rendering)
    - `extract-text-from-image-file` - Extract from image file (vision)
-   - `extract-text-from-string` - Extract from string content (direct text)
+   - `extract-text-from-string` - Extract from string content (LLM, no image rendering)
+   - `infer-document-title` - Infer a document title from page content using LLM
    
    Configuration is passed explicitly via opts maps.
    Uses multimodal LLM for both image and text extraction.
@@ -20,6 +25,8 @@
    [com.blockether.svar.rlm.internal.pageindex.pdf :as pdf]
    [taoensso.trove :as trove])
   (:import
+   [java.awt Color Graphics2D]
+   [java.awt.geom AffineTransform]
    [java.awt.image BufferedImage]
    [java.io ByteArrayOutputStream File]
    [java.util Base64]
@@ -208,6 +215,131 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   (let [baos (ByteArrayOutputStream.)]
     (ImageIO/write image "PNG" baos)
     (.toByteArray baos)))
+
+;; =============================================================================
+;; Rotation Detection & Correction
+;; =============================================================================
+
+(def ^:private rotation-detection-spec
+  "Spec for page rotation detection response."
+  (svar/svar-spec
+   (svar/field {svar/NAME :rotation
+                svar/TYPE :spec.type/int
+                svar/CARDINALITY :spec.cardinality/one
+                svar/DESCRIPTION "Page rotation in degrees clockwise (0, 90, 180, or 270)"
+                svar/VALUES {"0" "Correct orientation, text reads left-to-right top-to-bottom"
+                             "90" "Rotated 90 degrees clockwise, text reads top-to-bottom"
+                             "180" "Upside down, text reads right-to-left bottom-to-top"
+                             "270" "Rotated 90 degrees counter-clockwise, text reads bottom-to-top"}})))
+
+(defn- detect-rotation
+  "Detects the rotation of a page image using vision LLM.
+   
+   Sends the image to the vision LLM and asks it to determine if the page
+   is rotated, and by how many degrees clockwise.
+   
+   Params:
+   `image` - BufferedImage. The page image to check.
+   `page-index` - Integer. The page index (for logging).
+   `opts` - Map with:
+     `:model` - String. Vision model to use.
+     `:config` - Map. LLM config with :api-key, :base-url.
+     `:timeout-ms` - Integer, optional. HTTP timeout (default: 60000ms / 1 min).
+   
+   Returns:
+   Integer. Rotation in degrees (0, 90, 180, or 270)."
+  [^BufferedImage image page-index {:keys [model config timeout-ms]
+                                    :or {timeout-ms 60000}}]
+  (trove/log! {:level :debug :data {:page page-index :model model}
+               :msg "Detecting page rotation"})
+  (let [base64-image (image->base64 image)
+        response (svar/ask! {:spec rotation-detection-spec
+                              :messages [(svar/system "You are a document orientation detector. Your ONLY job is to determine if this page image needs to be rotated to be read normally.
+
+CRITICAL: Look at the INDIVIDUAL CHARACTERS and LETTERS in the text:
+- If letters are upright and text flows left-to-right: rotation = 0
+- If letters are sideways and text flows top-to-bottom: rotation = 90
+- If letters are upside down: rotation = 180
+- If letters are sideways and text flows bottom-to-top: rotation = 270
+
+Pay special attention to:
+- Are table headers/column labels readable without tilting your head?
+- Are numbers and letters in their normal upright orientation?
+- Would you need to rotate the image to read the text comfortably?
+
+DO NOT assume 0. Actually examine the character orientation carefully.")
+                                         (svar/user "Look at the characters and text in this image. Are the letters upright (normal) or are they rotated sideways/upside down? Return the rotation needed to make text readable in normal left-to-right orientation."
+                                                    (svar/image base64-image "image/png"))]
+                              :model model
+                              :config config
+                              :check-context? false
+                              :timeout-ms timeout-ms})
+        rotation (get-in response [:result :rotation] 0)
+        ;; Clamp to valid values
+        valid-rotation (if (contains? #{0 90 180 270} rotation) rotation 0)]
+    (when (pos? valid-rotation)
+      (trove/log! {:level :info :data {:page page-index :rotation valid-rotation}
+                   :msg "Rotation detected on page"}))
+    valid-rotation))
+
+(defn- rotate-image
+  "Rotates a BufferedImage by the specified degrees clockwise.
+   
+   Uses Java AWT AffineTransform for rotation. Handles dimension swapping
+   for 90° and 270° rotations (width/height are swapped).
+   
+   Params:
+   `image` - BufferedImage. The image to rotate.
+   `degrees` - Integer. Rotation in degrees clockwise (90, 180, or 270).
+   
+   Returns:
+   BufferedImage. The rotated image, or the original if degrees is 0."
+  [^BufferedImage image degrees]
+  (case (int degrees)
+    0 image
+    (let [src-width (.getWidth image)
+          src-height (.getHeight image)
+          radians (Math/toRadians (double degrees))
+          ;; For 90/270, width and height swap
+          [dst-width dst-height] (if (or (= 90 degrees) (= 270 degrees))
+                                   [src-height src-width]
+                                   [src-width src-height])
+          rotated (BufferedImage. dst-width dst-height BufferedImage/TYPE_INT_RGB)
+          ^Graphics2D g2d (.createGraphics rotated)
+          transform (AffineTransform.)]
+      ;; Translate to center of destination, rotate, translate back from center of source
+      (.translate transform (/ (double dst-width) 2.0) (/ (double dst-height) 2.0))
+      (.rotate transform radians)
+      (.translate transform (/ (double src-width) -2.0) (/ (double src-height) -2.0))
+      ;; Fill background white (in case of rounding gaps)
+      (.setColor g2d Color/WHITE)
+      (.fillRect g2d 0 0 dst-width dst-height)
+      (.setTransform g2d transform)
+      (.drawImage g2d image 0 0 nil)
+      (.dispose g2d)
+      rotated)))
+
+(defn- correct-page-rotation
+  "Detects and corrects page rotation for a single image.
+   
+   Sends the image to vision LLM for rotation detection, then rotates
+   the image if needed.
+   
+   Params:
+   `image` - BufferedImage. The page image.
+   `page-index` - Integer. The page index (for logging).
+   `opts` - Map with :model, :config, :timeout-ms.
+   
+   Returns:
+   BufferedImage. The corrected image (rotated if needed, original if already correct)."
+  [^BufferedImage image page-index opts]
+  (let [rotation (detect-rotation image page-index opts)]
+    (if (zero? rotation)
+      image
+      (do
+        (trove/log! {:level :info :data {:page page-index :rotation rotation}
+                     :msg "Correcting page rotation"})
+        (rotate-image image rotation)))))
 
 ;; =============================================================================
 ;; Spec for Vision Response (Union Node Types with parent-id)
@@ -715,19 +847,44 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   [node]
   (and (:page.node/kind node) (:page.node/bbox node)))
 
+(defn- extract-image-subregion
+  "Extracts a region from a BufferedImage and returns as a new BufferedImage.
+   
+   Params:
+   `image` - BufferedImage. The source image.
+   `bbox` - Vector of [xmin, ymin, xmax, ymax] in PIXEL coordinates (already scaled).
+   
+   Returns:
+   BufferedImage of the cropped region, or nil if bbox is invalid."
+  [^BufferedImage image bbox]
+  (when (and bbox (= 4 (count bbox)))
+    (let [[xmin ymin xmax ymax] (map int bbox)
+          width (- (long xmax) (long xmin))
+          height (- (long ymax) (long ymin))]
+      (when (and (pos? width) (pos? height))
+        (.getSubimage image (int xmin) (int ymin) (int width) (int height))))))
+
 (defn- enrich-visual-nodes
   "Enriches visual nodes (images/tables) with extracted image bytes from the source image.
    
    Visual nodes are identified by having :page.node/kind and :page.node/bbox fields (Image and Table types).
    
+   For each visual node:
+   1. Crops the region from the source image using the bbox
+   2. Stores the cropped image bytes
+   
+   Note: Page-level rotation is already handled by the PDFBox heuristic in
+   `extract-text-from-pdf` before extraction. No per-node LLM rotation needed.
+   
    Params:
    `nodes` - Vector of all node maps.
    `source-image` - BufferedImage. The source page image for extraction.
    `model` - String. The vision model name (used to determine bbox coordinate scale).
+   `page-index` - Integer. The page index (for logging).
    
     Returns:
      Vector of nodes with :page.node/image-data key added to visual elements that have valid bbox."
-  [nodes ^BufferedImage source-image model]
+  [nodes ^BufferedImage source-image model page-index]
   (let [bbox-scale (get-bbox-scale model)]
     (mapv (fn [node]
             (if (visual-node? node)
@@ -736,11 +893,296 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                     img-height (.getHeight source-image)
                     clamped (scale-and-clamp-bbox bbox img-width img-height bbox-scale)]
                 (if clamped
-                  (assoc node :page.node/image-data (image->bytes-region source-image clamped)
-                         :page.node/bbox clamped)
+                  (let [cropped (extract-image-subregion source-image clamped)]
+                    (assoc node :page.node/image-data (when cropped (image->bytes cropped))
+                           :page.node/bbox clamped))
                   node))
               node))
           nodes)))
+
+;; =============================================================================
+;; Quality Refinement — Eval + Refine Extracted Pages
+;; =============================================================================
+
+(def ^:private DEFAULT_REFINE_MODEL
+  "Default model for quality evaluation and refinement."
+  "gpt-4o")
+
+(def ^:private DEFAULT_REFINE_SAMPLE_SIZE
+  "Default number of pages to sample for quality evaluation."
+  3)
+
+(def ^:private DEFAULT_REFINE_THRESHOLD
+  "Default minimum eval score to pass quality check."
+  0.8)
+
+(def ^:private DEFAULT_REFINE_ITERATIONS
+  "Default maximum refinement iterations per page."
+  1)
+
+(def ^:private PAGE_EVAL_CRITERIA
+  "Evaluation criteria for document page extraction quality."
+  {:completeness "Does the extraction capture all expected content elements for a document page? Are there enough nodes for the visible content?"
+   :structure "Are nodes properly typed (Section, Heading, Paragraph, ListItem, Image, Table) and hierarchically organized with correct parent-id references?"
+   :descriptions "Are section descriptions meaningful, specific, and informative 2-3 sentence summaries?"})
+
+(defn- serialize-page-for-eval
+  "Serializes page nodes into human-readable text for eval!.
+   
+   Converts each node to a bracketed type + content line. Used as the
+   :output argument to svar/eval! for quality assessment.
+   
+   Params:
+   `page` - Map with :page/nodes.
+   
+   Returns:
+   String. One line per node."
+  [page]
+  (->> (:page/nodes page)
+       (map (fn [node]
+              (let [ntype (:page.node/type node)
+                    content (:page.node/content node)
+                    desc (:page.node/description node)]
+                (case ntype
+                  :section (str "[Section] " desc)
+                  :heading (str "[Heading " (:page.node/level node) "] " content)
+                  :paragraph (str "[Paragraph] " (when content (subs content 0 (min 200 (count content)))))
+                  :list-item (str "[ListItem] " content)
+                  :image (str "[Image: " (:page.node/kind node) "] " desc)
+                  :table (str "[Table: " (:page.node/kind node) "] " desc)
+                  :header (str "[Header] " content)
+                  :footer (str "[Footer] " content)
+                  :metadata (str "[Metadata] " content)
+                  :toc-entry (str "[TOC] " (:document.toc/title node))
+                  (str "[" (when ntype (name ntype)) "] " (or content desc ""))))))
+       (str/join "\n")))
+
+(defn- eval-page-extraction
+  "Evaluates quality of a page's node extraction using svar/eval!.
+   
+   Serializes nodes to text and asks the eval model to assess completeness,
+   structure, and description quality.
+   
+   Params:
+   `page` - Map with :page/index and :page/nodes.
+   `opts` - Map with :refine-model and :config.
+   
+   Returns:
+   Map with :page-index, :score, :correct?, :summary, :issues."
+  [page {:keys [refine-model config]
+         :or {refine-model DEFAULT_REFINE_MODEL}}]
+  (let [serialized (serialize-page-for-eval page)
+        page-index (:page/index page)]
+    (trove/log! {:level :info :data {:page page-index :model refine-model}
+                 :msg "Evaluating page extraction quality"})
+    (let [result (svar/eval! {:task (str "Extract all visible content from document page " page-index
+                                         " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
+                                         "Image, Table) with correct parent-id hierarchy. Every piece of visible "
+                                         "text should be captured. Section descriptions should be meaningful "
+                                         "2-3 sentence summaries.")
+                              :output serialized
+                              :model refine-model
+                              :config config
+                              :criteria PAGE_EVAL_CRITERIA})]
+      (trove/log! {:level :info :data {:page page-index
+                                       :score (:overall-score result)
+                                       :correct? (:correct? result)}
+                   :msg "Page eval complete"})
+      {:page-index page-index
+       :score (:overall-score result)
+       :correct? (:correct? result)
+       :summary (:summary result)
+       :issues (:issues result)})))
+
+(defn- refine-page-image
+  "Re-extracts a page image using svar/refine! for higher quality.
+   
+   Builds the same messages as extract-text-from-image but uses refine!
+   (decompose -> verify -> refine loop) instead of ask!.
+   
+   Params:
+   `image` - BufferedImage. The page image.
+   `page-index` - Integer. Page index (0-based).
+   `opts` - Map with:
+     :refine-model - String. Model for refinement.
+     :objective - String. System prompt.
+     :config - Map. LLM config.
+     :refine-iterations - Integer. Max iterations.
+     :refine-threshold - Float. Quality threshold.
+   
+   Returns:
+   Map with :page/index and :page/nodes (enriched with image data)."
+  [^BufferedImage image page-index {:keys [refine-model objective config
+                                           refine-iterations refine-threshold timeout-ms]
+                                    :or {refine-model DEFAULT_REFINE_MODEL
+                                         refine-iterations DEFAULT_REFINE_ITERATIONS
+                                         refine-threshold DEFAULT_REFINE_THRESHOLD
+                                         timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
+  (let [img-width (.getWidth image)
+        img-height (.getHeight image)]
+    (trove/log! {:level :info :data {:page page-index :model refine-model
+                                     :iterations refine-iterations :threshold refine-threshold}
+                 :msg "Refining page extraction (image)"})
+    (let [base64-image (image->base64 image)
+          task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.\n\nIMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coordinates MUST be within these bounds: xmin and xmax in range [0, %d], ymin and ymax in range [0, %d]."
+                       img-width img-height img-width img-height)
+          refine-result (svar/refine! {:spec vision-response-spec
+                                       :messages [(svar/system (or objective DEFAULT_VISION_OBJECTIVE))
+                                                  (svar/user task (svar/image base64-image "image/png"))]
+                                       :model refine-model
+                                       :config config
+                                       :iterations refine-iterations
+                                       :threshold refine-threshold
+                                       :criteria PAGE_EVAL_CRITERIA})
+          raw-nodes (get-in refine-result [:result :nodes] [])
+          ;; Use refine-model for bbox scale since it generated the coordinates
+          nodes (enrich-visual-nodes raw-nodes image refine-model page-index)]
+      (trove/log! {:level :info :data {:page page-index
+                                       :nodes (count nodes)
+                                       :final-score (:final-score refine-result)
+                                       :converged? (:converged? refine-result)
+                                       :iterations (:iterations-count refine-result)}
+                   :msg "Page refinement complete"})
+      {:page/index page-index
+       :page/nodes nodes})))
+
+(defn- refine-page-text
+  "Re-extracts text content using svar/refine! for higher quality.
+   
+   Params:
+   `content` - String. Text/markdown content.
+   `page-index` - Integer. Page index (0-based).
+   `opts` - Map with :refine-model, :objective, :config, :refine-iterations, :refine-threshold.
+   
+   Returns:
+   Map with :page/index and :page/nodes."
+  [content page-index {:keys [refine-model objective config refine-iterations refine-threshold]
+                       :or {refine-model DEFAULT_REFINE_MODEL
+                            refine-iterations DEFAULT_REFINE_ITERATIONS
+                            refine-threshold DEFAULT_REFINE_THRESHOLD}}]
+  (trove/log! {:level :info :data {:page page-index :model refine-model
+                                   :content-length (count content)}
+               :msg "Refining page extraction (text)"})
+  (let [refine-result (svar/refine! {:spec vision-response-spec
+                                     :messages [(svar/system (or objective DEFAULT_VISION_OBJECTIVE))
+                                                (svar/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
+                                                                "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                                "<document_content>\n" content "\n</document_content>"))]
+                                     :model refine-model
+                                     :config config
+                                     :iterations refine-iterations
+                                     :threshold refine-threshold
+                                     :criteria PAGE_EVAL_CRITERIA})
+        nodes (get-in refine-result [:result :nodes] [])]
+    (trove/log! {:level :info :data {:page page-index
+                                     :nodes (count nodes)
+                                     :final-score (:final-score refine-result)
+                                     :converged? (:converged? refine-result)}
+                 :msg "Text refinement complete"})
+    {:page/index page-index
+     :page/nodes nodes}))
+
+(defn- sample-pages
+  "Selects page indices for quality evaluation.
+   
+   Strategy: first page, last page, and random middle pages up to sample-size.
+   
+   Params:
+   `page-count` - Integer. Total number of pages.
+   `sample-size` - Integer. Maximum pages to sample.
+   
+   Returns:
+   Sorted vector of page indices."
+  [page-count sample-size]
+  (cond
+    (<= page-count sample-size) (vec (range page-count))
+    (= sample-size 1) [0]
+    (= sample-size 2) [0 (dec page-count)]
+    :else (let [middle-count (- (long sample-size) 2)
+                middle-range (range 1 (dec page-count))
+                middle-picks (take middle-count (shuffle middle-range))]
+            (vec (sort (into #{0 (dec page-count)} middle-picks))))))
+
+(defn- quality-pass-pdf
+  "Post-extraction quality pass for PDF pages.
+   
+   Samples pages, evaluates extraction quality with eval!, and re-extracts
+   pages that fall below the quality threshold using refine!.
+   
+   Params:
+   `pages` - Vector of extracted page maps.
+   `images` - Vector of BufferedImages (original, unrotated from pdf->images).
+   `page-rotations` - Vector of rotation degrees per page (from heuristic detection).
+   `opts` - Map with refine configuration keys.
+   
+   Returns:
+   Vector of pages (with low-quality pages replaced by refined versions)."
+  [pages images page-rotations opts]
+  (let [{:keys [refine-threshold refine-sample-size]
+         :or {refine-threshold DEFAULT_REFINE_THRESHOLD
+              refine-sample-size DEFAULT_REFINE_SAMPLE_SIZE}} opts
+        sample-indices (sample-pages (count pages) refine-sample-size)]
+    (trove/log! {:level :info :data {:total-pages (count pages)
+                                     :sample-size (count sample-indices)
+                                     :sampled-indices (vec sample-indices)
+                                     :threshold refine-threshold}
+                 :msg "Starting quality pass on sampled pages"})
+    (let [eval-results (mapv (fn [idx]
+                               (eval-page-extraction (nth pages idx) opts))
+                             sample-indices)
+          bad-pages (filterv #(< (double (:score %)) (double refine-threshold)) eval-results)
+          bad-indices (set (map :page-index bad-pages))]
+      (trove/log! {:level :info :data {:evaluated (count eval-results)
+                                       :below-threshold (count bad-pages)
+                                       :bad-indices (vec bad-indices)
+                                       :scores (mapv (fn [r] {:page (:page-index r) :score (:score r)}) eval-results)}
+                   :msg "Quality evaluation complete"})
+      (if (empty? bad-pages)
+        (do
+          (trove/log! {:level :info :msg "All sampled pages passed quality threshold"})
+          pages)
+        (do
+          (trove/log! {:level :info :data {:refining (count bad-pages)}
+                       :msg "Refining pages below quality threshold"})
+          (mapv (fn [page]
+                  (if (contains? bad-indices (:page/index page))
+                    (let [idx (:page/index page)
+                          image (nth images idx)
+                          rotation (get page-rotations idx 0)
+                          rotated-image (if (pos? (long rotation))
+                                          (rotate-image image rotation)
+                                          image)]
+                      (refine-page-image rotated-image idx opts))
+                    page))
+                pages))))))
+
+(defn- quality-pass-single
+  "Post-extraction quality pass for single-page extractors.
+   
+   Evaluates the extraction and refines if below threshold.
+   
+   Params:
+   `pages` - Vector with single page map.
+   `refine-fn` - Function. (fn [page-index opts] -> refined page). Called if below threshold.
+   `opts` - Map with refine configuration.
+   
+   Returns:
+   Vector with single page (original or refined)."
+  [pages refine-fn opts]
+  (let [{:keys [refine-threshold]
+         :or {refine-threshold DEFAULT_REFINE_THRESHOLD}} opts
+        page (first pages)
+        eval-result (eval-page-extraction page opts)]
+    (trove/log! {:level :info :data {:score (:score eval-result)
+                                     :threshold refine-threshold}
+                 :msg "Single page quality evaluation"})
+    (if (>= (double (:score eval-result)) (double refine-threshold))
+      (do
+        (trove/log! {:level :info :msg "Page passed quality threshold"})
+        pages)
+      (do
+        (trove/log! {:level :info :msg "Page below threshold, refining"})
+        [(refine-fn 0 opts)]))))
 
 (defn extract-text-from-image
   "Extracts document content from a BufferedImage using vision LLM.
@@ -776,7 +1218,7 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   (let [img-width (.getWidth image)
         img-height (.getHeight image)]
     (trove/log! {:level :info :data {:page page-index :model model :timeout-ms timeout-ms
-                                  :image-width img-width :image-height img-height}
+                                     :image-width img-width :image-height img-height}
                  :msg "Extracting content from page"})
     (let [base64-image (image->base64 image)
           task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.
@@ -784,16 +1226,15 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
 IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coordinates MUST be within these bounds: xmin and xmax in range [0, %d], ymin and ymax in range [0, %d]."
                        img-width img-height img-width img-height)
           response (svar/ask! {:spec vision-response-spec
-                               :objective objective
-                               :task task
-                               :images [{:base64 base64-image :media-type "image/png"}]
-                               :model model
-                               :config config
-                               :check-context? false
-                               :timeout-ms timeout-ms})
+                                :messages [(svar/system objective)
+                                           (svar/user task (svar/image base64-image "image/png"))]
+                                :model model
+                                :config config
+                                :check-context? false
+                                :timeout-ms timeout-ms})
           raw-nodes (get-in response [:result :nodes] [])
-          ;; Enrich visual nodes with extracted base64 data (pass model for bbox scaling)
-          nodes (enrich-visual-nodes raw-nodes image model)
+          ;; Enrich visual nodes with extracted image data + rotation correction
+          nodes (enrich-visual-nodes raw-nodes image model page-index)
         ;; Count elements for logging
           section-count (count (filter :page.node/description nodes))
           heading-count (count (filter :page.node/level nodes))
@@ -801,11 +1242,11 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
           image-count (count (filter #(contains? image-kind-values (:page.node/kind %)) visual-nodes))
           table-count (count (filter #(contains? table-kind-values (:page.node/kind %)) visual-nodes))]
       (trove/log! {:level :debug :data {:page page-index
-                                     :nodes-count (count nodes)
-                                     :sections section-count
-                                     :headings heading-count
-                                     :images image-count
-                                     :tables table-count}
+                                        :nodes-count (count nodes)
+                                        :sections section-count
+                                        :headings heading-count
+                                        :images image-count
+                                        :tables table-count}
                    :msg "Page extraction complete"})
       {:page/index page-index
        :page/nodes nodes})))
@@ -832,13 +1273,23 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    
    Throws:
    Anomaly (fault) if any page fails to extract."
-  [pdf-path {:keys [model objective parallel timeout-ms config]
-             :or {parallel 4 timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
-   (trove/log! {:level :info :data {:pdf pdf-path :model model :parallel parallel :timeout-ms timeout-ms}
-                :msg "Starting PDF text extraction"})
+  [pdf-path {:keys [model objective parallel timeout-ms config refine?]
+             :or {parallel 3 timeout-ms DEFAULT_VISION_TIMEOUT_MS}
+             :as opts}]
+  (trove/log! {:level :info :data {:pdf pdf-path :model model :parallel parallel :timeout-ms timeout-ms}
+               :msg "Starting PDF text extraction"})
   (let [images (pdf/pdf->images pdf-path)
-        page-count (count images)]
-     (trove/log! {:level :info :data {:pages page-count} :msg "PDF loaded, extracting text"})
+        page-count (count images)
+        ;; Detect text rotation per page using PDFBox heuristic (no LLM needed)
+        page-rotations (try
+                         (pdf/detect-text-rotation pdf-path)
+                         (catch Exception e
+                           (trove/log! {:level :warn
+                                        :data {:pdf pdf-path :error (ex-message e)}
+                                        :msg "Text rotation detection failed, assuming no rotation"})
+                           (vec (repeat page-count 0))))]
+    (trove/log! {:level :info :data {:pages page-count :rotations page-rotations}
+                 :msg "PDF loaded, extracting text"})
 
     ;; Handle empty PDF case
     (if (zero? page-count)
@@ -848,17 +1299,32 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
 
       ;; Use core.async for parallel extraction
       (let [result-chan (async/chan page-count)
-            ;; Create work items
-            work-items (map-indexed (fn [idx img] {:index idx :image img}) images)
+            ;; Create work items with pre-computed rotation per page
+            work-items (map-indexed (fn [idx img]
+                                     {:index idx
+                                      :image img
+                                      :rotation (get page-rotations idx 0)})
+                                   images)
             extract-opts {:model model :objective objective :timeout-ms timeout-ms :config config}]
 
         ;; Start parallel workers - capture errors as data since pipeline-blocking catches exceptions
+        ;; Page rotation is detected via PDFBox text position heuristics (no LLM cost).
+        ;; This catches landscape content on portrait pages that PDFBox /Rotate misses.
         (async/pipeline-blocking
          parallel
          result-chan
-         (map (fn [{:keys [index image]}]
+         (map (fn [{:keys [index image rotation]}]
                 (try
-                  (extract-text-from-image image index extract-opts)
+                  ;; Step 1: Apply rotation correction if needed (heuristic-detected)
+                  (let [image (if (pos? rotation)
+                                (do
+                                  (trove/log! {:level :info
+                                               :data {:page index :rotation rotation}
+                                               :msg "Correcting page rotation (heuristic)"})
+                                  (rotate-image image rotation))
+                                image)]
+                    ;; Step 2: Extract content from (possibly corrected) image
+                    (extract-text-from-image image index extract-opts))
                   (catch Exception e
                     (let [^java.awt.image.BufferedImage image image
                           ex-data-map (ex-data e)
@@ -910,13 +1376,17 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
           (when (seq errors)
             (let [first-error (:extraction-error (first errors))]
               (anomaly/fault! "PDF page extraction failed"
-                              {:pdf-path pdf-path
+                              {:type :svar.vision/pdf-extraction-failed
+                               :pdf-path pdf-path
                                :failed-page (:page first-error)
                                :error-message (:message first-error)
                                :total-errors (count errors)
                                :all-errors (mapv :extraction-error errors)})))
 
-          sorted-results)))))
+          ;; Quality pass: eval sampled pages, refine those below threshold
+          (if refine?
+            (quality-pass-pdf sorted-results images page-rotations opts)
+            sorted-results))))))
 
 ;; =============================================================================
 ;; Text-Based Extraction (No Images - Direct LLM Text Processing)
@@ -939,21 +1409,21 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
   (trove/log! {:level :info :data {:page page-index :model model :content-length (count content)}
                :msg "Extracting nodes from text content"})
   (let [response (svar/ask! {:spec vision-response-spec
-                             :objective objective
-                             :task (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                        "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                        "<document_content>\n" content "\n</document_content>")
-                             :model model
-                             :config config
-                             :check-context? false
-                             :timeout-ms timeout-ms})
+                              :messages [(svar/system objective)
+                                         (svar/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
+                                                         "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                         "<document_content>\n" content "\n</document_content>"))]
+                              :model model
+                              :config config
+                              :check-context? false
+                              :timeout-ms timeout-ms})
         nodes (get-in response [:result :nodes] [])
         section-count (count (filter :page.node/description nodes))
         heading-count (count (filter :page.node/level nodes))]
     (trove/log! {:level :debug :data {:page page-index
-                                   :nodes-count (count nodes)
-                                   :sections section-count
-                                   :headings heading-count}
+                                      :nodes-count (count nodes)
+                                      :sections section-count
+                                      :headings heading-count}
                  :msg "Text extraction complete"})
     {:page/index page-index
      :page/nodes nodes}))
@@ -976,10 +1446,10 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
   [file-path]
   (let [file (File. ^String file-path)]
     (when-not (.exists file)
-      (anomaly/not-found! "Image file not found" {:path file-path}))
+      (anomaly/not-found! "Image file not found" {:type :svar.vision/image-not-found :path file-path}))
     (let [img (ImageIO/read file)]
       (when-not img
-        (anomaly/fault! "Failed to read image file" {:path file-path}))
+        (anomaly/fault! "Failed to read image file" {:type :svar.vision/image-read-failed :path file-path}))
       img)))
 
 ;; =============================================================================
@@ -990,6 +1460,7 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
   "Extracts document content from a text or markdown file using LLM.
    
    Sends text directly to the multimodal LLM (no image rendering).
+   When :refine? is true, evaluates extraction quality and refines if below threshold.
    
    Params:
    `file-path` - String. Path to the text/markdown file.
@@ -998,23 +1469,32 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
      `:objective` - String. System prompt for extraction.
      `:config` - Map. LLM config with :api-key, :base-url.
      `:timeout-ms` - Integer, optional. HTTP timeout.
+     `:refine?` - Boolean, optional. Enable quality refinement.
+     `:refine-model` - String, optional. Model for eval/refine (default: gpt-4o).
    
    Returns:
    Vector with single map:
      `:page/index` - Integer. Always 0.
      `:page/nodes` - Vector of document nodes."
-  [file-path {:keys [model] :as opts}]
+  [file-path {:keys [model refine?] :as opts}]
   (let [file (File. ^String file-path)]
     (when-not (.exists file)
-      (anomaly/not-found! "File not found" {:path file-path}))
+      (anomaly/not-found! "File not found" {:type :svar.vision/file-not-found :path file-path}))
     (trove/log! {:level :info :data {:file file-path :model model}
                  :msg "Extracting content from text file"})
     (let [content (slurp file)
-          result (extract-nodes-from-text content 0 opts)]
-      [result])))
+          result (extract-nodes-from-text content 0 opts)
+          pages [result]]
+      (if refine?
+        (quality-pass-single pages
+                             (fn [idx refine-opts] (refine-page-text content idx refine-opts))
+                             opts)
+        pages))))
 
 (defn extract-text-from-image-file
   "Extracts document content from an image file using vision LLM.
+   
+   When :refine? is true, evaluates extraction quality and refines if below threshold.
    
    Params:
    `file-path` - String. Path to the image file (.png, .jpg, etc.).
@@ -1023,22 +1503,30 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
      `:objective` - String. System prompt for OCR.
      `:config` - Map. LLM config with :api-key, :base-url.
      `:timeout-ms` - Integer, optional. HTTP timeout.
+     `:refine?` - Boolean, optional. Enable quality refinement.
+     `:refine-model` - String, optional. Model for eval/refine (default: gpt-4o).
    
    Returns:
    Vector with single map:
      `:page/index` - Integer. Always 0.
      `:page/nodes` - Vector of document nodes."
-  [file-path {:keys [model] :as opts}]
+  [file-path {:keys [model refine?] :as opts}]
   (trove/log! {:level :info :data {:file file-path :model model}
                :msg "Extracting text from image file"})
   (let [image (load-image-file file-path)
-        result (extract-text-from-image image 0 opts)]
-    [result]))
+        result (extract-text-from-image image 0 opts)
+        pages [result]]
+    (if refine?
+      (quality-pass-single pages
+                           (fn [idx refine-opts] (refine-page-image image idx refine-opts))
+                           opts)
+      pages)))
 
 (defn extract-text-from-string
   "Extracts document content from string content using LLM.
    
    Sends text directly to the multimodal LLM (no image rendering).
+   When :refine? is true, evaluates extraction quality and refines if below threshold.
    
    Params:
    `content` - String. Text/markdown content to extract from.
@@ -1047,16 +1535,23 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
      `:objective` - String. System prompt for extraction.
      `:config` - Map. LLM config with :api-key, :base-url.
      `:timeout-ms` - Integer, optional. HTTP timeout.
+     `:refine?` - Boolean, optional. Enable quality refinement.
+     `:refine-model` - String, optional. Model for eval/refine (default: gpt-4o).
    
    Returns:
    Vector with single map:
      `:page/index` - Integer. Always 0.
      `:page/nodes` - Vector of document nodes."
-  [content {:keys [model] :as opts}]
+  [content {:keys [model refine?] :as opts}]
   (trove/log! {:level :info :data {:content-length (count content) :model model}
                :msg "Extracting content from string"})
-  (let [result (extract-nodes-from-text content 0 opts)]
-    [result]))
+  (let [result (extract-nodes-from-text content 0 opts)
+        pages [result]]
+    (if refine?
+      (quality-pass-single pages
+                           (fn [idx refine-opts] (refine-page-text content idx refine-opts))
+                           opts)
+      pages)))
 
 ;; =============================================================================
 ;; Title Inference
@@ -1120,16 +1615,16 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
                        (str "\n\nFirst paragraph:\n" (subs first-para 0 (min 500 (count first-para))))))]
     (when (or (seq headings) (seq sections) (seq metadata))
       (trove/log! {:level :debug :data {:headings (count headings)
-                                     :sections (count sections)
-                                     :metadata (count metadata)}
+                                        :sections (count sections)
+                                        :metadata (count metadata)}
                    :msg "Inferring document title"})
       (let [response (svar/ask! {:spec title-inference-spec
-                                 :objective "You are a document analyst. Infer the most appropriate title for a document based on its structure and content."
-                                 :task (str "Based on the following document content, infer the document's title. "
-                                            "Return the most likely title - it should be concise and descriptive.\n\n"
-                                            context)
-                                 :model model
-                                 :config config
-                                 :check-context? false
-                                 :timeout-ms timeout-ms})]
+                                  :messages [(svar/system "You are a document analyst. Infer the most appropriate title for a document based on its structure and content.")
+                                             (svar/user (str "Based on the following document content, infer the document's title. "
+                                                             "Return the most likely title - it should be concise and descriptive.\n\n"
+                                                             context))]
+                                  :model model
+                                  :config config
+                                  :check-context? false
+                                  :timeout-ms timeout-ms})]
         (get-in response [:result :title])))))

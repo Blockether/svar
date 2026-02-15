@@ -4,15 +4,17 @@
    Provides a single `make-config` for creating validated config maps.
    No DI, no global state. Config is a plain immutable map.
    
-   Environment variables (used as fallback for :api-key and :base-url):
-   - OPENAI_API_KEY / BLOCKETHER_LLM_API_KEY
-   - OPENAI_BASE_URL / BLOCKETHER_LLM_API_BASE_URL
+    Environment variables (used as fallback for :api-key and :base-url):
+     - BLOCKETHER_OPENAI_API_KEY (checked first)
+     - BLOCKETHER_OPENAI_BASE_URL (checked first)
+     - OPENAI_API_KEY
+     - OPENAI_BASE_URL
    
    Usage:
    (def config (make-config {:api-key \"sk-...\"
                               :base-url \"https://api.openai.com/v1\"
                               :model \"gpt-4o\"}))
-   (ask! {:config config :spec my-spec :task \"...\"})"
+    (ask! {:config config :spec my-spec :messages [(system \"...\") (user \"...\")]})"
   (:require
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.tokens :as tokens]))
@@ -60,18 +62,25 @@
    
    Params:
    `opts` - Map with keys:
-     - :api-key - String, optional. Falls back to OPENAI_API_KEY or BLOCKETHER_LLM_API_KEY env var.
-     - :base-url - String, optional. Falls back to OPENAI_BASE_URL or BLOCKETHER_LLM_API_BASE_URL env var,
-                   then DEFAULT_BASE_URL.
-     - :model - String, optional. Default model for all calls (default: \"gpt-4o\").
-     - :timeout-ms - Integer, optional. HTTP request timeout (default: 180000).
-     - :check-context? - Boolean, optional. Pre-flight context limit check (default: true).
-     - :retry - Map, optional. Retry policy (merged over DEFAULT_RETRY):
-         - :max-retries, :initial-delay-ms, :max-delay-ms, :multiplier
-     - :pricing - Map, optional. Per-model pricing overrides, merged over built-in defaults.
-         Keys are model name strings, values are {:input price-per-1M :output price-per-1M}.
-     - :context-limits - Map, optional. Per-model context window overrides, merged over built-in defaults.
-         Keys are model name strings, values are integer token counts.
+      - :api-key - String, optional. Falls back to BLOCKETHER_OPENAI_API_KEY,
+                    then OPENAI_API_KEY env var.
+       - :base-url - String, optional. Falls back to BLOCKETHER_OPENAI_BASE_URL,
+                    then OPENAI_BASE_URL env var, then DEFAULT_BASE_URL.
+      - :model - String, optional. Default model for all calls (default: \"gpt-4o\").
+      - :network - Map, optional. Network settings (merged over defaults):
+          - :timeout-ms - Integer. HTTP request timeout (default: 180000).
+          - :max-retries - Integer. Maximum retry attempts (default: 5).
+          - :initial-delay-ms - Integer. First retry delay (default: 1000).
+          - :max-delay-ms - Integer. Maximum retry delay (default: 60000).
+          - :multiplier - Double. Backoff multiplier (default: 2.0).
+      - :tokens - Map, optional. Token-related settings:
+          - :check-context? - Boolean. Pre-flight context limit check (default: true).
+          - :pricing - Map. Per-model pricing overrides, merged over built-in defaults.
+              Keys are model name strings, values are {:input price-per-1M :output price-per-1M}.
+          - :context-limits - Map. Per-model context window overrides, merged over built-in defaults.
+              Keys are model name strings, values are integer token counts.
+          - :output-reserve - Integer. Tokens reserved for output in pre-flight context check.
+              Defaults to model's max output tokens (model-aware). Set to 0 to disable.
    
    Returns:
    Validated config map with all defaults applied.
@@ -81,25 +90,28 @@
    
    Example:
    (make-config {:api-key \"sk-...\" :base-url \"https://api.openai.com/v1\"})
-   (make-config {:api-key \"sk-...\" :model \"gpt-4o-mini\" :timeout-ms 300000})
-   (make-config {}) ;; uses env vars for api-key/base-url"
+    (make-config {:api-key \"sk-...\" :model \"gpt-4o-mini\"
+                   :network {:timeout-ms 300000}})
+    (make-config {}) ;; uses env vars for api-key/base-url"
   ([] (make-config {}))
-  ([{:keys [api-key base-url model timeout-ms check-context? retry pricing context-limits]}]
+  ([{:keys [api-key base-url model network tokens]}]
    (let [api-key (or api-key
-                     (get-env "OPENAI_API_KEY")
-                     (get-env "BLOCKETHER_LLM_API_KEY"))
-         base-url (or base-url
-                      (get-env "OPENAI_BASE_URL")
-                      (get-env "BLOCKETHER_LLM_API_BASE_URL")
-                      DEFAULT_BASE_URL)]
-     (when-not api-key
-       (anomaly/incorrect! "LLM API key required. Set OPENAI_API_KEY or BLOCKETHER_LLM_API_KEY env var, or pass :api-key."
-                           {:type :svar/missing-api-key}))
-     {:api-key api-key
-      :base-url base-url
-      :model (or model DEFAULT_MODEL)
-      :timeout-ms (or timeout-ms DEFAULT_TIMEOUT_MS)
-      :check-context? (if (some? check-context?) check-context? true)
-      :retry (merge DEFAULT_RETRY retry)
-      :pricing (merge tokens/DEFAULT_MODEL_PRICING pricing)
-      :context-limits (merge tokens/DEFAULT_CONTEXT_LIMITS context-limits)})))
+                       (get-env "BLOCKETHER_OPENAI_API_KEY")
+                       (get-env "OPENAI_API_KEY"))
+           base-url (or base-url
+                        (get-env "BLOCKETHER_OPENAI_BASE_URL")
+                        (get-env "OPENAI_BASE_URL")
+                        DEFAULT_BASE_URL)]
+       (when-not api-key
+         (anomaly/incorrect! "LLM API key required. Set BLOCKETHER_OPENAI_API_KEY or OPENAI_API_KEY env var, or pass :api-key."
+                            {:type :svar/missing-api-key}))
+      {:api-key api-key
+       :base-url base-url
+       :model (or model DEFAULT_MODEL)
+       :network (merge DEFAULT_RETRY
+                       {:timeout-ms DEFAULT_TIMEOUT_MS}
+                       network)
+       :tokens {:check-context? (if (some? (:check-context? tokens)) (:check-context? tokens) true)
+                :pricing (merge tokens/DEFAULT_MODEL_PRICING (:pricing tokens))
+                :context-limits (merge tokens/DEFAULT_CONTEXT_LIMITS (:context-limits tokens))
+                :output-reserve (:output-reserve tokens)}})))

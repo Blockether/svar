@@ -3,9 +3,10 @@
    
    Primary functions:
    - `build-index` - Extract structure from file path or string content
-   - `index!` - Index and save to Nippy binary file
-   - `load-index` - Load indexed document from Nippy file
+   - `index!` - Index and save to EDN + PNG files
+   - `load-index` - Load indexed document from EDN directory
    - `inspect` - Print full document summary with TOC tree
+   - `print-toc-tree` - Print a formatted TOC tree from TOC entries
    
    Supported file types:
    - PDF (.pdf) - Uses vision LLM for node-based extraction
@@ -30,27 +31,33 @@
    ;; Index a PDF
    (def doc (pageindex/build-index \"manual.pdf\"))
    
-   ;; Index and save to Nippy binary file
+   ;; Index and save to EDN + PNG files
    (pageindex/index! \"manual.pdf\")
-   ;; => {:document {...} :output-path \"manual.nippy\"}
+   ;; => {:document {...} :output-path \"manual.pageindex\"}
    
    ;; Load and inspect (includes TOC tree)
-   (pageindex/inspect \"manual.nippy\")"
+   (pageindex/inspect \"manual.pageindex\")"
   (:require
    [babashka.fs :as fs]
    [clojure.java.io :as io]
+   [clojure.pprint :as pprint]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.core :as svar]
-   [com.blockether.svar.rlm.internal.pageindex.markdown :as markdown]
+    [com.blockether.svar.internal.util :as util]
+    [com.blockether.svar.rlm.internal.pageindex.markdown :as markdown]
    [com.blockether.svar.rlm.internal.pageindex.pdf :as pdf]
    [com.blockether.svar.rlm.internal.pageindex.spec :as rlm-spec]
    [com.blockether.svar.rlm.internal.pageindex.vision :as vision]
-   [taoensso.nippy :as nippy]
+   [fast-edn.core :as edn]
    [taoensso.trove :as trove])
   (:import
    [java.time Instant]
-   [java.util UUID]))
+   [java.util Date UUID]))
+
+;; Ensure java.time.Instant prints as #inst in EDN (pprint only knows java.util.Date)
+(defmethod print-method Instant [^Instant inst ^java.io.Writer w]
+  (print-method (Date/from inst) w))
 
 ;; =============================================================================
 ;; Helper: Extract Document Name
@@ -502,7 +509,7 @@
                                        :config config})]
         (when (seq abstracts)
           (let [abstract (:summary (last abstracts))]
-             (trove/log! {:level :info :data {:abstract-length (count abstract)}
+            (trove/log! {:level :info :data {:abstract-length (count abstract)}
                          :msg "Document abstract generated"})
             abstract))))))
 
@@ -529,22 +536,23 @@
     (when (= :unknown ftype)
       (let [extension (extract-extension file-path)]
         (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
-                              {:file file-path
+                              {:type :svar.pageindex/unsupported-file-type
+                               :file file-path
                                :extension extension
                                :supported-extensions SUPPORTED_EXTENSIONS})))
      (trove/log! {:level :info :data {:file file-path :type ftype}
                   :msg "Extracting text from document"})
-    (let [start-time (System/nanoTime)
-          page-list (case ftype
-                      :pdf (vision/extract-text-from-pdf file-path opts)
-                      :markdown (markdown/markdown-file->pages file-path)
-                      :text (vision/extract-text-from-text-file file-path opts)
-                      :image (vision/extract-text-from-image-file file-path opts))
-          duration-ms (/ (- (System/nanoTime) start-time) 1e6)]
-       (trove/log! {:level :info :data {:pages (count page-list)
-                                    :type ftype
-                                    :duration-ms duration-ms}
-                    :msg "Text extraction complete"})
+    (let [[page-list duration-ms]
+          (util/with-elapsed
+            (case ftype
+              :pdf (vision/extract-text-from-pdf file-path opts)
+              :markdown (markdown/markdown-file->pages file-path)
+              :text (vision/extract-text-from-text-file file-path opts)
+              :image (vision/extract-text-from-image-file file-path opts)))]
+      (trove/log! {:level :info :data {:pages (count page-list)
+                                       :type ftype
+                                       :duration-ms duration-ms}
+                   :msg "Text extraction complete"})
       page-list)))
 
 ;; =============================================================================
@@ -595,21 +603,29 @@
    - If document has TOC pages, extracts TocEntry nodes and links to Sections
    - If no TOC exists, generates one from Section/Heading structure
    
-   Params:
-   `input` - String. File path or raw content.
-   `opts` - Optional map with:
-     ;; For dispatch (string input)
-     `:content-type` - Keyword. Required for string input: :md, :markdown, :txt, :text
-     `:doc-name` - String. Document name (required for string input).
-     
-     ;; For metadata (string input only - PDF extracts from file)
-     `:doc-title` - String. Document title.
-     `:doc-author` - String. Document author.
-     `:created-at` - Instant. Creation date.
-     `:updated-at` - Instant. Modification date.
-     
-     ;; For processing
-     `:model` - String. Vision LLM model to use.
+    Params:
+    `input` - String. File path or raw content.
+    `opts` - Optional map with:
+      ;; For dispatch (string input)
+      `:content-type` - Keyword. Required for string input: :md, :markdown, :txt, :text
+      `:doc-name` - String. Document name (required for string input).
+      
+      ;; For metadata (string input only - PDF extracts from file)
+      `:doc-title` - String. Document title.
+      `:doc-author` - String. Document author.
+      `:created-at` - Instant. Creation date.
+      `:updated-at` - Instant. Modification date.
+      
+      ;; For processing
+      `:model` - String. Vision LLM model to use.
+      
+      ;; Quality refinement (opt-in)
+      `:refine?` - Boolean, optional. Enable post-extraction quality refinement (default: false).
+      `:refine-model` - String, optional. Model for eval/refine steps (default: \"gpt-4o\").
+      `:refine-iterations` - Integer, optional. Max refine iterations per page (default: 1).
+      `:refine-threshold` - Float, optional. Min eval score to pass (default: 0.8).
+      `:refine-sample-size` - Integer, optional. Pages to sample for eval (default: 3).
+                              For PDFs, samples first + last + random middle pages.
    
    Returns:
    Map with:
@@ -641,23 +657,24 @@
 (defmethod build-index :path
   [file-path & [opts]]
   ;; Validate file exists
-  (when-not (.exists (io/file file-path))
-    (anomaly/not-found! (str "File not found: " file-path)
-                        {:file file-path}))
-  ;; Validate file type is supported
-  (when-not (supported-extension? file-path)
-    (let [extension (extract-extension file-path)]
-      (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
-                            {:file file-path
-                             :extension extension
-                             :supported-extensions SUPPORTED_EXTENSIONS})))
+   (when-not (.exists (io/file file-path))
+     (anomaly/not-found! (str "File not found: " file-path)
+                         {:type :svar.pageindex/file-not-found :file file-path}))
+   ;; Validate file type is supported
+   (when-not (supported-extension? file-path)
+     (let [extension (extract-extension file-path)]
+       (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
+                             {:type :svar.pageindex/unsupported-file-type
+                              :file file-path
+                              :extension extension
+                              :supported-extensions SUPPORTED_EXTENSIONS})))
   (let [vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
         vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         vision-config (:config opts)
         output-dir (:output-dir opts)
         vision-opts {:model vision-model :objective vision-objective :config vision-config}]
-     (trove/log! {:level :info :data {:file file-path}
-                  :msg "Starting text extraction from file"})
+    (trove/log! {:level :info :data {:file file-path}
+                 :msg "Starting text extraction from file"})
     (let [page-list-raw (extract-text file-path (merge opts vision-opts))
            ;; Step 1: Translate local IDs to global UUIDs
           page-list-uuids (translate-all-ids page-list-raw)
@@ -671,16 +688,16 @@
                           (try
                             (pdf/pdf-metadata file-path)
                             (catch Exception e
-                               (trove/log! {:level :warn :data {:error (ex-message e)}
-                                            :msg "Failed to extract PDF metadata"})
+                              (trove/log! {:level :warn :data {:error (ex-message e)}
+                                           :msg "Failed to extract PDF metadata"})
                               nil)))
           ;; Step 3: Post-process TOC (build/link with UUIDs)
           {:keys [pages toc]} (postprocess-toc page-list)
           pages-with-images (if output-dir
                               (let [dir-file (io/file output-dir)]
                                 (when-not (.exists dir-file)
-                                  (anomaly/not-found! (str "Output directory not found: " output-dir)
-                                                      {:output-dir output-dir}))
+                                   (anomaly/not-found! (str "Output directory not found: " output-dir)
+                                                       {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
                                 (mapv (fn [page]
                                         (update page :page/nodes
                                                 (fn [nodes]
@@ -694,7 +711,7 @@
                                                                     (with-open [out (io/output-stream (io/file (str file-path)))]
                                                                       (.write out ^bytes img-bytes)))
                                                                   (catch Exception e
-                                                                     (trove/log! {:level :warn
+                                                                    (trove/log! {:level :warn
                                                                                  :data {:node-id (:page.node/id node)
                                                                                         :error (ex-message e)}
                                                                                  :msg "Failed to write image bytes to output directory"})))
@@ -712,13 +729,13 @@
                            (vision/infer-document-title pages {:model vision-model :config vision-config}))
           final-title (or metadata-title inferred-title)
           now (Instant/now)]
-       (trove/log! {:level :info :data {:document/name doc-name
-                                    :pages (count pages)
-                                    :toc-entries (count toc)
-                                    :has-metadata (boolean file-metadata)
-                                    :title-inferred (boolean inferred-title)
-                                    :has-abstract (boolean document-abstract)}
-                    :msg "Text extraction complete"})
+      (trove/log! {:level :info :data {:document/name doc-name
+                                       :pages (count pages)
+                                       :toc-entries (count toc)
+                                       :has-metadata (boolean file-metadata)
+                                       :title-inferred (boolean inferred-title)
+                                       :has-abstract (boolean document-abstract)}
+                   :msg "Text extraction complete"})
       {:document/name doc-name
        :document/title final-title
        :document/abstract document-abstract
@@ -741,23 +758,25 @@
         vision-config (:config opts)
         vision-opts {:model vision-model :objective vision-objective :config vision-config}]
     ;; Validate required options
-    (when-not content-type
-      (anomaly/incorrect! "Missing required :content-type option for string input"
-                          {:valid-types [:md :txt]}))
-    (when-not doc-name
-      (anomaly/incorrect! "Missing required :doc-name option for string input" {}))
-     (trove/log! {:level :info :data {:doc-name doc-name :content-type content-type}
-                  :msg "Starting text extraction from string content"})
+     (when-not content-type
+       (anomaly/incorrect! "Missing required :content-type option for string input"
+                           {:type :svar.pageindex/missing-content-type :valid-types [:md :txt]}))
+     (when-not doc-name
+       (anomaly/incorrect! "Missing required :doc-name option for string input" {:type :svar.pageindex/missing-doc-name}))
+    (trove/log! {:level :info :data {:doc-name doc-name :content-type content-type}
+                 :msg "Starting text extraction from string content"})
     (let [page-list-raw (case content-type
                           :pdf (anomaly/unsupported! "PDF content-type not supported for string input"
-                                                     {:hint "PDF requires vision extraction from file path"})
+                                                     {:type :svar.pageindex/pdf-string-unsupported
+                                                      :hint "PDF requires vision extraction from file path"})
                           :md (markdown/markdown->pages content)
                           :markdown (markdown/markdown->pages content)
                           :txt (vision/extract-text-from-string content (merge opts vision-opts))
                           :text (vision/extract-text-from-string content (merge opts vision-opts))
                           (anomaly/incorrect! "Unknown content-type"
-                                              {:content-type content-type
-                                               :valid-types [:md :txt]}))
+                                               {:type :svar.pageindex/unknown-content-type
+                                                :content-type content-type
+                                                :valid-types [:md :txt]}))
           ;; Step 1: Translate local IDs to global UUIDs
           page-list-uuids (translate-all-ids page-list-raw)
           ;; Step 2: Group continuation nodes across pages
@@ -773,12 +792,12 @@
           final-title (or doc-title inferred-title)
           extension (name content-type)
           now (Instant/now)]
-       (trove/log! {:level :info :data {:document/name doc-name
-                                    :pages (count pages)
-                                    :toc-entries (count toc)
-                                    :title-inferred (boolean inferred-title)
-                                    :has-abstract (boolean document-abstract)}
-                    :msg "Text extraction complete"})
+      (trove/log! {:level :info :data {:document/name doc-name
+                                       :pages (count pages)
+                                       :toc-entries (count toc)
+                                       :title-inferred (boolean inferred-title)
+                                       :has-abstract (boolean document-abstract)}
+                   :msg "Text extraction complete"})
       {:document/name doc-name
        :document/title final-title
        :document/abstract document-abstract
@@ -790,17 +809,17 @@
        :document/author doc-author})))
 
 ;; =============================================================================
-;; Nippy Serialization
+;; EDN + PNG Serialization
 ;; =============================================================================
 
 (defn- derive-index-path
-  "Derive the Nippy output path from the input file path.
+  "Derive the EDN output directory from the input file path.
    
-   Example: /path/to/document.pdf -> /path/to/document.nippy"
+   Example: /path/to/document.pdf -> /path/to/document.pageindex/"
   [input-path]
   (let [parent (fs/parent input-path)
         base-name (fs/strip-ext (fs/file-name input-path))]
-    (str (when parent (str parent "/")) base-name ".nippy")))
+    (str (when parent (str parent "/")) base-name ".pageindex")))
 
 (defn- ensure-absolute
   "Ensure the path is absolute."
@@ -813,114 +832,230 @@
 ;; Public Serialization API
 ;; =============================================================================
 
-(defn ^:export index!
-  "Index a document file and save the result as EDN.
+(defn- write-document-edn!
+  "Writes a document to an EDN file, extracting image bytes to separate PNG files.
    
-   Takes a file path (PDF, MD, TXT) and runs build-index to extract structure.
-   The result is saved as a Nippy binary file alongside the original (or custom path).
+   Image data (byte arrays) in :page.node/image-data are written as PNG files
+   in an 'images' subdirectory. The EDN stores the relative path instead of bytes.
+   
+   Instants are serialized as #inst tagged literals (EDN native).
    
    Params:
-   `file-path` - String. Path to the document file.
-   `opts` - Map, optional:
-     - :output - Custom output path for Nippy file (default: same dir, .nippy extension)
-     - :model - LLM model override for vision extraction
-     - :config - LLM config override
+   `output-dir` - String. Path to the output directory (e.g., 'docs/manual.pageindex').
+   `document` - Map. The PageIndex document.
    
    Returns:
-   Map with :document (the indexed document) and :output-path (where Nippy was saved).
+   The output directory path."
+  [output-dir document]
+  (let [dir-file (io/file output-dir)
+        images-dir (io/file output-dir "images")
+        ;; Extract images and replace bytes with relative paths
+        doc-with-paths (update document :document/pages
+                               (fn [pages]
+                                 (mapv (fn [page]
+                                         (update page :page/nodes
+                                                 (fn [nodes]
+                                                   (mapv (fn [node]
+                                                           (let [img-bytes (:page.node/image-data node)]
+                                                             (if (and (bytes? img-bytes)
+                                                                      (#{:image :table} (:page.node/type node)))
+                                                               (let [img-name (str (:page.node/id node) ".png")
+                                                                     img-path (io/file images-dir img-name)]
+                                                                 ;; Ensure images dir exists
+                                                                 (when-not (.exists images-dir)
+                                                                   (.mkdirs images-dir))
+                                                                 ;; Write PNG
+                                                                 (with-open [out (io/output-stream img-path)]
+                                                                   (.write out ^bytes img-bytes))
+                                                                 (trove/log! {:level :debug
+                                                                              :data {:node-id (:page.node/id node) :path (str "images/" img-name)}
+                                                                              :msg "Wrote image file"})
+                                                                 ;; Replace bytes with relative path
+                                                                 (-> node
+                                                                     (dissoc :page.node/image-data)
+                                                                     (assoc :page.node/image-path (str "images/" img-name))))
+                                                               node)))
+                                                         nodes))))
+                                       pages)))
+        edn-file (io/file dir-file "document.edn")]
+    ;; Ensure output dir exists
+    (when-not (.exists dir-file)
+      (.mkdirs dir-file))
+    ;; Write pretty-printed EDN
+    (spit edn-file (with-out-str (pprint/pprint doc-with-paths)))
+    (trove/log! {:level :debug :data {:path (str edn-file)} :msg "Wrote document EDN"})
+    output-dir))
+
+(defn- read-document-edn
+  "Reads a document from an EDN file, resolving image paths back to byte arrays.
    
-   Throws:
-   - ex-info if file not found
-   - ex-info if document fails spec validation
+   Image paths in :page.node/image-path are read back as byte arrays
+   into :page.node/image-data.
    
-   Example:
-   (index! \"docs/manual.pdf\")
-   ;; => {:document {...} :output-path \"docs/manual.nippy\"}"
+   Params:
+   `index-dir` - String. Path to the pageindex directory.
+   
+   Returns:
+   The PageIndex document map with image bytes restored."
+  [index-dir]
+   (let [edn-file (io/file index-dir "document.edn")
+        doc (edn/read-once edn-file)]
+    ;; Resolve image paths back to byte arrays
+    (update doc :document/pages
+            (fn [pages]
+              (mapv (fn [page]
+                      (update page :page/nodes
+                              (fn [nodes]
+                                (mapv (fn [node]
+                                        (if-let [img-rel-path (:page.node/image-path node)]
+                                          (let [img-file (io/file index-dir img-rel-path)]
+                                            (if (.exists img-file)
+                                              (let [img-bytes (let [ba (byte-array (.length img-file))]
+                                                                (with-open [is (java.io.FileInputStream. img-file)]
+                                                                  (.read is ba))
+                                                                ba)]
+                                                (-> node
+                                                    (dissoc :page.node/image-path)
+                                                    (assoc :page.node/image-data img-bytes)))
+                                              (do
+                                                (trove/log! {:level :warn
+                                                             :data {:path (str img-file)}
+                                                             :msg "Image file not found, skipping"})
+                                                (dissoc node :page.node/image-path))))
+                                          node))
+                                      nodes))))
+                    pages)))))
+
+(defn ^:export index!
+  "Index a document file and save the result as EDN + PNG files.
+   
+   Takes a file path (PDF, MD, TXT) and runs build-index to extract structure.
+   The result is saved as a directory alongside the original (or custom path):
+     document.pageindex/
+       document.edn    — structured data (EDN)
+       images/          — extracted images as PNG files
+   
+    Params:
+    `file-path` - String. Path to the document file.
+    `opts` - Map, optional:
+      - :output - Custom output directory path (default: same dir, .pageindex extension)
+      - :model - LLM model override for vision extraction
+      - :config - LLM config override
+      - :refine? - Boolean. Enable post-extraction quality refinement (default: false)
+      - :refine-model - String. Model for eval/refine steps (default: \"gpt-4o\")
+      - :refine-iterations - Integer. Max refine iterations per page (default: 1)
+      - :refine-threshold - Float. Min eval score to pass (default: 0.8)
+      - :refine-sample-size - Integer. Pages to sample for eval (default: 3)
+    
+    Returns:
+    Map with :document (the indexed document) and :output-path (directory where files were saved).
+    
+    Throws:
+    - ex-info if file not found
+    - ex-info if document fails spec validation
+    
+    Example:
+    (index! \"docs/manual.pdf\")
+    ;; => {:document {...} :output-path \"docs/manual.pageindex\"}
+    
+    ;; With quality refinement
+    (index! \"docs/manual.pdf\" {:refine? true :refine-model \"gpt-4o\"})"
   ([file-path] (index! file-path {}))
-  ([file-path {:keys [output model config]}]
-   (let [abs-path (ensure-absolute file-path)
-         output-path (or output (derive-index-path abs-path))]
+   ([file-path {:keys [output model config
+                      refine? refine-model refine-iterations
+                      refine-threshold refine-sample-size]}]
+    (let [abs-path (ensure-absolute file-path)
+          output-path (or output (derive-index-path abs-path))]
 
-      (trove/log! {:level :debug
-                   :msg "index! does not use :output-dir"})
+      ;; Validate input exists
+       (when-not (fs/exists? abs-path)
+         (trove/log! {:level :error :data {:path abs-path} :msg "File not found"})
+         (anomaly/not-found! "File not found" {:type :svar.pageindex/file-not-found :path abs-path}))
 
-     ;; Validate input exists
-     (when-not (fs/exists? abs-path)
-        (trove/log! {:level :error :data {:path abs-path} :msg "File not found"})
-       (anomaly/not-found! "File not found" {:path abs-path}))
+      (trove/log! {:level :info :data {:input abs-path :output output-path :refine? (boolean refine?)}
+                   :msg "Starting document indexing"})
 
-      (trove/log! {:level :info :data {:input abs-path :output output-path} :msg "Starting document indexing"})
-
-     ;; Run indexing
-     (let [index-opts (cond-> {}
-                        model (assoc :model model)
-                        config (assoc :config config))
-            _ (trove/log! {:level :debug :data {:opts index-opts} :msg "Running build-index"})
+      ;; Run indexing
+      (let [index-opts (cond-> {}
+                         model (assoc :model model)
+                         config (assoc :config config)
+                         refine? (assoc :refine? refine?)
+                         refine-model (assoc :refine-model refine-model)
+                         refine-iterations (assoc :refine-iterations refine-iterations)
+                         refine-threshold (assoc :refine-threshold refine-threshold)
+                         refine-sample-size (assoc :refine-sample-size refine-sample-size))
+           _ (trove/log! {:level :debug :data {:opts index-opts} :msg "Running build-index"})
            document (build-index abs-path index-opts)
-            _ (trove/log! {:level :debug :data {:document/name (:document/name document)} :msg "build-index complete"})]
+           _ (trove/log! {:level :debug :data {:document/name (:document/name document)} :msg "build-index complete"})]
 
        ;; Validate the document - throw on failure
        (when-not (rlm-spec/valid-document? document)
          (let [explanation (rlm-spec/explain-document document)]
-                     (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
+           (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
            (anomaly/incorrect! "Document failed spec validation"
                                {:type :rlm/invalid-document
                                 :document/name (:document/name document)
                                 :explanation explanation})))
 
-        (trove/log! {:level :debug :msg "Spec validation passed"})
+       (trove/log! {:level :debug :msg "Spec validation passed"})
 
-      ;; Save to Nippy binary (handles Instants, byte[], UUID natively)
-        (trove/log! {:level :debug :data {:path output-path} :msg "Writing Nippy file"})
-       (nippy/freeze-to-file output-path document)
+      ;; Save as EDN + PNG files
+       (trove/log! {:level :debug :data {:path output-path} :msg "Writing EDN + PNG files"})
+       (write-document-edn! output-path document)
 
-        (trove/log! {:level :info :data {:document/name (:document/name document)
+       (trove/log! {:level :info :data {:document/name (:document/name document)
                                         :pages (count (:document/pages document))
                                         :toc-entries (count (:document/toc document))
                                         :output-path output-path}
-                     :msg "Document indexed and saved successfully"})
+                    :msg "Document indexed and saved successfully"})
 
        {:document document
         :output-path output-path}))))
 
 (defn load-index
-  "Load an indexed document from a Nippy binary file.
+  "Load an indexed document from a pageindex directory (EDN + PNG files).
+   
+   Also supports loading legacy Nippy files for backward compatibility.
    
    Params:
-   `nippy-path` - String. Path to the Nippy file.
+   `index-path` - String. Path to the pageindex directory or legacy .nippy file.
    
    Returns:
    The RLM document map.
    
    Throws:
-   - ex-info if file not found
+   - ex-info if path not found
    - ex-info if document fails spec validation
    
    Example:
-   (load-index \"docs/manual.nippy\")"
-  [nippy-path]
-  (let [abs-path (ensure-absolute nippy-path)]
+   (load-index \"docs/manual.pageindex\")"
+  [index-path]
+  (let [abs-path (ensure-absolute index-path)]
     (when-not (fs/exists? abs-path)
-       (trove/log! {:level :error :data {:path abs-path} :msg "Nippy file not found"})
-      (anomaly/not-found! "Nippy file not found" {:path abs-path}))
+      (trove/log! {:level :error :data {:path abs-path} :msg "Index path not found"})
+       (anomaly/not-found! "Index path not found" {:type :svar.pageindex/index-not-found :path abs-path}))
 
-     (trove/log! {:level :debug :data {:path abs-path} :msg "Loading Nippy file"})
-    (let [document (nippy/thaw-from-file abs-path)]
+    (trove/log! {:level :debug :data {:path abs-path} :msg "Loading index"})
+    (let [document (if (fs/directory? abs-path)
+                     ;; New format: directory with document.edn + images/
+                     (read-document-edn abs-path)
+                     ;; Legacy: could be a plain EDN file
+                     (edn/read-once (io/file abs-path)))]
 
       ;; Validate the document - throw on failure
       (when-not (rlm-spec/valid-document? document)
         (let [explanation (rlm-spec/explain-document document)]
-           (trove/log! {:level :error :data {:path abs-path :explanation explanation} :msg "Loaded document failed spec validation"})
+          (trove/log! {:level :error :data {:path abs-path :explanation explanation} :msg "Loaded document failed spec validation"})
           (anomaly/incorrect! "Loaded document failed spec validation"
                               {:type :rlm/invalid-document
                                :path abs-path
                                :explanation explanation})))
 
-       (trove/log! {:level :info :data {:path abs-path
-                                         :document/name (:document/name document)
-                                         :pages (count (:document/pages document))
-                                         :toc-entries (count (:document/toc document))}
-                    :msg "Loaded document"})
+      (trove/log! {:level :info :data {:path abs-path
+                                       :document/name (:document/name document)
+                                       :pages (count (:document/pages document))
+                                       :toc-entries (count (:document/toc document))}
+                   :msg "Loaded document"})
       document)))
 
 (defn- print-toc-tree
@@ -948,7 +1083,7 @@
    (inspect \"docs/manual.edn\")
    (inspect my-document)"
   [doc-or-path]
-   (trove/log! {:level :debug :data {:input (if (string? doc-or-path) doc-or-path :document-map)} :msg "Inspecting document"})
+  (trove/log! {:level :debug :data {:input (if (string? doc-or-path) doc-or-path :document-map)} :msg "Inspecting document"})
   (let [doc (if (string? doc-or-path)
               (load-index doc-or-path)
               ;; Validate document map if passed directly

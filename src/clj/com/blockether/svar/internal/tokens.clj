@@ -8,10 +8,14 @@
    - `count-tokens` - Count tokens for a string using a specific model's encoding
    - `count-messages` - Count tokens for a chat completion message array
    - `estimate-cost` - Estimate cost in USD based on model pricing
+   - `count-and-estimate` - Count tokens and estimate cost in one call
    - `context-limit` - Get max context window for a model
+   - `max-input-tokens` - Get max input tokens (context minus output reserve)
    - `truncate-text` - Token-aware text truncation
-   - `truncate-messages` - Smart message truncation with priority
-   - `check-context-limit` - Pre-flight check before API calls
+    - `truncate-messages` - Smart message truncation with priority
+    - `check-context-limit` - Pre-flight check before API calls
+    - `format-cost` - Format USD cost for display
+   - `get-model-pricing` - Look up per-model pricing info
    
    Note: Token counts are approximate. Chat completion API payloads have ~25 token
    error margin due to internal OpenAI formatting that isn't publicly documented."
@@ -26,7 +30,11 @@
     EncodingType
     IntArrayList
     ModelType)
-   (java.util Locale)))
+   (java.io ByteArrayInputStream)
+   (java.net HttpURLConnection URI)
+   (java.util Base64 Locale)
+   (javax.imageio ImageIO ImageReader)
+   (javax.imageio.stream ImageInputStream)))
 
 ;; =============================================================================
 ;; Registry and Encoding Setup
@@ -67,10 +75,13 @@
    Sources:
    - OpenAI: https://platform.openai.com/docs/models
    - Anthropic: https://docs.anthropic.com/en/docs/about-claude/models
-   - Google: https://ai.google.dev/gemini-api/docs/models/gemini
+   - Google: https://cloud.google.com/vertex-ai/generative-ai/docs/models
+   - Zhipu: https://docs.z.ai/guides/overview/pricing
+   - DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
+   - Mistral: https://docs.mistral.ai/models
    
-   Last updated: January 2025"
-  {;; OpenAI models
+   Last updated: February 2026"
+  {;; OpenAI GPT-4 models
    "gpt-4o"              128000
    "gpt-4o-2024-11-20"   128000
    "gpt-4o-2024-08-06"   128000
@@ -84,6 +95,7 @@
    ;; OpenAI GPT-5 models (400k context, 128k max output)
    "gpt-5"               400000
    "gpt-5-mini"          400000
+   "gpt-5-nano"          400000
    "gpt-5.1"             400000
    "gpt-5.2"             400000
    ;; OpenAI reasoning models
@@ -91,23 +103,35 @@
    "o1-preview"          128000
    "o1-mini"             128000
    "o3"                  200000
+   "o3-pro"              200000
    "o3-mini"             200000
-   ;; Anthropic models
+   "o4-mini"             200000
+   ;; Anthropic models — Claude 3.x (legacy)
    "claude-3-5-sonnet"   200000
    "claude-3-5-haiku"    200000
    "claude-3-opus"       200000
    "claude-3-sonnet"     200000
    "claude-3-haiku"      200000
+   ;; Anthropic models — Claude 4.x
+   "claude-opus-4-6"     200000   ; 1M beta available
+   "claude-opus-4-5"     200000
+   "claude-opus-4-1"     200000
+   "claude-opus-4-0"     200000
+   "claude-sonnet-4-5"   200000   ; 1M beta available
+   "claude-sonnet-4-0"   200000   ; 1M beta available
+   "claude-haiku-4-5"    200000
+   ;; Anthropic — legacy aliases (for partial matching compat)
    "claude-4-opus"       200000
    "claude-4-sonnet"     200000
    "claude-4.5-sonnet"   200000
    "claude-4.5-haiku"    200000
-   "claude-opus-4-5"     200000
    "claude-opus-4.5"     200000
-   ;; Google models
+   ;; Google Gemini models
    "gemini-1.5-pro"      2000000
    "gemini-1.5-flash"    1000000
-   "gemini-2.0-flash"    1000000
+   "gemini-2.0-flash"    1048576
+   "gemini-2.5-flash"    1048576
+   "gemini-2.5-pro"      1048576
    ;; Meta models
    "llama-3.1-405b"      128000
    "llama-3.1-70b"       128000
@@ -115,28 +139,34 @@
    ;; Mistral models
    "mistral-large"       128000
    "mistral-medium"      32000
+   "mistral-medium-3"    131000
    "mistral-small"       32000
+   "mistral-small-3.1"   128000
+   "codestral-2"         128000
    ;; Zhipu GLM models
    "glm-4"               128000
    "glm-4-plus"          128000
    "glm-4.5"             128000
    "glm-4.5-air"         128000
    "glm-4.6"             200000
-   "glm-4.6v"            200000
+   "glm-4.6v"            128000   ; vision model, 128K not 200K
    "glm-4.7"             200000
+   "glm-4.7-flashx"      200000
    "glm-5"               200000
+   "glm-5-code"          200000
    ;; DeepSeek models
    "deepseek-v3"         128000
    "deepseek-v3.2"       128000
    "deepseek-chat"       128000
    "deepseek-coder"      128000
+   "deepseek-reasoner"   128000
    ;; Default fallback (conservative)
    :default              8192})
 
 (def DEFAULT_OUTPUT_RESERVE
   "Default number of tokens to reserve for model output.
-   Set to 0 - let API handle overflow naturally. Modern APIs error gracefully
-   if context is exceeded, and reserving tokens wastes available input space."
+   0 means no reservation — let the API handle overflow naturally.
+   Override per-call via :output-reserve in check-context-limit or ask! opts."
   0)
 
 (def DEFAULT_TRIM_RATIO
@@ -174,25 +204,31 @@
    Params:
    `model` - String. Model name.
    `opts` - Map, optional:
-     - :output-reserve - Integer. Tokens to reserve for output (default: 4096).
+     - :output-reserve - Integer. Tokens to reserve for output.
+         Defaults to model's max output tokens (from DEFAULT_MAX_OUTPUT_TOKENS).
      - :trim-ratio - Float. Alternative: use ratio of context (default: nil).
+         When set, overrides :output-reserve.
    
    Returns:
-   Integer. Maximum input tokens.
-   
-   Example:
-   (max-input-tokens \"gpt-4o\")
-   ;; => 123904 (128000 - 4096)
-   
-   (max-input-tokens \"gpt-4o\" {:trim-ratio 0.75})
-   ;; => 96000 (128000 * 0.75)"
+    Integer. Maximum input tokens.
+    
+    Example:
+    (max-input-tokens \"gpt-4o\")
+    ;; => 128000 (128000 - 0, default reserve is 0)
+    
+    (max-input-tokens \"gpt-4o\" {:output-reserve 4096})
+    ;; => 123904 (128000 - 4096)
+    
+    (max-input-tokens \"gpt-4o\" {:trim-ratio 0.75})
+    ;; => 96000 (128000 * 0.75)"
   (^long [^String model]
    (max-input-tokens model {}))
   (^long [^String model {:keys [output-reserve trim-ratio context-limits]}]
-   (let [limit (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS))]
+   (let [limit (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS))
+         effective-reserve (or output-reserve DEFAULT_OUTPUT_RESERVE)]
      (if trim-ratio
        (long (* (long limit) (double trim-ratio)))
-       (- (long limit) (long (or output-reserve DEFAULT_OUTPUT_RESERVE)))))))
+       (- (long limit) (long effective-reserve))))))
 
 ;; =============================================================================
 ;; Token Counting
@@ -235,54 +271,243 @@
   [^String _model]
   1)
 
+;; =============================================================================
+;; Image Token Estimation (OpenAI Vision Formula)
+;; =============================================================================
+;;
+;; OpenAI charges tokens for images based on dimensions and detail level:
+;;   - detail "low"  → 85 tokens (fixed, any size)
+;;   - detail "high" / "auto" / nil →
+;;       1. Scale longest side to ≤ 2048
+;;       2. Scale shortest side to ≤ 768
+;;       3. Tile into 512×512 blocks
+;;       4. tokens = 170 × tiles + 85
+;;
+;; For base64 data URLs we decode and read actual image dimensions.
+;; For HTTP(S) URLs we fetch the image header (lazy read, only metadata).
+;; Falls back to 765 tokens (~1024×1024 high-detail) when dimensions
+;; cannot be determined.
+;;
+;; Reference: https://platform.openai.com/docs/guides/vision/calculating-costs
+
+(def ^:private ^:const IMAGE_TOKEN_FALLBACK
+  "Fallback token estimate when image dimensions can't be determined.
+   Equivalent to a 1024×1024 image at high detail:
+   ceil(1024/512) × ceil(1024/512) = 2×2 = 4 tiles → 170×4+85 = 765."
+  765)
+
+(def ^:private ^:const IMAGE_URL_TIMEOUT_MS
+  "Timeout in milliseconds for fetching image headers from URLs.
+   Kept short since this runs during token counting."
+  3000)
+
+(defn- image-dimensions-from-stream
+  "Reads image width and height from an ImageInputStream without
+   decoding pixel data. Returns [width height] or nil.
+   
+   Params:
+   `iis` - ImageInputStream. Source to read from.
+   
+   Returns:
+   Vector of [width height] or nil if format is unrecognized."
+  [^ImageInputStream iis]
+  (let [readers (ImageIO/getImageReaders iis)]
+    (when (.hasNext readers)
+      (let [^ImageReader reader (.next readers)]
+        (try
+          (.setInput reader iis true true)
+          [(.getWidth reader 0) (.getHeight reader 0)]
+          (finally
+            (.dispose reader)))))))
+
+(defn- image-dimensions-from-base64
+  "Extracts image dimensions from a base64-encoded image string.
+   Decodes the base64 payload and reads the image header for
+   width/height without fully decoding pixel data.
+   
+   Params:
+   `base64-str` - String. Raw base64 data (no data: prefix).
+   
+   Returns:
+   Vector of [width height] or nil on failure."
+  [^String base64-str]
+  (try
+    (let [decoder (Base64/getDecoder)
+          bytes (.decode decoder base64-str)
+          bais (ByteArrayInputStream. bytes)
+          iis (ImageIO/createImageInputStream bais)]
+      (when iis
+        (try
+          (image-dimensions-from-stream iis)
+          (finally
+            (.close iis)))))
+    (catch Exception _ nil)))
+
+(defn- image-dimensions-from-url
+  "Fetches image dimensions from an HTTP(S) URL by reading only the
+   image header metadata. Uses a short timeout to avoid blocking
+   token counting operations.
+   
+   Params:
+   `url-str` - String. Full HTTP(S) URL to the image.
+   
+   Returns:
+   Vector of [width height] or nil on failure/timeout."
+  [^String url-str]
+  (try
+    (let [url (.toURL (URI. url-str))
+          conn ^HttpURLConnection (.openConnection url)]
+      (.setConnectTimeout conn IMAGE_URL_TIMEOUT_MS)
+      (.setReadTimeout conn IMAGE_URL_TIMEOUT_MS)
+      (.setRequestMethod conn "GET")
+      ;; Request only the first 64KB — enough for any image header
+      (.setRequestProperty conn "Range" "bytes=0-65535")
+      (try
+        (let [is (.getInputStream conn)
+              iis (ImageIO/createImageInputStream is)]
+          (when iis
+            (try
+              (image-dimensions-from-stream iis)
+              (finally
+                (.close iis)
+                (.close is)))))
+        (finally
+          (.disconnect conn))))
+    (catch Exception _ nil)))
+
+(defn- calculate-image-tokens
+  "Applies OpenAI's vision token formula given image dimensions.
+   
+   detail \"low\"       → 85 tokens (fixed).
+   detail \"high\"/nil  → tile-based calculation.
+   
+   Params:
+   `width`  - Long. Image width in pixels.
+   `height` - Long. Image height in pixels.
+   `detail` - String or nil. \"low\", \"high\", or \"auto\".
+   
+   Returns:
+   Long. Estimated token count."
+  ^long [^long width ^long height detail]
+  (if (= "low" detail)
+    85
+    ;; high / auto / nil — tile-based
+    (let [;; Step 1: scale so longest side ≤ 2048
+          max-side (double (max width height))
+          scale1 (if (> max-side 2048.0) (/ 2048.0 max-side) 1.0)
+          w1 (* (double width) scale1)
+          h1 (* (double height) scale1)
+          ;; Step 2: scale so shortest side ≤ 768
+          min-side (min w1 h1)
+          scale2 (if (> min-side 768.0) (/ 768.0 min-side) 1.0)
+          w2 (* w1 scale2)
+          h2 (* h1 scale2)
+          ;; Step 3: count 512×512 tiles
+          tiles-w (long (Math/ceil (/ w2 512.0)))
+          tiles-h (long (Math/ceil (/ h2 512.0)))
+          tiles (* tiles-w tiles-h)]
+      (+ (* 170 tiles) 85))))
+
+(defn- estimate-image-block-tokens
+  "Estimates tokens for a single image_url message block.
+   
+   Dispatches based on URL type:
+   - data: URLs → decode base64, read dimensions, apply formula
+   - http(s): URLs → fetch image header, read dimensions, apply formula
+   - Unknown → fallback estimate
+   
+   Params:
+   `block` - Map. An image_url content block with shape
+             {:type \"image_url\" :image_url {:url \"...\" :detail \"...\"}}.
+   
+   Returns:
+   Long. Estimated token count for this image."
+  ^long [block]
+  (let [url (get-in block [:image_url :url] "")
+        detail (get-in block [:image_url :detail])]
+    (if (= "low" detail)
+      85
+      (let [dims (cond
+                   ;; Base64 data URL: data:image/png;base64,<payload>
+                   (str/starts-with? url "data:")
+                   (let [comma-idx (str/index-of url ",")]
+                     (when comma-idx
+                       (image-dimensions-from-base64 (subs url (inc (long comma-idx))))))
+
+                   ;; Remote URL
+                   (or (str/starts-with? url "http://")
+                       (str/starts-with? url "https://"))
+                   (image-dimensions-from-url url)
+
+                   :else nil)]
+        (if dims
+          (calculate-image-tokens (long (first dims)) (long (second dims)) detail)
+          IMAGE_TOKEN_FALLBACK)))))
+
+;; =============================================================================
+;; Content Extraction for Token Counting
+;; =============================================================================
+
 (defn- extract-text-from-content
-  "Extracts text content from a message content field.
+  "Extracts text content and image token counts from a message content field.
    
    Handles both:
    - String content (regular messages)
-   - Vector content (multimodal messages with images)
+   - Vector content (multimodal messages with text + images)
    
-   For multimodal messages, extracts text from text blocks and counts
-   approximate tokens for image blocks.
+   For images, calculates accurate token counts using OpenAI's vision
+   formula when dimensions are available (base64 or fetchable URL),
+   otherwise falls back to a conservative estimate.
    
    Params:
    `content` - String or vector. The message content.
    
    Returns:
-   String. The extracted text content for token counting."
+   Map with:
+   - :text         - String. Concatenated text from text blocks.
+   - :image-tokens - Long. Total estimated tokens for all image blocks."
   [content]
   (cond
-    (string? content) content
+    (string? content)
+    {:text content :image-tokens 0}
+
     (vector? content)
-    ;; Multimodal content: extract text from text blocks
-    ;; Images are roughly 85 tokens for low-res, 170 for high-res per 512x512 tile
-    ;; We approximate as 256 tokens per image for token counting purposes
-    (->> content
-         (keep (fn [block]
-                 (cond
-                   (and (map? block) (= "text" (:type block)))
-                   (:text block)
-                   (and (map? block) (= "image_url" (:type block)))
-                      ;; Placeholder text to approximate image tokens (~256 tokens per image)
-                   (apply str (repeat 256 "x"))
-                   :else nil)))
-         (str/join "\n"))
-    :else ""))
+    (let [{:keys [texts image-tokens]}
+          (reduce (fn [{:keys [texts image-tokens]} block]
+                    (cond
+                      (and (map? block) (= "text" (:type block)))
+                      {:texts (conj texts (:text block))
+                       :image-tokens image-tokens}
+
+                      (and (map? block) (= "image_url" (:type block)))
+                      {:texts texts
+                       :image-tokens (+ (long image-tokens)
+                                        (long (estimate-image-block-tokens block)))}
+
+                      :else
+                      {:texts texts :image-tokens image-tokens}))
+                  {:texts [] :image-tokens 0}
+                  content)]
+      {:text (str/join "\n" texts) :image-tokens image-tokens})
+
+    :else
+    {:text "" :image-tokens 0}))
 
 (defn count-messages
   "Counts tokens for a chat completion message array.
    
    Accounts for:
-   - Message content tokens
+   - Message content tokens (text blocks tokenized via JTokkit)
    - Role field overhead
    - Per-message formatting overhead
    - Reply priming (every reply is primed with <|start|>assistant<|message|>)
-   - Multimodal content (images approximated as ~256 tokens each)
+   - Multimodal content (images sized via OpenAI's vision tile formula
+     when dimensions are available, conservative fallback otherwise)
    
    Params:
    `model` - String. Model name.
    `messages` - Vector of maps with :role and :content keys.
-              Content can be string (text) or vector (multimodal).
+               Content can be string (text) or vector (multimodal).
    
    Returns:
    Integer. Total token count for the messages.
@@ -298,11 +523,12 @@
         tpn (tokens-per-name model)
         message-tokens (reduce
                         (fn [^long acc {:keys [role content name] :as _message}]
-                          (let [text-content (extract-text-from-content content)]
+                          (let [{:keys [text image-tokens]} (extract-text-from-content content)]
                             (+ acc
                                (long tpm)
                                (long (.countTokens encoding (or (some-> role clojure.core/name) "")))
-                               (long (.countTokens encoding text-content))
+                               (long (.countTokens encoding (or text "")))
+                               (long image-tokens)
                                (if name
                                  (+ (long tpn) (long (.countTokens encoding name)))
                                  0))))
@@ -317,30 +543,69 @@
 ;; =============================================================================
 
 (def DEFAULT_MODEL_PRICING
-  "Default pricing per 1M tokens in USD as of January 2025.
+  "Default pricing per 1M tokens in USD as of February 2026.
    Format: {:input price-per-1M :output price-per-1M}
    Override per-model via :pricing in make-config.
    
    Sources:
-   - OpenAI: https://openai.com/api/pricing/
-   - Anthropic: https://www.anthropic.com/pricing
+   - OpenAI: https://developers.openai.com/api/docs/pricing/
+   - Anthropic: https://docs.claude.com/en/about-claude/pricing
+   - Google: https://cloud.google.com/vertex-ai/generative-ai/pricing
+   - Zhipu: https://docs.z.ai/guides/overview/pricing
+   - DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
+   - Mistral: https://docs.mistral.ai/models
    
    Note: These are approximate and may change. Update periodically."
-  {;; OpenAI models
+  {;; OpenAI GPT-4 models
    "gpt-4o"              {:input 2.50   :output 10.00}
    "gpt-4o-2024-11-20"   {:input 2.50   :output 10.00}
    "gpt-4o-mini"         {:input 0.15   :output 0.60}
    "gpt-4-turbo"         {:input 10.00  :output 30.00}
    "gpt-4"               {:input 30.00  :output 60.00}
    "gpt-3.5-turbo"       {:input 0.50   :output 1.50}
+   ;; OpenAI GPT-5 models
+   "gpt-5"               {:input 1.25   :output 10.00}
+   "gpt-5-mini"          {:input 0.25   :output 2.00}
+   "gpt-5-nano"          {:input 0.05   :output 0.40}
+   "gpt-5.1"             {:input 1.25   :output 10.00}
+   "gpt-5.2"             {:input 1.75   :output 14.00}
+   ;; OpenAI reasoning models
    "o1"                  {:input 15.00  :output 60.00}
    "o1-mini"             {:input 3.00   :output 12.00}
    "o1-pro"              {:input 150.00 :output 600.00}
+   "o3"                  {:input 2.00   :output 8.00}
+   "o3-pro"              {:input 20.00  :output 80.00}
    "o3-mini"             {:input 1.10   :output 4.40}
-   ;; Anthropic models
+   "o4-mini"             {:input 1.10   :output 4.40}
+   ;; Anthropic Claude 3.x (legacy)
    "claude-3-5-sonnet"   {:input 3.00   :output 15.00}
    "claude-3-5-haiku"    {:input 0.80   :output 4.00}
    "claude-3-opus"       {:input 15.00  :output 75.00}
+   ;; Anthropic Claude 4.x
+   "claude-opus-4-6"     {:input 5.00   :output 25.00}
+   "claude-opus-4-5"     {:input 5.00   :output 25.00}
+   "claude-opus-4-1"     {:input 15.00  :output 75.00}
+   "claude-opus-4-0"     {:input 15.00  :output 75.00}
+   "claude-sonnet-4-5"   {:input 3.00   :output 15.00}
+   "claude-sonnet-4-0"   {:input 3.00   :output 15.00}
+   "claude-haiku-4-5"    {:input 1.00   :output 5.00}
+   ;; Google Gemini models
+   "gemini-2.5-pro"      {:input 1.25   :output 10.00}
+   "gemini-2.5-flash"    {:input 0.30   :output 2.50}
+   "gemini-2.0-flash"    {:input 0.10   :output 0.40}
+   ;; Zhipu GLM models
+   "glm-5"               {:input 1.00   :output 3.20}
+   "glm-5-code"          {:input 1.20   :output 5.00}
+   "glm-4.7"             {:input 0.60   :output 2.20}
+   "glm-4.7-flashx"      {:input 0.07   :output 0.40}
+   "glm-4.6"             {:input 0.60   :output 2.20}
+   "glm-4.6v"            {:input 0.30   :output 0.90}
+   ;; DeepSeek models (cache-miss pricing)
+   "deepseek-chat"       {:input 0.28   :output 0.42}
+   "deepseek-reasoner"   {:input 0.28   :output 0.50}
+   ;; Mistral models
+   "mistral-medium-3"    {:input 0.40   :output 2.00}
+   "codestral-2"         {:input 0.30   :output 0.90}
    ;; Default fallback (conservative estimate)
    :default              {:input 5.00   :output 15.00}})
 
@@ -406,6 +671,11 @@
    `model` - String. Model name.
    `messages` - Vector. Input messages for the prompt.
    `output-text` - String. The response text.
+   `opts` - Map, optional:
+     - :pricing - Map. Per-model pricing overrides.
+     - :input-tokens - Integer, optional. Pre-counted input tokens.
+         When provided, skips re-tokenizing messages (avoids duplicate work
+         when check-context-limit already counted them).
    
    Returns:
    Map with:
@@ -424,8 +694,8 @@
    ;;     :cost {:input-cost 0.00002 :output-cost 0.00009 :total-cost 0.00011 ...}}"
   ([^String model messages ^String output-text]
    (count-and-estimate model messages output-text {}))
-  ([^String model messages ^String output-text {:keys [pricing] :as _config}]
-   (let [input-tokens (count-messages model messages)
+  ([^String model messages ^String output-text {:keys [pricing input-tokens]}]
+   (let [input-tokens (long (or input-tokens (count-messages model messages)))
          output-tokens (count-tokens model output-text)
          total-tokens (+ input-tokens output-tokens)
          cost (estimate-cost model input-tokens output-tokens
@@ -457,32 +727,6 @@
 ;; Token-Aware Truncation
 ;; =============================================================================
 
-(defn encode-tokens
-  "Encodes text into token IDs using the model's tokenizer.
-   
-   Params:
-   `model` - String. Model name.
-   `text` - String. Text to encode.
-   
-   Returns:
-   int[] (Java primitive array). Token IDs."
-  [^String model ^String text]
-  (let [encoding (model->encoding model)]
-    (.encode encoding text)))
-
-(defn decode-tokens
-  "Decodes token IDs back into text.
-   
-   Params:
-   `model` - String. Model name.
-   `tokens` - IntList or int[]. Token IDs to decode.
-   
-   Returns:
-   String. Decoded text."
-  ^String [^String model tokens]
-  (let [encoding (model->encoding model)]
-    (.decode encoding tokens)))
-
 (defn truncate-text
   "Truncates text to fit within a token limit.
    
@@ -509,8 +753,8 @@
   ([^String model ^String text ^long max-tokens]
    (truncate-text model text max-tokens {}))
   ([^String model ^String text ^long max-tokens {:keys [truncation-marker from] :or {from :end}}]
-   (when (nil? text) (anomaly/incorrect! "Cannot truncate nil text" {:type :truncation/nil-input}))
-   (when (<= max-tokens 0) (anomaly/incorrect! "max-tokens must be positive" {:type :truncation/invalid-limit :max-tokens max-tokens}))
+(when (nil? text) (anomaly/incorrect! "Cannot truncate nil text" {:type :svar.tokens/nil-input}))
+    (when (<= max-tokens 0) (anomaly/incorrect! "max-tokens must be positive" {:type :svar.tokens/invalid-limit :max-tokens max-tokens}))
    (let [^Encoding encoding (model->encoding model)
          ^IntArrayList tokens (.encode encoding text)
          token-count (.size tokens)]
@@ -622,30 +866,38 @@
    Params:
    `model` - String. Model name.
    `messages` - Vector. Chat messages.
-   `opts` - Map, optional:
-     - :output-reserve - Integer. Tokens reserved for output (default: 4096).
-     - :throw? - Boolean. Throw exception if over limit (default: false).
-   
-   Returns:
-   Map with:
-     - :ok? - Boolean. True if messages fit.
-     - :input-tokens - Integer. Counted input tokens.
-     - :max-input-tokens - Integer. Maximum allowed.
-     - :context-limit - Integer. Model's total context.
-     - :overflow - Integer. How many tokens over limit (0 if ok).
-     - :error - String or nil. Error message if not ok.
-   
-   Example:
-   (check-context-limit \"gpt-4o\" messages)
-   ;; => {:ok? true :input-tokens 5000 :max-input-tokens 123904 ...}
-   
-   (check-context-limit \"gpt-4\" huge-messages {:throw? true})
-   ;; => throws ExceptionInfo with detailed error"
+    `opts` - Map, optional:
+      - :output-reserve - Integer. Tokens reserved for output (default: 0).
+          When 0, the full context window is available for input — the API
+          handles output allocation naturally.
+      - :throw? - Boolean. Throw exception if over limit (default: false).
+      - :context-limits - Map. Per-model context window overrides.
+    
+    Returns:
+    Map with:
+      - :ok? - Boolean. True if messages fit.
+      - :input-tokens - Integer. Counted input tokens.
+      - :max-input-tokens - Integer. Maximum allowed.
+      - :context-limit - Integer. Model's total context.
+      - :output-reserve - Integer. Effective output reserve used.
+      - :overflow - Integer. How many tokens over limit (0 if ok).
+      - :error - String or nil. Error message if not ok.
+    
+    Example:
+    (check-context-limit \"gpt-4o\" messages)
+    ;; => {:ok? true :input-tokens 5000 :max-input-tokens 128000 ...}
+    
+    (check-context-limit \"gpt-4o\" messages {:output-reserve 4096})
+    ;; => {:ok? true :input-tokens 5000 :max-input-tokens 123904 ...}
+    
+    (check-context-limit \"gpt-4\" huge-messages {:throw? true})
+    ;; => throws ExceptionInfo with detailed error"
   ([^String model messages]
    (check-context-limit model messages {}))
   ([^String model messages {:keys [output-reserve throw? context-limits] :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
    (let [ctx-limit (long (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS)))
-         max-input (- ctx-limit (long output-reserve))
+         effective-reserve (long output-reserve)
+         max-input (- ctx-limit effective-reserve)
          input-tokens (long (count-messages model messages))
          ok? (<= input-tokens max-input)
          overflow (if ok? 0 (- input-tokens max-input))
@@ -653,15 +905,15 @@
                  :input-tokens input-tokens
                  :max-input-tokens max-input
                  :context-limit ctx-limit
-                 :output-reserve output-reserve
+                 :output-reserve effective-reserve
                  :overflow overflow
                  :utilization (double (/ input-tokens max-input))
                  :error (when-not ok?
                           (format "Context overflow: %d tokens exceed limit of %d (model %s has %d context, reserving %d for output). Reduce input by %d tokens."
-                                  input-tokens max-input model ctx-limit output-reserve overflow))}]
+                                  input-tokens max-input model ctx-limit effective-reserve overflow))}]
      (when (and throw? (not ok?))
-       (anomaly/incorrect! (:error result)
-                           {:type :context/overflow
+        (anomaly/incorrect! (:error result)
+                            {:type :svar.tokens/context-overflow
                             :model model
                             :input-tokens input-tokens
                             :max-input-tokens max-input

@@ -18,8 +18,9 @@
        (svar/ask! ...))"
   (:require
    [clojure.string :as str]
-   [com.blockether.svar.spec :as spec]
-   [taoensso.trove :as trove]))
+    [com.blockether.svar.internal.util :as util]
+    [com.blockether.svar.spec :as spec]
+    [taoensso.trove :as trove]))
 
 ;; =============================================================================
 ;; Constants
@@ -236,7 +237,7 @@
    Returns:
    Guard function (fn [input] -> input | throw).
    The guard returns original input unchanged if safe.
-   Throws ExceptionInfo with :type :prompt-injection (single) or :multiple-violations (multiple)."
+   Throws ExceptionInfo with :type :svar.guard/prompt-injection (single) or :svar.guard/multiple-violations (multiple)."
   ([]
    (static {}))
   ([opts]
@@ -254,12 +255,12 @@
                             {:pattern pattern
                              :message (:message config)
                              :type (:type config)}))
-             duration-ms (/ (- (System/nanoTime) start-time) 1e6)]
-         (cond
-           ;; No matches - pass through
-           (empty? matches)
+              duration-ms (util/elapsed-since start-time)]
+          (cond
+            ;; No matches - pass through
+            (empty? matches)
            (do
-(trove/log! {:level :debug :data {:input-length (count text) :duration-ms duration-ms}
+             (trove/log! {:level :debug :data {:input-length (count text) :duration-ms duration-ms}
                           :msg "Static guard passed"})
              input)
 
@@ -267,30 +268,30 @@
            (= 1 (count matches))
            (let [{:keys [pattern message type]} (first matches)
                  error-message (or message (str "Pattern matched: " pattern))]
-(trove/log! {:level :warn :data {:input-length (count text)
-                                           :pattern pattern
-                                           :type type
-                                           :duration-ms duration-ms}
+             (trove/log! {:level :warn :data {:input-length (count text)
+                                              :pattern pattern
+                                              :type type
+                                              :duration-ms duration-ms}
                           :msg "Static guard detected prompt injection"})
              (throw (ex-info error-message
-                             {:type (or type :prompt-injection)
-                              :pattern pattern
-                              :input input})))
+                              {:type (or type :svar.guard/prompt-injection)
+                               :pattern pattern
+                               :input input})))
 
            ;; Multiple matches - aggregate
            :else
            (let [violation-types (set (keep :type matches))
                  error-message (str "Multiple violations detected: "
                                     (str/join ", " (map :pattern matches)))]
-(trove/log! {:level :warn :data {:input-length (count text)
-                                           :patterns-matched (count matches)
-                                           :types violation-types
-                                           :duration-ms duration-ms}
+             (trove/log! {:level :warn :data {:input-length (count text)
+                                              :patterns-matched (count matches)
+                                              :types violation-types
+                                              :duration-ms duration-ms}
                           :msg "Static guard detected multiple violations"})
              (throw (ex-info error-message
-                             {:type :multiple-violations
-                              :violations matches
-                              :input input})))))))))
+                              {:type :svar.guard/multiple-violations
+                               :violations matches
+                               :input input})))))))))
 
 ;; =============================================================================
 ;; Moderation Guard Factory
@@ -332,46 +333,49 @@
    Returns:
    Guard function (fn [input] -> input | throw).
    The guard returns original input unchanged if safe.
-   Throws ExceptionInfo with :type :moderation-violation if policies violated.
-   Throws ExceptionInfo with :type :invalid-config if :ask-fn not provided."
+    Throws ExceptionInfo with :type :svar.guard/moderation-violation if policies violated.
+    Throws ExceptionInfo with :type :svar.guard/invalid-config if :ask-fn not provided."
   [opts]
   (let [{:keys [ask-fn api-key base-url model policies]
          :or {model DEFAULT_MODERATION_MODEL
               policies DEFAULT_MODERATION_POLICIES}} opts]
     (when-not ask-fn
       (throw (ex-info ":ask-fn is required for moderation guard"
-                      {:type :invalid-config
+                      {:type :svar.guard/invalid-config
                        :missing :ask-fn})))
     (fn [input]
       (let [start-time (System/nanoTime)
             text (input->text input)
-_ (trove/log! {:level :debug :data {:input-length (count text) :model model}
+            _ (trove/log! {:level :debug :data {:input-length (count text) :model model}
                            :msg "Calling LLM for content moderation"})
-            result (ask-fn {:spec (build-moderation-spec)
-                            :objective (build-moderation-objective policies)
-                            :task (str "<content_to_moderate>\n" text "\n</content_to_moderate>")
-                            :model model
-                            :api-key api-key
-                            :base-url base-url})
+            response (ask-fn {:spec (build-moderation-spec)
+                              :messages [{:role "system" :content (build-moderation-objective policies)}
+                                         {:role "user" :content (str "<content_to_moderate>\n" text "\n</content_to_moderate>")}]
+                              :model model
+                              :api-key api-key
+                              :base-url base-url})
+            ;; ask! wraps the parsed result under :result key
+            result (or (:result response) response)
             violations (extract-violations result policies)
-            duration-ms (/ (- (System/nanoTime) start-time) 1e6)]
+            duration-ms (util/elapsed-since start-time)]
         (if (empty? violations)
           (do
-(trove/log! {:level :debug :data {:input-length (count text)
-                                           :flagged? (:flagged result)
-                                           :duration-ms duration-ms}
+            (trove/log! {:level :debug :data {:input-length (count text)
+                                               :flagged? (:flagged result)
+                                               :duration-ms duration-ms}
                           :msg "Moderation guard passed"})
             input)
           (do
-(trove/log! {:level :warn :data {:input-length (count text)
-                                          :violations (mapv :policy violations)
-                                          :duration-ms duration-ms}
-                          :msg "Moderation guard detected policy violation"})
+            (trove/log! {:level :warn :data {:input-length (count text)
+                                             :violations (mapv :policy violations)
+                                             :duration-ms duration-ms}
+                         :msg "Moderation guard detected policy violation"})
             (throw (ex-info (str "Content violates moderation policies: "
                                  (str/join ", " (map #(name (:policy %)) violations)))
-                            {:type :moderation-violation
-                             :violations violations
-                             :input input}))))))))
+                             {:type :svar.guard/moderation-violation
+                              :violations violations
+                              :input input}))))))))
+
 
 ;; =============================================================================
 ;; Combined Guard
@@ -415,7 +419,7 @@ _ (trove/log! {:level :debug :data {:input-length (count text) :model model}
         start-time (System/nanoTime)]
     (doseq [guard-fn guard-list]
       (guard-fn input))
-    (let [duration-ms (/ (- (System/nanoTime) start-time) 1e6)]
-(trove/log! {:level :debug :data {:guards-count (count guard-list) :duration-ms duration-ms}
-                  :msg "Guard chain completed"}))
+    (let [duration-ms (util/elapsed-since start-time)]
+      (trove/log! {:level :debug :data {:guards-count (count guard-list) :duration-ms duration-ms}
+                   :msg "Guard chain completed"}))
     input))

@@ -4,10 +4,20 @@
    This namespace provides a DSL for defining expected output structures,
    converting specs to LLM prompts, and parsing LLM responses back to Clojure data.
    
+   Primary functions:
+   - `field` - Define a field with name, type, cardinality, and description
+   - `spec` - Create a spec from field definitions
+   - `build-ref-registry` - Build a registry of referenced specs for nested types
+   - `spec->prompt` - Generate LLM prompt text from a spec (sent to LLM)
+   - `str->data` - Parse LLM response string to Clojure data (schemaless)
+   - `str->data-with-spec` - Parse LLM response with spec-based type coercion
+   - `validate-data` - Validate parsed data against a spec
+   - `data->str` - Serialize Clojure data to JSON string
+   
    Data Flow:
    1. Define spec with `spec` and `field` functions
    2. Generate prompt with `spec->prompt` (sent to LLM)
-   3. Parse response with `str->data` (LLM response -> Clojure map)
+   3. Parse response with `str->data-with-spec` (LLM response -> typed Clojure map)
    4. Optionally validate with `validate-data`
    5. Optionally serialize with `data->str`"
   (:require
@@ -16,6 +26,7 @@
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.jsonish :as jsonish]
+   [com.blockether.svar.internal.util :as util]
    [taoensso.trove :as trove])
   (:import
    [java.time LocalDate OffsetDateTime ZonedDateTime]))
@@ -173,9 +184,9 @@
    Throws ex-info if validation fails."
   [the-name the-type the-cardinality the-description the-target]
   (when (nil? the-name)
-    (anomaly/incorrect! "Field ::name is required" {:option ::name}))
+    (anomaly/incorrect! "Field ::name is required" {:type :svar.spec/missing-name :option ::name}))
   (when-not (keyword? the-name)
-    (anomaly/incorrect! "Field ::name must be a keyword" {:option ::name :value the-name}))
+    (anomaly/incorrect! "Field ::name must be a keyword" {:type :svar.spec/invalid-name :option ::name :value the-name}))
   ;; Validate Datomic-style keyword format: dots are only allowed in namespace, not in name
   ;; Valid: :name, :org/name, :org.division/name
   ;; Invalid: :users.name (dot in name part - use :users/name instead)
@@ -183,32 +194,33 @@
     (anomaly/incorrect! (str "Field ::name contains dot in name part. "
                              "Use Datomic-style namespaced keywords instead. "
                              "Example: Use :users/name not :users.name")
-                        {:option ::name
+                        {:type :svar.spec/dotted-name
+                         :option ::name
                          :value the-name
                          :hint (str "Change " the-name " to "
                                     (keyword (str/replace (name the-name) "." "/")))}))
   (when (nil? the-type)
-    (anomaly/incorrect! "Field ::type is required" {:option ::type}))
+    (anomaly/incorrect! "Field ::type is required" {:type :svar.spec/missing-type :option ::type}))
   (when-not (valid-type? the-type)
     (anomaly/incorrect! "Field ::type must be one of the valid types or a fixed-size vector type (e.g., :spec.type/int-v-4)"
-                        {:option ::type :value the-type :valid-types VALID_TYPES
+                        {:type :svar.spec/invalid-type :option ::type :value the-type :valid-types VALID_TYPES
                          :vector-type-examples [:spec.type/int-v-4 :spec.type/string-v-2 :spec.type/double-v-3]}))
   (when (nil? the-cardinality)
-    (anomaly/incorrect! "Field ::cardinality is required" {:option ::cardinality}))
+    (anomaly/incorrect! "Field ::cardinality is required" {:type :svar.spec/missing-cardinality :option ::cardinality}))
   (when-not (contains? VALID_CARDINALITIES the-cardinality)
     (anomaly/incorrect! "Field ::cardinality must be :spec.cardinality/one or :spec.cardinality/many"
-                        {:option ::cardinality :value the-cardinality :valid-cardinalities VALID_CARDINALITIES}))
+                        {:type :svar.spec/invalid-cardinality :option ::cardinality :value the-cardinality :valid-cardinalities VALID_CARDINALITIES}))
   (when (nil? the-description)
-    (anomaly/incorrect! "Field ::description is required" {:option ::description}))
+    (anomaly/incorrect! "Field ::description is required" {:type :svar.spec/missing-description :option ::description}))
   ;; Validate ::target for :spec.type/ref types
   ;; Target can be a single keyword or a vector of keywords (union type)
   (when (= the-type :spec.type/ref)
     (when (nil? the-target)
       (anomaly/incorrect! "Field ::target is required when ::type is :spec.type/ref"
-                          {:option ::target :type the-type})))
+                          {:type :svar.spec/missing-target :option ::target :field-type the-type})))
   (when (and the-target (not= the-type :spec.type/ref))
     (anomaly/incorrect! "Field ::target can only be used with ::type :spec.type/ref"
-                        {:option ::target :type the-type :target the-target}))
+                        {:type :svar.spec/target-without-ref :option ::target :field-type the-type :target the-target}))
   (when the-target
     (let [valid-target? (or (keyword? the-target)
                             (and (vector? the-target)
@@ -216,7 +228,7 @@
                                  (every? keyword? the-target)))]
       (when-not valid-target?
         (anomaly/incorrect! "Field ::target must be a keyword or a vector of keywords (for union types)"
-                            {:option ::target :value the-target}))))
+                            {:type :svar.spec/invalid-target :option ::target :value the-target}))))
   nil)
 
 (defn- validate-description
@@ -226,7 +238,8 @@
   (let [invalid-chars (filter RESERVED_CHARS description)]
     (when (seq invalid-chars)
       (anomaly/incorrect! "Description contains reserved characters"
-                          {:description description
+                          {:type :svar.spec/reserved-chars-in-description
+                           :description description
                            :invalid-chars (set invalid-chars)
                            :reserved-chars RESERVED_CHARS}))))
 
@@ -237,7 +250,8 @@
   (let [invalid-chars (filter VALUES_RESERVED_CHARS value)]
     (when (seq invalid-chars)
       (anomaly/incorrect! "Enum value contains reserved characters"
-                          {:value value
+                          {:type :svar.spec/reserved-chars-in-enum
+                           :value value
                            :invalid-chars (set invalid-chars)
                            :reserved-chars VALUES_RESERVED_CHARS}))))
 
@@ -248,13 +262,15 @@
   [v]
   (when (vector? v)
     (anomaly/incorrect! "::values must be a map with descriptions, not a vector. Every enum value requires a description."
-                        {:values v
+                        {:type :svar.spec/values-not-map
+                         :values v
                          :expected-format {"value1" "Description of value1"
                                            "value2" "Description of value2"}}))
   (when-not (map? v)
     (anomaly/incorrect! "::values must be a map with value->description pairs"
-                        {:values v
-                         :type (type v)}))
+                        {:type :svar.spec/invalid-values
+                         :values v
+                         :value-type (type v)}))
   ;; Validate all keys (enum values)
   (doseq [k (keys v)]
     (validate-enum-value k))
@@ -262,7 +278,7 @@
   (doseq [[value desc] v]
     (when (nil? desc)
       (anomaly/incorrect! "Every enum value must have a description"
-                          {:value value :description desc}))
+                          {:type :svar.spec/missing-enum-description :value value :description desc}))
     (validate-description desc))
   v)
 
@@ -362,18 +378,18 @@
         ;; Validate key-ns if provided
         _ (when (and key-ns (not (string? key-ns)))
             (anomaly/incorrect! "::key-ns must be a string (e.g., \"page.node\")"
-                                {:key-ns key-ns :type (type key-ns)}))
+                                {:type :svar.spec/invalid-key-ns :key-ns key-ns :value-type (clojure.core/type key-ns)}))
         ;; Validate refs if provided
         refs (when opts-map
                (let [ref-vec (:refs opts-map)]
                  (when ref-vec
                    (when-not (vector? ref-vec)
-                     (anomaly/incorrect! "Refs must be a vector" {:refs ref-vec}))
+                     (anomaly/incorrect! "Refs must be a vector" {:type :svar.spec/invalid-refs :refs ref-vec}))
                    (doseq [ref ref-vec]
                      (when-not (map? ref)
-                       (anomaly/incorrect! "Each ref must be a spec map" {:ref ref}))
+                       (anomaly/incorrect! "Each ref must be a spec map" {:type :svar.spec/invalid-ref :ref ref}))
                      (when-not (contains? ref ::fields)
-                       (anomaly/incorrect! "Each ref must have ::fields key" {:ref ref})))
+                       (anomaly/incorrect! "Each ref must have ::fields key" {:type :svar.spec/ref-missing-fields :ref ref})))
                    ref-vec)))
         ;; Build set of available ref names
         available-refs (into #{} (map ::spec-name refs))
@@ -391,7 +407,8 @@
                   (anomaly/incorrect! (str "Field '" field-name "' references target '" t
                                            "' but no ref with that name exists. "
                                            "Add the referenced spec via {:refs [ref-spec]} parameter.")
-                                      {:field field-name
+                                      {:type :svar.spec/unresolved-ref-target
+                                       :field field-name
                                        :target t
                                        :all-targets targets
                                        :available-refs available-refs
@@ -428,10 +445,11 @@
                 ref-name (::spec-name ref)]
             (when-not ref-name
               (anomaly/incorrect! "Referenced spec must have ::spec-name"
-                                  {:ref ref}))
+                                  {:type :svar.spec/missing-spec-name :ref ref}))
             (when (contains? registry ref-name)
               (anomaly/incorrect! "Duplicate spec name in refs"
-                                  {:spec-name ref-name
+                                  {:type :svar.spec/duplicate-spec-name
+                                   :spec-name ref-name
                                    :existing (get registry ref-name)
                                    :duplicate ref}))
             ;; Recursively collect refs from this ref
@@ -441,7 +459,7 @@
                                               (set (keys nested-registry)))]
               (when (seq conflicts)
                 (anomaly/incorrect! "Duplicate spec names in nested refs"
-                                    {:conflicts conflicts}))
+                                    {:type :svar.spec/duplicate-nested-spec-name :conflicts conflicts}))
               (recur (rest remaining)
                      (merge registry {ref-name ref} nested-registry)))))))))
 
@@ -843,7 +861,7 @@
                              (spec->baml-class spec-def nil))
                            hoisted)
 
-         ;; Render inlined specs (used exactly once)
+        ;; Render inlined specs (used exactly once)
         inlined-lines (map (fn [[_name spec-def]]
                              (spec->baml-class spec-def nil))
                            inlined)
@@ -881,17 +899,7 @@
    Throws:
    RuntimeException if JSON cannot be parsed."
   [text]
-  (let [start-time (System/nanoTime)
-        parse-result (jsonish/parse-json text)
-        result (:value parse-result)
-        warnings (:warnings parse-result)
-        duration-ms (/ (- (System/nanoTime) start-time) 1e6)]
-    (when (seq warnings)
-      (trove/log! {:level :warn :data {:warnings warnings}
-                   :msg "JSON parsing warnings"}))
-    (trove/log! {:level :debug :data {:duration-ms duration-ms :warnings-count (count warnings)}
-                 :msg "Parsed JSON response"})
-    result))
+  (jsonish/parse-json text))
 
 (defn- build-keyword-fields
   "Builds a set of field paths that are :spec.type/keyword type.
@@ -1075,36 +1083,35 @@
    Throws:
    RuntimeException if JSON cannot be parsed."
   [text spec-def]
-  (let [start-time (System/nanoTime)
-        parse-result (jsonish/parse-json text)
-        raw-result (:value parse-result)
-        warnings (:warnings parse-result)
-        ;; Auto-wrap bare arrays if spec expects object with single array field
-        wrapped-result (maybe-wrap-bare-array raw-result spec-def)
-        ;; Build key mapping from spec and remap keys
-        key-mapping (build-key-mapping spec-def)
-        remapped (if (empty? key-mapping)
-                   wrapped-result
-                   (remap-keys wrapped-result key-mapping))
-        ;; Build keyword fields set and convert strings to keywords
-        keyword-fields (build-keyword-fields spec-def)
-        keywordized (if (empty? keyword-fields)
-                      remapped
-                      (keywordize-fields remapped keyword-fields))
-        ;; Apply key namespace if configured
-        key-ns-map (collect-key-namespaces spec-def)
-        result (if (empty? key-ns-map)
-                 keywordized
-                 (namespace-keys keywordized key-ns-map))
-        duration-ms (/ (- (System/nanoTime) start-time) 1e6)]
-    (when (seq warnings)
-      (trove/log! {:level :warn :data {:warnings warnings}
-                   :msg "JSON parsing warnings"}))
+  (let [[{:keys [result key-mapping keyword-fields key-ns-map warnings]} duration-ms]
+        (util/with-elapsed
+          (let [parse-result (jsonish/parse-json text)
+                raw-result (:value parse-result)
+                warnings (:warnings parse-result)
+                ;; Auto-wrap bare arrays if spec expects object with single array field
+                wrapped-result (maybe-wrap-bare-array raw-result spec-def)
+                ;; Build key mapping from spec and remap keys
+                key-mapping (build-key-mapping spec-def)
+                remapped (if (empty? key-mapping)
+                           wrapped-result
+                           (remap-keys wrapped-result key-mapping))
+                ;; Build keyword fields set and convert strings to keywords
+                keyword-fields (build-keyword-fields spec-def)
+                keywordized (if (empty? keyword-fields)
+                              remapped
+                              (keywordize-fields remapped keyword-fields))
+                ;; Apply key namespace if configured
+                key-ns-map (collect-key-namespaces spec-def)
+                result (if (empty? key-ns-map)
+                         keywordized
+                         (namespace-keys keywordized key-ns-map))]
+            {:result result :key-mapping key-mapping :keyword-fields keyword-fields
+             :key-ns-map key-ns-map :warnings warnings}))]
     (trove/log! {:level :debug :data {:duration-ms duration-ms
-                                   :warnings-count (count warnings)
-                                   :key-remaps (count key-mapping)
-                                   :keyword-fields (count keyword-fields)
-                                   :key-ns-applied (seq key-ns-map)}
+                                      :warnings-count (count warnings)
+                                      :key-remaps (count key-mapping)
+                                      :keyword-fields (count keyword-fields)
+                                      :key-ns-applied (seq key-ns-map)}
                  :msg "Parsed JSON response with spec-aware processing"})
     result))
 
@@ -1343,68 +1350,68 @@
    Returns:
    Map with :valid? boolean and optional :errors vector of error maps."
   [the-spec data]
-  (let [start-time (System/nanoTime)
-        fields (::fields the-spec)
+  (let [fields (::fields the-spec)
         array-containers (find-array-container-paths fields)
-        errors (atom [])]
-    (doseq [field-def fields]
-      (let [field-name (::name field-def)
-            path-str (keyword->path field-name)
-            field-type (::type field-def)
-            cardinality (::cardinality field-def)
-            optional? (contains? (::union field-def) ::nil)
-            allowed-values (::values field-def)
-            in-array? (nested-in-array? path-str array-containers)
-            has-nested? (and (= cardinality :spec.cardinality/many)
-                             (has-nested-fields? path-str fields))
-            ;; Pass original field-name keyword to handle special chars like ?!
-            value (get-value-at-path data path-str array-containers field-name)
-            missing? (if in-array?
-                       (or (nil? value) (every? nil? value))
-                       (nil? value))]
-        ;; Check required
-        (when (and missing? (not optional?))
-          (swap! errors conj {:error :missing-required-field
-                              :field field-name
-                              :path path-str}))
-        ;; Check type (only if present)
-        (when (not missing?)
-          (if in-array?
-            ;; For nested fields in arrays, check each extracted value
-            (when-not (check-type-in-array value field-type)
-              (swap! errors conj {:error :type-mismatch
-                                  :field field-name
-                                  :path path-str
-                                  :expected-type field-type
-                                  :actual-value value
-                                  :actual-type (type value)}))
-            ;; Regular type check
-            (when-not (check-type value field-type cardinality has-nested?)
-              (swap! errors conj {:error :type-mismatch
-                                  :field field-name
-                                  :path path-str
-                                  :expected-type field-type
-                                  :actual-value value
-                                  :actual-type (type value)}))))
-        ;; Check enum (only if present and has values constraint)
-        (when (and (not missing?)
-                   allowed-values
-                   (not (check-enum value allowed-values cardinality)))
-          (swap! errors conj {:error :invalid-enum-value
-                              :field field-name
-                              :path path-str
-                              :value value
-                              :allowed-values (keys allowed-values)}))))
-    (let [duration-ms (/ (- (System/nanoTime) start-time) 1e6)
-          result (if (empty? @errors)
-                   {:valid? true}
-                   {:valid? false :errors @errors})]
-      (if (:valid? result)
-        (trove/log! {:level :debug :data {:fields-count (count fields) :duration-ms duration-ms}
-                     :msg "Spec validation passed"})
-        (trove/log! {:level :warn :data {:fields-count (count fields) :error-count (count @errors) :duration-ms duration-ms}
-                     :msg "Spec validation failed"}))
-      result)))
+        errors (atom [])
+        [_ duration-ms]
+        (util/with-elapsed
+          (doseq [field-def fields]
+            (let [field-name (::name field-def)
+                  path-str (keyword->path field-name)
+                  field-type (::type field-def)
+                  cardinality (::cardinality field-def)
+                  optional? (contains? (::union field-def) ::nil)
+                  allowed-values (::values field-def)
+                  in-array? (nested-in-array? path-str array-containers)
+                  has-nested? (and (= cardinality :spec.cardinality/many)
+                                   (has-nested-fields? path-str fields))
+                  ;; Pass original field-name keyword to handle special chars like ?!
+                  value (get-value-at-path data path-str array-containers field-name)
+                  missing? (if in-array?
+                             (or (nil? value) (every? nil? value))
+                             (nil? value))]
+              ;; Check required
+              (when (and missing? (not optional?))
+                (swap! errors conj {:error :missing-required-field
+                                    :field field-name
+                                    :path path-str}))
+              ;; Check type (only if present)
+              (when (not missing?)
+                (if in-array?
+                  ;; For nested fields in arrays, check each extracted value
+                  (when-not (check-type-in-array value field-type)
+                    (swap! errors conj {:error :type-mismatch
+                                        :field field-name
+                                        :path path-str
+                                        :expected-type field-type
+                                        :actual-value value
+                                        :actual-type (type value)}))
+                  ;; Regular type check
+                  (when-not (check-type value field-type cardinality has-nested?)
+                    (swap! errors conj {:error :type-mismatch
+                                        :field field-name
+                                        :path path-str
+                                        :expected-type field-type
+                                        :actual-value value
+                                        :actual-type (type value)}))))
+              ;; Check enum (only if present and has values constraint)
+              (when (and (not missing?)
+                         allowed-values
+                         (not (check-enum value allowed-values cardinality)))
+                (swap! errors conj {:error :invalid-enum-value
+                                    :field field-name
+                                    :path path-str
+                                    :value value
+                                    :allowed-values (keys allowed-values)})))))
+        result (if (empty? @errors)
+                 {:valid? true}
+                 {:valid? false :errors @errors})]
+    (if (:valid? result)
+      (trove/log! {:level :debug :data {:fields-count (count fields) :duration-ms duration-ms}
+                   :msg "Spec validation passed"})
+      (trove/log! {:level :warn :data {:fields-count (count fields) :error-count (count @errors) :duration-ms duration-ms}
+                   :msg "Spec validation failed"}))
+    result))
 
 ;; =============================================================================
 ;; Spec Fields Text Representation - Prompt Generation

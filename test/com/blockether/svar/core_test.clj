@@ -31,7 +31,7 @@
     :criteria []
     :issues issues
     :scores {}
-    :eval-duration-ms 0
+    :duration-ms 0
     :tokens {:input 0 :output 0 :total 0}
     :cost {:input-cost 0 :output-cost 0 :total-cost 0}}))
 
@@ -53,8 +53,13 @@
 ;; 4. Refinement ask! (objective contains "refinement_task")
 ;; We dispatch based on the objective content.
 
+(defn- extract-system-content
+  "Extracts the system message content from a :messages vector."
+  [messages]
+  (->> messages (filter #(= "system" (:role %))) first :content))
+
 (defn- make-dispatching-ask-fn
-  "Creates an ask! mock that dispatches based on objective content.
+  "Creates an ask! mock that dispatches based on system message content.
    
    Params:
    `initial-result` - Result for the initial ask! call.
@@ -64,36 +69,37 @@
    Function suitable for with-redefs on ask!."
   [initial-result refined-result]
   (let [call-count (atom 0)]
-    (fn [{:keys [objective]}]
+    (fn [{:keys [messages]}]
       (swap! call-count inc)
-      (cond
-        ;; Decomposition call — return mock claims
-        (and (string? objective)
-             (re-find #"decomposition_task" objective))
-        (make-mock-ask-response
-         {:claims [{:claim "The answer is correct"
-                    :category "factual"
-                    :confidence 0.9
-                    :verifiable? true}]})
+      (let [objective (extract-system-content messages)]
+        (cond
+          ;; Decomposition call — return mock claims
+          (and (string? objective)
+               (re-find #"decomposition_task" objective))
+          (make-mock-ask-response
+           {:claims [{:claim "The answer is correct"
+                      :category "factual"
+                      :confidence 0.9
+                      :verifiable? true}]})
 
-        ;; Verification call — return mock verification
-        (and (string? objective)
-             (re-find #"verification_task" objective))
-        (make-mock-ask-response
-         {:verifications [{:claim "The answer is correct"
-                           :question "Is the answer correct?"
-                           :answer "Yes"
-                           :verdict "correct"
-                           :reasoning "Verified against context"}]})
+          ;; Verification call — return mock verification
+          (and (string? objective)
+               (re-find #"verification_task" objective))
+          (make-mock-ask-response
+           {:verifications [{:claim "The answer is correct"
+                             :question "Is the answer correct?"
+                             :answer "Yes"
+                             :verdict "correct"
+                             :reasoning "Verified against context"}]})
 
-        ;; Refinement call — return refined result
-        (and (string? objective)
-             (re-find #"refinement_task" objective))
-        (make-mock-ask-response refined-result)
+          ;; Refinement call — return refined result
+          (and (string? objective)
+               (re-find #"refinement_task" objective))
+          (make-mock-ask-response refined-result)
 
-        ;; Initial call or unknown — return initial result
-        :else
-        (make-mock-ask-response initial-result)))))
+          ;; Initial call or unknown — return initial result
+          :else
+          (make-mock-ask-response initial-result))))))
 
 ;; =============================================================================
 ;; refine! Baseline Tests
@@ -105,8 +111,8 @@
                 (with-redefs [svar/ask! (make-dispatching-ask-fn {:answer "Paris"} {:answer "Paris"})
                               svar/eval! (fn [_opts] (make-mock-eval-response 0.95))]
                   (let [result (svar/refine! {:spec test-spec
-                                              :objective "Answer geography questions."
-                                              :task "What is the capital of France?"
+                                               :messages [(svar/system "Answer geography questions.")
+                                                          (svar/user "What is the capital of France?")]
                                               :model "gpt-4o"
                                               :iterations 1
                                               :threshold 0.9})]
@@ -131,10 +137,10 @@
                                    ;; Return low score so it never converges
                                              (make-mock-eval-response 0.3))]
                     (let [result (svar/refine! {:spec test-spec
-                                                :objective "Test objective."
-                                                :task "Test task."
-                                                :model "gpt-4o"
-                                      ;; Use defaults: iterations=3, threshold=0.9
+                                                 :messages [(svar/system "Test objective.")
+                                                            (svar/user "Test task.")]
+                                                 :model "gpt-4o"
+                                       ;; Use defaults: iterations=3, threshold=0.9
                                                 })]
             ;; Default is 3 iterations
                       (expect (= 3 (:iterations-count result)))
@@ -148,11 +154,11 @@
                                                (swap! eval-scores rest)
                                                (make-mock-eval-response score)))]
                     (let [result (svar/refine! {:spec test-spec
-                                                :objective "Test objective."
-                                                :task "Test task."
-                                                :model "gpt-4o"
-                                                :iterations 5
-                                                :threshold 0.9})]
+                                                 :messages [(svar/system "Test objective.")
+                                                            (svar/user "Test task.")]
+                                                 :model "gpt-4o"
+                                                 :iterations 5
+                                                 :threshold 0.9})]
             ;; Should converge after 0 refinement iterations because
             ;; the initial eval score (0.95) already meets threshold.
             ;; After initial ask!, the loop checks should-stop? with score=0 first,
@@ -165,11 +171,11 @@
             (it "works without :documents key (baseline for future extension)"
                 (with-redefs [svar/ask! (make-dispatching-ask-fn {:answer "42"} {:answer "42"})
                               svar/eval! (fn [_opts] (make-mock-eval-response 0.85))]
-                  (let [result (svar/refine! {:spec test-spec
-                                              :objective "Answer math questions."
-                                              :task "What is 6 * 7?"
-                                              :model "gpt-4o"
-                                              :iterations 1})]
+                   (let [result (svar/refine! {:spec test-spec
+                                               :messages [(svar/system "Answer math questions.")
+                                                          (svar/user "What is 6 * 7?")]
+                                               :model "gpt-4o"
+                                               :iterations 1})]
           ;; refine! should work without :documents parameter
                     (expect (map? result))
                     (expect (some? (:result result)))
@@ -181,22 +187,22 @@
             (it "final result is the last refined output"
                 (with-redefs [svar/ask! (make-dispatching-ask-fn {:answer "initial"} {:answer "refined"})
                               svar/eval! (fn [_opts] (make-mock-eval-response 0.5))]
-                  (let [result (svar/refine! {:spec test-spec
-                                              :objective "Test."
-                                              :task "Test."
-                                              :model "gpt-4o"
-                                              :iterations 1})]
+                   (let [result (svar/refine! {:spec test-spec
+                                               :messages [(svar/system "Test.")
+                                                          (svar/user "Test.")]
+                                               :model "gpt-4o"
+                                               :iterations 1})]
           ;; The result should be the refined version, not the initial
                     (expect (= {:answer "refined"} (:result result))))))
 
             (it "final-score is a number between 0 and 1"
                 (with-redefs [svar/ask! (make-dispatching-ask-fn {:answer "test"} {:answer "test"})
                               svar/eval! (fn [_opts] (make-mock-eval-response 0.75))]
-                  (let [result (svar/refine! {:spec test-spec
-                                              :objective "Test."
-                                              :task "Test."
-                                              :model "gpt-4o"
-                                              :iterations 1})]
+                   (let [result (svar/refine! {:spec test-spec
+                                               :messages [(svar/system "Test.")
+                                                          (svar/user "Test.")]
+                                               :model "gpt-4o"
+                                               :iterations 1})]
                     (expect (number? (:final-score result)))
                     (expect (>= (:final-score result) 0.0))
                     (expect (<= (:final-score result) 1.0)))))
@@ -204,11 +210,11 @@
             (it "iterations vector tracks refinement history"
                 (with-redefs [svar/ask! (make-dispatching-ask-fn {:answer "v1"} {:answer "v2"})
                               svar/eval! (fn [_opts] (make-mock-eval-response 0.6))]
-                  (let [result (svar/refine! {:spec test-spec
-                                              :objective "Test."
-                                              :task "Test."
-                                              :model "gpt-4o"
-                                              :iterations 2})]
+                   (let [result (svar/refine! {:spec test-spec
+                                               :messages [(svar/system "Test.")
+                                                          (svar/user "Test.")]
+                                               :model "gpt-4o"
+                                               :iterations 2})]
                     (expect (vector? (:iterations result)))
                     (expect (= (:iterations-count result) (count (:iterations result))))
           ;; Each iteration record should have expected keys
@@ -275,11 +281,12 @@
   (describe "iteration progression"
             (it "passes previous summary to subsequent iterations"
                 (let [call-log (atom [])]
-                  (with-redefs [svar/ask! (fn [{:keys [task]}]
-                                            (swap! call-log conj task)
-                                            (make-mock-ask-response
-                                             {:entities [{:entity "E" :type "concept" :importance 0.5}]
-                                              :summary "Dense summary."}))]
+                  (with-redefs [svar/ask! (fn [{:keys [messages]}]
+                                             (let [user-content (->> messages (filter #(= "user" (:role %))) first :content)]
+                                               (swap! call-log conj user-content))
+                                             (make-mock-ask-response
+                                              {:entities [{:entity "E" :type "concept" :importance 0.5}]
+                                               :summary "Dense summary."}))]
                     (svar/abstract! {:text "Source text."
                                      :model "gpt-4o"
                                      :iterations 2})
@@ -313,7 +320,7 @@
                     (expect (string? (:summary result)))
                     (expect (vector? (:criteria result)))
                     (expect (map? (:scores result)))
-                    (expect (number? (:eval-duration-ms result))))))
+                    (expect (number? (:duration-ms result))))))
 
             (it "builds scores map from criteria"
                 (with-redefs [svar/ask! (fn [_]
@@ -344,8 +351,8 @@
                                  :output "Revenue grew 15%."
                                  :model "gpt-4o"
                                  :criteria {:tone "Is the tone appropriate?"}})
-                    ;; Objective should mention the custom criterion
-                    (expect (some? (re-find #"tone" (:objective @ask-args))))))))
+                    ;; System message should mention the custom criterion
+                     (expect (some? (re-find #"tone" (extract-system-content (:messages @ask-args)))))))))
 
   (describe "ground truths"
             (it "includes ground truths in objective when provided"
@@ -362,9 +369,10 @@
                                  :output "4"
                                  :model "gpt-4o"
                                  :ground-truths ["2+2 equals 4"]})
-                    ;; Objective should contain ground_truths section
-                    (expect (some? (re-find #"ground_truths" (:objective @ask-args))))
-                    (expect (some? (re-find #"2\+2 equals 4" (:objective @ask-args))))))))
+                    ;; System message should contain ground_truths section
+                     (let [sys-content (extract-system-content (:messages @ask-args))]
+                       (expect (some? (re-find #"ground_truths" sys-content)))
+                       (expect (some? (re-find #"2\+2 equals 4" sys-content))))))))
 
   (describe "issues reporting"
             (it "includes issues when present"
@@ -455,3 +463,282 @@
                 (let [fields (::spec/fields humanize-spec)
                       summary-field (first (filter #(= :summary (keyword (name (::spec/name %)))) fields))]
                   (expect (true? (::spec/humanize? summary-field)))))))
+
+;; =============================================================================
+;; eval! :messages support Tests
+;; =============================================================================
+
+(defdescribe eval!-messages-test
+
+  (describe "messages as task source"
+            (it "extracts task from user message when :messages provided"
+                (let [ask-args (atom nil)]
+                  (with-redefs [svar/ask! (fn [opts]
+                                            (reset! ask-args opts)
+                                            (make-mock-ask-response
+                                             {:correct? true
+                                              :overall-score 0.9
+                                              :summary "Good."
+                                              :criteria []
+                                              :issues []}))]
+                    (svar/eval! {:messages [(svar/user "What is the capital of France?")]
+                                 :output "Paris"
+                                 :model "gpt-4o"})
+                    ;; The user message content from eval task should contain the task text
+                    (let [user-msg (->> (:messages @ask-args)
+                                        (filter #(= "user" (:role %)))
+                                        first :content)]
+                      (expect (some? (re-find #"capital of France" user-msg)))))))
+
+            (it "extracts from system + user messages (non-assistant, joined)"
+                (let [ask-args (atom nil)]
+                  (with-redefs [svar/ask! (fn [opts]
+                                            (reset! ask-args opts)
+                                            (make-mock-ask-response
+                                             {:correct? true
+                                              :overall-score 0.85
+                                              :summary "OK."
+                                              :criteria []
+                                              :issues []}))]
+                    (svar/eval! {:messages [(svar/system "You are a geography expert.")
+                                            (svar/user "What is the capital of France?")]
+                                 :output "Paris"
+                                 :model "gpt-4o"})
+                    ;; Both system and user content should appear in the eval task
+                    (let [user-msg (->> (:messages @ask-args)
+                                        (filter #(= "user" (:role %)))
+                                        first :content)]
+                      (expect (some? (re-find #"geography expert" user-msg)))
+                      (expect (some? (re-find #"capital of France" user-msg))))))))
+
+  (describe "backward compatibility"
+            (it ":task still works without :messages"
+                (let [ask-args (atom nil)]
+                  (with-redefs [svar/ask! (fn [opts]
+                                            (reset! ask-args opts)
+                                            (make-mock-ask-response
+                                             {:correct? true
+                                              :overall-score 0.9
+                                              :summary "Good."
+                                              :criteria []
+                                              :issues []}))]
+                    (svar/eval! {:task "What is 2+2?"
+                                 :output "4"
+                                 :model "gpt-4o"})
+                    (let [user-msg (->> (:messages @ask-args)
+                                        (filter #(= "user" (:role %)))
+                                        first :content)]
+                      (expect (some? (re-find #"2\+2" user-msg)))))))
+
+            (it ":task takes precedence when both :task and :messages provided"
+                (let [ask-args (atom nil)]
+                  (with-redefs [svar/ask! (fn [opts]
+                                            (reset! ask-args opts)
+                                            (make-mock-ask-response
+                                             {:correct? true
+                                              :overall-score 0.9
+                                              :summary "Good."
+                                              :criteria []
+                                              :issues []}))]
+                    (svar/eval! {:task "explicit task text"
+                                 :messages [(svar/user "message task text")]
+                                 :output "some output"
+                                 :model "gpt-4o"})
+                    (let [user-msg (->> (:messages @ask-args)
+                                        (filter #(= "user" (:role %)))
+                                        first :content)]
+                      ;; Explicit :task should win
+                      (expect (some? (re-find #"explicit task text" user-msg)))
+                      ;; Message text should NOT appear (task takes precedence)
+                      (expect (nil? (re-find #"message task text" user-msg))))))))
+
+  (describe "return shape preserved"
+            (it "returns all expected keys when using :messages"
+                (with-redefs [svar/ask! (fn [_]
+                                          (make-mock-ask-response
+                                           {:correct? true
+                                            :overall-score 0.92
+                                            :summary "Accurate."
+                                            :criteria [{:name "accuracy" :score 0.95 :confidence 0.9 :reasoning "OK"}]
+                                            :issues []}))]
+                  (let [result (svar/eval! {:messages [(svar/user "Test task")]
+                                            :output "Test output"
+                                            :model "gpt-4o"})]
+                    (expect (boolean? (:correct? result)))
+                    (expect (number? (:overall-score result)))
+                    (expect (string? (:summary result)))
+                    (expect (vector? (:criteria result)))
+                    (expect (map? (:scores result)))
+                    (expect (number? (:duration-ms result))))))))
+
+;; =============================================================================
+;; sample! Tests
+;; =============================================================================
+
+(defdescribe sample!-test
+
+  (describe "zero count edge case"
+            (it "returns empty result with zero count"
+                (let [result (svar/sample! {:spec test-spec
+                                             :count 0
+                                             :model "gpt-4o"})]
+                  (expect (= [] (:samples result)))
+                  (expect (= {} (:scores result)))
+                  (expect (= 0.0 (:final-score result)))
+                  (expect (true? (:converged? result)))
+                  (expect (= 0 (:iterations-count result)))
+                  (expect (= 0.0 (:duration-ms result))))))
+
+  (describe "return shape"
+            (it "returns map with all expected keys"
+                (with-redefs [svar/ask! (fn [_]
+                                          (make-mock-ask-response
+                                           {:items [{:answer "alpha"} {:answer "beta"}]}))
+                              svar/eval! (fn [_] (make-mock-eval-response 0.95))]
+                  (let [result (svar/sample! {:spec test-spec
+                                               :count 2
+                                               :model "gpt-4o"})]
+                    (expect (contains? result :samples))
+                    (expect (contains? result :scores))
+                    (expect (contains? result :final-score))
+                    (expect (contains? result :converged?))
+                    (expect (contains? result :iterations-count))
+                    (expect (contains? result :duration-ms))))))
+
+  (describe "basic generation"
+            (it "returns generated samples when score meets threshold"
+                (with-redefs [svar/ask! (fn [_]
+                                          (make-mock-ask-response
+                                           {:items [{:answer "one"} {:answer "two"} {:answer "three"}]}))
+                              svar/eval! (fn [_] (make-mock-eval-response 0.95))]
+                  (let [result (svar/sample! {:spec test-spec
+                                               :count 3
+                                               :model "gpt-4o"})]
+                    (expect (= 3 (count (:samples result))))
+                    (expect (= "one" (:answer (first (:samples result)))))
+                    (expect (true? (:converged? result)))
+                    (expect (= 1 (:iterations-count result)))))))
+
+  (describe "self-correction loop"
+            (it "runs multiple iterations when score below threshold"
+                (let [ask-call-count (atom 0)
+                      eval-scores (atom [0.3 0.95])]
+                  (with-redefs [svar/ask! (fn [_]
+                                            (swap! ask-call-count inc)
+                                            (make-mock-ask-response
+                                             {:items [{:answer (str "v" @ask-call-count)}]}))
+                                svar/eval! (fn [_]
+                                             (let [score (first @eval-scores)]
+                                               (swap! eval-scores rest)
+                                               (make-mock-eval-response (or score 0.95))))]
+                    (let [result (svar/sample! {:spec test-spec
+                                                 :count 1
+                                                 :model "gpt-4o"
+                                                 :iterations 3
+                                                 :threshold 0.9})]
+                      ;; Should have run 2 iterations (first low, second high)
+                      (expect (= 2 (:iterations-count result)))
+                      (expect (true? (:converged? result)))))))
+
+            (it "keeps best samples across iterations"
+                (let [eval-call-count (atom 0)]
+                  (with-redefs [svar/ask! (fn [_]
+                                            (make-mock-ask-response
+                                             {:items [{:answer "sample"}]}))
+                                svar/eval! (fn [_]
+                                             (swap! eval-call-count inc)
+                                             ;; All low scores — never converges
+                                             (make-mock-eval-response 0.3))]
+                    (let [result (svar/sample! {:spec test-spec
+                                                 :count 1
+                                                 :model "gpt-4o"
+                                                 :iterations 2
+                                                 :threshold 0.99})]
+                      (expect (= 2 (:iterations-count result)))
+                      (expect (false? (:converged? result)))
+                      ;; Should still have samples (best from all iterations)
+                      (expect (seq (:samples result))))))))
+
+  (describe "custom messages"
+            (it "passes user messages to ask! with count instruction appended"
+                (let [captured-messages (atom nil)]
+                  (with-redefs [svar/ask! (fn [{:keys [messages]}]
+                                            (reset! captured-messages messages)
+                                            (make-mock-ask-response
+                                             {:items [{:answer "x"}]}))
+                                svar/eval! (fn [_] (make-mock-eval-response 0.95))]
+                    (svar/sample! {:spec test-spec
+                                    :count 3
+                                    :messages [(svar/system "Generate dating profiles.")
+                                               (svar/user "Make them diverse.")]
+                                    :model "gpt-4o"})
+                    (let [msgs @captured-messages
+                          ;; First message is system from user, second is user from user,
+                          ;; third is appended count instruction, then schema prompt from ask!
+                          sys-msg (first msgs)]
+                      (expect (= "system" (:role sys-msg)))
+                      (expect (some? (re-find #"dating profiles" (:content sys-msg))))
+                      ;; Count instruction should be present somewhere in messages
+                      (expect (some #(and (= "user" (:role %))
+                                         (re-find #"exactly 3" (:content %)))
+                                    msgs)))))))
+
+  (describe "iteration control"
+            (it "respects :iterations 1 — runs exactly once"
+                (let [ask-call-count (atom 0)]
+                  (with-redefs [svar/ask! (fn [_]
+                                            (swap! ask-call-count inc)
+                                            (make-mock-ask-response
+                                             {:items [{:answer "only"}]}))
+                                svar/eval! (fn [_] (make-mock-eval-response 0.1))]
+                    (let [result (svar/sample! {:spec test-spec
+                                                 :count 1
+                                                 :model "gpt-4o"
+                                                 :iterations 1
+                                                 :threshold 0.99})]
+                      (expect (= 1 (:iterations-count result)))
+                      (expect (= 1 @ask-call-count))))))))
+
+;; =============================================================================
+;; Message Helpers Tests
+;; =============================================================================
+
+(defdescribe message-helpers-test
+
+  (describe "system"
+            (it "creates system message map"
+                (expect (= {:role "system" :content "You are helpful."}
+                           (svar/system "You are helpful.")))))
+
+  (describe "user"
+            (it "creates user message with string content (no images)"
+                (let [msg (svar/user "Hello")]
+                  (expect (= "user" (:role msg)))
+                  (expect (= "Hello" (:content msg)))))
+
+            (it "creates user message with multimodal content when images provided"
+                (let [img (svar/image "base64data" "image/png")
+                      msg (svar/user "Describe this" img)]
+                  (expect (= "user" (:role msg)))
+                  (expect (vector? (:content msg)))
+                  (expect (= 2 (count (:content msg))))
+                  ;; First element is image_url (images come first in multimodal)
+                  (let [img-part (first (:content msg))]
+                    (expect (= "image_url" (:type img-part)))
+                    (expect (some? (re-find #"base64data"
+                                            (get-in img-part [:image_url :url])))))
+                  ;; Second element is text
+                  (let [text-part (second (:content msg))]
+                    (expect (= "text" (:type text-part)))
+                    (expect (= "Describe this" (:text text-part)))))))
+
+  (describe "assistant"
+            (it "creates assistant message map"
+                (expect (= {:role "assistant" :content "I can help."}
+                           (svar/assistant "I can help.")))))
+
+  (describe "image"
+            (it "creates image attachment map"
+                (let [img (svar/image "abc123" "image/jpeg")]
+                  (expect (= "abc123" (:base64 img)))
+                  (expect (= "image/jpeg" (:media-type img)))))))

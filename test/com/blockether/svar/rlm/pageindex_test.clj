@@ -28,8 +28,8 @@
   "resources-test/example.pdf")
 
 (def ^:private TEST_FIXTURE_PATH
-  "Path to the expected index fixture Nippy file."
-  "resources-test/example-index.nippy")
+  "Path to the expected index fixture directory."
+  "resources-test/example-index.pageindex")
 
 ;; =============================================================================
 ;; Fixture: Expected Index for example.pdf
@@ -258,10 +258,8 @@
 
 (def ^:private integration-config
   "LLM config for integration tests."
-  {:api-key (or (System/getenv "OPENAI_API_KEY")
-                (System/getenv "BLOCKETHER_LLM_API_KEY"))
+  {:api-key (System/getenv "OPENAI_API_KEY")
    :base-url (or (System/getenv "OPENAI_BASE_URL")
-                 (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
                  "https://api.openai.com/v1")})
 
 (defn- integration-tests-enabled?
@@ -300,7 +298,7 @@
 
             (it "index! saves and load-index reads back (when LLM available)"
                 (when (integration-tests-enabled?)
-                  (let [output-path "resources-test/example-generated.nippy"
+                  (let [output-path "resources-test/example-generated.pageindex"
                         result (pageindex/index! TEST_PDF_PATH
                                                  {:output output-path
                                                   :config integration-config})
@@ -320,7 +318,7 @@
                       (expect (pageindex-spec/valid-document? loaded))
                       (finally
               ;; Cleanup
-                        (io/delete-file output-path true))))))))
+                        (fs/delete-tree output-path))))))))
 
 ;; =============================================================================
 ;; Fixture Loading Tests
@@ -328,8 +326,8 @@
 
 (defdescribe fixture-loading-test
   (describe "load saved index"
-            (it "loads fixture Nippy when available"
-                (when (.exists (io/file TEST_FIXTURE_PATH))
+            (it "loads fixture index when available"
+                (when (fs/exists? TEST_FIXTURE_PATH)
                   (let [doc (pageindex/load-index TEST_FIXTURE_PATH)]
                     (expect (= "example" (:document/name doc)))
                     (expect (pageindex-spec/valid-document? doc)))))))
@@ -460,3 +458,271 @@
                   (expect (= ascii-table (:page.node/content table-node)))
                   ;; ID should be translated to UUID
                   (expect (not= "1" (:page.node/id table-node)))))))
+
+;; =============================================================================
+;; Cambridge Guide to Schema Therapy — Fixture Tests
+;; =============================================================================
+;;
+;; Each test loads a pre-generated .pageindex fixture and validates:
+;; 1. Spec compliance (::pageindex-spec/document)
+;; 2. Structural expectations per PDF type (pages, TOC, node types)
+;; 3. Round-trip integrity (load-index reads what index! wrote)
+
+(def ^:private CAMBRIDGE_DIR
+  "resources-test")
+
+(defn- cambridge-fixture-path
+  "Returns the .pageindex path for a cambridge test PDF."
+  [base-name]
+  (str CAMBRIDGE_DIR "/" base-name ".pageindex"))
+
+(defn- load-cambridge-fixture
+  "Loads a cambridge fixture if it exists. Returns nil if not generated yet."
+  [base-name]
+  (let [path (cambridge-fixture-path base-name)]
+    (when (fs/exists? path)
+      (pageindex/load-index path))))
+
+(defn- all-nodes
+  "Extracts all page nodes from a document."
+  [doc]
+  (->> (:document/pages doc)
+       (mapcat :page/nodes)
+       vec))
+
+(defn- nodes-of-type
+  "Filters all page nodes by type."
+  [doc node-type]
+  (->> (all-nodes doc)
+       (filter #(= node-type (:page.node/type %)))
+       vec))
+
+(defdescribe cambridge-toc-test
+  (describe "toc.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "toc")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has correct document metadata"
+                (when-let [doc (load-cambridge-fixture "toc")]
+                  (expect (= "toc" (:document/name doc)))
+                  (expect (= "pdf" (:document/extension doc)))))
+
+            (it "has 2 pages"
+                (when-let [doc (load-cambridge-fixture "toc")]
+                  (expect (= 2 (count (:document/pages doc))))))
+
+            (it "has non-empty TOC entries"
+                (when-let [doc (load-cambridge-fixture "toc")]
+                  (expect (pos? (count (:document/toc doc))))))
+
+            (it "TOC entries have required fields"
+                (when-let [doc (load-cambridge-fixture "toc")]
+                  (doseq [entry (:document/toc doc)]
+                    (expect (some? (:document.toc/id entry)))
+                    (expect (some? (:document.toc/title entry)))
+                    (expect (some? (:document.toc/level entry)))
+                    (expect (nat-int? (:document.toc/target-page entry))))))))
+
+(defdescribe cambridge-box-multi-page-test
+  (describe "box-multi-page.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "box-multi-page")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has correct document metadata"
+                (when-let [doc (load-cambridge-fixture "box-multi-page")]
+                  (expect (= "box-multi-page" (:document/name doc)))
+                  (expect (= "pdf" (:document/extension doc)))))
+
+            (it "has multiple pages"
+                (when-let [doc (load-cambridge-fixture "box-multi-page")]
+                  (expect (> (count (:document/pages doc)) 1))))
+
+            (it "has section and heading nodes"
+                (when-let [doc (load-cambridge-fixture "box-multi-page")]
+                  (expect (pos? (count (nodes-of-type doc :section))))
+                  (expect (pos? (count (nodes-of-type doc :heading))))))))
+
+(defdescribe cambridge-box-conversations-test
+  (describe "box-conversations.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "box-conversations")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has correct metadata"
+                (when-let [doc (load-cambridge-fixture "box-conversations")]
+                  (expect (= "box-conversations" (:document/name doc)))))
+
+            (it "has paragraph content"
+                (when-let [doc (load-cambridge-fixture "box-conversations")]
+                  (expect (pos? (count (nodes-of-type doc :paragraph))))))))
+
+(defdescribe cambridge-table-multi-page-test
+  (describe "table-multi-page.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "table-multi-page")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has table nodes"
+                (when-let [doc (load-cambridge-fixture "table-multi-page")]
+                  (expect (pos? (count (nodes-of-type doc :table))))))))
+
+(defdescribe cambridge-table-rotated-test
+  (describe "table-multi-page-rotated.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "table-multi-page-rotated")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has table nodes"
+                (when-let [doc (load-cambridge-fixture "table-multi-page-rotated")]
+                  (expect (pos? (count (nodes-of-type doc :table))))))))
+
+(defdescribe cambridge-chapter-test
+  (describe "chapter.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "chapter")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has multiple pages"
+                (when-let [doc (load-cambridge-fixture "chapter")]
+                  (expect (> (count (:document/pages doc)) 1))))
+
+            (it "has sections, headings, and paragraphs"
+                (when-let [doc (load-cambridge-fixture "chapter")]
+                  (expect (pos? (count (nodes-of-type doc :section))))
+                  (expect (pos? (count (nodes-of-type doc :heading))))
+                  (expect (pos? (count (nodes-of-type doc :paragraph))))))
+
+            (it "has non-empty TOC"
+                (when-let [doc (load-cambridge-fixture "chapter")]
+                  (expect (pos? (count (:document/toc doc))))))))
+
+(defdescribe cambridge-figure-diagram-1-test
+  (describe "figure-diagram-1.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "figure-diagram-1")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has image nodes"
+                (when-let [doc (load-cambridge-fixture "figure-diagram-1")]
+                  (expect (pos? (count (nodes-of-type doc :image))))))))
+
+(defdescribe cambridge-figure-diagram-2-test
+  (describe "figure-diagram-2.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "figure-diagram-2")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has image nodes"
+                (when-let [doc (load-cambridge-fixture "figure-diagram-2")]
+                  (expect (pos? (count (nodes-of-type doc :image))))))))
+
+(defdescribe cambridge-illustration-test
+  (describe "illustration.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "illustration")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has image nodes"
+                (when-let [doc (load-cambridge-fixture "illustration")]
+                  (expect (pos? (count (nodes-of-type doc :image))))))))
+
+(defdescribe cambridge-figure-advanced-1-test
+  (describe "figure-advanced-1.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "figure-advanced-1")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has image nodes with descriptions"
+                (when-let [doc (load-cambridge-fixture "figure-advanced-1")]
+                  (let [imgs (nodes-of-type doc :image)]
+                    (expect (pos? (count imgs)))
+                    (expect (every? #(some? (:page.node/description %)) imgs)))))))
+
+(defdescribe cambridge-figure-advanced-2-test
+  (describe "figure-advanced-2.pdf fixture"
+            (it "passes spec validation"
+                (when-let [doc (load-cambridge-fixture "figure-advanced-2")]
+                  (expect (pageindex-spec/valid-document? doc))))
+
+            (it "has image nodes"
+                (when-let [doc (load-cambridge-fixture "figure-advanced-2")]
+                  (expect (pos? (count (nodes-of-type doc :image))))))))
+
+;; =============================================================================
+;; Rotation Detection & Correction Tests (No LLM — pure image rotation)
+;; =============================================================================
+
+(defdescribe rotate-image-test
+  (describe "rotate-image utility"
+            (it "0 degrees returns same image"
+                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+                      rotated (#'vision/rotate-image img 0)]
+                  (expect (identical? img rotated))))
+
+            (it "90 degrees swaps width and height"
+                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+                      rotated (#'vision/rotate-image img 90)]
+                  (expect (= 200 (.getWidth rotated)))
+                  (expect (= 100 (.getHeight rotated)))))
+
+            (it "180 degrees preserves dimensions"
+                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+                      rotated (#'vision/rotate-image img 180)]
+                  (expect (= 100 (.getWidth rotated)))
+                  (expect (= 200 (.getHeight rotated)))))
+
+            (it "270 degrees swaps width and height"
+                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+                      rotated (#'vision/rotate-image img 270)]
+                  (expect (= 200 (.getWidth rotated)))
+                  (expect (= 100 (.getHeight rotated)))))
+
+            (it "preserves pixel data through 90° rotation"
+                ;; Paint top-left corner red, verify it moves to top-right after 90° CW
+                (let [img (BufferedImage. 4 2 BufferedImage/TYPE_INT_RGB)
+                      _ (.setRGB img 0 0 0xFF0000) ;; red at (0,0)
+                      rotated (#'vision/rotate-image img 90)]
+                  ;; After 90° CW: (0,0) in src → (1,0) in dst (top-right of 2×4 image)
+                  ;; Height of rotated = src width = 4, Width of rotated = src height = 2
+                  (expect (= 2 (.getWidth rotated)))
+                  (expect (= 4 (.getHeight rotated)))))))
+
+(defdescribe cambridge-all-fixtures-common-test
+  (describe "common invariants across all cambridge fixtures"
+            (it "all generated fixtures have non-empty pages with nodes"
+                (doseq [base-name ["toc" "box-multi-page" "box-conversations"
+                                   "table-multi-page" "table-multi-page-rotated"
+                                   "figure-diagram-1" "figure-diagram-2"
+                                   "illustration" "figure-advanced-1"
+                                   "chapter" "figure-advanced-2"]]
+                  (when-let [doc (load-cambridge-fixture base-name)]
+                    (expect (pos? (count (:document/pages doc)))
+                            (str base-name " should have pages"))
+                    (expect (pos? (count (all-nodes doc)))
+                            (str base-name " should have nodes")))))
+
+            (it "all nodes have required :page.node/type and :page.node/id"
+                (doseq [base-name ["toc" "box-multi-page" "box-conversations"
+                                   "table-multi-page" "table-multi-page-rotated"
+                                   "figure-diagram-1" "figure-diagram-2"
+                                   "illustration" "figure-advanced-1"
+                                   "chapter" "figure-advanced-2"]]
+                  (when-let [doc (load-cambridge-fixture base-name)]
+                    (doseq [node (all-nodes doc)]
+                      (expect (some? (:page.node/type node))
+                              (str base-name " node missing :page.node/type"))
+                      (expect (some? (:page.node/id node))
+                              (str base-name " node missing :page.node/id"))))))
+
+            (it "page indices are sequential starting from 0"
+                (doseq [base-name ["toc" "box-multi-page" "box-conversations"
+                                   "table-multi-page" "table-multi-page-rotated"
+                                   "figure-diagram-1" "figure-diagram-2"
+                                   "illustration" "figure-advanced-1"
+                                   "chapter" "figure-advanced-2"]]
+                  (when-let [doc (load-cambridge-fixture base-name)]
+                    (let [indices (mapv :page/index (:document/pages doc))]
+                      (expect (= (range (count indices)) indices)
+                              (str base-name " page indices not sequential"))))))))

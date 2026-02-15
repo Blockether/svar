@@ -1,8 +1,9 @@
 (ns com.blockether.svar.internal.humanize-test
   "Tests for AI response humanization."
   (:require
-   [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.internal.humanize :as sut]))
+   [clojure.string :as str]
+   [com.blockether.svar.internal.humanize :as sut]
+   [lazytest.core :refer [defdescribe describe expect it]]))
 
 ;; =============================================================================
 ;; Constants
@@ -377,7 +378,7 @@
   (it "preserves fenced code blocks"
       (let [input "Before ```\noptimize()\nleverage()\n``` After"
             result (sut/humanize-string input {:aggressive? true})]
-        (expect (clojure.string/includes? result "```\noptimize()\nleverage()\n```"))))
+        (expect (str/includes? result "```\noptimize()\nleverage()\n```"))))
 
   (it "preserves email addresses"
       (expect (= "Contact admin@example.com for help."
@@ -385,8 +386,8 @@
 
   (it "still replaces patterns outside exclusion zones"
       (let [result (sut/humanize-string "We should leverage `optimize()` to use it" {:aggressive? true})]
-        (expect (clojure.string/includes? result "`optimize()`"))
-        (expect (not (clojure.string/includes? result "leverage"))))))
+        (expect (str/includes? result "`optimize()`"))
+        (expect (not (str/includes? result "leverage"))))))
 
 ;; =============================================================================
 ;; T6: Case-preserving replacement

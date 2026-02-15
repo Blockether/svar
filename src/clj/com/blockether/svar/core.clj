@@ -3,25 +3,39 @@
    
    SVAR = Structured Validated Automated Reasoning
    
-   Provides main functions:
-   - `ask!` - Structured output using the spec DSL
-   - `abstract!` - Text summarization using Chain of Density prompting
-   - `eval!` - LLM self-evaluation for reliability and accuracy assessment
-   - `refine!` - Iterative refinement using decomposition and verification
-   - `models!` - Fetch available models from the LLM API
-   - `sample!` - Generate test data samples matching a spec
+    Provides main functions:
+    - `ask!` - Structured output using the spec DSL
+    - `abstract!` - Text summarization using Chain of Density prompting
+    - `eval!` - LLM self-evaluation for reliability and accuracy assessment
+    - `refine!` - Iterative refinement using decomposition and verification
+    - `models!` - Fetch available models from the LLM API
+    - `sample!` - Generate test data samples matching a spec
+    
+    Guardrails:
+    - `static-guard` - Pattern-based prompt injection detection
+    - `moderation-guard` - LLM-based content moderation
+    - `guard` - Run one or more guards on input
+    
+    Humanization:
+    - `humanize-string` - Strip AI-style phrases from text
+    - `humanize-data` - Humanize string values in data structures
+    - `humanizer` - Create a reusable humanizer function
+    
+    Re-exports spec DSL (`field`, `svar-spec`, `str->data`, `str->data-with-spec`,
+    `data->str`, `validate-data`, `spec->prompt`, `build-ref-registry`) and
+    `make-config` so users can require only this namespace.
    
    Configuration:
    Config MUST be passed explicitly to all LLM functions via the :config parameter.
    No global state. No dependency injection.
    
-   Example:
-   (def config (config/make-config \"sk-...\" \"https://api.openai.com/v1\"))
-   (ask! {:config config
-          :spec my-spec
-          :objective \"Help the user.\"
-          :task \"What is 2+2?\"
-          :model \"gpt-4o\"})
+    Example:
+    (def config (make-config {:api-key \"sk-...\" :base-url \"https://api.openai.com/v1\"}))
+     (ask! {:config config
+            :spec my-spec
+            :messages [(system \"Help the user.\")
+                       (user \"What is 2+2?\")]
+            :model \"gpt-4o\"})
    
    References:
    - Chain of Density: https://arxiv.org/abs/2309.04269
@@ -37,6 +51,7 @@
    [com.blockether.svar.internal.guard :as guard]
    [com.blockether.svar.internal.humanize :as humanize]
    [com.blockether.svar.internal.tokens :as tokens]
+   [com.blockether.svar.internal.util :as util]
    [com.blockether.svar.spec :as spec]
    [taoensso.trove :as trove]))
 
@@ -44,11 +59,10 @@
 ;; Re-export config functions
 ;; =============================================================================
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def make-config
   "Creates an LLM configuration map. See internal.config for details."
   config/make-config)
-
-
 
 ;; =============================================================================
 ;; Re-export spec DSL
@@ -129,21 +143,10 @@
   "Spec option: Namespace prefix to add to keys during parsing."
   ::spec/key-ns)
 
-(def FIELDS
-  "Spec structure: Vector of field definitions."
-  ::spec/fields)
+(def HUMANIZE
+  "Field option: When true, marks field for humanization via :humanizer in ask!."
+  ::spec/humanize?)
 
-(def SPEC-NAME
-  "Spec structure: Name of the spec (for references)."
-  ::spec/spec-name)
-
-(def REFS
-  "Spec structure: Vector of referenced specs."
-  ::spec/refs)
-
-(def NIL
-  "Union value: Represents nil/null in optional fields."
-  ::spec/nil)
 
 ;; =============================================================================
 ;; Type Keywords
@@ -379,10 +382,10 @@
        (cond
          (:success result) (:success result)
          (:retry result) (do
-(trove/log! {:level :warn :data {:attempt attempt
-                                                                    :status (:status result)
-                                                                    :delay-ms delay-ms}
-                                              :msg "Retrying HTTP request"})
+                           (trove/log! {:level :warn :data {:attempt attempt
+                                                            :status (:status result)
+                                                            :delay-ms delay-ms}
+                                        :msg "Retrying HTTP request"})
                            (Thread/sleep (long delay-ms))
                            (recur (inc attempt)
                                   (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
@@ -487,7 +490,8 @@
                                 :response-body response-body}
                          :msg "LLM API key configuration error detected"}))
           (anomaly/fault! error-message
-                          (cond-> (merge (ex-data e) {:llm-request sanitized-request})
+                          (cond-> (merge (ex-data e) {:type :svar.core/http-error
+                                                      :llm-request sanitized-request})
                             api-key-error (assoc :api-key-error api-key-error))))))))
 
 (defn- chat-completion
@@ -499,15 +503,12 @@
      (chat-completion-with-retry
       messages model api-key base-url retry-opts timeout-ms))))
 
-(def ^:private NUCLEUS_PROMPT
-  "Nucleus operating principles for improved AI reasoning and output quality.
-   Based on https://github.com/michaelwhitford/nucleus"
-  "engage nucleus: [phi fractal euler tao pi mu] | [Δ λ ∞/0 | ε/φ Σ/μ c/h] | OODA Human ⊗ AI")
-
 (defn- build-system-prompt
   "Builds the system prompt with the objective wrapped in XML tags."
   [objective]
   (str "<objective>\n" objective "\n</objective>"))
+
+(defn- url? [s] (or (str/starts-with? s "http://") (str/starts-with? s "https://")))
 
 (defn- build-user-content
   "Builds user message content, supporting both text-only and multimodal formats."
@@ -516,12 +517,93 @@
     ;; Text-only: return plain string
     text
     ;; Multimodal: build content array with images first, then text
-    (let [image-blocks (mapv (fn [{:keys [base64 media-type] :or {media-type "image/png"}}]
+    (let [image-blocks (mapv (fn [{:keys [url base64 media-type] :or {media-type "image/png"}}]
                                {:type "image_url"
-                                :image_url {:url (str "data:" media-type ";base64," base64)}})
+                                :image_url {:url (if url
+                                                   url
+                                                   (str "data:" media-type ";base64," base64))}})
                              images)
           text-block {:type "text" :text text}]
       (conj image-blocks text-block))))
+
+;; =============================================================================
+;; Message Construction Helpers (Public API)
+;; =============================================================================
+
+(defn image
+  "Creates an image attachment for use with `user` messages.
+   
+   Accepts either base64-encoded image data or an HTTP(S) URL.
+   URLs are passed through directly to the LLM API; base64 strings
+   are wrapped in a data URI with the given media-type.
+   
+   Params:
+   `source` - String. Base64-encoded image data or an image URL (http/https).
+   `media-type` - String, optional. MIME type (default: \"image/png\").
+                  Ignored when source is a URL.
+   
+   Returns:
+   Map marker that `user` recognizes and converts to multimodal content.
+   When source is a URL, returns {:svar/type :image :url \"...\"}.
+   When source is base64, returns {:svar/type :image :base64 \"...\" :media-type \"...\"}.
+   
+   Examples:
+   (user \"Describe this\" (image my-base64 \"image/jpeg\"))
+   (user \"What's in this?\" (image \"https://example.com/photo.jpg\"))"
+  ([source]
+   (image source "image/png"))
+  ([source media-type]
+   (if (url? source)
+     {:svar/type :image :url source}
+     {:svar/type :image :base64 source :media-type media-type})))
+
+(defn system
+  "Creates a system message.
+   
+   Params:
+   `content` - String. System instructions / objective.
+   
+   Returns:
+   Message map with :role \"system\".
+   
+   Example:
+   (system \"You are a helpful assistant.\")"
+  [content]
+  {:role "system" :content content})
+
+(defn user
+  "Creates a user message, optionally with images for multimodal models.
+   
+   Params:
+   `content` - String. The user's message text.
+   `images` - Zero or more image maps created with `image`.
+   
+   Returns:
+   Message map with :role \"user\". When images are provided, content becomes
+   a multimodal content array.
+   
+   Examples:
+   (user \"Hello!\")
+   (user \"Describe this\" (image base64-str \"image/png\"))"
+  [content & images]
+  (if (seq images)
+    {:role "user"
+      :content (build-user-content content (mapv #(select-keys % [:url :base64 :media-type]) images))}
+    {:role "user" :content content}))
+
+(defn assistant
+  "Creates an assistant message (for few-shot examples or conversation history).
+   
+   Params:
+   `content` - String. The assistant's response.
+   
+   Returns:
+   Message map with :role \"assistant\".
+   
+   Example:
+   (assistant \"The answer is 42.\")"
+  [content]
+  {:role "assistant" :content content})
 
 ;; =============================================================================
 ;; Config Resolution Helper
@@ -530,17 +612,19 @@
 (defn- resolve-opts
   "Extracts effective config values from opts, falling back to config defaults.
    If no :config provided, creates one from env vars."
-  [{:keys [config model timeout-ms check-context?]}]
-  (let [config (or config (config/make-config))]
+  [{:keys [config model timeout-ms check-context? output-reserve]}]
+  (let [config (or config (config/make-config))
+        {:keys [network tokens]} config]
     {:config config
      :model (or model (:model config))
-     :timeout-ms (or timeout-ms (:timeout-ms config))
-     :check-context? (if (some? check-context?) check-context? (:check-context? config))
+     :timeout-ms (or timeout-ms (:timeout-ms network))
+     :check-context? (if (some? check-context?) check-context? (:check-context? tokens))
+     :output-reserve (or output-reserve (:output-reserve tokens))
      :api-key (:api-key config)
      :base-url (:base-url config)
-     :retry (:retry config)
-     :pricing (:pricing config)
-     :context-limits (:context-limits config)}))
+     :network network
+     :pricing (:pricing tokens)
+     :context-limits (:context-limits tokens)}))
 
 ;; =============================================================================
 ;; ask! - Main structured output function
@@ -595,16 +679,13 @@
    the model's context window, throws a clear error with actionable suggestions
    BEFORE making the API call.
    
-   Supports multimodal input (images + text) for vision models.
+   Supports multimodal input via the `user` + `image` helpers.
    
    Params:
    `opts` - Map with keys:
      - :spec - Spec definition, required. Created with spec/spec and spec/field.
-     - :objective - String, required. System instructions (spec format added automatically).
-     - :task - String, required. The current task/prompt.
-     - :images - Vector of maps, optional. For vision models. Each map has:
-         - :base64 - String. Base64-encoded image data (without data URI prefix).
-         - :media-type - String, optional. MIME type (default: \"image/png\").
+     - :messages - Vector of message maps, required. Use `system`, `user`, `assistant`
+         helpers to construct. The spec schema prompt is appended automatically.
      - :model - String, required. LLM model to use (e.g., \"gpt-4o\").
      - :config - Map, optional. LLM config from make-config with :api-key, :base-url.
      - :api-key - String, optional. API key (overrides :config).
@@ -612,8 +693,9 @@
      - :humanizer - Function, optional. A humanizer fn (fn [string] -> string) that is
          applied to spec fields marked with ::spec/humanize? true. Create one with
          (humanizer) or (humanizer {:aggressive? true}). Defaults to nil (no humanization).
-     - :check-context? - Boolean, optional. Check context limit before API call. Defaults to true.
-     - :timeout-ms - Integer, optional. HTTP request timeout in milliseconds. Defaults to 180000 (3 min).
+       - :output-reserve - Integer, optional. Tokens reserved for output (overrides config :tokens :output-reserve).
+       - :check-context? - Boolean, optional. Check context limit before API call (overrides config :tokens :check-context?).
+       - :timeout-ms - Integer, optional. HTTP request timeout in ms (overrides config :network :timeout-ms).
    
    Returns:
    Map with keys:
@@ -623,76 +705,65 @@
      - :duration-ms - Float. Total call duration in milliseconds.
    
    Throws:
-   ExceptionInfo with :type :context/overflow if input exceeds model limit.
-   ExceptionInfo with :type :svar/missing-api-key if no API key provided.
+    ExceptionInfo with :type :svar.core/context-overflow if input exceeds model limit.
+    ExceptionInfo with :type :svar/missing-api-key if no API key provided.
    
    Example:
    (ask! {:config config
           :spec my-spec
-          :objective \"You are a helpful math tutor.\"
-          :task \"What is 2+2?\"
+          :messages [(system \"You are a helpful math tutor.\")
+                     (user \"What is 2+2?\")]
           :model \"gpt-4o\"
           :humanizer (humanizer {:aggressive? true})})"
-  [{:keys [spec objective task images humanizer] :as opts}]
-  (let [{:keys [model api-key base-url timeout-ms check-context? retry pricing context-limits]} (resolve-opts opts)
+  [{:keys [spec messages humanizer] :as opts}]
+  (let [{:keys [model api-key base-url timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts opts)
         chat-url (str base-url "/chat/completions")
-        image-count (count images)]
-    (trove/log! {:level :info :data {:model model :task-len (count task) :images image-count} :msg "SVAR ask!"})
-    (let [system-prompt (build-system-prompt objective)
-          schema-prompt (spec/spec->prompt spec)
-          task-content (build-user-content
-                        (str "<current_task>\n" task "\n</current_task>")
-                        images)
-          messages [{:role "system" :content system-prompt}
-                    {:role "user" :content task-content}
-                    {:role "system" :content NUCLEUS_PROMPT}
-                    {:role "user" :content schema-prompt}]
-          ;; Pre-flight context check
-          _ (when check-context?
-              (let [check (tokens/check-context-limit model messages {:output-reserve 4096 :context-limits context-limits})]
-                (when-not (:ok? check)
-                   (trove/log! {:level :warn :data {:model model
-                                                      :input-tokens (:input-tokens check)
-                                                      :max (:max-input-tokens check)}
-                                    :msg "Context overflow"})
-                  (anomaly/incorrect! (:error check)
-                                      {:type :context/overflow
-                                       :model model
-                                       :input-tokens (:input-tokens check)
-                                       :max-input-tokens (:max-input-tokens check)
-                                       :overflow (:overflow check)
-                                       :utilization (:utilization check)
-                                       :suggestion (str "Reduce task content by ~"
-                                                        (int (* (double (:overflow check)) 0.75)) " words, "
-                                                        "or use a larger context model.")}))))
+        schema-prompt (spec/spec->prompt spec)
+        ;; Process messages: wrap system content with build-system-prompt
+        processed-msgs (mapv (fn [{:keys [role content] :as msg}]
+                               (if (= role "system")
+                                 (assoc msg :content (build-system-prompt content))
+                                 msg))
+                             messages)
+        ;; Append schema prompt as final user message
+        messages (conj processed-msgs {:role "user" :content schema-prompt})
+          ;; Pre-flight context check (also counts input tokens for reuse)
+          check-opts (cond-> {:context-limits context-limits}
+                       output-reserve (assoc :output-reserve output-reserve))
+          context-check (when check-context?
+                          (let [check (tokens/check-context-limit model messages check-opts)]
+                            (when-not (:ok? check)
+                              (anomaly/incorrect! (:error check)
+                                                  {:type :svar.core/context-overflow
+                                                   :model model
+                                                   :input-tokens (:input-tokens check)
+                                                   :max-input-tokens (:max-input-tokens check)
+                                                   :overflow (:overflow check)
+                                                   :utilization (:utilization check)
+                                                   :suggestion (str "Reduce task content by ~"
+                                                                    (int (* (double (:overflow check)) 0.75)) " words, "
+                                                                    "or use a larger context model.")}))
+                            check))
           ;; API call
-          call-start (System/nanoTime)
-          retry-opts (merge retry {:timeout-ms timeout-ms})
-          response (chat-completion messages model api-key chat-url retry-opts)
-          duration-ms (/ (- (System/nanoTime) call-start) 1e6)
-          ;; Token counting
-          token-stats (tokens/count-and-estimate model messages response {:pricing pricing})
+          retry-opts (merge network {:timeout-ms timeout-ms})
+          [response duration-ms] (util/with-elapsed
+                                   (chat-completion messages model api-key chat-url retry-opts))
+          ;; Token counting — reuse pre-counted input tokens when available
+          token-stats (tokens/count-and-estimate model messages response
+                                                 (cond-> {:pricing pricing}
+                                                   context-check (assoc :input-tokens (:input-tokens context-check))))
           ;; Parse response
-          raw-result (try
-                       (spec/str->data-with-spec response spec)
-                       (catch Exception e
-                          (trove/log! {:level :error :data {:model model :error (ex-message e)} :msg "Parse failed"})
-                         (throw e)))
+          raw-result (spec/str->data-with-spec response spec)
           ;; Apply spec-driven humanization if humanizer fn provided
           result (if humanizer
                    (apply-spec-humanizer raw-result spec humanizer)
                    raw-result)]
-      (trove/log! {:level :info :data {:model model
-                                       :duration-ms (int duration-ms)
-                                       :tokens (:total-tokens token-stats)
-                                       :cost (get-in token-stats [:cost :total-cost])}
-                    :msg "SVAR complete"})
       {:result result
        :tokens {:input (:input-tokens token-stats)
                 :output (:output-tokens token-stats)
                 :total (:total-tokens token-stats)}
        :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
-       :duration-ms duration-ms})))
+       :duration-ms duration-ms}))
 
 ;; =============================================================================
 ;; abstract! - Chain of Density summarization
@@ -881,8 +952,8 @@
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary)
         {:keys [result]} (ask! {:spec (build-cod-spec)
-                                :objective objective
-                                :task task
+                                :messages [(system objective)
+                                           (user task)]
                                 :model model
                                 :config config})]
     {:iterations (conj iterations result)
@@ -1091,60 +1162,73 @@
    This function asks an LLM to critically evaluate a previous LLM output against
    specified criteria. Based on LLM Self-Evaluation techniques for improving reliability.
    
-   Params:
-   `opts` - Map with keys:
-     - :task - String, required. The original task/prompt that generated the output.
-     - :output - String or data, required. The LLM output to evaluate.
-     - :model - String, required. LLM model to use for evaluation.
-     - :criteria - Map, optional. Custom evaluation criteria as keyword->description map.
-       Defaults to: accuracy, completeness, relevance, coherence, fairness, bias.
-     - :ground-truths - Vector of strings, optional. Reference facts to verify correctness.
-     - :context - String, optional. Additional context for evaluation.
-      - :config - Map, optional. LLM config from make-config.
+    Params:
+    `opts` - Map with keys:
+      - :messages - Vector of message maps, optional. Use `system`, `user`, `assistant`
+          helpers. The user message content is used as the task context for evaluation.
+          Provide either :messages or :task (not both).
+      - :task - String, optional. The original task/prompt that generated the output.
+          Alternative to :messages for simple cases.
+      - :output - String or data, required. The LLM output to evaluate.
+      - :model - String, required. LLM model to use for evaluation.
+      - :criteria - Map, optional. Custom evaluation criteria as keyword->description map.
+        Defaults to: accuracy, completeness, relevance, coherence, fairness, bias.
+      - :ground-truths - Vector of strings, optional. Reference facts to verify correctness.
+      - :context - String, optional. Additional context for evaluation.
+       - :config - Map, optional. LLM config from make-config.
     
-    Returns:
-    Map with evaluation results:
-      - :correct? - Boolean. Whether the output is fundamentally correct.
-      - :overall-score - Float. Overall quality score from 0.0 to 1.0.
-      - :summary - String. Brief overall assessment.
-      - :criteria - Vector. Evaluation of each criterion.
-      - :issues - Vector. Issues found.
-      - :scores - Map. Consolidated scores by criterion name.
-      - :eval-duration-ms - Float. Time taken for evaluation.
+     Returns:
+     Map with evaluation results:
+       - :correct? - Boolean. Whether the output is fundamentally correct.
+       - :overall-score - Float. Overall quality score from 0.0 to 1.0.
+       - :summary - String. Brief overall assessment.
+       - :criteria - Vector. Evaluation of each criterion.
+       - :issues - Vector. Issues found.
+       - :scores - Map. Consolidated scores by criterion name.
+       - :duration-ms - Float. Time taken for evaluation.
+       - :tokens - Map. Token counts (:input, :output, :total).
+       - :cost - Map. Cost breakdown (:input-cost, :output-cost, :total-cost).
     
-    Example:
-    (eval! {:config config
-            :task \"What is the capital of France?\"
-            :output \"The capital of France is Paris.\"
-            :model \"gpt-4o\"})"
-  [{:keys [task output criteria ground-truths context]
+     Examples:
+     ;; With :messages
+     (eval! {:config config
+             :messages [(user \"What is the capital of France?\")]
+             :output \"The capital of France is Paris.\"
+             :model \"gpt-4o\"})
+     
+     ;; With :task (legacy)
+     (eval! {:config config
+             :task \"What is the capital of France?\"
+             :output \"The capital of France is Paris.\"
+             :model \"gpt-4o\"})"
+  [{:keys [task output messages criteria ground-truths context]
     :as opts
     :or {criteria EVAL_CRITERIA}}]
-  (let [{:keys [config model]} (resolve-opts opts)]
-    (trove/log! {:level :info :data {:model model :criteria (count criteria)} :msg "SVAR eval"})
-    (let [eval-start (System/nanoTime)
-          eval-spec (build-eval-spec criteria)
-          objective (build-eval-objective criteria ground-truths)
-          eval-task (build-eval-task task output context)
-          {:keys [result tokens cost]} (ask! {:spec eval-spec
-                                              :objective objective
-                                              :task eval-task
-                                              :model model
-                                              :config config})
-          eval-duration-ms (/ (- (System/nanoTime) eval-start) 1e6)
-          scores (build-scores result)
-          final-result (-> result
-                           (assoc :scores scores)
-                           (assoc :eval-duration-ms eval-duration-ms)
-                           (assoc :tokens tokens)
-                           (assoc :cost cost))]
-      (trove/log! {:level :info :data {:model model
-                                            :correct? (:correct? result)
-                                            :score (:overall-score result)
-                                            :issues (count (:issues result))
-                                            :duration-ms (int eval-duration-ms)}
-                    :msg "SVAR eval complete"})
-      final-result)))
+  (let [{:keys [config model]} (resolve-opts opts)
+        ;; Resolve task: explicit :task wins, else extract from :messages
+        effective-task (or task
+                          (when messages
+                            (->> messages
+                                 (remove #(= "assistant" (:role %)))
+                                 (map :content)
+                                 (str/join "\n")))
+                          "")
+        eval-spec (build-eval-spec criteria)
+        objective (build-eval-objective criteria ground-truths)
+        eval-task (build-eval-task effective-task output context)
+        [{:keys [result tokens cost]} duration-ms]
+        (util/with-elapsed
+          (ask! {:spec eval-spec
+                 :messages [(system objective)
+                            (user eval-task)]
+                 :model model
+                 :config config}))
+        scores (build-scores result)]
+    (assoc result
+           :scores scores
+           :duration-ms duration-ms
+           :tokens tokens
+           :cost cost)))
 
 ;; =============================================================================
 ;; refine! - Iterative refinement with decomposition and verification
@@ -1231,167 +1315,14 @@
   "Extracts verifiable claims from an LLM output using DuTy-inspired decomposition."
   [output original-task original-objective model config]
   (:result (ask! {:spec (build-decomposition-spec)
-                  :objective (build-decomposition-objective original-objective)
-                  :task (build-decomposition-task original-task output)
-                  :model model
-                  :config config})))
+                   :messages [(system (build-decomposition-objective original-objective))
+                              (user (build-decomposition-task original-task output))]
+                   :model model
+                   :config config})))
 
-;; Verification spec and functions
-(defn- build-verification-spec
-  "Builds the spec for verification of claims."
-  [documents]
-  (if (seq documents)
-    (spec/spec
-     (spec/field ::spec/name :verifications
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "Verification results for each claim")
-     (spec/field ::spec/name :verifications/claim
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "The original claim being verified")
-     (spec/field ::spec/name :verifications/question
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Verification question designed to test the claim")
-     (spec/field ::spec/name :verifications/answer
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Answer to the verification question")
-     (spec/field ::spec/name :verifications/verdict
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/values {"correct" "Claim is accurate as stated"
-                                "incorrect" "Claim contains errors or inaccuracies"
-                                "partially-correct" "Claim is partly true but needs refinement"
-                                "uncertain" "Cannot determine accuracy with available information"}
-                 ::spec/description "Verification verdict for the claim")
-     (spec/field ::spec/name :verifications/reasoning
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Explanation of the verification reasoning")
-     (spec/field ::spec/name :verifications/correction
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Suggested correction if claim is incorrect or partially correct")
-     (spec/field ::spec/name :verifications/document-id
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Document ID supporting or contradicting the claim")
-     (spec/field ::spec/name :verifications/page
-                 ::spec/type :spec.type/int
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Page number supporting or contradicting the claim")
-     (spec/field ::spec/name :verifications/section
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Section supporting or contradicting the claim"))
-    (spec/spec
-     (spec/field ::spec/name :verifications
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "Verification results for each claim")
-     (spec/field ::spec/name :verifications/claim
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "The original claim being verified")
-     (spec/field ::spec/name :verifications/question
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Verification question designed to test the claim")
-     (spec/field ::spec/name :verifications/answer
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Answer to the verification question")
-     (spec/field ::spec/name :verifications/verdict
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/values {"correct" "Claim is accurate as stated"
-                                "incorrect" "Claim contains errors or inaccuracies"
-                                "partially-correct" "Claim is partly true but needs refinement"
-                                "uncertain" "Cannot determine accuracy with available information"}
-                 ::spec/description "Verification verdict for the claim")
-     (spec/field ::spec/name :verifications/reasoning
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Explanation of the verification reasoning")
-     (spec/field ::spec/name :verifications/correction
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Suggested correction if claim is incorrect or partially correct"))))
+;; Verification helper functions (truncation, source documents, claim formatting)
 
-(defn- build-verification-objective
-  "Builds the objective prompt for claim verification."
-  [original-objective documents]
-  (if (seq documents)
-    (str "<verification_task>
-    <role>You are a rigorous fact-checker who verifies claims through targeted questions.</role>
-    
-    <context>
-        <original_objective>" original-objective "</original_objective>
-    </context>
-    
-    <instructions>
-        <instruction>For each claim, generate a specific verification question</instruction>
-        <instruction>Answer the verification question independently and honestly</instruction>
-        <instruction>Compare your answer against the original claim</instruction>
-        <instruction>Determine if the claim is correct, incorrect, partially correct, or uncertain</instruction>
-        <instruction>Provide clear reasoning for your verdict</instruction>
-        <instruction>If incorrect or partially correct, suggest a specific correction</instruction>
-        <instruction>You MUST verify claims against the provided source documents. For each claim, find the specific document, page, and section that supports or contradicts it.</instruction>
-    </instructions>
-    
-    <verification_principles>
-        <principle>Be skeptical - do not assume claims are correct</principle>
-        <principle>Verification questions should be answerable independently</principle>
-        <principle>Focus on the most critical aspects of each claim</principle>
-        <principle>Consider edge cases and potential misinterpretations</principle>
-        <principle>Mark uncertain when you genuinely cannot verify</principle>
-    </verification_principles>
-    
-    <verdict_guidelines>
-        <guideline verdict=\"correct\">Claim fully accurate, no changes needed</guideline>
-        <guideline verdict=\"incorrect\">Claim contains clear errors that must be fixed</guideline>
-        <guideline verdict=\"partially-correct\">Claim has merit but needs refinement or clarification</guideline>
-        <guideline verdict=\"uncertain\">Insufficient information to verify - flag for review</guideline>
-    </verdict_guidelines>
-</verification_task>")
-    (str "<verification_task>
-    <role>You are a rigorous fact-checker who verifies claims through targeted questions.</role>
-    
-    <context>
-        <original_objective>" original-objective "</original_objective>
-    </context>
-    
-    <instructions>
-        <instruction>For each claim, generate a specific verification question</instruction>
-        <instruction>Answer the verification question independently and honestly</instruction>
-        <instruction>Compare your answer against the original claim</instruction>
-        <instruction>Determine if the claim is correct, incorrect, partially correct, or uncertain</instruction>
-        <instruction>Provide clear reasoning for your verdict</instruction>
-        <instruction>If incorrect or partially correct, suggest a specific correction</instruction>
-    </instructions>
-    
-    <verification_principles>
-        <principle>Be skeptical - do not assume claims are correct</principle>
-        <principle>Verification questions should be answerable independently</principle>
-        <principle>Focus on the most critical aspects of each claim</principle>
-        <principle>Consider edge cases and potential misinterpretations</principle>
-        <principle>Mark uncertain when you genuinely cannot verify</principle>
-    </verification_principles>
-    
-    <verdict_guidelines>
-        <guideline verdict=\"correct\">Claim fully accurate, no changes needed</guideline>
-        <guideline verdict=\"incorrect\">Claim contains clear errors that must be fixed</guideline>
-        <guideline verdict=\"partially-correct\">Claim has merit but needs refinement or clarification</guideline>
-        <guideline verdict=\"uncertain\">Insufficient information to verify - flag for review</guideline>
-    </verdict_guidelines>
-</verification_task>")))
+
 
 (defn- format-claims-for-verification
   "Formats claims into a string for the verification task."
@@ -1451,22 +1382,393 @@
                           truncated-documents))
            "\n</source_documents>"))))
 
-(defn- build-verification-task
-  "Builds the task content for verification."
-  [original-task claims documents]
+;; =============================================================================
+;; Factored CoVe: Question Planning + Independent Per-Claim Verification
+;;
+;; Implements the Factored variant from Dhuliawala et al. (2023):
+;;   Step 1: Plan — generate verification questions (one call, sees all claims)
+;;   Step 2: Execute — answer each question independently (one call per claim,
+;;           NO original output visible — prevents confirmation bias)
+;;   Step 3: Aggregate — combine into unified verification results
+;; =============================================================================
+
+(defn- build-question-planning-spec
+  "Builds the spec for generating verification questions (without answers).
+   Step 1 of Factored CoVe."
+  []
+  (spec/spec
+   (spec/field ::spec/name :questions
+               ::spec/type :spec.type/string
+               ::spec/cardinality :spec.cardinality/many
+               ::spec/description "Verification questions, one per claim")
+   (spec/field ::spec/name :questions/claim
+               ::spec/type :spec.type/string
+               ::spec/cardinality :spec.cardinality/one
+               ::spec/description "The original claim text being verified")
+   (spec/field ::spec/name :questions/question
+               ::spec/type :spec.type/string
+               ::spec/cardinality :spec.cardinality/one
+               ::spec/description "A targeted verification question to test this claim")))
+
+(defn- build-question-planning-objective
+  "Builds the system prompt for verification question planning."
+  [original-objective]
+  (str "<question_planning_task>
+    <role>You are an expert fact-checker who designs targeted verification questions.</role>
+    
+    <context>
+        <original_objective>" original-objective "</original_objective>
+    </context>
+    
+    <instructions>
+        <instruction>For each claim, generate ONE specific verification question</instruction>
+        <instruction>The question should be answerable independently without seeing the original output</instruction>
+        <instruction>Questions should test the factual accuracy of the claim</instruction>
+        <instruction>Do NOT answer the questions - only generate them</instruction>
+    </instructions>
+    
+    <question_guidelines>
+        <guideline>Questions should be specific and testable</guideline>
+        <guideline>Avoid yes/no questions - prefer questions that require detailed answers</guideline>
+        <guideline>Each question should focus on the most critical aspect of its claim</guideline>
+        <guideline>Questions should be self-contained - understandable without additional context</guideline>
+    </question_guidelines>
+</question_planning_task>"))
+
+(defn- build-question-planning-task
+  "Builds the task content for verification question planning."
+  [original-task claims]
   (str "<original_task>\n" original-task "\n</original_task>\n\n"
-       "<claims_to_verify>\n" (format-claims-for-verification claims) "\n</claims_to_verify>"
+       "<claims_to_plan_questions_for>\n" (format-claims-for-verification claims) "\n</claims_to_plan_questions_for>"))
+
+(defn- plan-verification-questions
+  "Step 1 of Factored CoVe: Generate verification questions without answers.
+   One LLM call that sees all claims and generates a targeted question per claim."
+  [claims original-task original-objective model config]
+  (:result (ask! {:spec (build-question-planning-spec)
+                  :messages [(system (build-question-planning-objective original-objective))
+                             (user (build-question-planning-task original-task claims))]
+                  :model model
+                  :config config})))
+
+(defn- build-single-verification-spec
+  "Builds the spec for independently verifying a single claim.
+   Step 2 of Factored CoVe — one result per LLM call."
+  [has-documents?]
+  (if has-documents?
+    (spec/spec
+     (spec/field ::spec/name :answer
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Your independent answer to the verification question")
+     (spec/field ::spec/name :verdict
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values {"correct" "The claim is accurate based on your independent answer"
+                                "incorrect" "The claim contradicts your independent answer"
+                                "partially-correct" "The claim is partly accurate but needs refinement"
+                                "uncertain" "Cannot determine accuracy with available information"}
+                 ::spec/description "Verdict comparing your answer against the original claim")
+     (spec/field ::spec/name :reasoning
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Explanation of your reasoning")
+     (spec/field ::spec/name :correction
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Suggested correction if claim is incorrect or partially correct")
+     (spec/field ::spec/name :document-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Document ID supporting or contradicting the claim")
+     (spec/field ::spec/name :page
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Page number supporting or contradicting the claim")
+     (spec/field ::spec/name :section
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Section supporting or contradicting the claim"))
+    (spec/spec
+     (spec/field ::spec/name :answer
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Your independent answer to the verification question")
+     (spec/field ::spec/name :verdict
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values {"correct" "The claim is accurate based on your independent answer"
+                                "incorrect" "The claim contradicts your independent answer"
+                                "partially-correct" "The claim is partly accurate but needs refinement"
+                                "uncertain" "Cannot determine accuracy with available information"}
+                 ::spec/description "Verdict comparing your answer against the original claim")
+     (spec/field ::spec/name :reasoning
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Explanation of your reasoning")
+     (spec/field ::spec/name :correction
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Suggested correction if claim is incorrect or partially correct"))))
+
+(defn- build-single-verification-objective
+  "Builds the system prompt for independently answering a single verification question.
+   The original output is deliberately NOT included — this is the key isolation
+   that prevents confirmation bias (the paper's core innovation)."
+  [documents]
+  (if (seq documents)
+    "<independent_verification>
+    <role>You are a rigorous fact-checker answering a verification question.</role>
+    
+    <instructions>
+        <instruction>Answer the verification question using ONLY the provided source documents and your knowledge</instruction>
+        <instruction>You are NOT shown the original output being verified - this is intentional</instruction>
+        <instruction>Answer as accurately and independently as possible</instruction>
+        <instruction>Then compare your answer against the original claim to determine a verdict</instruction>
+        <instruction>Cite the specific document, page, and section that supports your answer</instruction>
+    </instructions>
+    
+    <principles>
+        <principle>Be skeptical - do not assume the claim is correct</principle>
+        <principle>Base your answer on evidence, not assumptions</principle>
+        <principle>Mark uncertain when you genuinely cannot determine the answer</principle>
+    </principles>
+</independent_verification>"
+    "<independent_verification>
+    <role>You are a rigorous fact-checker answering a verification question.</role>
+    
+    <instructions>
+        <instruction>Answer the verification question independently using your knowledge</instruction>
+        <instruction>You are NOT shown the original output being verified - this is intentional</instruction>
+        <instruction>Answer as accurately and independently as possible</instruction>
+        <instruction>Then compare your answer against the original claim to determine a verdict</instruction>
+    </instructions>
+    
+    <principles>
+        <principle>Be skeptical - do not assume the claim is correct</principle>
+        <principle>Base your answer on evidence, not assumptions</principle>
+        <principle>Mark uncertain when you genuinely cannot determine the answer</principle>
+    </principles>
+</independent_verification>"))
+
+(defn- build-single-verification-task
+  "Builds the task for independently verifying a single claim.
+   Only the claim and question are shown — NOT the original output or other claims."
+  [claim-text question documents]
+  (str "<claim_to_verify>" claim-text "</claim_to_verify>\n\n"
+       "<verification_question>" question "</verification_question>"
        (when (seq documents)
          (str "\n\n" (build-source-documents-block documents)))))
 
-(defn- verify-claims
-  "Verifies extracted claims using CoVe-inspired verification questions."
-  [claims original-task original-objective model config documents]
-  (:result (ask! {:spec (build-verification-spec documents)
-                  :objective (build-verification-objective original-objective documents)
-                  :task (build-verification-task original-task claims documents)
+(defn- verify-single-claim
+  "Step 2 of Factored CoVe: Answer a single verification question independently.
+   The LLM sees ONLY the claim, the question, and (optionally) source documents.
+   It does NOT see the original output, other claims, or other verification answers."
+  [claim-text question model config documents]
+  (:result (ask! {:spec (build-single-verification-spec (boolean (seq documents)))
+                  :messages [(system (build-single-verification-objective documents))
+                             (user (build-single-verification-task claim-text question documents))]
                   :model model
                   :config config})))
+
+(defn- verifiable-claim?
+  "Returns true if a claim should be sent to verification.
+   Filters out non-verifiable and purely subjective claims to focus
+   verification budget on high-value targets."
+  [claim]
+  (and (not= false (:verifiable? claim))
+       (not= "subjective" (:category claim))))
+
+(defn- filter-verifiable-claims
+  "Splits claims into verifiable and non-verifiable groups."
+  [claims]
+  (let [grouped (group-by verifiable-claim? claims)]
+    {:verifiable (get grouped true [])
+     :non-verifiable (get grouped false [])}))
+
+(defn- verify-claims
+  "Verifies extracted claims using Factored CoVe (independent per-claim verification).
+   
+   Implements the Factored variant from Dhuliawala et al. (2023, arXiv:2309.11495):
+   1. Plan: Generate verification questions (one call, sees claims + original task)
+   2. Execute: Answer each question independently (one call per claim,
+      NO original output visible — prevents confirmation bias / snowball effect)
+   3. Aggregate: Combine into unified verification results
+   
+   Non-verifiable and subjective claims are skipped with an 'uncertain' verdict."
+  [claims original-task original-objective model config documents]
+  (let [{:keys [verifiable non-verifiable]} (filter-verifiable-claims claims)]
+    (if (empty? verifiable)
+      ;; All claims are non-verifiable — return as uncertain
+      {:verifications (mapv (fn [claim]
+                              {:claim (:claim claim)
+                               :question "N/A"
+                               :answer "N/A"
+                               :verdict "uncertain"
+                               :reasoning "Claim is subjective or not independently verifiable"})
+                            non-verifiable)}
+      ;; Factored CoVe
+      (let [;; Step 1: Plan verification questions (one LLM call — sees all claims)
+            planning-result (plan-verification-questions verifiable original-task
+                                                        original-objective model config)
+            planned-questions (:questions planning-result)
+
+            ;; Step 2: Answer each question independently (one LLM call per question)
+            ;; Key isolation: each call sees ONLY the claim + question + documents
+            factored-verifications
+            (mapv (fn [planned-q]
+                    (let [claim-text (:claim planned-q)
+                          question (:question planned-q)
+                          result (verify-single-claim claim-text question model config documents)]
+                      (merge {:claim claim-text :question question} result)))
+                  planned-questions)
+
+            ;; Non-verifiable claims → uncertain without LLM calls
+            skipped-results
+            (mapv (fn [claim]
+                    {:claim (:claim claim)
+                     :question "N/A"
+                     :answer "N/A"
+                     :verdict "uncertain"
+                     :reasoning "Claim is subjective or not independently verifiable"})
+                  non-verifiable)]
+        {:verifications (into factored-verifications skipped-results)}))))
+
+;; =============================================================================
+;; Factor+Revise: Cross-Claim Inconsistency Detection
+;;
+;; After independent per-claim verification (Factored CoVe), this step
+;; explicitly compares all verification answers against each other AND against
+;; the original output to detect cross-claim contradictions that individual
+;; per-claim verification misses.
+;;
+;; This implements the Factor+Revise variant from Dhuliawala et al. (2023):
+;;   Factored verification (already done above) produces per-claim verdicts.
+;;   This step finds conflicts BETWEEN those verdicts — e.g. two claims both
+;;   marked "correct" individually but mutually contradictory, or subtle drift
+;;   between the original output and independent verification answers.
+;; =============================================================================
+
+(defn- format-verifications-for-inconsistency-detection
+  "Formats verification results for cross-claim inconsistency detection.
+   Includes the independent answer for each claim — critical for detecting
+   drift between what the original output stated and what the independent
+   verifier found."
+  [verifications]
+  (->> verifications
+       (map-indexed (fn [i v]
+                      (str "<verified_claim id=\"" (inc (long i)) "\">\n"
+                           "  <claim>" (:claim v) "</claim>\n"
+                           "  <independent_answer>" (:answer v) "</independent_answer>\n"
+                           "  <verdict>" (:verdict v) "</verdict>\n"
+                           "  <reasoning>" (:reasoning v) "</reasoning>\n"
+                           (when (:correction v)
+                             (str "  <correction>" (:correction v) "</correction>\n"))
+                           "</verified_claim>")))
+       (str/join "\n")))
+
+(defn- build-inconsistency-detection-spec
+  "Builds the spec for detecting cross-claim inconsistencies.
+   Step 3 of Factor+Revise CoVe — explicit conflict identification."
+  []
+  (spec/spec
+   (spec/field ::spec/name :inconsistencies
+              ::spec/type :spec.type/string
+              ::spec/cardinality :spec.cardinality/many
+              ::spec/description "Cross-claim inconsistencies detected between verification results and original output. Empty array if none found.")
+   (spec/field ::spec/name :inconsistencies/claims
+              ::spec/type :spec.type/string
+              ::spec/cardinality :spec.cardinality/one
+              ::spec/description "The conflicting claim texts, quoted verbatim from the verification results")
+   (spec/field ::spec/name :inconsistencies/type
+              ::spec/type :spec.type/string
+              ::spec/cardinality :spec.cardinality/one
+              ::spec/values {"contradiction" "Two or more claims directly contradict each other"
+                             "inconsistency" "Claims are not directly contradictory but cannot both be fully accurate"
+                             "drift" "Verification answer reveals the original output diverged from facts in a way not caught by individual verdicts"}
+              ::spec/description "Type of inconsistency")
+   (spec/field ::spec/name :inconsistencies/description
+              ::spec/type :spec.type/string
+              ::spec/cardinality :spec.cardinality/one
+              ::spec/description "Clear description of the inconsistency and why it matters")
+   (spec/field ::spec/name :inconsistencies/severity
+              ::spec/type :spec.type/string
+              ::spec/cardinality :spec.cardinality/one
+              ::spec/values {"high" "Factual contradiction that must be resolved"
+                             "medium" "Notable inconsistency that should be addressed"
+                             "low" "Minor tension that may be acceptable"}
+              ::spec/description "Severity of the inconsistency")
+   (spec/field ::spec/name :inconsistencies/resolution
+              ::spec/type :spec.type/string
+              ::spec/cardinality :spec.cardinality/one
+              ::spec/description "Suggested resolution for the inconsistency")))
+
+(defn- build-inconsistency-detection-objective
+  "Builds the system prompt for cross-claim inconsistency detection.
+   This is the core of Factor+Revise — explicitly identifying conflicts
+   between the original output and independent verification answers."
+  [original-objective]
+  (str "<inconsistency_detection>
+    <role>You are an expert analyst who identifies contradictions and inconsistencies across multiple verified claims.</role>
+
+    <context>
+        <original_objective>" original-objective "</original_objective>
+    </context>
+
+    <instructions>
+        <instruction>Compare ALL verification answers against each other to find cross-claim contradictions</instruction>
+        <instruction>Compare each verification answer against the original output to find undetected divergences</instruction>
+        <instruction>Look for cases where individually 'correct' claims conflict with each other</instruction>
+        <instruction>Identify factual drift — where the original output subtly diverges from verification answers</instruction>
+        <instruction>If no inconsistencies are found, return an empty inconsistencies array</instruction>
+    </instructions>
+
+    <detection_guidelines>
+        <guideline>Focus on factual and logical contradictions, not stylistic differences</guideline>
+        <guideline>A contradiction is when two claims cannot both be true simultaneously</guideline>
+        <guideline>An inconsistency is when claims are in tension but not directly contradictory</guideline>
+        <guideline>Drift is when the original output says X but verification evidence says Y, even if the individual verdict was 'correct'</guideline>
+        <guideline>Quote the specific conflicting texts verbatim</guideline>
+    </detection_guidelines>
+</inconsistency_detection>"))
+
+(defn- build-inconsistency-detection-task
+  "Builds the task content for cross-claim inconsistency detection.
+   Includes the original output and all verification results so the model
+   can compare them against each other."
+  [original-output verifications]
+  (str "<original_output>\n" (if (string? original-output) original-output (pr-str original-output)) "\n</original_output>\n\n"
+       "<verification_results>\n" (format-verifications-for-inconsistency-detection verifications) "\n</verification_results>\n\n"
+       "<instruction>Identify any cross-claim contradictions, inconsistencies, or factual drift between the verification results and the original output. If none are found, return an empty inconsistencies array.</instruction>"))
+
+(defn- detect-inconsistencies
+  "Step 3 of Factor+Revise CoVe: Explicit cross-claim inconsistency detection.
+
+   After independent per-claim verification (Factored CoVe), compares all
+   verification answers against each other AND against the original output
+   to detect:
+   - Cross-claim contradictions (individually correct claims that conflict)
+   - Factual drift (original output diverges from independent verification answers)
+   - Logical inconsistencies (claims in tension but not directly contradictory)
+
+   Requires at least 2 verified claims — with fewer, cross-claim comparison
+   is meaningless.
+
+   Returns a map with :inconsistencies vector. May be empty if no conflicts found."
+  [current-output verifications original-objective model config]
+  (if (< (long (count verifications)) 2)
+    ;; Need at least 2 verified claims to detect cross-claim inconsistencies
+    {:inconsistencies []}
+    (:result (ask! {:spec (build-inconsistency-detection-spec)
+                    :messages [(system (build-inconsistency-detection-objective original-objective))
+                               (user (build-inconsistency-detection-task current-output verifications))]
+                    :model model
+                    :config config}))))
 
 ;; Refinement functions
 (defn- format-verifications-for-refinement
@@ -1498,6 +1800,24 @@
                              "</issue>")))
          (str/join "\n"))))
 
+(defn- format-inconsistencies-for-refinement
+  "Formats cross-claim inconsistencies into feedback for refinement.
+   Factor+Revise: these are conflicts detected between independently
+   verified claims that per-claim verification did not catch."
+  [inconsistencies]
+  (if (empty? inconsistencies)
+    "<cross_claim_inconsistencies>None detected</cross_claim_inconsistencies>"
+    (str "<cross_claim_inconsistencies>\n"
+         (->> inconsistencies
+              (map-indexed (fn [i incon]
+                             (str "  <inconsistency id=\"" (inc (long i)) "\" type=\"" (:type incon) "\" severity=\"" (:severity incon) "\">\n"
+                                  "    <claims>" (:claims incon) "</claims>\n"
+                                  "    <description>" (:description incon) "</description>\n"
+                                  "    <resolution>" (:resolution incon) "</resolution>\n"
+                                  "  </inconsistency>")))
+              (str/join "\n"))
+         "\n</cross_claim_inconsistencies>")))
+
 (defn- build-refinement-objective
   "Builds the objective prompt for output refinement."
   [original-objective iteration]
@@ -1513,13 +1833,15 @@
         <instruction>Review the ORIGINAL OUTPUT and the VERIFICATION FEEDBACK</instruction>
         <instruction>Address ALL issues marked as incorrect or partially-correct</instruction>
         <instruction>Apply suggested corrections where provided</instruction>
-        <instruction>Maintain all aspects that were verified as correct</instruction>
+        <instruction>Resolve ALL cross-claim inconsistencies — these are conflicts between claims that were individually verified but contradict each other</instruction>
+        <instruction>Maintain all aspects that were verified as correct and are not part of an inconsistency</instruction>
         <instruction>Improve clarity and accuracy without changing correct content</instruction>
         <instruction>Ensure the refined output fully addresses the original task</instruction>
     </instructions>
     
     <refinement_principles>
-        <principle>Prioritize fixing high-severity issues first</principle>
+        <principle>Prioritize resolving cross-claim contradictions — these indicate structural errors in the output</principle>
+        <principle>Prioritize fixing high-severity issues next</principle>
         <principle>Do not introduce new errors while fixing existing ones</principle>
         <principle>Preserve the overall structure and intent of the original output</principle>
         <principle>Be conservative - only change what needs to be changed</principle>
@@ -1528,13 +1850,15 @@
 </refinement_task>"))
 
 (defn- build-refinement-task
-  "Builds the task content for refinement with full context."
-  [original-task current-output verifications evaluation-issues]
+  "Builds the task content for refinement with full context.
+   Includes cross-claim inconsistencies from Factor+Revise detection step."
+  [original-task current-output verifications evaluation-issues inconsistencies]
   (str "<original_task>\n" original-task "\n</original_task>\n\n"
        "<current_output>\n" (if (string? current-output) current-output (pr-str current-output)) "\n</current_output>\n\n"
        "<verification_feedback>\n" (format-verifications-for-refinement verifications) "\n</verification_feedback>\n\n"
+       (format-inconsistencies-for-refinement inconsistencies) "\n\n"
        "<evaluation_issues>\n" (format-issues-for-refinement evaluation-issues) "\n</evaluation_issues>\n\n"
-       "<instruction>Generate a refined version of the output that addresses the verification feedback and evaluation issues while maintaining correct content.</instruction>"))
+       "<instruction>Generate a refined version of the output that resolves all cross-claim inconsistencies, addresses the verification feedback and evaluation issues, while maintaining correct content.</instruction>"))
 
 (defn- should-stop?
   "Determines if refinement should stop based on strategy and current state."
@@ -1553,41 +1877,54 @@
           (>= current-iteration max-iterations)))))
 
 (defn- refinement-iteration-step
-  "Performs a single refinement iteration: decompose -> verify -> evaluate -> refine."
+  "Performs a single refinement iteration:
+   decompose -> verify -> detect inconsistencies -> evaluate -> refine.
+   
+   The inconsistency detection step (Factor+Revise) compares all independent
+   verification answers against each other to find cross-claim contradictions
+   that per-claim verification misses."
   [spec original-objective original-task model config eval-criteria documents
    {:keys [current-output iterations iteration-num prompt-evolution] :as _state}]
-  (let [iter-start (System/nanoTime)
-        iteration (inc (long iteration-num))
-        _ (trove/log! {:level :info :data {:n iteration} :msg "Refine iteration"})
+  (let [iteration (inc (long iteration-num))
 
-        ;; Step 1: Decompose - extract claims from current output
-        decomposition (decompose-output current-output original-task original-objective
-                                        model config)
-        claims (:claims decomposition)
+        [{:keys [claims verifications inconsistencies evaluation
+                 refined-output refinement-objective refinement-task]} iter-duration-ms]
+        (util/with-elapsed
+          (let [;; Step 1: Decompose - extract claims from current output
+                decomposition (decompose-output current-output original-task original-objective
+                                                model config)
+                claims (:claims decomposition)
 
-        ;; Step 2: Verify - check claims with verification questions
-        verification (verify-claims claims original-task original-objective model config documents)
-        verifications (:verifications verification)
+                ;; Step 2: Verify - check claims with independent per-claim verification
+                verification (verify-claims claims original-task original-objective model config documents)
+                verifications (:verifications verification)
 
-        ;; Step 3: Evaluate - get quality assessment
-        evaluation (eval! {:task original-task
-                           :output current-output
-                           :model model
-                           :criteria eval-criteria
-                           :config config})
+                ;; Step 3: Detect cross-claim inconsistencies (Factor+Revise)
+                inconsistency-result (detect-inconsistencies current-output verifications
+                                                             original-objective model config)
+                inconsistencies (or (:inconsistencies inconsistency-result) [])
 
-        ;; Step 4: Refine - generate improved output
-        refinement-objective (build-refinement-objective original-objective iteration)
-        refinement-task (build-refinement-task original-task current-output
-                                               verifications (:issues evaluation))
-        {:keys [result]} (ask! {:spec spec
-                                :objective refinement-objective
-                                :task refinement-task
-                                :model model
-                                :config config})
-        refined-output result
+                ;; Step 4: Evaluate - get quality assessment
+                evaluation (eval! {:task original-task
+                                   :output current-output
+                                   :model model
+                                   :criteria eval-criteria
+                                   :config config})
 
-        iter-duration-ms (/ (- (System/nanoTime) iter-start) 1e6)
+                ;; Step 5: Refine - generate improved output incorporating all feedback
+                refinement-objective (build-refinement-objective original-objective iteration)
+                refinement-task (build-refinement-task original-task current-output
+                                                       verifications (:issues evaluation)
+                                                       inconsistencies)
+                {:keys [result]} (ask! {:spec spec
+                                        :messages [(system refinement-objective)
+                                                   (user refinement-task)]
+                                        :model model
+                                        :config config})]
+            {:claims claims :verifications verifications
+             :inconsistencies inconsistencies :evaluation evaluation
+             :refined-output result :refinement-objective refinement-objective
+             :refinement-task refinement-task}))
 
         ;; Build iteration record
         incorrect-count (->> verifications (filter #(= "incorrect" (:verdict %))) count)
@@ -1599,6 +1936,11 @@
                                          :uncertain-count (->> verifications
                                                                (filter #(= "uncertain" (:verdict %)))
                                                                count)}
+                          :inconsistencies {:detected inconsistencies
+                                            :count (count inconsistencies)
+                                            :high-severity-count (->> inconsistencies
+                                                                      (filter #(= "high" (:severity %)))
+                                                                      count)}
                           :evaluation evaluation
                           :refinements (->> verifications
                                             (filter #(contains? #{"incorrect" "partially-correct"} (:verdict %)))
@@ -1609,13 +1951,6 @@
         prompt-record {:objective refinement-objective
                        :task refinement-task
                        :iteration iteration}]
-
-    (trove/log! {:level :info :data {:n iteration
-                                             :claims (count claims)
-                                             :incorrect incorrect-count
-                                             :score (:overall-score evaluation)
-                                             :duration-ms (int iter-duration-ms)}
-                  :msg "Refine iteration done"})
 
     {:current-output refined-output
      :iterations (conj iterations iteration-record)
@@ -1656,17 +1991,17 @@
 (defn refine!
   "Iteratively refines LLM output using decomposition and verification.
    
-   Combines DuTy (Duty-Distinct Chain-of-Thought) decomposition with 
-   Chain of Verification (CoVe) to reduce hallucinations and improve accuracy.
-   Each iteration: decomposes output into claims, verifies each claim,
-   evaluates overall quality, and generates a refined version.
+   Implements the Factor+Revise variant of Chain of Verification (CoVe)
+   from Dhuliawala et al. (2023), combined with DuTy decomposition.
+   Each iteration: decomposes output into claims, verifies each claim
+   independently (Factored CoVe), detects cross-claim inconsistencies
+   (Factor+Revise), evaluates overall quality, and generates a refined version.
    
-   Params:
-   `opts` - Map with keys:
-     - :spec - Spec definition, required. Created with spec/spec and spec/field.
-     - :objective - String, required. System instructions for the task.
-     - :task - String, required. The task/prompt to refine.
-     - :model - String, required. LLM model to use.
+    Params:
+    `opts` - Map with keys:
+      - :spec - Spec definition, required. Created with spec/spec and spec/field.
+      - :messages - Vector of message maps, required. Use `system`, `user` helpers.
+      - :model - String, required. LLM model to use.
      - :iterations - Integer, optional. Max refinement iterations (default: 3).
      - :threshold - Float, optional. Stop early if eval score >= threshold (default: 0.9).
      - :stop-strategy - Keyword, optional. Stopping strategy (default: :both).
@@ -1687,12 +2022,12 @@
       - :window - Map. Sliding window of recent scores.
     
     Example:
-    (refine! {:config config
-              :spec my-spec
-              :objective \"Analyze the data accurately.\"
-              :task \"Summarize key findings.\"
-              :model \"gpt-4o\"})"
-  [{:keys [spec objective task iterations threshold stop-strategy
+     (refine! {:config config
+               :spec my-spec
+               :messages [(system \"Analyze the data accurately.\")
+                          (user \"Summarize key findings.\")]
+               :model \"gpt-4o\"})"
+  [{:keys [spec messages iterations threshold stop-strategy
            window-size criteria documents]
     :as opts
     :or {iterations DEFAULT_REFINE_ITERATIONS
@@ -1701,14 +2036,12 @@
          window-size 3
          criteria EVAL_CRITERIA}}]
   (let [{:keys [config model]} (resolve-opts opts)
-        iterations (if (seq documents) 1 iterations)]
-     (trove/log! {:level :info :data {:model model :max-iters iterations :threshold threshold} :msg "SVAR refine"})
-    (let [total-start (System/nanoTime)
-
-          ;; Phase 1: Generate initial output
+         ;; Extract objective/task from messages for internal decompose/verify/eval pipeline
+         original-objective (or (->> messages (filter #(= "system" (:role %))) first :content) "")
+         original-task (or (->> messages (filter #(= "user" (:role %))) first :content) "")
+         ;; Phase 1: Generate initial output
           {:keys [result]} (ask! {:spec spec
-                                  :objective objective
-                                  :task task
+                                  :messages messages
                                   :model model
                                   :config config})
           initial-output result
@@ -1721,24 +2054,26 @@
                          :prompt-evolution []}
 
           step-fn (partial refinement-iteration-step
-                           spec objective task model config criteria documents)
+                           spec original-objective original-task model config criteria documents)
 
           ;; Run iterations until stopping condition met
-          final-state (loop [state initial-state]
-                        (if (should-stop? stop-strategy threshold
-                                          (:latest-score state)
-                                          (:iteration-num state)
-                                          iterations)
-                          state
-                          (recur (step-fn state))))
+          [final-state total-duration-ms]
+          (util/with-elapsed
+            (loop [state initial-state]
+              (if (should-stop? stop-strategy threshold
+                                (:latest-score state)
+                                (:iteration-num state)
+                                iterations)
+                state
+                (recur (step-fn state)))))
 
           ;; Phase 3: Final evaluation
           final-output (:current-output final-state)
-          final-evaluation (eval! {:task task
-                                   :output final-output
-                                   :model model
-                                   :criteria criteria
-                                   :config config})
+          final-evaluation (eval! {:task original-task
+                                    :output final-output
+                                    :model model
+                                    :criteria criteria
+                                    :config config})
           final-score (:overall-score final-evaluation)
 
           ;; Phase 4: Compute gradient and window
@@ -1746,17 +2081,8 @@
                            final-score)
           gradient (compute-gradient all-scores)
           window-scores (vec (take-last window-size all-scores))
-
-          total-duration-ms (/ (- (System/nanoTime) total-start) 1e6)
           iterations-count (:iteration-num final-state)
           converged? (>= (double final-score) (double threshold))]
-
-      (trove/log! {:level :info :data {:iterations iterations-count
-                                          :score final-score
-                                          :converged? converged?
-                                          :trend (:trend gradient)
-                                          :duration-ms (int total-duration-ms)}
-                    :msg "SVAR refine done"})
 
       {:result final-output
        :iterations (:iterations final-state)
@@ -1768,7 +2094,7 @@
        :gradient gradient
        :prompt-evolution (:prompt-evolution final-state)
        :window {:size window-size
-                :scores window-scores}})))
+                 :scores window-scores}}))
 
 ;; =============================================================================
 ;; models! - Fetch available models
@@ -1795,64 +2121,121 @@
   ([opts]
    (let [{:keys [api-key base-url]} (resolve-opts opts)
          models-url (str base-url "/models")
-          _ (trove/log! {:level :info :data {:url models-url} :msg "Fetching models"})
          body (http-get! models-url api-key)
          models (or (:data body) [])]
-     (trove/log! {:level :info :data {:count (count models)} :msg "Models fetched"})
      (vec models))))
 
 ;; =============================================================================
-;; sample! - Generate test data samples
+;; sample! - Generate test data samples with self-correction
 ;; =============================================================================
 
+(def ^:private SAMPLE_CRITERIA
+  "Default evaluation criteria for generated samples."
+  {:diversity "Are the generated samples diverse and varied across all fields? Samples should cover different cases and not be repetitive."
+   :realism "Are the samples realistic and plausible? Values should be believable, not placeholder-like."
+   :completeness "Do all samples include all required fields with appropriate values?"
+   :correctness "Do the field values match the expected types and constraints (e.g., valid emails, reasonable ages)?"})
+
+(def ^:private DEFAULT_SAMPLE_ITERATIONS
+  "Default number of sample refinement iterations."
+  3)
+
+(def ^:private DEFAULT_SAMPLE_THRESHOLD
+  "Default quality threshold for sample generation."
+  0.9)
+
+(defn- build-sample-refinement-feedback
+  "Builds feedback for sample refinement based on evaluation results.
+   
+   Params:
+   `evaluation` - Map. Result from eval!.
+   `n` - Integer. Number of samples requested.
+   
+   Returns:
+   String. Feedback prompt for regeneration."
+  [evaluation n]
+  (let [issues (:issues evaluation)
+        summary (:summary evaluation)
+        scores (:scores evaluation)]
+    (str "<evaluation_feedback>\n"
+         "  <summary>" summary "</summary>\n"
+         "  <scores>" (pr-str (dissoc scores :overall)) "</scores>\n"
+         (when (seq issues)
+           (str "  <issues>\n"
+                (->> issues
+                     (map (fn [{:keys [issue severity reasoning mitigation]}]
+                            (str "    <issue severity=\"" severity "\">\n"
+                                 "      <description>" issue "</description>\n"
+                                 (when reasoning (str "      <reasoning>" reasoning "</reasoning>\n"))
+                                 (when mitigation (str "      <mitigation>" mitigation "</mitigation>\n"))
+                                 "    </issue>")))
+                     (str/join "\n"))
+                "\n  </issues>\n"))
+         "</evaluation_feedback>\n\n"
+         "Regenerate " n " improved samples addressing the feedback above. "
+         "Maintain what was good and fix the identified issues.")))
+
 (defn sample!
-  "Generates test data samples matching a spec with criteria evaluation.
+  "Generates test data samples matching a spec with evaluation and self-correction.
    
    Uses the LLM to generate N items that conform to the provided spec,
-   then evaluates the generated samples against criteria to assess quality.
+   evaluates the generated samples against criteria, and iteratively
+   refines until quality threshold is met or max iterations reached.
    
    Params:
    `opts` - Map with keys:
      - :spec - Spec definition, required. Created with spec/spec and spec/field.
      - :count - Integer, required. Number of samples to generate.
-     - :criteria - Map, optional. Evaluation criteria (default: EVAL_CRITERIA).
+     - :messages - Vector of message maps, optional. Custom generation instructions
+         using `system`, `user` helpers. If not provided, uses default instructions.
+     - :criteria - Map, optional. Evaluation criteria (default: sample-specific criteria).
+     - :iterations - Integer, optional. Max refinement iterations (default: 3).
+     - :threshold - Float, optional. Stop when eval score >= threshold (default: 0.9).
      - :model - String, required. LLM model to use.
-      - :config - Map, optional. LLM config from make-config.
+     - :config - Map, optional. LLM config from make-config.
     
     Returns:
     Map with generation results:
       - :samples - Vector. Generated items matching the spec structure.
-      - :criteria-scores - Map. Scores for each criterion from eval!.
-      - :generation-duration-ms - Float. Total time for generation and evaluation.
+      - :scores - Map. Scores for each criterion.
+      - :final-score - Float. Final overall quality score.
+      - :converged? - Boolean. Whether threshold was reached.
+      - :iterations-count - Integer. Number of iterations performed.
+      - :duration-ms - Float. Total time for generation and evaluation.
     
-    Example:
+    Examples:
+    ;; Basic usage
     (sample! {:config config
               :spec user-spec
               :count 5
-              :model \"gpt-4o\"})"
-  [{:keys [spec criteria]
+              :model \"gpt-4o\"})
+    
+    ;; With custom prompt and refinement
+    (sample! {:config config
+              :spec user-spec
+              :count 5
+              :messages [(system \"Generate realistic dating app profiles.\")
+                         (user \"Create diverse profiles for users aged 18-65.\")]
+              :model \"gpt-4o\"
+              :iterations 3
+              :threshold 0.9})"
+  [{:keys [spec messages criteria iterations threshold]
     :as opts
     n :count
-    :or {criteria EVAL_CRITERIA}}]
+    :or {criteria SAMPLE_CRITERIA
+         iterations DEFAULT_SAMPLE_ITERATIONS
+         threshold DEFAULT_SAMPLE_THRESHOLD}}]
   (if (zero? (long n))
     {:samples []
-     :criteria-scores {}
-     :generation-duration-ms 0.0}
+     :scores {}
+     :final-score 0.0
+     :converged? true
+     :iterations-count 0
+     :duration-ms 0.0}
 
     (let [{:keys [config model]} (resolve-opts opts)
-          _ (trove/log! {:level :info :data {:model model :count n} :msg "SVAR sample"})
-          gen-start (System/nanoTime)
 
-          ;; Build objective for sample generation
-          objective (str "You are a test data generator. Generate realistic, diverse samples "
-                         "that match the provided specification. Ensure variety and quality.")
-
-          ;; Build task requesting N samples
-          task (str "Generate exactly " n " sample items. "
-                    "Each item should be unique and realistic. "
-                    "Ensure diversity across all samples.")
-
-          ;; Create a spec for the response that wraps individual items
+          ;; Build items spec wrapping user's spec
           item-spec (assoc spec ::spec/spec-name :Item)
           items-spec (spec/spec
                       {:refs [item-spec]}
@@ -1862,27 +2245,62 @@
                                   ::spec/description "Array of generated samples"
                                   ::spec/target :Item))
 
-          ;; Generate samples using ask!
-          {:keys [result]} (ask! {:spec items-spec
-                                  :objective objective
-                                  :task task
-                                  :model model
-                                  :config config})
-          samples (vec (:items result))
+          ;; Build generation messages
+          count-instruction (str "Generate exactly " n " sample items. "
+                                 "Each item should be unique and realistic. "
+                                 "Ensure diversity across all samples.")
+          generation-messages (if messages
+                                (conj (vec messages) (user count-instruction))
+                                [(system (str "You are a test data generator. Generate realistic, diverse "
+                                              "samples that match the provided specification. "
+                                              "Ensure variety and quality."))
+                                 (user count-instruction)])
 
-          ;; Evaluate the generated samples against criteria
-          evaluation (eval! {:task task
-                             :output result
-                             :model model
-                             :criteria criteria
-                             :config config})
+          ;; Generation + self-correction loop
+          [{:keys [samples scores final-score converged? iterations-count]} total-duration-ms]
+          (util/with-elapsed
+            (loop [iter 0
+                   current-messages generation-messages
+                   best-samples nil
+                   best-score 0.0]
+              (let [{:keys [result]} (ask! {:spec items-spec
+                                            :messages current-messages
+                                            :model model
+                                            :config config})
+                    current-samples (vec (:items result))
 
-          gen-duration-ms (/ (- (System/nanoTime) gen-start) 1e6)]
+                    ;; Evaluate generated samples
+                    evaluation (eval! {:messages generation-messages
+                                       :output result
+                                       :model model
+                                       :criteria criteria
+                                       :config config})
+                    score (double (:overall-score evaluation))
+                    better? (> score (double best-score))
+                    new-best-samples (if better? current-samples (or best-samples current-samples))
+                    new-best-score (if better? score best-score)]
 
-      (trove/log! {:level :info :data {:count (count samples)
-                                          :duration-ms (int gen-duration-ms)}
-                    :msg "SVAR sample done"})
+                (if (or (>= score (double threshold))
+                        (>= (long iter) (dec (long iterations))))
+                  ;; Done — return best result
+                  {:samples new-best-samples
+                   :scores (:scores evaluation)
+                   :final-score new-best-score
+                   :converged? (>= score (double threshold))
+                   :iterations-count (inc (long iter))}
+
+                  ;; Self-correct: feed back evaluation and regenerate
+                  (let [feedback (build-sample-refinement-feedback evaluation n)]
+                    (recur (inc (long iter))
+                           (conj current-messages
+                                 (assistant (data->str result))
+                                 (user feedback))
+                           new-best-samples
+                           new-best-score))))))]
 
       {:samples samples
-       :criteria-scores (:scores evaluation)
-       :generation-duration-ms gen-duration-ms})))
+       :scores scores
+       :final-score final-score
+       :converged? converged?
+       :iterations-count iterations-count
+       :duration-ms total-duration-ms})))

@@ -21,51 +21,52 @@
                                                :model "gpt-4o-mini"})]
                   (expect (= "gpt-4o-mini" (:model cfg)))))
 
-            (it "sets default timeout-ms"
+            (it "sets default timeout-ms in :network"
                 (let [cfg (config/make-config {:api-key "sk-test"
                                                :base-url "https://api.example.com"})]
-                  (expect (= config/DEFAULT_TIMEOUT_MS (:timeout-ms cfg)))))
+                  (expect (= config/DEFAULT_TIMEOUT_MS (get-in cfg [:network :timeout-ms])))))
 
-            (it "allows custom timeout-ms"
+            (it "allows custom timeout-ms via :network"
                 (let [cfg (config/make-config {:api-key "sk-test"
                                                :base-url "https://api.example.com"
-                                               :timeout-ms 300000})]
-                  (expect (= 300000 (:timeout-ms cfg)))))
+                                               :network {:timeout-ms 300000}})]
+                  (expect (= 300000 (get-in cfg [:network :timeout-ms])))))
 
-            (it "sets check-context? to true by default"
+            (it "sets check-context? to true by default in :tokens"
                 (let [cfg (config/make-config {:api-key "sk-test"})]
-                  (expect (true? (:check-context? cfg)))))
+                  (expect (true? (get-in cfg [:tokens :check-context?])))))
 
-            (it "allows disabling check-context?"
+            (it "allows disabling check-context? via :tokens"
                 (let [cfg (config/make-config {:api-key "sk-test"
-                                               :check-context? false})]
-                  (expect (false? (:check-context? cfg)))))
+                                               :tokens {:check-context? false}})]
+                  (expect (false? (get-in cfg [:tokens :check-context?])))))
 
-            (it "merges retry over defaults"
+            (it "merges network over defaults"
                 (let [cfg (config/make-config {:api-key "sk-test"
-                                               :retry {:max-retries 10}})]
-                  (expect (= 10 (get-in cfg [:retry :max-retries])))
+                                               :network {:max-retries 10}})]
+                  (expect (= 10 (get-in cfg [:network :max-retries])))
                   ;; Other defaults preserved
-                  (expect (= 1000 (get-in cfg [:retry :initial-delay-ms])))))
+                  (expect (= 1000 (get-in cfg [:network :initial-delay-ms])))))
 
-            (it "merges pricing over defaults"
+            (it "merges pricing over defaults in :tokens"
                 (let [cfg (config/make-config {:api-key "sk-test"
-                                               :pricing {"my-model" {:input 1.0 :output 2.0}}})]
-                  (expect (= {:input 1.0 :output 2.0} (get-in cfg [:pricing "my-model"])))
+                                               :tokens {:pricing {"my-model" {:input 1.0 :output 2.0}}}})]
+                  (expect (= {:input 1.0 :output 2.0} (get-in cfg [:tokens :pricing "my-model"])))
                   ;; Built-in defaults still present
-                  (expect (some? (get-in cfg [:pricing "gpt-4o"])))))
+                  (expect (some? (get-in cfg [:tokens :pricing "gpt-4o"])))))
 
-            (it "merges context-limits over defaults"
+            (it "merges context-limits over defaults in :tokens"
                 (let [cfg (config/make-config {:api-key "sk-test"
-                                               :context-limits {"my-model" 65536}})]
-                  (expect (= 65536 (get-in cfg [:context-limits "my-model"])))
+                                               :tokens {:context-limits {"my-model" 65536}}})]
+                  (expect (= 65536 (get-in cfg [:tokens :context-limits "my-model"])))
                   ;; Built-in defaults still present
-                  (expect (some? (get-in cfg [:context-limits "gpt-4o"]))))))
+                  (expect (some? (get-in cfg [:tokens :context-limits "gpt-4o"]))))))
 
   (describe "with missing params"
             (it "throws on missing api-key when no env var set"
-                (if (or (System/getenv "OPENAI_API_KEY") (System/getenv "BLOCKETHER_LLM_API_KEY"))
-                  (expect true) ;; Skip when env var is set
+                (if (or (System/getenv "BLOCKETHER_OPENAI_API_KEY")
+                        (System/getenv "OPENAI_API_KEY"))
+                  (expect true) ;; Skip when any api-key env var is set
                   (try
                     (config/make-config {})
                     (expect false "Should have thrown")
@@ -74,8 +75,8 @@
 
             (it "falls back to env var for base-url"
                 (let [cfg (config/make-config {:api-key "sk-test"})
-                      expected-url (or (System/getenv "OPENAI_BASE_URL")
-                                       (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
+                      expected-url (or (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
+                                       (System/getenv "OPENAI_BASE_URL")
                                        config/DEFAULT_BASE_URL)]
                   (expect (= expected-url (:base-url cfg)))))))
 
