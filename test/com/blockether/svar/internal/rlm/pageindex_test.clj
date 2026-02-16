@@ -1,4 +1,4 @@
-(ns com.blockether.svar.rlm.pageindex-test
+(ns com.blockether.svar.internal.rlm.pageindex-test
   "Tests for the PageIndex PDF processing module.
    
    Uses example.pdf from resources-test as the test fixture.
@@ -12,10 +12,10 @@
    [clojure.java.io :as io]
    [clojure.spec.alpha :as s]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
-   [com.blockether.svar.rlm.internal.pageindex.pdf :as pdf]
-   [com.blockether.svar.rlm.internal.pageindex.core :as pageindex]
-   [com.blockether.svar.rlm.internal.pageindex.spec :as pageindex-spec]
-   [com.blockether.svar.rlm.internal.pageindex.vision :as vision])
+   [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
+   [com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex]
+   [com.blockether.svar.internal.rlm.internal.pageindex.spec :as pageindex-spec]
+   [com.blockether.svar.internal.rlm.internal.pageindex.vision :as vision])
   (:import
    [java.awt.image BufferedImage]))
 
@@ -346,8 +346,8 @@
                                                  :page.node/image-data (byte-array [1 2 3])
                                                  :page.node/description "diagram"}]}]]
                   (try
-                    (with-redefs [com.blockether.svar.rlm.internal.pageindex.core/extract-text (fn [_ _] fake-pages)
-                                  com.blockether.svar.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
+                    (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text (fn [_ _] fake-pages)
+                                  com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
                                   vision/infer-document-title (fn [_ _] nil)]
                       (let [doc (pageindex/build-index TEST_PDF_PATH {:output-dir (str output-dir)})
                             node-id (get-in doc [:document/pages 0 :page/nodes 0 :page.node/id])
@@ -357,8 +357,8 @@
                       (fs/delete-tree output-dir)))))
 
             (it "throws when output-dir does not exist"
-                (with-redefs [com.blockether.svar.rlm.internal.pageindex.core/extract-text (fn [_ _] [])
-                              com.blockether.svar.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
+                (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text (fn [_ _] [])
+                              com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
                               vision/infer-document-title (fn [_ _] nil)]
                   (expect (throws? clojure.lang.ExceptionInfo
                                    #(pageindex/build-index TEST_PDF_PATH {:output-dir "does-not-exist"}))))))
@@ -370,8 +370,8 @@
                                                  :page.node/id "img-1"
                                                  :page.node/image-data (byte-array [9 9 9])
                                                  :page.node/description "diagram"}]}]]
-                  (with-redefs [com.blockether.svar.rlm.internal.pageindex.core/extract-text (fn [_ _] fake-pages)
-                                com.blockether.svar.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
+                  (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text (fn [_ _] fake-pages)
+                                com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
                                 vision/infer-document-title (fn [_ _] nil)]
                     (let [doc (pageindex/build-index TEST_PDF_PATH)
                           img-bytes (get-in doc [:document/pages 0 :page/nodes 0 :page.node/image-data])]
@@ -384,7 +384,7 @@
                                           :page/nodes [{:page.node/type :paragraph
                                                         :page.node/id "p1"
                                                         :page.node/content "hello"}]}])
-                              com.blockether.svar.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
+                              com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
                               vision/infer-document-title (fn [_ _] nil)]
                   (let [doc (pageindex/build-index "Hello" {:content-type :txt
                                                             :doc-name "sample"
@@ -415,8 +415,8 @@
                                                  :page.node/bbox [10 20 300 200]
                                                  :page.node/description "A table showing names and ages"
                                                  :page.node/content ascii-table}]}]]
-                  (with-redefs [com.blockether.svar.rlm.internal.pageindex.core/extract-text (fn [_ _] fake-pages)
-                                com.blockether.svar.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
+                  (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text (fn [_ _] fake-pages)
+                                com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract (fn [_ _] nil)
                                 vision/infer-document-title (fn [_ _] nil)]
                     (let [doc (pageindex/build-index TEST_PDF_PATH)
                           table-node (->> (get-in doc [:document/pages 0 :page/nodes])
@@ -453,7 +453,7 @@
                                             :page.node/description "Test"
                                             :page.node/content ascii-table}]}]
                       translated (pageindex/group-continuations
-                                  (#'com.blockether.svar.rlm.internal.pageindex.core/translate-all-ids pages))
+                                  (#'com.blockether.svar.internal.rlm.internal.pageindex.core/translate-all-ids pages))
                       table-node (first (:page/nodes (first translated)))]
                   (expect (= ascii-table (:page.node/content table-node)))
                   ;; ID should be translated to UUID

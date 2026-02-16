@@ -1,9 +1,10 @@
-(ns com.blockether.svar.rlm-test
+(ns com.blockether.svar.internal.rlm-test
   (:require
    [babashka.fs :as fs]
    [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
-   [com.blockether.svar.rlm :as sut]
+   [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.rlm :as sut]
    [com.blockether.svar.core :as svar])
   (:import
    [java.util UUID]))
@@ -883,7 +884,7 @@
         (expect (str/includes? prompt "(search-entities"))))
 
   (it "includes spec schema when provided"
-      (let [test-spec (svar/svar-spec
+      (let [test-spec (svar/spec
                        (svar/field {svar/NAME :name
                                     svar/TYPE :spec.type/string
                                     svar/CARDINALITY :spec.cardinality/one
@@ -989,79 +990,84 @@
 (defdescribe query!-integration-test
   (describe "basic functionality"
             (it "processes simple string context with refinement"
-                (with-integration-env* (fn [env]
-                                         (let [result (sut/query! env "What is the capital of France? Answer with just the city name."
-                                                                  {:context "Paris is the capital of France."
-                                                                   :max-iterations 10
-                                                                   :learn? false})]
-          ;; Result is now a map with :answer key
-                                           (expect (map? result))
-                                           (if (:status result)
-                                             (expect (= :max-iterations (:status result)))
-                                             (do
-                                               (expect (some? (:answer result)))
-                                               (expect (re-find #"(?i)paris" (str (:answer result))))
-                                               (expect (contains? result :refinement-count))
-                                               (expect (contains? result :eval-scores))))))))
+                (when (integration-tests-enabled?)
+                  (with-integration-env*
+                   (fn [env]
+                     (let [result (sut/query! env "What is the capital of France? Answer with just the city name."
+                                              {:context "Paris is the capital of France."
+                                               :max-iterations 10
+                                               :learn? false})]
+                       (expect (map? result))
+                       (if (:status result)
+                         (expect (= :max-iterations (:status result)))
+                         (do
+                           (expect (some? (:answer result)))
+                           (expect (re-find #"(?i)paris" (str (:answer result))))
+                           (expect (contains? result :refinement-count))
+                           (expect (contains? result :eval-scores)))))))))
 
             (it "can disable refinement for speed"
-                (with-integration-env* (fn [env]
-                                         (let [result (sut/query! env "What is 2 + 2?"
-                                                                  {:context "2 + 2 = 4"
-                                                                   :max-iterations 5
-                                                                   :refine? false
-                                                                   :learn? false})]
-                                           (expect (map? result))
-          ;; When refine? is false, either:
-          ;; - Query completes with refinement-count=0 and no eval-scores
-          ;; - Query hits max-iterations (status present)
-                                           (if (:status result)
-                                             (do
-                                               (expect (= :max-iterations (:status result)))
-                                               (expect (contains? result :iterations)))
-                                             (do
-                                               (expect (= 0 (:refinement-count result)))
-                                               (expect (nil? (:eval-scores result))))))))))
+                (when (integration-tests-enabled?)
+                  (with-integration-env*
+                   (fn [env]
+                     (let [result (sut/query! env "What is 2 + 2?"
+                                              {:context "2 + 2 = 4"
+                                               :max-iterations 5
+                                               :refine? false
+                                               :learn? false})]
+                       (expect (map? result))
+                       (if (:status result)
+                         (do
+                           (expect (= :max-iterations (:status result)))
+                           (expect (contains? result :iterations)))
+                         (do
+                           (expect (= 0 (:refinement-count result)))
+                           (expect (nil? (:eval-scores result)))))))))))
 
   (describe "code execution capabilities"
             (it "allows LLM to access context and return FINAL"
-                (with-integration-env* (fn [env]
-                                         (let [result (sut/query! env "What is the value of :count? Use (FINAL answer)"
-                                                                  {:context {:count 42}
-                                                                   :max-iterations 10
-                                                                   :refine? false
-                                                                   :learn? false})]
-                                           (expect (map? result))
-                                           (if (:status result)
-                                             (expect (= :max-iterations (:status result)))
-                                             (expect (re-find #"42" (str (:answer result))))))))))
+                (when (integration-tests-enabled?)
+                  (with-integration-env*
+                   (fn [env]
+                     (let [result (sut/query! env "What is the value of :count? Use (FINAL answer)"
+                                              {:context {:count 42}
+                                               :max-iterations 10
+                                               :refine? false
+                                               :learn? false})]
+                       (expect (map? result))
+                       (if (:status result)
+                         (expect (= :max-iterations (:status result)))
+                         (expect (re-find #"42" (str (:answer result)))))))))))
 
   (describe "refinement loop"
             (it "applies refinement by default"
-                (with-integration-env* (fn [env]
-                                         (let [result (sut/query! env "Sum the numbers"
-                                                                  {:context {:nums [1 2 3 4 5]}
-                                                                   :max-iterations 10
-                                                                   :max-refinements 1
-                                                                   :learn? false})]
-                                           (expect (map? result))
-                                           (when-not (:status result)
-                                             (expect (some? (:eval-scores result)))
-                                             (expect (number? (:eval-scores result)))))))))
+                (when (integration-tests-enabled?)
+                  (with-integration-env*
+                   (fn [env]
+                     (let [result (sut/query! env "Sum the numbers"
+                                              {:context {:nums [1 2 3 4 5]}
+                                               :max-iterations 10
+                                               :max-refinements 1
+                                               :learn? false})]
+                       (expect (map? result))
+                       (when-not (:status result)
+                         (expect (some? (:eval-scores result)))
+                         (expect (number? (:eval-scores result))))))))))
 
   (describe "history tracking"
             (it "tracks history tokens when enabled"
-                (with-integration-env* (fn [env]
-                                         (let [result (sut/query! env "Echo the context"
-                                                                  {:context "Test context"
-                                                                   :max-iterations 5
-                                                                   :refine? false
-                                                                   :learn? false})]
-                                           (expect (map? result))
-          ;; History tokens should be present since db is enabled by default
-                                           (when-not (:status result)
-                                             (expect (contains? result :history-tokens))
-                                             (expect (number? (:history-tokens result)))))))))
+                (when (integration-tests-enabled?)
+                  (with-integration-env*
+                   (fn [env]
+                     (let [result (sut/query! env "Echo the context"
+                                              {:context "Test context"
+                                               :max-iterations 5
+                                               :refine? false
+                                               :learn? false})]
+                       (expect (map? result))
+                       (when-not (:status result)
+                         (expect (contains? result :history-tokens))
+                         (expect (number? (:history-tokens result))))))))))
 
   (describe "validation"
             (it "throws when env is invalid"
@@ -1398,7 +1404,7 @@
    :duration-ms 0})
 
 (defmacro with-mock-ask!
-  "Stubs `com.blockether.svar.core/ask!` with canned responses.
+  "Stubs `com.blockether.svar.internal.llm/ask!` with canned responses.
    
    `response-fn` is called with the ask! opts map and should return
    the mock response (use `make-mock-ask-response` to build it).
@@ -1412,7 +1418,7 @@
      (with-mock-ask! (fn [_] (let [r (first @calls)] (swap! calls rest) r))
        (svar/refine! opts)))"
   [response-fn & body]
-  `(with-redefs [svar/ask! (fn [opts#] (~response-fn opts#))]
+  `(with-redefs [llm/ask! (fn [opts#] (~response-fn opts#))]
      ~@body))
 
 (defn make-mock-eval-response
@@ -1454,8 +1460,8 @@
      (fn [opts] (make-mock-eval-response 0.95))
      (svar/refine! ...))"
   [ask-fn eval-fn & body]
-  `(with-redefs [svar/ask! (fn [opts#] (~ask-fn opts#))
-                 svar/eval! (fn [opts#] (~eval-fn opts#))]
+  `(with-redefs [llm/ask! (fn [opts#] (~ask-fn opts#))
+                 llm/eval! (fn [opts#] (~eval-fn opts#))]
      ~@body))
 
 ;; =============================================================================
@@ -1764,7 +1770,7 @@
   (describe "with-mock-ask!"
             (it "intercepts ask! calls with canned response"
                 (with-mock-ask! (fn [_opts] (make-mock-ask-response {:answer 42}))
-                  (let [result (svar/ask! {:spec nil :objective "test" :task "test" :model "gpt-4o"})]
+                  (let [result (llm/ask! {:spec nil :objective "test" :task "test" :model "gpt-4o"})]
                     (expect (= {:answer 42} (:result result)))
                     (expect (= 0 (:duration-ms result)))))))
 
@@ -1781,8 +1787,8 @@
                 (with-mock-ask-and-eval!
                   (fn [_opts] (make-mock-ask-response {:data "mocked"}))
                   (fn [_opts] (make-mock-eval-response 0.9))
-                  (let [ask-result (svar/ask! {:spec nil :objective "t" :task "t" :model "gpt-4o"})
-                        eval-result (svar/eval! {:task "t" :output "t" :model "gpt-4o"})]
+                  (let [ask-result (llm/ask! {:spec nil :objective "t" :task "t" :model "gpt-4o"})
+                        eval-result (llm/eval! {:task "t" :output "t" :model "gpt-4o"})]
                     (expect (= {:data "mocked"} (:result ask-result)))
                     (expect (= 0.9 (:overall-score eval-result))))))))
 
@@ -2127,10 +2133,10 @@
 ;; =============================================================================
 
 (defmacro ^:private with-mock-chat!
-  "Stubs svar/chat-completion (private) for testing query! iteration loop.
+  "Stubs llm/chat-completion for testing query! iteration loop.
    `response-fn` receives [messages model api-key base-url] and returns a string."
   [response-fn & body]
-  `(let [v# (var com.blockether.svar.core/chat-completion)
+  `(let [v# (var com.blockether.svar.internal.llm/chat-completion)
          orig# (deref v#)]
      (try
        (alter-var-root v# (constantly ~response-fn))
@@ -3012,10 +3018,219 @@
                     (finally
                       (#'sut/dispose-db! db-info)))))
 
-            (it "relationships vector starts empty in EMPTY_STORE"
+             (it "relationships vector starts empty in EMPTY_STORE"
                 (let [db-info (#'sut/create-disposable-db)]
                   (try
                     (expect (= [] (:relationships @(:store db-info))))
                     (finally
                       (#'sut/dispose-db! db-info)))))))
+
+;; =============================================================================
+;; questionify! pipeline unit tests
+;; =============================================================================
+
+(defdescribe compute-distribution-test
+  (describe "compute-distribution"
+            (it "distributes evenly when divisible"
+                (let [result (#'sut/compute-distribution 6 #{:a :b :c})]
+                  (expect (= 6 (reduce + (vals result))))
+                  (expect (every? #(= 2 %) (vals result)))))
+            (it "distributes remainder across first items"
+                (let [result (#'sut/compute-distribution 7 #{:a :b :c})]
+                  (expect (= 7 (reduce + (vals result))))
+                  ;; One item gets 3, two get 2 (or similar)
+                  (expect (= #{2 3} (set (vals result))))))
+            (it "handles single item"
+                (let [result (#'sut/compute-distribution 10 #{:x})]
+                  (expect (= {:x 10} result))))
+            (it "handles zero count"
+                (let [result (#'sut/compute-distribution 0 #{:a :b})]
+                  (expect (= 0 (reduce + (vals result))))))))
+
+(defdescribe deduplicate-questions-test
+  (describe "deduplicate-questions"
+            (it "keeps unique questions when LLM returns all indices"
+                (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices [0 1 2]}))
+                  (let [questions [{:question "What is the capital of France?"}
+                                   {:question "How does photosynthesis work?"}
+                                   {:question "What year was the company founded?"}]
+                        result (#'sut/deduplicate-questions questions {} "gpt-4o")]
+                    (expect (= 3 (count result))))))
+            (it "removes duplicates when LLM identifies them"
+                (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices [0 2]}))
+                  (let [questions [{:question "What is the minimum capital requirement for banks?"}
+                                   {:question "What is the minimum capital requirement for the banks?"}
+                                   {:question "How does photosynthesis produce oxygen?"}]
+                        result (#'sut/deduplicate-questions questions {} "gpt-4o")]
+                    (expect (= 2 (count result)))
+                    (expect (= "What is the minimum capital requirement for banks?"
+                               (:question (first result))))
+                    (expect (= "How does photosynthesis produce oxygen?"
+                               (:question (second result)))))))
+            (it "handles empty input"
+                (expect (= [] (#'sut/deduplicate-questions [] {} "gpt-4o"))))
+            (it "handles single question without calling LLM"
+                (let [result (#'sut/deduplicate-questions [{:question "Solo question"}] {} "gpt-4o")]
+                  (expect (= 1 (count result)))))
+            (it "falls back to all questions when LLM returns empty"
+                (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices []}))
+                  (let [questions [{:question "Q1"} {:question "Q2"}]
+                        result (#'sut/deduplicate-questions questions {} "gpt-4o")]
+                    (expect (= 2 (count result))))))))
+
+(defdescribe filter-verified-questions-test
+  (describe "filter-verified-questions"
+            (it "passes questions with :pass verdict"
+                (let [questions [{:question "Q1"} {:question "Q2"} {:question "Q3"}]
+                      verifications [{:question-index 0 :verdict :pass}
+                                     {:question-index 1 :verdict :fail :revision-note "bad"}
+                                     {:question-index 2 :verdict :pass}]
+                      result (#'sut/filter-verified-questions questions verifications)]
+                  (expect (= 2 (count (:passed result))))
+                  (expect (= 1 (count (:dropped result))))
+                  (expect (= "Q1" (:question (first (:passed result)))))
+                  (expect (= "Q3" (:question (second (:passed result)))))
+                  (expect (= "Q2" (:question (first (:dropped result)))))))
+            (it "defaults to :pass for missing verifications"
+                (let [questions [{:question "Q1"} {:question "Q2"}]
+                      verifications [{:question-index 0 :verdict :pass}]
+                      result (#'sut/filter-verified-questions questions verifications)]
+                  (expect (= 2 (count (:passed result))))
+                  (expect (= 0 (count (:dropped result))))))
+            (it "separates needs-revision questions for revision"
+                (let [questions [{:question "Q1"}]
+                      verifications [{:question-index 0 :verdict :needs-revision :revision-note "fix it"}]
+                      result (#'sut/filter-verified-questions questions verifications)]
+                  (expect (= 0 (count (:passed result))))
+                  (expect (= 0 (count (:dropped result))))
+                  (expect (= 1 (count (:needs-revision result))))
+                  (expect (= "fix it" (:revision-note (first (:needs-revision result)))))))
+            (it "handles empty input"
+                (let [result (#'sut/filter-verified-questions [] [])]
+                  (expect (= [] (:passed result)))
+                  (expect (= [] (:needs-revision result)))
+                  (expect (= [] (:dropped result)))))))
+
+(defdescribe build-chunk-selection-prompt-test
+  (describe "build-chunk-selection-prompt"
+            (it "produces non-empty string with key instructions"
+                (let [prompt (#'sut/build-chunk-selection-prompt
+                              {:count 15
+                               :difficulty-dist #{:remember :understand :apply}
+                               :category-dist #{:factual :inferential}})]
+                  (expect (string? prompt))
+                  (expect (> (count prompt) 200))
+                  (expect (str/includes? prompt "15"))
+                  (expect (str/includes? prompt "list-documents"))
+                  (expect (str/includes? prompt "FINAL"))))))
+
+(defdescribe build-generation-prompt-test
+  (describe "build-generation-prompt"
+            (it "includes passage details and key instructions"
+                (let [passages [{:document-id "doc1" :page 3
+                                 :section-title "Introduction"
+                                 :content-summary "Overview of the topic"
+                                 :suggested-difficulty :understand
+                                 :suggested-category :factual}]
+                      prompt (#'sut/build-generation-prompt passages 0 {})]
+                  (expect (string? prompt))
+                  (expect (str/includes? prompt "doc1"))
+                  (expect (str/includes? prompt "Introduction"))
+                  (expect (str/includes? prompt "evidence-span"))
+                  (expect (str/includes? prompt "VERBATIM"))
+                  (expect (str/includes? prompt "FINAL"))))
+            (it "includes persona instruction when provided"
+                (let [passages [{:document-id "doc1" :page 0
+                                 :section-title "Intro"
+                                 :content-summary "Summary"
+                                 :suggested-difficulty :remember
+                                 :suggested-category :factual}]
+                      prompt (#'sut/build-generation-prompt passages 0 {:persona :researcher})]
+                  (expect (str/includes? prompt "PERSONA"))
+                  (expect (str/includes? prompt "researcher"))))
+            (it "includes k-candidates instruction when k > 1"
+                (let [passages [{:document-id "doc1" :page 0
+                                 :section-title "Intro"
+                                 :content-summary "Summary"
+                                 :suggested-difficulty :remember
+                                 :suggested-category :factual}]
+                      prompt (#'sut/build-generation-prompt passages 0 {:k-candidates 3})]
+                  (expect (str/includes? prompt "3 candidate"))))
+            (it "includes multi-hop instruction when enabled"
+                (let [passages [{:document-id "doc1" :page 0
+                                 :section-title "Intro"
+                                 :content-summary "Summary"
+                                 :suggested-difficulty :analyze
+                                 :suggested-category :comparative}]
+                      prompt (#'sut/build-generation-prompt passages 0 {:multi-hop? true})]
+                  (expect (str/includes? prompt "MULTI-HOP"))))))
+
+(defdescribe build-verification-prompt-test
+  (describe "build-verification-prompt"
+            (it "includes question details and verification criteria"
+                (let [questions [{:question "What is X?"
+                                  :answer "X is Y"
+                                  :evidence-span "X is defined as Y"
+                                  :source-document "doc1"
+                                  :source-page 5}]
+                      prompt (#'sut/build-verification-prompt questions)]
+                  (expect (string? prompt))
+                  (expect (str/includes? prompt "What is X?"))
+                  (expect (str/includes? prompt "GROUNDED"))
+                  (expect (str/includes? prompt "NON-TRIVIAL"))
+                  (expect (str/includes? prompt "SELF-CONTAINED"))
+                  (expect (str/includes? prompt "ANSWERABLE"))
+                  (expect (str/includes? prompt "ANSWER-CONSISTENT"))
+                  (expect (str/includes? prompt "FINAL"))))))
+
+(defdescribe save-questionify-test
+  (describe "save-questionify!"
+            (it "saves EDN file with correct structure"
+                (let [dir (str (fs/create-temp-dir {:prefix "questionify-test-"}))
+                      result {:questions [{:question "Q1" :answer "A1" :difficulty :understand
+                                           :category :factual :source-document "d1" :source-page 0
+                                           :evidence-span "evidence text"}]
+                              :dropped-questions [{:question "Bad Q"}]
+                              :stats {:total-generated 2 :passed-verification 1
+                                      :duplicates-removed 0 :final-count 1
+                                      :by-difficulty {:understand 1} :by-category {:factual 1}}}
+                      path (str dir "/test-output")
+                      saved (sut/save-questionify! result path {:formats #{:edn}})]
+                  (expect (= 1 (count (:files saved))))
+                  (expect (str/ends-with? (first (:files saved)) ".edn"))
+                  (let [data (read-string (slurp (first (:files saved))))]
+                    (expect (= 1 (count (:questions data))))
+                    (expect (= "Q1" (:question (first (:questions data)))))
+                    (expect (map? (:stats data))))))
+            (it "saves Markdown file with formatted content"
+                (let [dir (str (fs/create-temp-dir {:prefix "questionify-test-"}))
+                      result {:questions [{:question "What is X?" :answer "X is Y"
+                                           :difficulty :analyze :category :inferential
+                                           :source-document "doc1" :source-page 3
+                                           :source-section "Chapter 2"
+                                           :evidence-span "X is defined as Y in the spec"}]
+                              :dropped-questions []
+                              :stats {:total-generated 1 :passed-verification 1
+                                      :duplicates-removed 0 :final-count 1
+                                      :by-difficulty {:analyze 1} :by-category {:inferential 1}}}
+                      path (str dir "/test-output")
+                      saved (sut/save-questionify! result path {:formats #{:markdown}})]
+                  (expect (= 1 (count (:files saved))))
+                  (expect (str/ends-with? (first (:files saved)) ".md"))
+                  (let [content (slurp (first (:files saved)))]
+                    (expect (str/includes? content "# Generated Q&A Pairs"))
+                    (expect (str/includes? content "What is X?"))
+                    (expect (str/includes? content "X is Y"))
+                    (expect (str/includes? content "Evidence"))
+                    (expect (str/includes? content "Chapter 2")))))
+            (it "saves both formats when requested"
+                (let [dir (str (fs/create-temp-dir {:prefix "questionify-test-"}))
+                      result {:questions [] :dropped-questions []
+                              :stats {:total-generated 0 :passed-verification 0
+                                      :duplicates-removed 0 :final-count 0
+                                      :by-difficulty {} :by-category {}}}
+                      path (str dir "/test-output")
+                      saved (sut/save-questionify! result path)]
+                  (expect (= 2 (count (:files saved))))))))
+
 

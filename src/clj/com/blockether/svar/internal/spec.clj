@@ -1,4 +1,4 @@
-(ns com.blockether.svar.spec
+(ns com.blockether.svar.internal.spec
   "Structured output specification system for LLM responses.
    
    This namespace provides a DSL for defining expected output structures,

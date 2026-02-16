@@ -1,4 +1,4 @@
-(ns com.blockether.svar.rlm.internal.pageindex.spec
+(ns com.blockether.svar.internal.rlm.internal.pageindex.spec
   "Comprehensive clojure.spec definitions for RLM data structures.
    
    This namespace centralizes ALL specs for the RLM system to provide

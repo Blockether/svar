@@ -1,4 +1,4 @@
-(ns com.blockether.svar.rlm.internal.pageindex.core
+(ns com.blockether.svar.internal.rlm.internal.pageindex.core
   "Main API for RLM document indexing - extracts structured data from documents.
    
    Primary functions:
@@ -26,7 +26,7 @@
    4. Generates document abstract from all section descriptions using Chain of Density
    
    Usage:
-   (require '[com.blockether.svar.rlm.internal.pageindex.core :as pageindex])
+   (require '[com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex])
    
    ;; Index a PDF
    (def doc (pageindex/build-index \"manual.pdf\"))
@@ -45,10 +45,10 @@
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.core :as svar]
     [com.blockether.svar.internal.util :as util]
-    [com.blockether.svar.rlm.internal.pageindex.markdown :as markdown]
-   [com.blockether.svar.rlm.internal.pageindex.pdf :as pdf]
-   [com.blockether.svar.rlm.internal.pageindex.spec :as rlm-spec]
-   [com.blockether.svar.rlm.internal.pageindex.vision :as vision]
+    [com.blockether.svar.internal.rlm.internal.pageindex.markdown :as markdown]
+   [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
+   [com.blockether.svar.internal.rlm.internal.pageindex.spec :as rlm-spec]
+   [com.blockether.svar.internal.rlm.internal.pageindex.vision :as vision]
    [fast-edn.core :as edn]
    [taoensso.trove :as trove])
   (:import

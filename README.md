@@ -19,7 +19,7 @@ Works with any text-producing LLM — no structured output support required.
 <div align="center">
 <h3>
 
-[Problem](#problem) • [What SVAR Does](#what-svar-does) • [Quick Start](#quick-start) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference) • [RLM](#rlm--recursive-language-model)
+[Problem](#problem) • [Functionalities](#functionalities) • [Quick Start](#quick-start) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference) • [RLM](#rlm--recursive-language-model)
 
 </h3>
 </div>
@@ -30,20 +30,47 @@ JSON Schema is the de facto way to get structured output from LLMs — but it's 
 
 SVAR takes a different approach: let the LLM produce plain text, then parse and correct the output post-step. This works with **any** text-producing LLM — OpenAI, Anthropic, local Ollama, vLLM, whatever you have. No provider lock-in, no feature flags, no "this model doesn't support JSON mode" surprises.
 
-## What SVAR Does
+## Functionalities
 
-- **`ask!`** — Structured output from LLMs via a type-safe spec DSL. Returns validated Clojure maps with token/cost tracking.
-- **`abstract!`** — Chain of Density summarization for entity-rich summaries.
-- **`eval!`** — LLM self-evaluation for quality assessment.
-- **`refine!`** — Iterative refinement with decomposition and verification.
-- **`models!`** — Lists available models from your LLM provider.
-- **`sample!`** — Generates test data matching a spec with quality evaluation and self-correction.
-- **RLM** — Agentic reasoning loops with tool use, sandboxed SCI execution, custom functions, and conversation history.
-- **Spec DSL** — Define expected output schemas: types, cardinality, enums, optional fields, nested refs, namespaced keys, fixed-size vectors.
-- **SAP Parser** — Java-based Schemaless Adaptive Parsing handles malformed JSON (unquoted keys, trailing commas, markdown blocks, single quotes).
-- **Token counting** — Accurate counts and cost estimation via JTokkit.
-- **Guardrails** — Static injection detection + LLM-based content moderation.
-- **Humanizer** — Strips AI-style phrases from outputs.
+#### `svar.core` — LLM Interactions
+
+| Function | Description |
+|----------|-------------|
+| **`ask!`** | Structured output from LLMs via a type-safe spec DSL. Returns validated Clojure maps with token/cost tracking. |
+| **`abstract!`** | Chain of Density summarization for entity-rich summaries. |
+| **`eval!`** | LLM self-evaluation for quality assessment. |
+| **`refine!`** | Iterative refinement with decomposition and verification. |
+| **`models!`** | Lists available models from your LLM provider. |
+| **`sample!`** | Generates test data matching a spec with quality evaluation and self-correction. |
+
+#### `svar.core` — Utilities
+
+| Feature | Description |
+|---------|-------------|
+| **SAP Parser** | Java-based Schemaless Adaptive Parsing handles malformed JSON (unquoted keys, trailing commas, markdown blocks, single quotes). |
+| **Token counting** | Accurate counts and cost estimation via JTokkit. |
+| **Guardrails** | Static injection detection + LLM-based content moderation. |
+| **Humanizer** | Strips AI-style phrases from outputs. |
+
+#### `svar.core` — Output Schema DSL
+
+| Feature | Description |
+|---------|-------------|
+| **Spec DSL** | Define expected output schemas: types, cardinality, enums, optional fields, nested refs, namespaced keys, fixed-size vectors. |
+
+#### `svar.core` — Agentic Reasoning (RLM)
+
+| Function | Description |
+|----------|-------------|
+| **`create-env`** | Create an RLM environment for processing large contexts via iterative code execution. |
+| **`ingest!`** | Ingest documents into an RLM environment for querying. |
+| **`query!`** | Run a query using iterative code execution in a sandboxed SCI environment. |
+| **`dispose!`** | Dispose an RLM environment and clean up resources. |
+| **`register-fn!`** | Register a custom function in the RLM's SCI sandbox. |
+| **`register-def!`** | Register a constant in the RLM's SCI sandbox. |
+| **`questionify!`** | Generate question-answer pairs from ingested documents. |
+| **`pprint-trace`** | Pretty-print an RLM trace to a string. |
+| **`print-trace`** | Pretty-print an RLM trace to stdout. |
 
 ## Quick Start
 
@@ -53,8 +80,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 ```
 
 ```clojure
-(require '[com.blockether.svar.core :as svar]
-         '[com.blockether.svar.spec :as spec])
+(require '[com.blockether.svar.core :as svar])
 
 ;; Configuration reads from OPENAI_API_KEY and OPENAI_BASE_URL env vars.
 ;; All API functions create a default config automatically when :config is omitted.
@@ -106,7 +132,7 @@ SVAR doesn't require your LLM to support structured output mode. Instead, `ask!`
 
 ```clojure
 (def person-spec
-  (svar/svar-spec
+  (svar/spec
     (svar/field svar/NAME :name
                 svar/TYPE svar/TYPE_STRING
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -268,7 +294,7 @@ Spec-driven humanization — mark specific fields with `::spec/humanize?` and pa
 
 ```clojure
 (def review-spec
-  (svar/svar-spec
+  (svar/spec
     (svar/field svar/NAME :summary
                 svar/TYPE svar/TYPE_STRING
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -372,7 +398,7 @@ Generates realistic test data matching a spec, with quality evaluation and self-
 
 ```clojure
 (def user-spec
-  (svar/svar-spec
+  (svar/spec
     (svar/field svar/NAME :username
                 svar/TYPE svar/TYPE_STRING
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -441,7 +467,7 @@ String values automatically become Clojure keywords on parse — useful for stat
 
 ```clojure
 (def status-spec
-  (svar/svar-spec
+  (svar/spec
     (svar/field svar/NAME :status
                 svar/TYPE svar/TYPE_KEYWORD
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -458,7 +484,7 @@ When a field should only contain one of a fixed set of values — status codes, 
 
 ```clojure
 (def sentiment-spec
-  (svar/svar-spec
+  (svar/spec
     (svar/field svar/NAME :sentiment
                 svar/TYPE svar/TYPE_STRING
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -486,7 +512,7 @@ Fields are required by default — the LLM must provide a value. Set `REQUIRED f
 
 ```clojure
 (def contact-spec
-  (svar/svar-spec
+  (svar/spec
     (svar/field svar/NAME :name
                 svar/TYPE svar/TYPE_STRING
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -512,7 +538,7 @@ When a field holds multiple values — tags, authors, line items — use `CARDIN
 
 ```clojure
 (def article-spec
-  (svar/svar-spec
+  (svar/spec
     (svar/field svar/NAME :title
                 svar/TYPE svar/TYPE_STRING
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -538,7 +564,7 @@ Pass referenced specs via `{:refs [address-spec]}` so the prompt generator and p
 
 ```clojure
 (def address-spec
-  (svar/svar-spec :Address
+  (svar/spec :Address
     (svar/field svar/NAME :street
                 svar/TYPE svar/TYPE_STRING
                 svar/CARDINALITY svar/CARDINALITY_ONE
@@ -549,7 +575,7 @@ Pass referenced specs via `{:refs [address-spec]}` so the prompt generator and p
                 svar/DESCRIPTION "City name")))
 
 (def company-spec
-  (svar/svar-spec
+  (svar/spec
     {:refs [address-spec]}
     (svar/field svar/NAME :name
                 svar/TYPE svar/TYPE_STRING
@@ -585,7 +611,7 @@ This is especially useful when multiple specs share field names like `:type` or 
 
 ```clojure
 (def node-spec
-  (svar/svar-spec :node
+  (svar/spec :node
     {svar/KEY-NS "page.node"}
     (svar/field svar/NAME :type
                 svar/TYPE svar/TYPE_STRING
@@ -690,20 +716,18 @@ Serialize Clojure data to/from LLM-compatible strings:
 RLM enables an LLM to iteratively write and execute Clojure code to examine, filter, and process large contexts that exceed token limits. The LLM writes code that runs in a sandboxed SCI environment, inspects results, and decides whether to continue iterating or return a final answer.
 
 ```clojure
-(require '[com.blockether.svar.rlm :as rlm])
-
 (comment
   ;; 1. Create environment
-  (def env (rlm/create-env {:config config :db-path "/tmp/my-rlm"}))
+  (def env (svar/create-env {:config config :db-path "/tmp/my-rlm"}))
 
   ;; 2. Ingest documents (PageIndex format)
-  (rlm/ingest! env documents)
+  (svar/ingest! env documents)
 
   ;; 3. Query
-  (rlm/query! env "What are the key compliance requirements?")
+  (svar/query! env "What are the key compliance requirements?")
 
   ;; 4. Dispose when done
-  (rlm/dispose! env))
+  (svar/dispose! env))
 ```
 
 ### Sandbox Extensibility
@@ -713,20 +737,20 @@ Inject custom functions and constants into the RLM's sandboxed SCI environment. 
 ```clojure
 (comment
   ;; Register a function the LLM can call
-  (rlm/register-fn! env 'fetch-weather
+  (svar/register-fn! env 'fetch-weather
     (fn [city] {:temp 22 :condition "sunny"})
     "(fetch-weather city) - Returns weather data for a city")
 
   ;; Register a constant
-  (rlm/register-def! env 'MAX_RETRIES 3
+  (svar/register-def! env 'MAX_RETRIES 3
     "MAX_RETRIES - Maximum retry attempts")
 
   ;; Both return the env for chaining
   (-> env
-      (rlm/register-fn! 'lookup-user
+      (svar/register-fn! 'lookup-user
         (fn [id] {:name "Alice" :role "admin"})
         "(lookup-user id) - Looks up user by ID")
-      (rlm/register-def! 'API_VERSION "v2"
+      (svar/register-def! 'API_VERSION "v2"
         "API_VERSION - Current API version")))
 ```
 
@@ -734,7 +758,7 @@ Inject custom functions and constants into the RLM's sandboxed SCI environment. 
 
 ```clojure
 (comment
-  (rlm/query! env "Summarize the contract terms"
+  (svar/query! env "Summarize the contract terms"
     {:spec my-output-spec          ;; structured output (parsed with spec)
      :context {:extra "data"}      ;; additional data context
      :model "gpt-4o"               ;; override default model
@@ -758,7 +782,7 @@ keeping iterations focused and reducing wasted exploration.
 ```clojure
 (comment
   ;; For complex multi-document queries, planning reduces iteration count
-  (rlm/query! env "Compare the financial obligations across all agreements"
+  (svar/query! env "Compare the financial obligations across all agreements"
     {:plan? true}))
 ```
 
@@ -770,7 +794,7 @@ its source material. The result includes a `:verified-claims` vector.
 
 ```clojure
 (comment
-  (let [result (rlm/query! env "What penalties apply for late payment?"
+  (let [result (svar/query! env "What penalties apply for late payment?"
                  {:verify-claims? true})]
     (:verified-claims result)
     ;; => [{:claim "Late fee of 1.5% per month" :source "doc-1" :verified? true} ...]
@@ -797,20 +821,41 @@ Every `query!` result includes a `:trace` vector. Pretty-print it for debugging:
 
 ```clojure
 (comment
-  (let [result (rlm/query! env "Find all parties in the agreement")]
+  (let [result (svar/query! env "Find all parties in the agreement")]
     ;; Pretty-print trace to string
-    (println (rlm/pprint-trace (:trace result)))
+    (println (svar/pprint-trace (:trace result)))
 
     ;; Or print directly to stdout
-    (rlm/print-trace (:trace result))
+    (svar/print-trace (:trace result))
 
     ;; With options
-    (rlm/print-trace (:trace result)
+    (svar/print-trace (:trace result)
       {:max-response-length 500   ;; truncate LLM response text
        :max-code-length 300       ;; truncate code blocks
        :max-result-length 200     ;; truncate execution results
        :show-stdout? true})))     ;; show stdout from code execution
 ```
+
+### Q&A Generation (`questionify!`)
+
+Generate question-answer pairs from ingested documents. The LLM iteratively explores the corpus using search functions, then produces diverse, grounded Q&A pairs with source provenance.
+
+```clojure
+(comment
+  ;; Generate 10 Q&A pairs (default settings)
+  (svar/questionify! env)
+
+  ;; Customized generation
+  (svar/questionify! env
+    {:count 20                                       ;; target number of Q&A pairs
+     :difficulty #{:easy :medium :hard}               ;; difficulty mix
+     :categories #{:factual :inferential :comparative} ;; question types
+     :model "gpt-4o"                                  ;; override model
+     :verify-answers? true                            ;; cross-check via refinement
+     :debug? true}))                                  ;; verbose logging
+```
+
+Returns `{:questions [{:question "..." :answer "..." :source-document "..." :source-page N :difficulty :medium :category :factual} ...] :trace [...] :iterations N :duration-ms N}`.
 
 ## License
 

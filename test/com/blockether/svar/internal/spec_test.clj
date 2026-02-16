@@ -1,11 +1,11 @@
-(ns com.blockether.svar.spec-test
+(ns com.blockether.svar.internal.spec-test
   "Tests for structured output specification DSL.
    
    Ported from unbound.backend.shared.llm.internal.spec-test"
   (:require
    [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
-   [com.blockether.svar.spec :as sut])
+   [com.blockether.svar.internal.spec :as sut])
   (:import
    [java.time LocalDate OffsetDateTime]))
 
@@ -72,73 +72,73 @@
 
   (describe "valid JSON"
             (it "parses simple object"
-                (expect (= (sut/str->data "{\"name\": \"John\"}")
+                (expect (= (:value (sut/str->data "{\"name\": \"John\"}"))
                            {:name "John"})))
 
             (it "parses integer value"
-                (expect (= (sut/str->data "{\"age\": 30}")
+                (expect (= (:value (sut/str->data "{\"age\": 30}"))
                            {:age 30})))
 
             (it "parses boolean true"
-                (expect (= (sut/str->data "{\"active\": true}")
+                (expect (= (:value (sut/str->data "{\"active\": true}"))
                            {:active true})))
 
             (it "parses float value"
-                (expect (= (sut/str->data "{\"score\": 3.14}")
+                (expect (= (:value (sut/str->data "{\"score\": 3.14}"))
                            {:score 3.14})))
 
             (it "parses null value"
-                (expect (= (sut/str->data "{\"data\": null}")
+                (expect (= (:value (sut/str->data "{\"data\": null}"))
                            {:data nil}))))
 
   (describe "nested objects"
             (it "parses deeply nested object"
-                (expect (= (sut/str->data "{\"a\": {\"b\": {\"c\": 1}}}")
+                (expect (= (:value (sut/str->data "{\"a\": {\"b\": {\"c\": 1}}}"))
                            {:a {:b {:c 1}}})))
 
             (it "parses multiple nested fields"
-                (expect (= (sut/str->data "{\"address\": {\"street\": \"Main St\", \"city\": \"Boston\"}}")
+                (expect (= (:value (sut/str->data "{\"address\": {\"street\": \"Main St\", \"city\": \"Boston\"}}"))
                            {:address {:street "Main St" :city "Boston"}}))))
 
   (describe "arrays"
             (it "parses simple array"
-                (expect (= (sut/str->data "{\"tags\": [\"a\", \"b\"]}")
+                (expect (= (:value (sut/str->data "{\"tags\": [\"a\", \"b\"]}"))
                            {:tags ["a" "b"]})))
 
             (it "parses array of objects"
-                (expect (= (sut/str->data "{\"items\": [{\"name\": \"x\", \"value\": 1}]}")
+                (expect (= (:value (sut/str->data "{\"items\": [{\"name\": \"x\", \"value\": 1}]}"))
                            {:items [{:name "x" :value 1}]}))))
 
   (describe "malformed JSON - unquoted"
             (it "handles unquoted keys"
-                (expect (= (sut/str->data "{name: \"John\"}")
+                (expect (= (:value (sut/str->data "{name: \"John\"}"))
                            {:name "John"})))
 
             (it "handles unquoted string values"
-                (expect (= (sut/str->data "{\"name\": John}")
+                (expect (= (:value (sut/str->data "{\"name\": John}"))
                            {:name "John"}))))
 
   (describe "malformed JSON - trailing commas"
             (it "handles trailing comma in object"
-                (expect (= (sut/str->data "{\"name\": \"John\",}")
+                (expect (= (:value (sut/str->data "{\"name\": \"John\",}"))
                            {:name "John"})))
 
             (it "handles trailing comma in array"
-                (expect (= (sut/str->data "{\"tags\": [\"a\", \"b\",]}")
+                (expect (= (:value (sut/str->data "{\"tags\": [\"a\", \"b\",]}"))
                            {:tags ["a" "b"]}))))
 
   (describe "markdown code blocks"
             (it "extracts JSON from markdown"
-                (expect (= (sut/str->data "```json\n{\"name\": \"John\"}\n```")
+                (expect (= (:value (sut/str->data "```json\n{\"name\": \"John\"}\n```"))
                            {:name "John"})))
 
             (it "handles code block without language tag"
-                (expect (= (sut/str->data "```\n{\"name\": \"John\"}\n```")
+                (expect (= (:value (sut/str->data "```\n{\"name\": \"John\"}\n```"))
                            {:name "John"}))))
 
   (describe "complex example"
             (it "parses mixed data types"
-                (expect (= (sut/str->data "{\"name\": \"John\", \"age\": 30, \"tags\": [\"dev\"], \"address\": {\"city\": \"NYC\"}}")
+                (expect (= (:value (sut/str->data "{\"name\": \"John\", \"age\": 30, \"tags\": [\"dev\"], \"address\": {\"city\": \"NYC\"}}"))
                            {:name "John" :age 30 :tags ["dev"] :address {:city "NYC"}})))))
 
 (defdescribe data->str-test
@@ -177,19 +177,19 @@
 
   (describe "roundtrip tests"
             (it "roundtrips simple map"
-                (expect (= (sut/str->data (sut/data->str {:name "John" :age 30}))
+                (expect (= (:value (sut/str->data (sut/data->str {:name "John" :age 30})))
                            {:name "John" :age 30})))
 
             (it "roundtrips nested map"
-                (expect (= (sut/str->data (sut/data->str {:a {:b {:c 1}}}))
+                (expect (= (:value (sut/str->data (sut/data->str {:a {:b {:c 1}}})))
                            {:a {:b {:c 1}}})))
 
             (it "roundtrips vector"
-                (expect (= (sut/str->data (sut/data->str {:tags ["a" "b"]}))
+                (expect (= (:value (sut/str->data (sut/data->str {:tags ["a" "b"]})))
                            {:tags ["a" "b"]})))
 
             (it "roundtrips array of objects"
-                (expect (= (sut/str->data (sut/data->str {:items [{:x 1} {:x 2}]}))
+                (expect (= (:value (sut/str->data (sut/data->str {:items [{:x 1} {:x 2}]})))
                            {:items [{:x 1} {:x 2}]})))))
 
 (defdescribe validate-data-test
@@ -392,7 +392,7 @@
                          (sut/field ::sut/name :age ::sut/type :spec.type/int ::sut/cardinality :spec.cardinality/one ::sut/description "Age"))
                       prompt (sut/spec->prompt s)
                       llm-response "{\"name\": \"Alice\", \"age\": 30}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (str/includes? prompt "Answer in JSON using this schema:"))
                   (expect (= {:name "Alice" :age 30} parsed))
@@ -403,7 +403,7 @@
                 (let [s (sut/spec
                          (sut/field ::sut/name :name ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Name"))
                       llm-response "{name: Alice}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (= {:name "Alice"} parsed))
                   (expect (= {:valid? true} validation))))
@@ -412,7 +412,7 @@
                 (let [s (sut/spec
                          (sut/field ::sut/name :items ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/many ::sut/description "Items"))
                       llm-response "{\"items\": [\"a\", \"b\",]}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (= {:items ["a" "b"]} parsed))
                   (expect (= {:valid? true} validation))))
@@ -421,7 +421,7 @@
                 (let [s (sut/spec
                          (sut/field ::sut/name :value ::sut/type :spec.type/int ::sut/cardinality :spec.cardinality/one ::sut/description "Value"))
                       llm-response "Here's the data:\n```json\n{\"value\": 42}\n```"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (= {:value 42} parsed))
                   (expect (= {:valid? true} validation)))))
@@ -433,7 +433,7 @@
                          (sut/field ::sut/name :address/city ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "City"))
                       prompt (sut/spec->prompt s)
                       llm-response "{\"address\": {\"street\": \"Main St\", \"city\": \"Boston\"}}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (str/includes? prompt "address: {"))
                   (expect (= {:address {:street "Main St" :city "Boston"}} parsed))
@@ -444,7 +444,7 @@
                 (let [s (sut/spec
                          (sut/field ::sut/name :name ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Name"))
                       llm-response "{}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (= false (:valid? validation)))
                   (expect (some #(= :missing-required-field (:error %)) (:errors validation)))))
@@ -453,7 +453,7 @@
                 (let [s (sut/spec
                          (sut/field ::sut/name :age ::sut/type :spec.type/int ::sut/cardinality :spec.cardinality/one ::sut/description "Age"))
                       llm-response "{\"age\": \"thirty\"}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (= false (:valid? validation)))
                   (expect (some #(= :type-mismatch (:error %)) (:errors validation)))))
@@ -463,7 +463,7 @@
                          (sut/field ::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Role"
                                     ::sut/values {"admin" "Full access" "user" "Standard access"}))
                       llm-response "{\"role\": \"guest\"}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (= false (:valid? validation)))
                   (expect (some #(= :invalid-enum-value (:error %)) (:errors validation)))))))
@@ -693,7 +693,7 @@
                                     ::sut/description "Bounding box"))
                       prompt (sut/spec->prompt s)
                       llm-response "{\"bbox\": [10, 20, 100, 200]}"
-                      parsed (sut/str->data llm-response)
+                      parsed (:value (sut/str->data llm-response))
                       validation (sut/validate-data s parsed)]
                   (expect (str/includes? prompt "bbox: int[4],"))
                   (expect (= [10 20 100 200] (:bbox parsed)))

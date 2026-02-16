@@ -1,4 +1,4 @@
-(ns com.blockether.svar.rlm.internal.pageindex.vision
+(ns com.blockether.svar.internal.rlm.internal.pageindex.vision
   "Vision/LLM-based text extraction from documents.
    
    Provides:
@@ -22,7 +22,7 @@
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.core :as svar]
-   [com.blockether.svar.rlm.internal.pageindex.pdf :as pdf]
+   [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
    [taoensso.trove :as trove])
   (:import
    [java.awt Color Graphics2D]
@@ -222,7 +222,7 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
 
 (def ^:private rotation-detection-spec
   "Spec for page rotation detection response."
-  (svar/svar-spec
+  (svar/spec
    (svar/field {svar/NAME :rotation
                 svar/TYPE :spec.type/int
                 svar/CARDINALITY :spec.cardinality/one
@@ -407,7 +407,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 (def ^:private section-spec
   "Spec for section nodes. A section is a logical grouping of content.
    Other nodes reference sections via parent-id to establish hierarchy."
-  (svar/svar-spec
+  (svar/spec
    :section
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -431,7 +431,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private heading-spec
   "Spec for heading nodes. Headings belong to sections via parent-id."
-  (svar/svar-spec
+  (svar/spec
    :heading
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -460,7 +460,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private paragraph-spec
   "Spec for paragraph/text content nodes."
-  (svar/svar-spec
+  (svar/spec
    :paragraph
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -494,7 +494,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private list-item-spec
   "Spec for list item nodes."
-  (svar/svar-spec
+  (svar/spec
    :list-item
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -528,7 +528,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private toc-entry-spec
   "Spec for table of contents entry nodes (document-level, not page-level)."
-  (svar/svar-spec
+  (svar/spec
    :toc-entry
    {svar/KEY-NS "document.toc"}
    (svar/field {svar/NAME :type
@@ -572,7 +572,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private image-spec
   "Spec for image nodes. Description is REQUIRED, caption is optional."
-  (svar/svar-spec
+  (svar/spec
    :image
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -615,7 +615,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private table-spec
   "Spec for table nodes. Description is REQUIRED, caption is optional."
-  (svar/svar-spec
+  (svar/spec
    :table
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -662,7 +662,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private header-spec
   "Spec for page header nodes."
-  (svar/svar-spec
+  (svar/spec
    :header
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -681,7 +681,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private footer-spec
   "Spec for page footer nodes."
-  (svar/svar-spec
+  (svar/spec
    :footer
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -700,7 +700,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 
 (def ^:private metadata-spec
   "Spec for document metadata nodes."
-  (svar/svar-spec
+  (svar/spec
    :metadata
    {svar/KEY-NS "page.node"}
    (svar/field {svar/NAME :type
@@ -737,7 +737,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    - metadata: Document metadata (no parent-id)
    
    Hierarchy is established via parent-id references, not nesting."
-  (svar/svar-spec
+  (svar/spec
    {:refs [section-spec heading-spec paragraph-spec list-item-spec toc-entry-spec
            image-spec table-spec header-spec footer-spec metadata-spec]}
    (svar/field {svar/NAME :nodes
@@ -1559,7 +1559,7 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
 
 (def ^:private title-inference-spec
   "Spec for document title inference response."
-  (svar/svar-spec
+  (svar/spec
    (svar/field {svar/NAME :title
                 svar/TYPE :spec.type/string
                 svar/CARDINALITY :spec.cardinality/one

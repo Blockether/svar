@@ -1,4 +1,4 @@
-(ns com.blockether.svar.rlm
+(ns com.blockether.svar.internal.rlm
   "Recursive Language Model (RLM) for processing arbitrarily large contexts.
    
    RLM enables an LLM to iteratively write and execute Clojure code to examine,
@@ -62,14 +62,16 @@
   (:require
    [babashka.fs :as fs]
    [clojure.pprint :as pprint]
+   [clojure.core.async :as async]
    [clojure.set :as set]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.core :as svar]
+   [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.spec :as spec]
     [com.blockether.svar.internal.jsonish :as jsonish]
      [com.blockether.svar.internal.tokens :as tokens]
      [com.blockether.svar.internal.util :as util]
-     [com.blockether.svar.rlm.internal.pageindex.spec :as rlm-spec]
+     [com.blockether.svar.internal.rlm.internal.pageindex.spec :as rlm-spec]
    [fast-edn.core :as edn]
    [clojure.java.io :as io]
    [sci.core :as sci]
@@ -98,82 +100,82 @@
 
 (def ^:private ENTITY_SPEC
   "Spec for extracted entities."
-  (svar/svar-spec
+  (spec/spec
    :entity
-   {svar/KEY-NS "entity"}
-   (svar/field {svar/NAME :name
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/one
-                svar/DESCRIPTION "Entity name"})
-   (svar/field {svar/NAME :type
-                svar/TYPE :spec.type/keyword
-                svar/CARDINALITY :spec.cardinality/one
-                svar/DESCRIPTION "Entity type (e.g. :party, :organization, :obligation, :term, :condition)"})
-   (svar/field {svar/NAME :description
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/one
-                svar/DESCRIPTION "Entity description"})
-   (svar/field {svar/NAME :section
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/one
-                svar/REQUIRED false
-                svar/DESCRIPTION "Section identifier or label"})
-   (svar/field {svar/NAME :page
-                svar/TYPE :spec.type/int
-                svar/CARDINALITY :spec.cardinality/one
-                svar/REQUIRED false
-                svar/DESCRIPTION "Page index (0-based)"})))
+   {::spec/key-ns "entity"}
+   (spec/field {::spec/name :name
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Entity name"})
+   (spec/field {::spec/name :type
+                ::spec/type :spec.type/keyword
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Entity type (e.g. :party, :organization, :obligation, :term, :condition)"})
+   (spec/field {::spec/name :description
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Entity description"})
+   (spec/field {::spec/name :section
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/required false
+                ::spec/description "Section identifier or label"})
+   (spec/field {::spec/name :page
+                ::spec/type :spec.type/int
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/required false
+                ::spec/description "Page index (0-based)"})))
 
 (def ^:private RELATIONSHIP_SPEC
   "Spec for extracted relationships."
-  (svar/svar-spec
+  (spec/spec
    :relationship
-   {svar/KEY-NS "relationship"}
-   (svar/field {svar/NAME :source
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/one
-                svar/DESCRIPTION "Source entity name"})
-   (svar/field {svar/NAME :target
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/one
-                svar/DESCRIPTION "Target entity name"})
-   (svar/field {svar/NAME :type
-                svar/TYPE :spec.type/keyword
-                svar/CARDINALITY :spec.cardinality/one
-                svar/DESCRIPTION "Relationship type (e.g. :owns, :obligates, :references, :defines)"})
-   (svar/field {svar/NAME :description
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/one
-                svar/REQUIRED false
-                svar/DESCRIPTION "Relationship description"})))
+   {::spec/key-ns "relationship"}
+   (spec/field {::spec/name :source
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Source entity name"})
+   (spec/field {::spec/name :target
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Target entity name"})
+   (spec/field {::spec/name :type
+                ::spec/type :spec.type/keyword
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Relationship type (e.g. :owns, :obligates, :references, :defines)"})
+   (spec/field {::spec/name :description
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/required false
+                ::spec/description "Relationship description"})))
 
 (def ENTITY_EXTRACTION_SPEC
   "Spec for entity extraction output."
-  (svar/svar-spec
+  (spec/spec
    {:refs [ENTITY_SPEC RELATIONSHIP_SPEC]}
-   (svar/field {svar/NAME :entities
-                svar/TYPE :spec.type/ref
-                svar/TARGET :entity
-                svar/CARDINALITY :spec.cardinality/many
-                svar/DESCRIPTION "Extracted entities"})
-   (svar/field {svar/NAME :relationships
-                svar/TYPE :spec.type/ref
-                svar/TARGET :relationship
-                svar/CARDINALITY :spec.cardinality/many
-                svar/REQUIRED false
-                svar/DESCRIPTION "Extracted relationships"})))
+   (spec/field {::spec/name :entities
+                ::spec/type :spec.type/ref
+                ::spec/target :entity
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/description "Extracted entities"})
+   (spec/field {::spec/name :relationships
+                ::spec/type :spec.type/ref
+                ::spec/target :relationship
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/required false
+                ::spec/description "Extracted relationships"})))
 
 (def ^:private ITERATION_SPEC
   "Spec for each RLM iteration response. Forces structured output from LLM."
-  (svar/svar-spec
-   (svar/field {svar/NAME :thinking
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/one
-                svar/DESCRIPTION "Your reasoning: what you observed, what you learned, what to do next"})
-   (svar/field {svar/NAME :code
-                svar/TYPE :spec.type/string
-                svar/CARDINALITY :spec.cardinality/many
-                svar/DESCRIPTION "Clojure expressions to execute. Use (FINAL answer) when done."})))
+  (spec/spec
+   (spec/field {::spec/name :thinking
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Your reasoning: what you observed, what you learned, what to do next"})
+   (spec/field {::spec/name :code
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})))
 
 (defn bytes->base64
   "Converts raw bytes to a base64 string.
@@ -690,7 +692,7 @@
 
 (def DOCUMENT_SCHEMA
   "Schema for storing PageIndex documents exactly as produced by PageIndex.
-   Matches :document/* namespace from com.blockether.svar.rlm.internal.pageindex.spec."
+   Matches :document/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec."
   {:document/id         {:db/unique :db.unique/identity
                          :db/valueType :db.type/string
                          :db/doc "Generated UUID string for the document"}
@@ -711,7 +713,7 @@
 
 (def PAGE_SCHEMA
   "Schema for storing PageIndex pages exactly as produced by PageIndex.
-   Matches :page/* namespace from com.blockether.svar.rlm.internal.pageindex.spec."
+   Matches :page/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec."
   {:page/id          {:db/unique :db.unique/identity
                       :db/valueType :db.type/string
                       :db/doc "Generated UUID string: document-id + page-index"}
@@ -722,7 +724,7 @@
 
 (def PAGE_NODE_SCHEMA
   "Schema for storing PageIndex page nodes exactly as produced by PageIndex.
-   Matches :page.node/* namespace from com.blockether.svar.rlm.internal.pageindex.spec.
+   Matches :page.node/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec.
    These are the actual content elements: paragraphs, headings, images, tables, etc."
   {:page.node/id           {:db/unique :db.unique/identity
                             :db/valueType :db.type/string
@@ -758,7 +760,7 @@
 
 (def TOC_ENTRY_SCHEMA
   "Schema for storing PageIndex TOC entries exactly as produced by PageIndex.
-   Matches :document.toc/* namespace from com.blockether.svar.rlm.internal.pageindex.spec."
+   Matches :document.toc/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec."
   {:document.toc/id           {:db/unique :db.unique/identity
                                :db/valueType :db.type/string
                                :db/doc "UUID string identifier for the TOC entry"}
@@ -2132,8 +2134,8 @@
                                                         :else v)])
                                                  @locals-atom)))
                        'get-local (fn [var-name] (get @locals-atom var-name))
-                       'spec svar/svar-spec
-                       'field svar/field
+                       'spec spec/spec
+                       'field spec/field
                        'str-join str-join 'str-split str-split 'str-replace str-replace
                        'str-trim str-trim 'str-lower str-lower 'str-upper str-upper
                        'str-blank? str-blank? 'str-includes? str-includes?
@@ -2340,7 +2342,7 @@
        (str "Max recursion depth (" *max-recursion-depth* ") exceeded")
        (try
          (swap! depth-atom inc)
-         (#'svar/chat-completion [{:role "user" :content prompt}] model api-key base-url)
+         (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url)
          (finally (swap! depth-atom dec)))))
     ([prompt opts]
      (if (>= @depth-atom *max-recursion-depth*)
@@ -2348,9 +2350,9 @@
        (try
          (swap! depth-atom inc)
          (if-let [spec (:spec opts)]
-            (:result (svar/ask! {:spec spec :messages [(svar/system "You are a helpful assistant.") (svar/user prompt)]
+            (:result (llm/ask! {:spec spec :messages [(llm/system "You are a helpful assistant.") (llm/user prompt)]
                                  :model model :api-key api-key :base-url base-url}))
-           (#'svar/chat-completion [{:role "user" :content prompt}] model api-key base-url))
+           (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url))
          (finally (swap! depth-atom dec)))))))
 
 (defn- make-rlm-query-fn
@@ -2678,7 +2680,7 @@
        (when output-spec
          (str "\n<expected_output_schema>\n"
               "Your FINAL answer should match this structure:\n"
-              (svar/spec->prompt output-spec)
+              (spec/spec->prompt output-spec)
               "\n</expected_output_schema>\n"))
 
        ;; Include examples
@@ -2697,7 +2699,7 @@
 </workflow>
 
 <response_format>
-" (svar/spec->prompt ITERATION_SPEC) "
+" (spec/spec->prompt ITERATION_SPEC) "
 EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown, no prose outside JSON.
 </response_format>
 
@@ -2720,11 +2722,11 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 (defn- run-iteration [rlm-env messages model api-key base-url]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
     (let [_ (rlm-debug! {:model model :msg-count (count messages)} "LLM call started")
-          response (#'svar/chat-completion messages model api-key base-url)
+          response (llm/chat-completion messages model api-key base-url)
           _ (rlm-debug! {:response-len (count response)
                          :response-preview (str-truncate response 300)} "LLM response received")
         ;; Parse structured response via spec (primary), fall back to code fences
-          parsed (try (let [p (svar/str->data-with-spec response ITERATION_SPEC)]
+          parsed (try (let [p (spec/str->data-with-spec response ITERATION_SPEC)]
                         (rlm-debug! {} "Response parsed via ITERATION_SPEC (structured)")
                         p)
                       (catch Exception e
@@ -2870,10 +2872,10 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
   [text-content model config]
   (try
     (let [truncated (if (> (count text-content) 8000) (subs text-content 0 8000) text-content)
-          response (svar/ask! {:config config
+          response (llm/ask! {:config config
                                 :spec ENTITY_EXTRACTION_SPEC
-                                :messages [(svar/system ENTITY_EXTRACTION_OBJECTIVE)
-                                           (svar/user truncated)]
+                                :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
+                                           (llm/user truncated)]
                                 :model model})]
       (or (:result response) {:entities [] :relationships []}))
     (catch Exception e
@@ -2898,19 +2900,19 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         ;; Has image data - use vision
         image-data
         (let [b64 (bytes->base64 image-data)
-               response (svar/ask! {:config config
+               response (llm/ask! {:config config
                                     :spec ENTITY_EXTRACTION_SPEC
-                                    :messages [(svar/system ENTITY_EXTRACTION_OBJECTIVE)
-                                               (svar/user (or description "Extract entities from this image")
-                                                          (svar/image b64 "image/png"))]
+                                    :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
+                                               (llm/user (or description "Extract entities from this image")
+                                                          (llm/image b64 "image/png"))]
                                     :model model})]
           (or (:result response) {:entities [] :relationships []}))
         ;; Has description only - text extraction
         description
-        (let [response (svar/ask! {:config config
+        (let [response (llm/ask! {:config config
                                     :spec ENTITY_EXTRACTION_SPEC
-                                    :messages [(svar/system ENTITY_EXTRACTION_OBJECTIVE)
-                                               (svar/user description)]
+                                    :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
+                                               (llm/user description)]
                                     :model model})]
           (or (:result response) {:entities [] :relationships []}))
         ;; Neither - skip
@@ -3289,9 +3291,9 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                 db-info @db-info-atom
                 ;; Optional planning phase — LLM outlines approach before code execution
                 plan-context (when plan?
-                               (let [plan-result (svar/ask! {:config config
-                                                             :messages [(svar/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
-                                                                        (svar/user (str "Query: " query-str))]
+                               (let [plan-result (llm/ask! {:config config
+                                                             :messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
+                                                                        (llm/user (str "Query: " query-str))]
                                                              :model model})]
                                  (when-let [plan (:result plan-result)]
                                    (str "<plan>\n" plan "\n</plan>"))))
@@ -3315,76 +3317,88 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                         :iterations iterations
                         :duration-ms duration-ms}
                  verify-claims? (assoc :verified-claims (vec @claims-atom))))
-             ;; Normal completion - refine and finalize
-              (let [answer-value (:result answer answer)
-                    answer-as-str (answer-str answer)
-                    ;; Build documents for CoVe grounded verification
-                    stored-docs (when-let [docs (seq (:documents @(:store db-info)))]
-                                  (mapv (fn [doc]
-                                          {:id (or (:document/id doc) (:document/name doc))
-                                           :pages (mapv (fn [pn]
-                                                          {:page (or (:page.node/page-id pn) "0")
-                                                           :text (or (:page.node/content pn) "")})
-                                                        (filter #(= (or (:document/id doc) (:document/name doc))
-                                                                    (:page.node/document-id %))
-                                                                (:page-nodes @(:store db-info))))})
-                                        docs))
-                    refine-opts (cond-> {:spec spec
-                                        :messages [(svar/system (str "You are verifying and refining an answer to a specific query. "
-                                                                     "Check the answer for accuracy, completeness, and correctness."))
-                                                   (svar/user (str "<query>\n" query-str "\n</query>\n\n"
-                                                                   "<answer>\n" answer-as-str "\n</answer>"))]
-                                        :config config :model model
-                                        :iterations max-refinements :threshold min-score}
-                                  (seq stored-docs) (assoc :documents stored-docs))
-                   raw-refine (if refine?
-                                (svar/refine! refine-opts)
-                                {:result answer-as-str :final-score nil :iterations-count 0})
-                   refined-result {:answer (:result raw-refine)
-                                   :eval-scores (:final-score raw-refine)
-                                   :refinement-count (:iterations-count raw-refine)}
-                   final-answer (if (and spec (string? (:answer refined-result)))
-                                  (try
-                                    (svar/str->data-with-spec (:answer refined-result) spec)
-                                    (catch Exception _
-                                       (:result (svar/ask! {:config config :spec spec
-                                                            :messages [(svar/system "Extract structured data.")
-                                                                       (svar/user (str "From:\n" (:answer refined-result)))]
-                                                            :model model}))))
-                                   ;; No spec - use original realized value if no refinement happened
-                                  (if refine?
-                                    (:answer refined-result)
-                                    answer-value))
+              ;; Normal completion - refine and finalize
+               (let [answer-value (:result answer answer)
+                     ;; Refinement path: stringify for LLM round-trip.
+                     ;; No-refine path: keep the native Clojure value from FINAL/FINAL-VAR.
+                     {final-answer :answer
+                      eval-scores  :eval-scores
+                      refinement-count :refinement-count}
+                     (if refine?
+                       (let [answer-as-str (answer-str answer)
+                             stored-docs (when-let [docs (seq (:documents @(:store db-info)))]
+                                           (mapv (fn [doc]
+                                                   {:id (or (:document/id doc) (:document/name doc))
+                                                    :pages (mapv (fn [pn]
+                                                                   {:page (or (:page.node/page-id pn) "0")
+                                                                    :text (or (:page.node/content pn) "")})
+                                                                 (filter #(= (or (:document/id doc) (:document/name doc))
+                                                                             (:page.node/document-id %))
+                                                                         (:page-nodes @(:store db-info))))})
+                                                 docs))
+                             refine-opts (cond-> {:spec spec
+                                                  :messages [(llm/system (str "You are verifying and refining an answer to a specific query. "
+                                                                              "Check the answer for accuracy, completeness, and correctness."))
+                                                             (llm/user (str "<query>\n" query-str "\n</query>\n\n"
+                                                                            "<answer>\n" answer-as-str "\n</answer>"))]
+                                                  :config config :model model
+                                                  :iterations max-refinements :threshold min-score}
+                                           (seq stored-docs) (assoc :documents stored-docs))
+                             raw-refine (llm/refine! refine-opts)
+                             refined-str (:result raw-refine)
+                             ;; If refinement didn't change the answer (converged or identical text),
+                             ;; keep the original Clojure value from FINAL — no re-parse needed.
+                             answer-unchanged? (or (:converged? raw-refine)
+                                                   (= (str refined-str) answer-as-str))
+                             parsed (if answer-unchanged?
+                                      answer-value
+                                      ;; Refinement modified the answer — parse the new text through spec.
+                                      (if (and spec (string? refined-str))
+                                        (try
+                                          (spec/str->data-with-spec refined-str spec)
+                                          (catch Exception _
+                                            (:result (llm/ask! {:config config :spec spec
+                                                                :messages [(llm/system "Extract structured data.")
+                                                                           (llm/user (str "From:\n" refined-str))]
+                                                                :model model}))))
+                                        refined-str))]
+                         {:answer parsed
+                          :eval-scores (:final-score raw-refine)
+                          :refinement-count (:iterations-count raw-refine)})
+                       ;; No refinement — value is already Clojure from FINAL/FINAL-VAR. Use it directly.
+                       {:answer answer-value
+                        :eval-scores nil
+                        :refinement-count 0})
                     duration-ms (util/elapsed-since start-time)
                     history-tokens (count-history-tokens @db-info-atom)]
-               (when (and learn? (:eval-scores refined-result))
+               (when (and learn? eval-scores)
                  (store-example! query-str (str-truncate (pr-str context) 200)
-                                 (str final-answer) (get-in refined-result [:eval-scores :total] 0) nil))
-                (when (and verify-claims? (seq @claims-atom))
-                  (let [db-info @db-info-atom
-                        query-id (UUID/randomUUID)]
-                    (doseq [claim @claims-atom]
-                      (try
-                        (swap! (:store db-info) update :claims conj
-                               (merge claim {:claim/query-id query-id
-                                             :claim/verified? (boolean (get claim :claim/verified? true))}))
-                        (flush-store! db-info)
-                        (catch Exception e
-                          (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
-                (rlm-debug! {:iterations iterations :duration-ms duration-ms
-                              :refinement-count (:refinement-count refined-result)
-                              :answer-preview (str-truncate (pr-str final-answer) 200)} "RLM query! finished (success)")
-                 ;; Single flush after query completion (all messages, claims, learnings batched)
-                 (flush-store-now! db-info)
-                 (cond-> {:answer final-answer
-                         :raw-answer answer-value
-                         :eval-scores (:eval-scores refined-result)
-                         :refinement-count (:refinement-count refined-result)
-                         :trace trace
-                         :iterations iterations
-                         :duration-ms duration-ms
-                         :history-tokens history-tokens}
-                  verify-claims? (assoc :verified-claims (vec @claims-atom)))))))))))
+                                  (str final-answer) (get-in eval-scores [:total] 0) nil))
+                 (when (and verify-claims? (seq @claims-atom))
+                   (let [db-info @db-info-atom
+                         query-id (UUID/randomUUID)]
+                     (doseq [claim @claims-atom]
+                       (try
+                         (swap! (:store db-info) update :claims conj
+                                (merge claim {:claim/query-id query-id
+                                              :claim/verified? (boolean (get claim :claim/verified? true))}))
+                         (flush-store! db-info)
+                         (catch Exception e
+                           (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
+                 (rlm-debug! {:iterations iterations :duration-ms duration-ms
+                               :refinement-count refinement-count
+                               :answer-preview (str-truncate (pr-str final-answer) 200)} "RLM query! finished (success)")
+                  ;; Single flush after query completion (all messages, claims, learnings batched)
+                  (flush-store-now! db-info)
+                  (cond-> {:answer final-answer
+                          :raw-answer answer-value
+                          :eval-scores eval-scores
+                          :refinement-count refinement-count
+                          :trace trace
+                          :iterations iterations
+                          :duration-ms duration-ms
+                          :history-tokens history-tokens}
+                   verify-claims? (assoc :verified-claims (vec @claims-atom)))))))))))
 
 ;; =============================================================================
 ;; Trace Pretty Printing
@@ -3441,3 +3455,939 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
   "Prints an RLM execution trace to stdout. See pprint-trace for options."
   ([trace] (println (pprint-trace trace)))
   ([trace opts] (println (pprint-trace trace opts))))
+
+;; =============================================================================
+;; questionify! - Multi-stage Q&A generation from ingested documents
+;; =============================================================================
+
+;; -- Bloom's taxonomy difficulty levels --
+(def ^:private BLOOM_DIFFICULTIES
+  "Bloom's taxonomy cognitive levels as difficulty progression."
+  {"remember"    "Simple recall of facts, definitions, or terms directly stated in the text"
+   "understand"  "Explain concepts, summarize, paraphrase, or interpret meaning from the text"
+   "apply"       "Use information from the text to solve a new problem or scenario"
+   "analyze"     "Break down information, identify patterns, compare elements across sections"
+   "evaluate"    "Judge, assess, or critique claims, arguments, or evidence from the text"
+   "create"      "Synthesize information from multiple parts to form a new conclusion or insight"})
+
+(def ^:private QUESTION_CATEGORIES
+  "Question type categories."
+  {"factual"      "Direct fact extraction — answer is explicitly stated"
+   "inferential"  "Requires reasoning from stated facts to reach the answer"
+   "comparative"  "Compares or contrasts two or more concepts, entities, or processes"
+   "analytical"   "Requires breaking down complex information or identifying relationships"
+   "definitional" "Asks for definitions, explanations, or descriptions of concepts"
+   "procedural"   "Asks about processes, steps, methods, or how something works"})
+
+(def ^:private GENERATION_PERSONAS
+  "Persona descriptions to diversify question styles."
+  {:student     "You are a curious undergraduate student studying this material for the first time. Ask questions that test foundational understanding and clarify key concepts."
+   :researcher  "You are an academic researcher looking for precise details and methodological rigor. Ask technical, specific questions that require careful reading."
+   :practitioner "You are a working professional who needs to apply this knowledge. Ask practical, application-oriented questions about how to use the information."
+   :examiner    "You are a rigorous exam designer creating assessment questions. Ask questions that test deep comprehension and the ability to distinguish subtle details."
+   :journalist  "You are an investigative journalist looking for the most important claims and evidence. Ask questions that probe key findings, numbers, and conclusions."})
+
+;; -- Specs --
+
+(def ^:private QUESTION_SPEC
+  "Spec for a single generated question-answer pair."
+  (spec/spec
+   :question
+   {::spec/key-ns "question"}
+   (spec/field {::spec/name :question
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "The question text — must be self-contained and understandable without the source document"})
+   (spec/field {::spec/name :answer
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "The answer, grounded in source material"})
+   (spec/field {::spec/name :evidence-span
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Exact verbatim quote from the source document that supports the answer"})
+   (spec/field {::spec/name :source-document
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Source document ID"})
+   (spec/field {::spec/name :source-page
+                ::spec/type :spec.type/int
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Source page number (0-based)"})
+   (spec/field {::spec/name :source-section
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/required false
+                ::spec/description "Source section or heading title"})
+   (spec/field {::spec/name :difficulty
+                ::spec/type :spec.type/keyword
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/values BLOOM_DIFFICULTIES
+                ::spec/description "Bloom's taxonomy cognitive level"})
+   (spec/field {::spec/name :category
+                ::spec/type :spec.type/keyword
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/values QUESTION_CATEGORIES
+                ::spec/description "Question category"})))
+
+(def ^:private QUESTIONIFY_SPEC
+  "Spec for questionify! Q&A generation output."
+  (spec/spec
+   {:refs [QUESTION_SPEC]}
+   (spec/field {::spec/name :questions
+                ::spec/type :spec.type/ref
+                ::spec/target :question
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/description "Generated question-answer pairs"})))
+
+(def ^:private PASSAGE_SPEC
+  "Spec for a selected passage from Phase 1."
+  (spec/spec
+   :passage
+   {::spec/key-ns "passage"}
+   (spec/field {::spec/name :document-id
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Document ID"})
+   (spec/field {::spec/name :page
+                ::spec/type :spec.type/int
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Page number (0-based)"})
+   (spec/field {::spec/name :section-title
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Section or heading title"})
+   (spec/field {::spec/name :content-summary
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Brief summary of what this passage covers (1-2 sentences)"})
+   (spec/field {::spec/name :suggested-difficulty
+                ::spec/type :spec.type/keyword
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/values BLOOM_DIFFICULTIES
+                ::spec/description "Suggested Bloom's taxonomy difficulty level for questions from this passage"})
+   (spec/field {::spec/name :suggested-category
+                ::spec/type :spec.type/keyword
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/values QUESTION_CATEGORIES
+                ::spec/description "Suggested question category for this passage"})))
+
+(def ^:private CHUNK_SELECTION_SPEC
+  "Spec for Phase 1 passage selection output."
+  (spec/spec
+   {:refs [PASSAGE_SPEC]}
+   (spec/field {::spec/name :passages
+                ::spec/type :spec.type/ref
+                ::spec/target :passage
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/description "Selected passages for Q&A generation"})))
+
+(def ^:private VERIFICATION_RESULT_SPEC
+  "Spec for a single verification result."
+  (spec/spec
+   :verification
+   {::spec/key-ns "verification"}
+   (spec/field {::spec/name :question-index
+                ::spec/type :spec.type/int
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Index of the question being verified (0-based)"})
+   (spec/field {::spec/name :grounded
+                ::spec/type :spec.type/bool
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Whether the evidence span actually exists in the source and supports the answer"})
+   (spec/field {::spec/name :non-trivial
+                ::spec/type :spec.type/bool
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Whether the question requires reading the document — not answerable from titles or headings alone"})
+    (spec/field {::spec/name :self-contained
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the question is understandable without the source document context"})
+    (spec/field {::spec/name :answerable
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the question can be answered from the evidence span alone, without external knowledge"})
+    (spec/field {::spec/name :answer-consistent
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the provided answer accurately matches the question's intent and the evidence"})
+    (spec/field {::spec/name :verdict
+                ::spec/type :spec.type/keyword
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/values {"pass" "Question meets all quality criteria"
+                               "fail" "Question has fundamental issues and should be dropped"
+                               "needs-revision" "Question has minor issues but contains value"}
+                ::spec/description "Verification verdict"})
+   (spec/field {::spec/name :revision-note
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/required false
+                ::spec/description "Explanation of issues if verdict is not pass"})))
+
+(def ^:private VERIFICATION_SPEC
+  "Spec for Phase 3 verification output."
+  (spec/spec
+   {:refs [VERIFICATION_RESULT_SPEC]}
+   (spec/field {::spec/name :verifications
+                ::spec/type :spec.type/ref
+                ::spec/target :verification
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/description "Verification results for each question"})))
+
+;; -- Prompt builders --
+
+(defn- build-chunk-selection-prompt
+  "Builds prompt for Phase 1: diverse passage selection from the corpus.
+   Legacy version using SCI code execution — kept for fallback."
+  [{:keys [count difficulty-dist category-dist]}]
+  (let [difficulties (str/join ", " (map name difficulty-dist))
+        categories (str/join ", " (map name category-dist))]
+    (str "You are selecting diverse passages from the ingested documents for question-answer generation.
+
+YOUR TASK: Select exactly " count " passages that will serve as source material for generating Q&A pairs.
+Each passage should come from a distinct section of the corpus to maximize coverage.
+
+STEP-BY-STEP INSTRUCTIONS:
+1. First call (list-documents) to see all available documents with their abstracts and TOC
+2. Call (list-toc-entries) to understand the full document structure
+3. For each document, use (search-page-nodes nil 20 {:document-id doc-id}) to browse content
+4. Select " count " passages from DIFFERENT sections, covering the breadth of the corpus
+
+DIVERSITY REQUIREMENTS:
+- If multiple documents exist, select from ALL of them proportionally
+- Within each document, spread selections across different chapters/sections
+- Avoid selecting adjacent paragraphs — skip at least 2-3 pages between selections
+- Cover different content types: definitions, processes, examples, data, arguments
+- Assign difficulty levels using round-robin across: " difficulties "
+- Assign categories using round-robin across: " categories "
+
+WHAT MAKES A GOOD PASSAGE:
+- Contains substantive information (not just headers, footers, or boilerplate)
+- Has enough detail to generate a meaningful question AND answer
+- The content-summary should capture what makes this passage interesting for Q&A
+
+WHAT MAKES A BAD PASSAGE:
+- Table of contents or index pages
+- Pages with only images and no descriptive text
+- Extremely short content (less than 2 sentences)
+- Repeated/boilerplate content (headers, footers, page numbers)
+
+After exploring the corpus, call (FINAL {:passages [...]}) with your selected passages.")))
+
+(defn- build-toc-based-selection-prompt
+  "Builds prompt for Phase 1 fast-model selection using pre-gathered TOC data.
+   All corpus structure is provided inline — no SCI loop needed."
+  [{:keys [count difficulty-dist category-dist documents toc-entries page-nodes]}]
+  (let [difficulties (str/join ", " (map name difficulty-dist))
+        categories (str/join ", " (map name category-dist))
+        ;; Format document overview
+        docs-section
+        (str/join "\n"
+                  (map (fn [doc]
+                         (str "- " (or (:document/title doc) (:document/name doc))
+                              " (ID: " (:document/id doc) ")"
+                              (when-let [abstract (:document/abstract doc)]
+                                (str "\n  Abstract: " (str-truncate abstract 300)))))
+                       documents))
+        ;; Format TOC — indented by level for structure
+        toc-section
+        (str/join "\n"
+                  (map (fn [e]
+                         (let [level-num (let [l (:document.toc/level e)]
+                                          (if (string? l)
+                                            (parse-long (re-find #"\d+" (str l)))
+                                            (or l 0)))
+                               indent (str/join (repeat (min 4 (or level-num 0)) "  "))]
+                           (str indent "- [" (:document.toc/id e) " p" (:document.toc/target-page e) "] "
+                                (:document.toc/title e)
+                                (when-let [desc (:document.toc/description e)]
+                                  (str " — " (str-truncate desc 100))))))
+                       toc-entries))
+        ;; Format page content summaries — grouped by document
+        content-section
+        (str/join "\n"
+                  (->> page-nodes
+                       (filter #(or (not-empty (:page.node/content %))
+                                    (not-empty (:page.node/description %))))
+                       (map (fn [node]
+                              (str "  [" (:page.node/document-id node)
+                                   " p" (:page.node/page-id node)
+                                   " " (name (or (:page.node/type node) :unknown)) "] "
+                                   (or (not-empty (:page.node/content node))
+                                       (:page.node/description node)))))))]
+    (str "You are selecting diverse passages from a document corpus for question-answer generation.
+
+YOUR TASK: Select exactly " count " passages that will serve as source material for generating Q&A pairs.
+Each passage should come from a distinct section of the corpus to maximize coverage.
+
+AVAILABLE DOCUMENTS:
+" docs-section "
+
+TABLE OF CONTENTS:
+" (if (seq toc-section) toc-section "(no TOC entries)") "
+
+CONTENT SUMMARIES (truncated previews):
+" (if (seq content-section) content-section "(no content previews)") "
+
+SELECTION CRITERIA:
+- If multiple documents exist, select from ALL of them proportionally
+- Within each document, spread selections across different chapters/sections
+- Avoid selecting adjacent pages — skip at least 2-3 pages between selections
+- Cover different content types: definitions, processes, examples, data, arguments
+- Assign difficulty levels using round-robin across: " difficulties "
+- Assign categories using round-robin across: " categories "
+
+SKIP passages that are:
+- Table of contents or index pages
+- Pages with only images and no descriptive text
+- Extremely short content (less than 2 sentences)
+- Repeated/boilerplate content (headers, footers, page numbers)
+
+For each passage, provide:
+- document-id: The document ID from the list above
+- page: The 0-based page number
+- section-title: The section or heading title from the TOC
+- content-summary: A 1-2 sentence description of what makes this passage suitable for Q&A
+- suggested-difficulty: One of " difficulties "
+- suggested-category: One of " categories)))
+
+(defn- build-generation-prompt
+  "Builds prompt for Phase 2: Q&A generation from selected passages.
+   Supports optional persona styling, k-candidates selection, and multi-hop mode."
+  [passages batch-index {:keys [persona k-candidates multi-hop?]}]
+  (let [passage-descriptions
+        (str/join "\n\n"
+                  (map-indexed
+                   (fn [i p]
+                     (str "PASSAGE " (inc i) ":\n"
+                          "  Document: " (:document-id p) "\n"
+                          "  Page: " (:page p) "\n"
+                          "  Section: " (:section-title p) "\n"
+                          "  Summary: " (:content-summary p) "\n"
+                          "  Target difficulty: " (name (or (:suggested-difficulty p) :understand)) "\n"
+                          "  Target category: " (name (or (:suggested-category p) :factual))))
+                   passages))
+        k (or k-candidates 1)
+        per-passage-count (if (> k 1)
+                            (str "Generate " k " candidate Q&A pairs per passage. "
+                                 "Rate each candidate 1-5 on quality (groundedness, clarity, specificity). "
+                                 "Then keep only the BEST candidate per passage in your final output.")
+                            "Generate 1-2 Q&A pairs per passage.")
+        persona-instruction (when persona
+                              (str "\n\nPERSONA: " (get GENERATION_PERSONAS persona
+                                                        (str "You are " (name persona) ". Ask questions from this perspective.")) "\n"))
+        multi-hop-instruction (when multi-hop?
+                                "\n\nMULTI-HOP QUESTIONS: Some passages are paired across different sections. For paired passages, generate questions that REQUIRE information from BOTH passages to answer — the answer should synthesize facts from multiple sources. Mark these as 'analyze' or 'create' difficulty.\n")]
+    (str "You are generating high-quality question-answer pairs from specific passages in the corpus.
+This is batch " batch-index ". " per-passage-count
+(or persona-instruction "")
+(or multi-hop-instruction "") "
+
+PASSAGES TO PROCESS:
+" passage-descriptions "
+
+STEP-BY-STEP INSTRUCTIONS:
+1. For each passage above, search for its actual content:
+   (search-page-nodes \"<key terms from section>\" 5 {:document-id \"<doc-id>\"})
+   or (list-page-nodes {:document-id \"<doc-id>\" :page-id \"<page>\"})
+2. Read the full content of relevant page nodes using (get-page-node node-id)
+3. " per-passage-count "
+
+CRITICAL REQUIREMENTS FOR EACH Q&A PAIR:
+- question: Self-contained, understandable WITHOUT seeing the document. Never reference
+  'the document', 'the text', 'this section', 'the author'. A reader should understand
+  what is being asked without any context.
+- answer: Accurate, grounded in the source text. Should be 1-3 sentences.
+- evidence-span: A VERBATIM QUOTE from the source document. Copy the exact text.
+  This is NOT a paraphrase — it must be findable in the document word-for-word.
+  Keep it to 1-3 sentences maximum.
+- source-document: The document ID from list-documents
+- source-page: The page number (0-based) where the evidence appears
+- source-section: The section heading (if known)
+- difficulty: Use the suggested difficulty from the passage description
+- category: Use the suggested category from the passage description
+
+EXAMPLES OF GOOD QUESTIONS:
+  Q: What is the minimum capitalization requirement for banks under Basel III?
+  A: Banks must maintain a minimum Common Equity Tier 1 ratio of 4.5% of risk-weighted assets.
+  evidence-span: \"Banks are required to maintain a minimum CET1 ratio of 4.5 percent of risk-weighted assets\"
+
+EXAMPLES OF BAD QUESTIONS (DO NOT GENERATE THESE):
+  BAD: What does this document say about banks? (references 'this document')
+  BAD: What is discussed in Section 3? (references section numbers)
+  BAD: What is Basel III? (answerable without the document — too generic)
+  BAD: According to the text, what is mentioned? (references 'the text')
+
+After generating all Q&A pairs, call (FINAL {:questions [...]}).")))
+
+(defn- create-multi-hop-pairs
+  "Creates multi-hop passage pairs from selected passages.
+   Pairs passages from different sections/documents for cross-reference questions."
+  [passages]
+  (when (>= (clojure.core/count passages) 2)
+    (let [;; Group by document
+          by-doc (group-by :document-id passages)
+          pairs (atom [])
+          passage-vec (vec passages)]
+      ;; Cross-document pairs (highest value)
+      (when (> (clojure.core/count by-doc) 1)
+        (let [doc-ids (vec (keys by-doc))]
+          (doseq [i (range (min 3 (dec (clojure.core/count doc-ids))))]
+            (let [p1 (first (get by-doc (nth doc-ids i)))
+                  p2 (first (get by-doc (nth doc-ids (inc i))))]
+              (when (and p1 p2)
+                (swap! pairs conj [p1 p2]))))))
+      ;; Within-document pairs from different sections (skip adjacent pages)
+      (doseq [[_doc-id doc-passages] by-doc]
+        (let [sorted (vec (sort-by :page doc-passages))]
+          (doseq [i (range (dec (clojure.core/count sorted)))]
+            (let [p1 (nth sorted i)
+                  p2 (nth sorted (min (+ i 2) (dec (clojure.core/count sorted))))]
+              (when (and p1 p2 (not= p1 p2)
+                         (> (Math/abs (- (:page p2) (:page p1))) 1))
+                (swap! pairs conj [p1 p2]))))))
+      ;; Return up to 3 pairs
+      (vec (take 3 @pairs)))))
+(defn- build-verification-prompt
+  "Builds prompt for Phase 3: verify Q&A pairs against source material."
+  [questions]
+  (let [question-descriptions
+        (str/join "\n\n"
+                  (map-indexed
+                   (fn [i q]
+                     (str "QUESTION " i " (index " i "):\n"
+                          "  Q: " (:question q) "\n"
+                          "  A: " (:answer q) "\n"
+                          "  Evidence: " (str-truncate (or (:evidence-span q) "") 200) "\n"
+                          "  Source: " (:source-document q) " page " (:source-page q)))
+                   questions))]
+    (str "You are a quality auditor verifying question-answer pairs against source documents.
+For each Q&A pair below, verify it meets quality standards.
+
+Q&A PAIRS TO VERIFY:
+" question-descriptions "
+
+FOR EACH QUESTION, PERFORM THESE CHECKS:
+1. GROUNDED: Search for the evidence-span in the source document:
+   (search-page-nodes \"<key phrase from evidence>\" 5 {:document-id \"<doc-id>\"})
+   Does the evidence span actually exist (or closely match) in the document? Does it support the answer?
+
+2. NON-TRIVIAL: Is this question meaningful? Would answering it require actually reading the document?
+   FAIL if: the question just asks 'What is [heading text]?' or could be answered by reading only titles.
+
+3. SELF-CONTAINED: Can someone understand this question without seeing the source document?
+   FAIL if: the question references 'the document', 'this section', 'the text', 'the author' etc.
+
+4. ANSWERABLE: Can the question be answered solely from the evidence span provided?
+   The evidence should contain sufficient information to derive the answer without external knowledge.
+   FAIL if: the answer requires facts not present in the evidence span.
+
+5. ANSWER-CONSISTENT: Does the provided answer accurately match what the question asks?
+   The answer should directly address the question's intent and be supported by the evidence.
+   FAIL if: the answer addresses a different aspect, misinterprets the question, or contradicts the evidence.
+
+VERDICT CRITERIA:
+- pass: All five checks pass
+- fail: Evidence is fabricated/hallucinated, question is trivially bad, OR answer contradicts evidence
+- needs-revision: Minor issues (e.g., evidence is paraphrased rather than verbatim, but answer is correct)
+
+After verifying all questions, call (FINAL {:verifications [...]}).
+Each verification must include: question-index, grounded, non-trivial, self-contained, answerable, answer-consistent, verdict, and revision-note (if applicable).")))
+
+;; -- Utility functions --
+
+(defn- compute-distribution
+  "Computes target counts per item, distributing total-count evenly across items."
+  [total-count items]
+  (let [item-vec (vec items)
+        n (clojure.core/count item-vec)
+        base (quot total-count n)
+        remainder (rem total-count n)]
+    (into {} (map-indexed (fn [i item]
+                            [item (if (< i remainder) (inc base) base)])
+                          item-vec))))
+
+(def ^:private DEDUP_SPEC
+  "Spec for LLM-based semantic deduplication output."
+  (spec/spec
+   (spec/field {::spec/name :keep-indices
+                ::spec/type :spec.type/int
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/description "0-based indices of questions to KEEP — one per semantic group, choosing the highest quality version"})))
+
+(defn- dedup-batch
+  "Deduplicates a single batch of questions via LLM. Returns kept questions."
+  [questions config model]
+  (let [numbered-list
+        (str/join "\n"
+                  (map-indexed
+                   (fn [i q]
+                     (str "[" i "] " (:question q)))
+                   questions))
+        result (llm/ask!
+                {:config config
+                 :spec DEDUP_SPEC
+                 :messages
+                 [(llm/system "You are a deduplication engine. Given a numbered list of questions, identify semantic duplicates — questions that ask the same thing in different words. For each group of duplicates, keep only the BEST version (most clear, specific, and well-phrased). Return the 0-based indices of questions to KEEP.")
+                  (llm/user (str "Identify and remove semantic duplicates from this list. Return indices of questions to KEEP (one per duplicate group, choosing the best phrasing):\n\n" numbered-list))]
+                 :model model})
+        keep-indices (set (or (:keep-indices (:result result)) []))
+        kept (vec (keep-indexed
+                   (fn [i q]
+                     (when (contains? keep-indices i)
+                       q))
+                   questions))]
+    ;; Fallback: if LLM returns empty or error, keep all
+    (if (seq kept) kept questions)))
+
+(def ^:private DEDUP_WINDOW_SIZE
+  "Max questions per dedup LLM call to avoid context overload."
+  20)
+
+(defn- deduplicate-questions
+  "Removes semantically duplicate questions using LLM judgment.
+
+   Processes in sliding windows of 20 to avoid overwhelming the LLM
+   with too many questions in a single call. When there are multiple
+   windows, a final cross-window pass catches duplicates across windows.
+
+   Params:
+   `questions` - Vector of question maps with :question key.
+   `config` - svar config map with :api-key etc.
+   `model` - String. Model to use for dedup.
+
+   Returns:
+   Vector of unique questions."
+  [questions config model]
+  (if (<= (clojure.core/count questions) 1)
+    questions
+    (let [total (clojure.core/count questions)
+          ;; Small batch: single pass
+          kept (if (<= total DEDUP_WINDOW_SIZE)
+                 (dedup-batch questions config model)
+                 ;; Large batch: process in windows, then cross-window pass
+                 (let [windows (partition-all DEDUP_WINDOW_SIZE questions)
+                       per-window (vec (mapcat #(dedup-batch (vec %) config model) windows))]
+                   ;; Cross-window dedup on accumulated results
+                   (if (> (clojure.core/count per-window) 1)
+                     (dedup-batch per-window config model)
+                     per-window)))
+          dropped-count (- total (clojure.core/count kept))]
+      (when (pos? dropped-count)
+        (trove/log! {:level :info :id ::questionify-dedup
+                     :data {:original total
+                            :kept (clojure.core/count kept)
+                            :dropped dropped-count}
+                     :msg "LLM deduplication complete"}))
+      kept)))
+
+(def ^:private REVISION_SPEC
+  "Spec for revising questions that need improvement."
+  (spec/spec
+   {:refs [QUESTION_SPEC]}
+   (spec/field {::spec/name :questions
+                ::spec/type :spec.type/ref
+                ::spec/target :question
+                ::spec/cardinality :spec.cardinality/many
+                ::spec/description "Revised question-answer pairs"})))
+
+(defn- revise-questions
+  "Revises questions that received needs-revision verdict.
+
+   Takes questions with attached revision notes and asks the LLM to fix
+   the identified issues while preserving the core content.
+
+   Params:
+   `questions` - Vector of question maps with :revision-note key.
+   `config` - svar config map.
+   `model` - String. Model to use.
+
+   Returns:
+   Vector of revised question maps (without :revision-note)."
+  [questions config model]
+  (if (empty? questions)
+    []
+    (let [revision-descriptions
+          (str/join "\n\n"
+                    (map-indexed
+                     (fn [i q]
+                       (str "QUESTION " i ":\n"
+                            "  Q: " (:question q) "\n"
+                            "  A: " (:answer q) "\n"
+                            "  Evidence: " (str-truncate (or (:evidence-span q) "") 200) "\n"
+                            "  Source: " (:source-document q) " page " (:source-page q) "\n"
+                            "  Issue: " (or (:revision-note q) "Minor quality issue")))
+                     questions))
+          result (llm/ask!
+                  {:config config
+                   :spec REVISION_SPEC
+                   :messages
+                   [(llm/system "You are a question revision engine. Given Q&A pairs with identified issues, fix the problems while preserving the core question intent, answer accuracy, and evidence grounding. Keep the same source-document, source-page, difficulty, and category. Fix only the identified issue.")
+                    (llm/user (str "Revise these questions to fix the identified issues:\n\n" revision-descriptions))]
+                   :model model})
+          revised (or (:questions (:result result)) [])]
+      (trove/log! {:level :info :id ::questionify-revision
+                   :data {:input (clojure.core/count questions)
+                          :revised (clojure.core/count revised)}
+                   :msg "Question revision complete"})
+      ;; Fallback: if revision fails, return originals without revision-note
+      (if (seq revised)
+        revised
+        (mapv #(dissoc % :revision-note) questions)))))
+
+(defn- filter-verified-questions
+  "Splits questions into passed/needs-revision/dropped based on verification results."
+  [questions verifications]
+  (let [;; Pad verifications with :pass for any missing indices
+        ver-map (into {} (map (fn [v] [(:question-index v) v]) verifications))
+        results (map-indexed
+                 (fn [i q]
+                   (let [v (get ver-map i {:verdict :pass})
+                         verdict (:verdict v)]
+                     (when-not (= :pass verdict)
+                       (trove/log! {:level :debug :id ::questionify-filter
+                                    :data {:index i :verdict verdict :note (:revision-note v)
+                                           :question (str-truncate (:question q) 100)}
+                                    :msg "Question failed verification"}))
+                     {:question q :verification v
+                      :passed? (= :pass verdict)
+                      :needs-revision? (= :needs-revision verdict)}))
+                 questions)]
+    {:passed (mapv :question (filter :passed? results))
+     :needs-revision (mapv (fn [r] (assoc (:question r) :revision-note (get-in r [:verification :revision-note])))
+                           (filter :needs-revision? results))
+     :dropped (mapv :question (filter #(and (not (:passed? %)) (not (:needs-revision? %))) results))
+     :results (mapv :verification results)}))
+
+;; -- Main pipeline --
+
+(defn- fork-env-for-query
+  "Creates a copy of the env with a fresh locals-atom for parallel query! calls.
+   Shares immutable config, db-info-atom, and query functions. Isolates mutable locals
+   so concurrent queries don't clobber each other's SCI variables."
+  [env]
+  (assoc env :locals-atom (atom {})))
+
+(defn questionify!
+  "Generates question-answer pairs from ingested documents.
+
+   Uses a multi-stage pipeline leveraging the RLM's iterative code execution:
+
+   Phase 1 - Passage Selection: Explores the corpus structure via TOC and content
+   search, selects diverse passages covering different sections and topics.
+
+   Phase 2 - Q&A Generation: For each batch of selected passages, generates
+   grounded question-answer pairs with evidence spans extracted from source text.
+
+   Phase 3 - Verification: Each Q&A pair is verified against the source material
+   for groundedness, non-triviality, and self-containedness.
+
+   Phase 4 - Deduplication: Near-duplicate questions are removed and diversity
+   across difficulty levels and categories is verified.
+
+   Params:
+   `env` - RLM environment from create-env with ingested documents.
+   `opts` - Map, optional:
+     - :count - Integer. Target number of Q&A pairs (default: 10).
+     - :difficulty - Set of keywords. Bloom's taxonomy levels to include
+       (default: #{:remember :understand :apply :analyze :evaluate :create}).
+     - :categories - Set of keywords. Question types to include
+       (default: #{:factual :inferential :comparative :analytical :definitional :procedural}).
+     - :model - String. Override default model.
+      - :batch-size - Integer. Passages per generation batch (default: 5).
+      - :parallelism - Integer. Number of parallel batch workers for Phase 2 (default: 3).
+      - :selection-model - String. Fast/cheap model for Phase 1 passage selection (default: :model).
+      - :k-candidates - Integer. Generate k candidates per passage, keep best (default: 1).
+      - :multi-hop? - Boolean. Generate cross-section questions from passage pairs (default: false).
+      - :personas - Set of keywords. Persona styles to rotate across batches for diversity.
+        Available: :student, :researcher, :practitioner, :examiner, :journalist (default: nil).
+      - :verify? - Boolean. Run verification phase (default: true).
+      - :debug? - Boolean. Verbose logging (default: false).
+
+   Returns:
+   Map with:
+     - :questions - Vector of verified Q&A maps, each with :question, :answer,
+       :evidence-span, :source-document, :source-page, :source-section,
+       :difficulty, :category.
+     - :dropped-questions - Vector of Q&A maps that failed verification.
+     - :verification-results - Vector of verification result maps.
+     - :phase-traces - Map of {:selection :generation :verification} traces.
+     - :stats - Map with :total-generated, :passed-verification, :duplicates-removed,
+       :final-count, :by-difficulty (counts), :by-category (counts).
+     - :iterations - Total iterations across all phases.
+     - :duration-ms - Total execution time."
+  ([env] (questionify! env {}))
+   ([env {:keys [count difficulty categories model batch-size verify? debug? parallelism
+                selection-model k-candidates multi-hop? personas]
+         :or {count 10
+              difficulty #{:remember :understand :apply :analyze :evaluate :create}
+              categories #{:factual :inferential :comparative :analytical :definitional :procedural}
+              batch-size 5
+              verify? true
+              debug? false
+              parallelism 3
+              k-candidates 1}}]
+   (when-not (:db-info-atom env)
+     (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
+
+   (let [start-time (System/nanoTime)
+         config (:config env)
+         effective-model (or model (:default-model config))
+         ;; Select 1.5x passages for filtering headroom
+         passage-count (int (Math/ceil (* count 1.5)))
+
+          ;; ===== PHASE 1: Passage Selection (fast-model TOC routing) =====
+          effective-selection-model (or selection-model effective-model)
+          db-info @(:db-info-atom env)
+          _ (trove/log! {:level :info :id ::questionify-phase1
+                         :data {:target-passages passage-count :target-questions count
+                                :selection-model effective-selection-model}
+                         :msg "Phase 1: Selecting passages via fast-model TOC routing"})
+          ;; Gather corpus structure programmatically (no SCI loop)
+          corpus-documents (db-list-documents db-info)
+          corpus-toc (db-list-toc-entries db-info)
+          corpus-nodes (db-list-page-nodes db-info {:limit 500})
+          selection-prompt (build-toc-based-selection-prompt
+                            {:count passage-count
+                             :difficulty-dist difficulty
+                             :category-dist categories
+                             :documents corpus-documents
+                             :toc-entries corpus-toc
+                             :page-nodes corpus-nodes})
+          selection-result (llm/ask! {:config config
+                                      :spec CHUNK_SELECTION_SPEC
+                                      :messages [(llm/system "You are a passage selection engine for Q&A generation. Select diverse passages from the corpus based on the provided structure. Return your selections in the required JSON format.")
+                                                 (llm/user selection-prompt)]
+                                      :model effective-selection-model})
+          passages (or (:passages (:result selection-result)) [])
+          _ (trove/log! {:level :info :id ::questionify-phase1-done
+                         :data {:passages-selected (clojure.core/count passages)
+                                :model-used effective-selection-model}
+                         :msg "Phase 1 complete"})
+
+          ;; ===== PHASE 2: Batched Q&A Generation (parallel via core.async) =====
+          ;; Prepare persona rotation
+          persona-vec (when (seq personas) (vec personas))
+          ;; Add multi-hop passage pairs if enabled
+          multi-hop-pairs (when multi-hop? (create-multi-hop-pairs passages))
+          _ (trove/log! {:level :info :id ::questionify-phase2
+                         :data {:passages (clojure.core/count passages) :batch-size batch-size
+                                :parallelism parallelism
+                                :k-candidates k-candidates
+                                :multi-hop-pairs (clojure.core/count (or multi-hop-pairs []))
+                                :personas (when persona-vec (mapv name persona-vec))}
+                         :msg "Phase 2: Generating Q&A pairs in parallel batches"})
+          ;; Build standard batches from passages
+          standard-batches (vec (partition-all batch-size passages))
+          ;; Add multi-hop batches (pairs flattened into batches)
+          multi-hop-batches (when (seq multi-hop-pairs)
+                              (vec (partition-all batch-size (mapcat identity multi-hop-pairs))))
+          all-batches (into standard-batches (or multi-hop-batches []))
+          batch-count (clojure.core/count all-batches)
+          standard-batch-count (clojure.core/count standard-batches)
+          work-items (map-indexed
+                      (fn [idx batch]
+                        (let [is-multi-hop? (>= idx standard-batch-count)
+                              persona (when persona-vec
+                                        (nth persona-vec (mod idx (clojure.core/count persona-vec))))]
+                          {:batch-idx idx :batch (vec batch)
+                           :persona persona :multi-hop? is-multi-hop?
+                           :k-candidates k-candidates}))
+                      all-batches)
+          result-chan (async/chan batch-count)
+          _ (async/pipeline-blocking
+              parallelism
+              result-chan
+              (map (fn [{:keys [batch-idx batch persona multi-hop? k-candidates]}]
+                     (trove/log! {:level :debug :id ::questionify-batch
+                                  :data {:batch batch-idx :passages-in-batch (clojure.core/count batch)
+                                         :persona (when persona (name persona))
+                                         :multi-hop? multi-hop?}
+                                  :msg (str "Generating batch " batch-idx)})
+                     (try
+                       (let [forked-env (fork-env-for-query env)
+                             prompt (build-generation-prompt batch batch-idx
+                                      {:persona persona
+                                       :k-candidates k-candidates
+                                       :multi-hop? multi-hop?})
+                             result (query! forked-env prompt
+                                            {:spec QUESTIONIFY_SPEC
+                                             :refine? false
+                                             :learn? false
+                                             :debug? debug?
+                                             :max-iterations 20
+                                             :model effective-model})]
+                         {:batch-idx batch-idx
+                          :questions (or (get-in result [:answer :questions]) [])
+                          :trace (:trace result)
+                          :iterations (or (:iterations result) 0)})
+                       (catch Exception e
+                         (trove/log! {:level :error :id ::questionify-batch-error
+                                      :data {:batch batch-idx :error (ex-message e)}
+                                      :msg "Batch generation failed"})
+                         {:batch-idx batch-idx
+                          :questions []
+                          :trace []
+                          :iterations 0}))))
+              (async/to-chan! work-items))
+          ;; Collect results from pipeline and sort by batch index for deterministic order
+          generation-results (let [results (loop [acc []]
+                                             (if-let [result (async/<!! result-chan)]
+                                               (recur (conj acc result))
+                                               acc))]
+                               (vec (sort-by :batch-idx results)))
+          all-questions (vec (mapcat :questions generation-results))
+         _ (trove/log! {:level :info :id ::questionify-phase2-done
+                        :data {:total-generated (clojure.core/count all-questions)}
+                        :msg "Phase 2 complete"})
+
+         ;; ===== PHASE 3: Verification + Revision (optional) =====
+          {:keys [passed dropped results ver-trace ver-iterations]}
+          (if (and verify? (seq all-questions))
+            (do
+              (trove/log! {:level :info :id ::questionify-phase3
+                           :data {:questions-to-verify (clojure.core/count all-questions)}
+                           :msg "Phase 3: Verifying Q&A pairs against source material"})
+              (let [ver-prompt (build-verification-prompt all-questions)
+                    ver-result (query! env ver-prompt
+                                       {:spec VERIFICATION_SPEC
+                                        :refine? false
+                                        :learn? false
+                                        :debug? debug?
+                                        :max-iterations 15
+                                        :model effective-model})
+                    verifications (or (get-in ver-result [:answer :verifications]) [])
+                    filtered (filter-verified-questions all-questions verifications)
+                    ;; Revision sub-phase: revise needs-revision questions instead of dropping
+                    revised (when (seq (:needs-revision filtered))
+                              (trove/log! {:level :info :id ::questionify-phase3-revision
+                                           :data {:needs-revision (clojure.core/count (:needs-revision filtered))}
+                                           :msg "Phase 3: Revising questions with minor issues"})
+                              (revise-questions (:needs-revision filtered) config effective-model))
+                    all-passed (into (:passed filtered) (or revised []))]
+                (trove/log! {:level :info :id ::questionify-phase3-done
+                             :data {:passed (clojure.core/count (:passed filtered))
+                                    :revised (clojure.core/count (or revised []))
+                                    :dropped (clojure.core/count (:dropped filtered))}
+                             :msg "Phase 3 complete"})
+                {:passed all-passed
+                 :dropped (:dropped filtered)
+                 :results (:results filtered)
+                 :ver-trace (:trace ver-result)
+                 :ver-iterations (or (:iterations ver-result) 0)}))
+            {:passed all-questions :dropped [] :results []
+             :ver-trace [] :ver-iterations 0})
+
+         ;; ===== PHASE 4: Deduplication & Final Selection =====
+         deduped (deduplicate-questions passed config effective-model)
+         final-questions (vec (take count deduped))
+
+         ;; ===== Build stats =====
+         duration-ms (util/elapsed-since start-time)
+         total-iterations (+ (or (:iterations selection-result) 0)
+                             (reduce + 0 (map :iterations generation-results))
+                             ver-iterations)
+         stats {:total-generated (clojure.core/count all-questions)
+                :passed-verification (clojure.core/count passed)
+                :duplicates-removed (- (clojure.core/count passed)
+                                       (clojure.core/count deduped))
+                :final-count (clojure.core/count final-questions)
+                :by-difficulty (frequencies (map :difficulty final-questions))
+                :by-category (frequencies (map :category final-questions))}]
+
+     (trove/log! {:level :info :id ::questionify-done :data stats
+                  :msg "questionify! complete"})
+
+     {:questions final-questions
+      :dropped-questions dropped
+      :verification-results results
+      :phase-traces {:selection (:trace selection-result)
+                     :generation (mapv :trace generation-results)
+                     :verification ver-trace}
+      :stats stats
+      :iterations total-iterations
+      :duration-ms duration-ms})))
+
+;; =============================================================================
+;; save-questionify! - Serialize Q&A results to EDN and Markdown
+;; =============================================================================
+
+(defn save-questionify!
+  "Saves questionify! results to EDN and/or Markdown files.
+
+   Params:
+   `result` - Map. Result from questionify!.
+   `path` - String. Base file path without extension.
+   `opts` - Map, optional:
+     - :formats - Set of keywords. Output formats (default: #{:edn :markdown}).
+     - :include-dropped? - Boolean. Include dropped questions (default: false).
+     - :include-stats? - Boolean. Include generation stats (default: true).
+
+   Returns:
+   Map with :files - vector of written file paths."
+  ([result path] (save-questionify! result path {}))
+  ([result path {:keys [formats include-dropped? include-stats?]
+                 :or {formats #{:edn :markdown}
+                      include-dropped? false
+                      include-stats? true}}]
+   (let [written-files (atom [])]
+
+     ;; EDN output
+     (when (contains? formats :edn)
+       (let [edn-path (str path ".edn")
+             data (cond-> {:questions (:questions result)}
+                    include-dropped? (assoc :dropped-questions (:dropped-questions result))
+                    include-stats? (assoc :stats (:stats result)))]
+         (spit edn-path (pr-str data))
+         (swap! written-files conj edn-path)
+         (trove/log! {:level :info :id ::save-questionify-edn
+                      :data {:path edn-path :questions (clojure.core/count (:questions result))}
+                      :msg "Saved questionify results as EDN"})))
+
+     ;; Markdown output
+     (when (contains? formats :markdown)
+       (let [md-path (str path ".md")
+             questions (:questions result)
+             sb (StringBuilder.)]
+         (.append sb "# Generated Q&A Pairs\n\n")
+         ;; Stats section
+         (when include-stats?
+           (let [s (:stats result)]
+             (.append sb "## Statistics\n\n")
+             (.append sb (str "| Metric | Value |\n|--------|-------|\n"))
+             (.append sb (str "| Total generated | " (:total-generated s) " |\n"))
+             (.append sb (str "| Passed verification | " (:passed-verification s) " |\n"))
+             (.append sb (str "| Duplicates removed | " (:duplicates-removed s) " |\n"))
+             (.append sb (str "| Final count | " (:final-count s) " |\n"))
+             (.append sb (str "| By difficulty | " (pr-str (:by-difficulty s)) " |\n"))
+             (.append sb (str "| By category | " (pr-str (:by-category s)) " |\n\n"))))
+         ;; Questions section
+         (.append sb "## Questions\n\n")
+         (doseq [[i q] (map-indexed vector questions)]
+           (.append sb (str "### Q" (inc i)
+                            " [" (name (or (:difficulty q) :unknown))
+                            " / " (name (or (:category q) :unknown)) "]\n\n"))
+           (.append sb (str "**Question:** " (:question q) "\n\n"))
+           (.append sb (str "**Answer:** " (:answer q) "\n\n"))
+           (when (:evidence-span q)
+             (.append sb (str "**Evidence:**\n> " (:evidence-span q) "\n\n")))
+           (.append sb (str "**Source:** " (:source-document q)
+                            ", page " (:source-page q)
+                            (when (:source-section q) (str " — " (:source-section q)))
+                            "\n\n"))
+           (.append sb "---\n\n"))
+         ;; Dropped questions section
+         (when (and include-dropped? (seq (:dropped-questions result)))
+           (.append sb "## Dropped Questions\n\n")
+           (doseq [[i q] (map-indexed vector (:dropped-questions result))]
+             (.append sb (str "### Dropped Q" (inc i) "\n\n"))
+             (.append sb (str "**Question:** " (:question q) "\n\n"))
+             (.append sb (str "**Answer:** " (:answer q) "\n\n"))
+             (.append sb "---\n\n")))
+         (spit md-path (str sb))
+         (swap! written-files conj md-path)
+         (trove/log! {:level :info :id ::save-questionify-md
+                      :data {:path md-path :questions (clojure.core/count questions)}
+                      :msg "Saved questionify results as Markdown"})))
+
+     {:files @written-files})))

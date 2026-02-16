@@ -19,7 +19,7 @@
   (:require
    [clojure.string :as str]
     [com.blockether.svar.internal.util :as util]
-    [com.blockether.svar.spec :as spec]
+    [com.blockether.svar.internal.spec :as spec]
     [taoensso.trove :as trove]))
 
 ;; =============================================================================

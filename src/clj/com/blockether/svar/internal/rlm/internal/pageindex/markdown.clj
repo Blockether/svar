@@ -1,4 +1,4 @@
-(ns com.blockether.svar.rlm.internal.pageindex.markdown
+(ns com.blockether.svar.internal.rlm.internal.pageindex.markdown
   "Markdown parsing for RLM - extracts hierarchical structure from markdown files.
    
    Primary functions:
