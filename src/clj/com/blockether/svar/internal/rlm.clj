@@ -11,18 +11,18 @@
    
    ```clojure
    ;; 1. Create environment (holds DB, config, SCI context)
-   (def env (rlm/create-env {:config llm-config :db-path \"/tmp/my-rlm\"}))
+   (def env (rlm/create-env {:config llm-config :path \"/tmp/my-rlm\"}))
    
    ;; 2. Ingest documents (can call multiple times)
-   (rlm/ingest! env documents)
-   (rlm/ingest! env more-documents)
+   (rlm/ingest-to-env! env documents)
+   (rlm/ingest-to-env! env more-documents)
    
    ;; 3. Run queries (reuses same env)
-   (rlm/query! env \"What is X?\")
-   (rlm/query! env \"Find Y\" {:spec my-spec})
+   (rlm/query-env! env \"What is X?\")
+   (rlm/query-env! env \"Find Y\" {:spec my-spec})
    
    ;; 4. Dispose when done
-   (rlm/dispose! env)
+   (rlm/dispose-env! env)
    ```
    
    ## Key Features
@@ -71,6 +71,7 @@
     [com.blockether.svar.internal.jsonish :as jsonish]
      [com.blockether.svar.internal.tokens :as tokens]
      [com.blockether.svar.internal.util :as util]
+     [com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex]
      [com.blockether.svar.internal.rlm.internal.pageindex.spec :as rlm-spec]
    [fast-edn.core :as edn]
    [clojure.java.io :as io]
@@ -189,7 +190,7 @@
   (.encodeToString (Base64/getEncoder) bs))
 
 (def ^:dynamic *max-recursion-depth*
-  "Dynamic var for max recursion depth. Bound per query! call."
+  "Dynamic var for max recursion depth. Bound per query-env! call."
   DEFAULT_RECURSION_DEPTH)
 
 (def ^:dynamic *rlm-ctx*
@@ -416,44 +417,79 @@
 ;; In-Memory Store
 ;; =============================================================================
 
+(def ^:private STORE_COLLECTIONS
+  "Flat collection keys persisted as individual EDN files."
+  #{:messages :learnings :entities :relationships :claims})
+
 (def ^:private EMPTY_STORE
-  "Empty store structure — the shape of all in-memory RLM data."
+  "Empty store structure — the shape of all in-memory RLM data.
+   
+   Document data (documents, pages, page-nodes, toc-entries) is derived from
+   :raw-documents on load. On flush, raw-documents are written in pageindex format
+   under documents/{name}/document.edn."
   {:messages []
    :learnings []
+   ;; Decomposed document data (in-memory only, derived from raw-documents)
    :documents []
    :pages []
    :page-nodes []
    :toc-entries []
+   ;; Full PageIndex documents keyed by doc-id — the source of truth for persistence
+   :raw-documents {}
+   ;; Extracted knowledge graph
    :entities []
    :relationships []
    :claims []
    :schema {}
-   :dirty? false})
+   :dirty #{}})
 
 (defn- flush-store-now!
-  "Immediately persists the store atom to EDN on disk (if path is set).
-   Resets the dirty flag after successful write."
+  "Persists dirty data to disk.
+   
+   Flat collections (messages, learnings, entities, relationships, claims) are
+   written as individual EDN files: messages.edn, learnings.edn, etc.
+   
+   Documents are written in pageindex format under documents/{name}/:
+     documents/{name}/document.edn  — full PageIndex document
+     documents/{name}/images/       — extracted images as PNG files
+   
+   Only writes collections that are marked dirty. Resets dirty set after write."
   [{:keys [store path]}]
   (when (and path store)
-    (try
-      (let [store-file (io/file path "store.edn")]
-        (io/make-parents store-file)
-        (spit store-file (with-out-str (pprint/pprint (dissoc @store :dirty?))))
-        (swap! store assoc :dirty? false))
-      (catch Exception e
-        (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to flush store to EDN"})))))
+    (let [dirty-keys (:dirty @store)]
+      (when (seq dirty-keys)
+        (try
+          (let [store-data @store
+                docs-dir (io/file path "documents")]
+            (io/make-parents (io/file path "schema.edn"))
+            ;; Write dirty flat collections
+            (doseq [k (filter STORE_COLLECTIONS dirty-keys)]
+              (let [coll-file (io/file path (str (name k) ".edn"))
+                    coll-data (get store-data k)]
+                (spit coll-file (with-out-str (pprint/pprint coll-data)))))
+            ;; Write documents in pageindex format
+            (when (contains? dirty-keys :raw-documents)
+              (doseq [[_doc-id doc] (:raw-documents store-data)]
+                (let [doc-name (or (:document/name doc) (str _doc-id))
+                      doc-dir (io/file docs-dir doc-name)]
+                  (pageindex/write-document-edn! (str doc-dir) doc))))
+            ;; Always write schema (cheap, keeps consistent)
+            (spit (io/file path "schema.edn") (with-out-str (pprint/pprint (:schema store-data))))
+            (swap! store assoc :dirty #{}))
+          (catch Exception e
+            (trove/log! {:level :warn :data {:error (ex-message e) :dirty dirty-keys}
+                         :msg "Failed to flush store to disk"})))))))
 
-(defn- mark-dirty!
-  "Marks the store as dirty (has unsaved changes)."
-  [{:keys [store]}]
+(defn- mark-dirty-store!
+  "Marks specific collection(s) as dirty (has unsaved changes).
+   
+   Params:
+   `db-info` - Map with :store atom.
+   `ks` - Keyword or collection of keywords identifying which store collections changed."
+  [{:keys [store]} ks]
   (when store
-    (swap! store assoc :dirty? true)))
-
-(defn- flush-store!
-  "Marks the store as dirty for deferred persistence.
-   Use flush-store-now! for immediate write."
-  [db-info]
-  (mark-dirty! db-info))
+    (let [ks (if (keyword? ks) #{ks} (set ks))]
+      (swap! store update :dirty into ks))))
 
 (defn- create-temp-db-path []
   (let [tmp-dir (System/getProperty "java.io.tmpdir")
@@ -491,7 +527,7 @@
   "Flushes dirty data and disposes a database if it's owned."
   [{:keys [store path owned?] :as db-info}]
   ;; Always flush dirty data before disposing
-  (when (and store (:dirty? @store))
+  (when (and store (seq (:dirty @store)))
     (flush-store-now! db-info))
   (when owned?
     (try
@@ -563,7 +599,7 @@
                 :message/timestamp timestamp
                 :message/iteration (or iteration 0)}]
        (swap! store update :messages conj msg)
-       (flush-store! db-info)
+       (mark-dirty-store! db-info :messages)
        {:id msg-id :role role :content content :tokens token-count :timestamp timestamp}))))
 
 (defn- get-recent-messages
@@ -1107,7 +1143,7 @@
                              :learning/applied-count 0}
                       context (assoc :learning/context context))]
        (swap! store update :learnings conj learning)
-       (flush-store! db-info)
+       (mark-dirty-store! db-info :learnings)
        {:learning/id learning-id
         :learning/insight insight
         :learning/context context
@@ -1164,8 +1200,8 @@
                                     :learning/not-useful-count new-not-useful
                                     :learning/last-evaluated (java.util.Date.))
                              l))
-                         ls)))
-          (flush-store! db-info)
+                          ls)))
+          (mark-dirty-store! db-info :learnings)
           {:learning/id learning-id
            :learning/insight (:learning/insight entity)
            :learning/useful-count new-useful
@@ -1192,8 +1228,8 @@
                            (if (= learning-id (:learning/id l))
                              (assoc l :learning/applied-count new-count)
                              l))
-                         ls)))
-          (flush-store! db-info)
+                          ls)))
+          (mark-dirty-store! db-info :learnings)
           new-count)))))
 
 (defn- db-get-learnings
@@ -1371,7 +1407,7 @@
                    (:document/created-at doc) (assoc :document/created-at (:document/created-at doc))
                    (:document/updated-at doc) (assoc :document/updated-at (:document/updated-at doc)))]
       (swap! store update :documents conj entity)
-      (flush-store! db-info)
+      (mark-dirty-store! db-info :documents)
       entity)))
 
 (defn- get-document-toc
@@ -1445,7 +1481,7 @@
                      :page/document-id doc-id
                      :page/index (:page/index page)}]
       (swap! store update :pages conj page-data)
-      (flush-store! db-info)
+      (mark-dirty-store! db-info :pages)
       page-id)))
 
 (defn- db-get-page
@@ -1518,7 +1554,7 @@
                             :bytes-size (alength ^bytes img-bytes)}
                      :msg "Skipping page node image-data (exceeds 5MB limit)"}))
       (swap! store update :page-nodes conj (first tx-data))
-      (flush-store! db-info)
+      (mark-dirty-store! db-info :page-nodes)
       node-id)))
 
 (defn- db-search-page-nodes
@@ -1629,7 +1665,7 @@
                              :document.toc/document-id doc-id
                              :document.toc/created-at timestamp)]
        (swap! store update :toc-entries conj entry-data)
-       (flush-store! db-info)
+       (mark-dirty-store! db-info :toc-entries)
        entry-data))))
 
 (defn- db-search-toc-entries
@@ -1841,10 +1877,11 @@
   "Stores an entire PageIndex document with all its components.
    
    Stores the complete document structure exactly as PageIndex produces it:
-   - Document metadata
-   - All pages
-   - All page nodes
-   - All TOC entries
+   - Document metadata (decomposed for search)
+   - All pages (decomposed for search)
+   - All page nodes (decomposed for search)
+   - All TOC entries (decomposed for search)
+   - Raw document (preserved for pageindex-compatible persistence)
    
    Params:
    `db-info` - Map with :store key.
@@ -1854,7 +1891,9 @@
    Map with :document-id and counts of stored entities."
   [db-info doc]
   (let [doc-id (str (java.util.UUID/randomUUID))
-        ;; Store document metadata
+        ;; Store raw document for pageindex-compatible persistence
+        _ (swap! (:store db-info) assoc-in [:raw-documents doc-id] doc)
+        ;; Store document metadata (decomposed for search)
         _ (db-store-document! db-info doc doc-id)
         ;; Store pages and their nodes
         page-count (atom 0)
@@ -1870,6 +1909,7 @@
         _ (doseq [entry (:document/toc doc)]
             (db-store-toc-entry! db-info entry doc-id)
             (swap! toc-count inc))]
+    (mark-dirty-store! db-info :raw-documents)
     {:document-id doc-id
      :pages-stored @page-count
      :nodes-stored @node-count
@@ -2192,20 +2232,123 @@
                          'java.util.UUID java.util.UUID}
                :deny '[require import ns eval load-string read-string]})))
 
+(defn- load-collection-file
+  "Loads a single collection EDN file, returning nil on missing/corrupt."
+  [path filename]
+  (let [f (io/file path filename)]
+    (when (.exists f)
+      (try
+        (edn/read-string (slurp f))
+        (catch Exception e
+          (trove/log! {:level :warn :data {:error (ex-message e) :file filename}
+                       :msg "Failed to load collection file, skipping"})
+          nil)))))
+
+(defn- load-documents-from-disk
+  "Loads PageIndex documents from documents/{name}/document.edn directories.
+   Returns a map of {doc-id -> document}."
+  [path]
+  (let [docs-dir (io/file path "documents")]
+    (if (and (.exists docs-dir) (.isDirectory docs-dir))
+      (let [subdirs (filter #(.isDirectory ^java.io.File %) (.listFiles docs-dir))]
+        (reduce (fn [acc ^java.io.File dir]
+                  (let [doc-file (io/file dir "document.edn")]
+                    (if (.exists doc-file)
+                      (try
+                        (let [doc (pageindex/read-document-edn (str dir))
+                              doc-id (str (java.util.UUID/randomUUID))]
+                          (assoc acc doc-id doc))
+                        (catch Exception e
+                          (trove/log! {:level :warn :data {:error (ex-message e) :dir (str dir)}
+                                       :msg "Failed to load document, skipping"})
+                          acc))
+                      acc)))
+                {}
+                subdirs))
+      {})))
+
+(defn- decompose-raw-documents
+  "Decomposes raw PageIndex documents into flat search collections.
+   Returns a map with :documents, :pages, :page-nodes, :toc-entries vectors."
+  [raw-documents]
+  (let [documents (atom [])
+        pages (atom [])
+        page-nodes (atom [])
+        toc-entries (atom [])]
+    (doseq [[doc-id doc] raw-documents]
+      ;; Document metadata
+      (swap! documents conj
+             (cond-> {:document/id doc-id
+                      :document/name (:document/name doc)
+                      :document/extension (:document/extension doc)
+                      :document/page-count (count (:document/pages doc))
+                      :document/created-at (java.util.Date.)}
+               (:document/title doc) (assoc :document/title (:document/title doc))
+               (:document/abstract doc) (assoc :document/abstract (:document/abstract doc))
+               (:document/author doc) (assoc :document/author (:document/author doc))
+               (:document/created-at doc) (assoc :document/created-at (:document/created-at doc))
+               (:document/updated-at doc) (assoc :document/updated-at (:document/updated-at doc))))
+      ;; Pages and nodes
+      (doseq [page (:document/pages doc)]
+        (let [page-id (str doc-id "-page-" (:page/index page))]
+          (swap! pages conj {:page/id page-id
+                             :page/document-id doc-id
+                             :page/index (:page/index page)})
+          (doseq [node (:page/nodes page)]
+            (let [node-id (str (or (:page.node/id node) (java.util.UUID/randomUUID)))]
+              (swap! page-nodes conj
+                     (cond-> {:page.node/id node-id
+                              :page.node/page-id page-id
+                              :page.node/document-id doc-id
+                              :page.node/type (:page.node/type node)
+                              :page.node/created-at (java.util.Date.)}
+                       (:page.node/content node) (assoc :page.node/content (:page.node/content node))
+                       (:page.node/description node) (assoc :page.node/description (:page.node/description node))
+                       (:page.node/level node) (assoc :page.node/level (:page.node/level node))
+                       (:page.node/parent-id node) (assoc :page.node/parent-id (:page.node/parent-id node))
+                       (:page.node/kind node) (assoc :page.node/kind (:page.node/kind node))
+                       (:page.node/caption node) (assoc :page.node/caption (:page.node/caption node))
+                       (:page.node/bbox node) (assoc :page.node/bbox (:page.node/bbox node))
+                       (:page.node/continuation? node) (assoc :page.node/continuation? (:page.node/continuation? node))))))))
+      ;; TOC entries
+      (doseq [entry (:document/toc doc)]
+        (swap! toc-entries conj
+               (cond-> {:document.toc/id (str (or (:document.toc/id entry) (java.util.UUID/randomUUID)))
+                        :document.toc/document-id doc-id
+                        :document.toc/created-at (java.util.Date.)}
+                 (:document.toc/type entry) (assoc :document.toc/type (:document.toc/type entry))
+                 (:document.toc/title entry) (assoc :document.toc/title (:document.toc/title entry))
+                 (:document.toc/description entry) (assoc :document.toc/description (:document.toc/description entry))
+                 (:document.toc/target-page entry) (assoc :document.toc/target-page (:document.toc/target-page entry))
+                 (:document.toc/target-section-id entry) (assoc :document.toc/target-section-id (:document.toc/target-section-id entry))
+                 (:document.toc/level entry) (assoc :document.toc/level (:document.toc/level entry))
+                 (:document.toc/parent-id entry) (assoc :document.toc/parent-id (:document.toc/parent-id entry))))))
+    {:documents @documents
+     :pages @pages
+     :page-nodes @page-nodes
+     :toc-entries @toc-entries}))
+
 (defn- create-persistent-db
   "Creates a persistent store at the given path.
-   Loads existing data from store.edn if present.
+   Loads flat collections from individual EDN files and documents from
+   documents/{name}/document.edn in pageindex format.
    Unlike create-disposable-db, this store is NOT deleted when disposed."
   [path]
-  (let [store-file (io/file path "store.edn")
-        existing-data (when (.exists store-file)
-                        (try
-                          (edn/read-string (slurp store-file))
-                          (catch Exception e
-                            (trove/log! {:level :warn :data {:error (ex-message e)}
-                                         :msg "Failed to load existing store.edn, starting fresh"})
-                            nil)))]
-    {:store (atom (or existing-data EMPTY_STORE))
+  (let [;; Load flat collections
+        base-store (reduce (fn [store k]
+                             (if-let [data (load-collection-file path (str (name k) ".edn"))]
+                               (assoc store k data)
+                               store))
+                           EMPTY_STORE
+                           STORE_COLLECTIONS)
+        ;; Load documents from pageindex format
+        raw-documents (load-documents-from-disk path)
+        ;; Decompose documents into search collections
+        decomposed (decompose-raw-documents raw-documents)
+        ;; Load schema
+        schema-data (load-collection-file path "schema.edn")]
+    {:store (atom (cond-> (merge base-store decomposed {:raw-documents raw-documents :dirty #{}})
+                    schema-data (assoc :schema schema-data)))
      :path path
      :owned? false}))
 
@@ -2221,7 +2364,7 @@
    `opts` - Map, optional:
      - :db - External db connection, false to disable, or nil for auto-create.
      - :db-opts - Options for auto-created db (:schema).
-     - :db-path - Path for persistent DB (history survives across sessions).
+      - :path - Path for persistent DB (history survives across sessions).
      - :documents - Vector of PageIndex documents to preload (stored exactly as-is).
    
    Returns:
@@ -2232,13 +2375,13 @@
     The same in-memory store is used for conversation history, documents, and learnings."
   ([context-data model depth-atom api-key base-url]
    (create-rlm-env context-data model depth-atom api-key base-url {}))
-  ([context-data model depth-atom api-key base-url {:keys [db db-opts db-path documents config]}]
+   ([context-data model depth-atom api-key base-url {:keys [db db-opts path documents config]}]
    (let [locals-atom (atom {})
           db-info (cond
                     (false? db) nil
                     (rlm-store? db) (assoc db :owned? false)
                    ;; Persistent DB path provided - history survives across sessions
-                   db-path (create-persistent-db db-path)
+                   path (create-persistent-db path)
                    ;; Default: disposable in-memory DB
                    :else (create-disposable-db (or db-opts {})))
          db-info-atom (when db-info (atom db-info))
@@ -3009,7 +3152,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                       :relationship/created-at (java.util.Date.)})))
           (catch Exception e
             (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store relationship"}))))
-      (flush-store! db-info)
+      (mark-dirty-store! db-info #{:entities :relationships})
       {:entities-extracted (count entities)
        :relationships-extracted (count relationships)
        :pages-processed (count pages)
@@ -3031,20 +3174,20 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
    Usage:
    ```clojure
    (def env (rlm/create-env {:config llm-config}))
-   (rlm/register-fn! env 'my-fn (fn [x] (* x 2)) \"(my-fn x) - Doubles x\")
-   (rlm/register-def! env 'MAX_RETRIES 3 \"MAX_RETRIES - Max retry attempts\")
-   (rlm/ingest! env documents)
-   (rlm/query! env \"What is X?\")
-   (rlm/dispose! env)
+   (rlm/register-env-fn! env 'my-fn (fn [x] (* x 2)) \"(my-fn x) - Doubles x\")
+   (rlm/register-env-def! env 'MAX_RETRIES 3 \"MAX_RETRIES - Max retry attempts\")
+   (rlm/ingest-to-env! env documents)
+   (rlm/query-env! env \"What is X?\")
+   (rlm/dispose-env! env)
    ```
    
    Params:
    - :config - Required. LLM config with :api-key, :base-url, :default-model.
-   - :db-path - Optional. Path for persistent DB. If provided, data survives across sessions.
-   
-   Returns:
-   RLM environment map (component). Pass to register-fn!, register-def!, ingest!, query!, dispose!."
-  [{:keys [config db-path]}]
+    - :path - Optional. Path for persistent DB. If provided, data survives across sessions.
+    
+    Returns:
+    RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
+  [{:keys [config path]}]
   (when-not config
     (anomaly/incorrect! "Missing :config" {:type :rlm/missing-config}))
   (let [api-key (:api-key config)
@@ -3052,12 +3195,12 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         model (:default-model config)
         depth-atom (atom 0)
         locals-atom (atom {})
-        ;; Custom bindings for SCI (registered via register-fn!/register-def!)
+        ;; Custom bindings for SCI (registered via register-env-fn!/register-env-def!)
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
-        db-info (if db-path
-                  (create-persistent-db db-path)
-                  (create-disposable-db {}))
+         db-info (if path
+                   (create-persistent-db path)
+                   (create-disposable-db {}))
         db-info-atom (atom db-info)
         ;; Initialize all schemas
         _ (init-message-history! db-info)
@@ -3078,7 +3221,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
      :rlm-query-fn rlm-query-fn
      :history-enabled? true}))
 
-(defn register-fn!
+(defn register-env-fn!
   "Registers a function in the RLM environment's SCI sandbox.
    
    The function becomes available to the LLM during code execution.
@@ -3105,7 +3248,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
   (swap! (:custom-docs-atom env) conj {:type :fn :sym sym :doc doc-string})
   env)
 
-(defn register-def!
+(defn register-env-def!
   "Registers a constant/value in the RLM environment's SCI sandbox.
    
    The value becomes available to the LLM during code execution.
@@ -3130,7 +3273,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
   (swap! (:custom-docs-atom env) conj {:type :def :sym sym :doc doc-string})
   env)
 
-(defn ingest!
+(defn ingest-to-env!
   "Ingests PageIndex documents into an RLM environment.
    
    Stores the complete document structure exactly as PageIndex produces it:
@@ -3155,7 +3298,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
    [{:document-id \"...\" :pages-stored N :nodes-stored N :toc-entries-stored N 
      :entities-extracted N :relationships-extracted N :pages-processed N 
      :extraction-errors N :visual-nodes-scanned N}] (extraction fields only if enabled)"
-  ([env documents] (ingest! env documents {}))
+  ([env documents] (ingest-to-env! env documents {}))
   ([env documents opts]
    (when-not (:db-info-atom env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
@@ -3178,10 +3321,10 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
       (flush-store-now! db-info)
       results)))
 
-(defn dispose!
+(defn dispose-env!
   "Disposes an RLM environment and releases resources.
    
-   For persistent DBs (created with :db-path), data is preserved.
+    For persistent DBs (created with :path), data is preserved.
    For disposable DBs, all data is deleted.
    
    Params:
@@ -3190,7 +3333,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
   (when-let [db-info-atom (:db-info-atom env)]
     (dispose-db! @db-info-atom)))
 
-(defn query!
+(defn query-env!
   "Runs a query on an RLM environment using iterative LLM code execution.
    
    The LLM can use these functions during execution:
@@ -3222,7 +3365,8 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
      - :model - Override config's default model.
      - :max-iterations - Max code iterations (default: 50).
      - :max-refinements - Max refine iterations (default: 1).
-     - :min-score - Min eval score (default: 32/40).
+      - :threshold - Min eval score 0.0-1.0 for refinement early stop (default: 0.8).
+      - :verify? - Enable claim verification with citations (default: false).
      - :refine? - Enable refinement (default: true).
      - :learn? - Store as example (default: true).
       - :max-context-tokens - Token budget for context.
@@ -3246,12 +3390,12 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
      - :history-tokens - Approximate token count of conversation history.
      - :status - Only present on failure, e.g. :max-iterations."
   ([env query-str]
-   (query! env query-str {}))
-  ([env query-str {:keys [context spec model max-iterations max-refinements min-score
-                           refine? learn? max-context-tokens max-recursion-depth verify-claims?
+   (query-env! env query-str {}))
+   ([env query-str {:keys [context spec model max-iterations max-refinements threshold
+                           refine? learn? max-context-tokens max-recursion-depth verify?
                            plan? debug?]
-                    :or {max-iterations MAX_ITERATIONS max-refinements 1 min-score 32
-                         refine? true learn? true max-recursion-depth DEFAULT_RECURSION_DEPTH verify-claims? false
+                    :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
+                         refine? true learn? true max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
                          plan? false debug? false}}]
    (when-not (:db-info-atom env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
@@ -3268,12 +3412,12 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
          rlm-query-fn (:rlm-query-fn env)
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
-         claims-atom (when verify-claims? (atom []))
-         cite-bindings (when verify-claims?
-                         {'CITE (make-cite-fn claims-atom)
-                          'CITE-UNVERIFIED (make-cite-unverified-fn claims-atom)
-                          'list-claims (make-list-claims-fn claims-atom)})
-         cite-docs (when verify-claims?
+          claims-atom (when verify? (atom []))
+          cite-bindings (when verify?
+                          {'CITE (make-cite-fn claims-atom)
+                           'CITE-UNVERIFIED (make-cite-unverified-fn claims-atom)
+                           'list-claims (make-list-claims-fn claims-atom)})
+          cite-docs (when verify?
                      [{:type :fn :sym 'CITE :doc "(CITE claim-text document-id page section quote) or (CITE claim-text document-id page section quote confidence) - Cite a claim with source evidence. Returns {:cited true :claim-id uuid :claim-text text}"}
                       {:type :fn :sym 'CITE-UNVERIFIED :doc "(CITE-UNVERIFIED claim-text) - Record a claim without source verification. Lower confidence."}
                       {:type :fn :sym 'list-claims :doc "(list-claims) - List all claims cited so far in this query."}
@@ -3284,8 +3428,8 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
        (binding [*max-recursion-depth* max-recursion-depth]
          (rlm-debug! {:query query-str :model model :max-iterations max-iterations
-                       :verify-claims? verify-claims? :plan? plan?
-                       :refine? refine?} "RLM query! started")
+                        :verify? verify? :plan? plan?
+                       :refine? refine?} "RLM query-env! started")
           (let [start-time (System/nanoTime)
                 examples (get-examples query-str {})
                 db-info @db-info-atom
@@ -3308,7 +3452,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
            (if status
                ;; Execution hit max iterations - return with trace
                (let [duration-ms (util/elapsed-since start-time)]
-                 (rlm-debug! {:status status :iterations iterations :duration-ms duration-ms} "RLM query! finished (max iterations)")
+                 (rlm-debug! {:status status :iterations iterations :duration-ms duration-ms} "RLM query-env! finished (max iterations)")
                  (flush-store-now! db-info)
                 (cond-> {:answer nil
                         :raw-answer (:result answer answer)
@@ -3316,8 +3460,8 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                         :trace trace
                         :iterations iterations
                         :duration-ms duration-ms}
-                 verify-claims? (assoc :verified-claims (vec @claims-atom))))
-              ;; Normal completion - refine and finalize
+                  verify? (assoc :verified-claims (vec @claims-atom))))
+               ;; Normal completion - refine and finalize
                (let [answer-value (:result answer answer)
                      ;; Refinement path: stringify for LLM round-trip.
                      ;; No-refine path: keep the native Clojure value from FINAL/FINAL-VAR.
@@ -3342,7 +3486,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                                                              (llm/user (str "<query>\n" query-str "\n</query>\n\n"
                                                                             "<answer>\n" answer-as-str "\n</answer>"))]
                                                   :config config :model model
-                                                  :iterations max-refinements :threshold min-score}
+                                                   :iterations max-refinements :threshold threshold}
                                            (seq stored-docs) (assoc :documents stored-docs))
                              raw-refine (llm/refine! refine-opts)
                              refined-str (:result raw-refine)
@@ -3365,8 +3509,13 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                          {:answer parsed
                           :eval-scores (:final-score raw-refine)
                           :refinement-count (:iterations-count raw-refine)})
-                       ;; No refinement — value is already Clojure from FINAL/FINAL-VAR. Use it directly.
-                       {:answer answer-value
+                       ;; No refinement — value is Clojure from FINAL/FINAL-VAR.
+                       ;; When spec is provided, coerce through SAP for type correctness
+                       ;; (e.g., string "pass" → keyword :pass for :spec.type/keyword fields).
+                       {:answer (if spec
+                                 (try (spec/coerce-data-with-spec answer-value spec)
+                                      (catch Exception _ answer-value))
+                                 answer-value)
                         :eval-scores nil
                         :refinement-count 0})
                     duration-ms (util/elapsed-since start-time)
@@ -3374,20 +3523,20 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                (when (and learn? eval-scores)
                  (store-example! query-str (str-truncate (pr-str context) 200)
                                   (str final-answer) (get-in eval-scores [:total] 0) nil))
-                 (when (and verify-claims? (seq @claims-atom))
+                  (when (and verify? (seq @claims-atom))
                    (let [db-info @db-info-atom
                          query-id (UUID/randomUUID)]
                      (doseq [claim @claims-atom]
                        (try
                          (swap! (:store db-info) update :claims conj
-                                (merge claim {:claim/query-id query-id
-                                              :claim/verified? (boolean (get claim :claim/verified? true))}))
-                         (flush-store! db-info)
+                                 (merge claim {:claim/query-id query-id
+                                               :claim/verified? (boolean (get claim :claim/verified? true))}))
+                          (mark-dirty-store! db-info :claims)
                          (catch Exception e
                            (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
                  (rlm-debug! {:iterations iterations :duration-ms duration-ms
                                :refinement-count refinement-count
-                               :answer-preview (str-truncate (pr-str final-answer) 200)} "RLM query! finished (success)")
+                               :answer-preview (str-truncate (pr-str final-answer) 200)} "RLM query-env! finished (success)")
                   ;; Single flush after query completion (all messages, claims, learnings batched)
                   (flush-store-now! db-info)
                   (cond-> {:answer final-answer
@@ -3398,66 +3547,76 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                           :iterations iterations
                           :duration-ms duration-ms
                           :history-tokens history-tokens}
-                   verify-claims? (assoc :verified-claims (vec @claims-atom)))))))))))
+                    verify? (assoc :verified-claims (vec @claims-atom)))))))))))
+
 
 ;; =============================================================================
 ;; Trace Pretty Printing
 ;; =============================================================================
 
+(defn- format-trace
+  "Formats an RLM execution trace into a string. Internal helper."
+  [trace {:keys [max-response-length max-code-length max-result-length show-stdout?]
+          :or {max-response-length 500 max-code-length 300 max-result-length 200
+               show-stdout? true}}]
+  (let [truncate (fn [s n] (if (and s (> (count s) n)) (str (subs s 0 n) "...") s))
+        format-execution (fn [{:keys [id code result stdout error execution-time-ms]}]
+                           (str "║ [" id "] "
+                                (truncate (str/replace (or code "") #"\n" " ") max-code-length) "\n"
+                                "║     "
+                                (if error
+                                  (str "ERROR: " error)
+                                  (str "=> " (truncate (pr-str result) max-result-length)))
+                                (when execution-time-ms (str " (" execution-time-ms "ms)"))
+                                (when (and show-stdout? stdout (not (str/blank? stdout)))
+                                  (str "\n║     STDOUT: " (truncate stdout max-result-length)))))
+        format-iteration (fn [{:keys [iteration response executions final?]}]
+                           (str "\n"
+                                "╔══════════════════════════════════════════════════════════════════════════════\n"
+                                "║ ITERATION " iteration (when final? " [FINAL]") "\n"
+                                "╠══════════════════════════════════════════════════════════════════════════════\n"
+                                "║ RESPONSE:\n"
+                                "║ " (str/replace (truncate response max-response-length) #"\n" "\n║ ") "\n"
+                                (when (seq executions)
+                                  (str "╠──────────────────────────────────────────────────────────────────────────────\n"
+                                       "║ EXECUTIONS (" (count executions) "):\n"
+                                       (str/join "\n"
+                                                 (map format-execution executions))
+                                       "\n"))
+                                "╚══════════════════════════════════════════════════════════════════════════════"))]
+    (if (empty? trace)
+      "No trace entries."
+      (str "RLM EXECUTION TRACE (" (count trace) " iterations)\n"
+           (str/join "\n" (map format-iteration trace))))))
+
 (defn pprint-trace
-  "Pretty-prints an RLM execution trace for debugging.
-   
+  "Pretty-prints an RLM execution trace to stdout for debugging.
+
+   Prints the formatted trace to *out* and returns the formatted string.
+
    Params:
-   `trace` - Vector of trace entries from query! result.
+   `trace` - Vector of trace entries from query-env! result.
    `opts` - Map, optional:
      - :max-response-length - Truncate LLM response (default: 500).
      - :max-code-length - Truncate code blocks (default: 300).
      - :max-result-length - Truncate execution results (default: 200).
      - :show-stdout? - Show stdout output (default: true).
-   
+
    Returns:
-   String with formatted trace output."
+   String with formatted trace output (also printed to stdout)."
   ([trace] (pprint-trace trace {}))
-  ([trace {:keys [max-response-length max-code-length max-result-length show-stdout?]
-           :or {max-response-length 500 max-code-length 300 max-result-length 200
-                show-stdout? true}}]
-   (let [truncate (fn [s n] (if (and s (> (count s) n)) (str (subs s 0 n) "...") s))
-         format-execution (fn [{:keys [id code result stdout error execution-time-ms]}]
-                            (str "║ [" id "] "
-                                 (truncate (str/replace (or code "") #"\n" " ") max-code-length) "\n"
-                                 "║     "
-                                 (if error
-                                   (str "ERROR: " error)
-                                   (str "=> " (truncate (pr-str result) max-result-length)))
-                                 (when execution-time-ms (str " (" execution-time-ms "ms)"))
-                                 (when (and show-stdout? stdout (not (str/blank? stdout)))
-                                   (str "\n║     STDOUT: " (truncate stdout max-result-length)))))
-         format-iteration (fn [{:keys [iteration response executions final?]}]
-                            (str "\n"
-                                 "╔══════════════════════════════════════════════════════════════════════════════\n"
-                                 "║ ITERATION " iteration (when final? " [FINAL]") "\n"
-                                 "╠══════════════════════════════════════════════════════════════════════════════\n"
-                                 "║ RESPONSE:\n"
-                                 "║ " (str/replace (truncate response max-response-length) #"\n" "\n║ ") "\n"
-                                 (when (seq executions)
-                                   (str "╠──────────────────────────────────────────────────────────────────────────────\n"
-                                        "║ EXECUTIONS (" (count executions) "):\n"
-                                        (str/join "\n"
-                                                  (map format-execution executions))
-                                        "\n"))
-                                 "╚══════════════════════════════════════════════════════════════════════════════"))]
-     (if (empty? trace)
-       "No trace entries."
-       (str "RLM EXECUTION TRACE (" (count trace) " iterations)\n"
-            (str/join "\n" (map format-iteration trace)))))))
+  ([trace opts]
+   (let [s (format-trace trace opts)]
+     (println s)
+     s)))
 
 (defn print-trace
-  "Prints an RLM execution trace to stdout. See pprint-trace for options."
-  ([trace] (println (pprint-trace trace)))
-  ([trace opts] (println (pprint-trace trace opts))))
+  "Prints an RLM execution trace to stdout. Alias for pprint-trace."
+  ([trace] (pprint-trace trace))
+  ([trace opts] (pprint-trace trace opts)))
 
 ;; =============================================================================
-;; questionify! - Multi-stage Q&A generation from ingested documents
+;; generate-qa-env! - Multi-stage Q&A generation from ingested documents
 ;; =============================================================================
 
 ;; -- Bloom's taxonomy difficulty levels --
@@ -3531,7 +3690,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                 ::spec/description "Question category"})))
 
 (def ^:private QUESTIONIFY_SPEC
-  "Spec for questionify! Q&A generation output."
+  "Spec for generate-qa-env! Q&A generation output."
   (spec/spec
    {:refs [QUESTION_SPEC]}
    (spec/field {::spec/name :questions
@@ -3974,7 +4133,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                      per-window)))
           dropped-count (- total (clojure.core/count kept))]
       (when (pos? dropped-count)
-        (trove/log! {:level :info :id ::questionify-dedup
+        (trove/log! {:level :info :id ::qa-dedup
                      :data {:original total
                             :kept (clojure.core/count kept)
                             :dropped dropped-count}
@@ -4026,7 +4185,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                     (llm/user (str "Revise these questions to fix the identified issues:\n\n" revision-descriptions))]
                    :model model})
           revised (or (:questions (:result result)) [])]
-      (trove/log! {:level :info :id ::questionify-revision
+      (trove/log! {:level :info :id ::qa-revision
                    :data {:input (clojure.core/count questions)
                           :revised (clojure.core/count revised)}
                    :msg "Question revision complete"})
@@ -4045,7 +4204,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                    (let [v (get ver-map i {:verdict :pass})
                          verdict (:verdict v)]
                      (when-not (= :pass verdict)
-                       (trove/log! {:level :debug :id ::questionify-filter
+                       (trove/log! {:level :debug :id ::qa-filter
                                     :data {:index i :verdict verdict :note (:revision-note v)
                                            :question (str-truncate (:question q) 100)}
                                     :msg "Question failed verification"}))
@@ -4062,13 +4221,13 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 ;; -- Main pipeline --
 
 (defn- fork-env-for-query
-  "Creates a copy of the env with a fresh locals-atom for parallel query! calls.
+  "Creates a copy of the env with a fresh locals-atom for parallel query-env! calls.
    Shares immutable config, db-info-atom, and query functions. Isolates mutable locals
    so concurrent queries don't clobber each other's SCI variables."
   [env]
   (assoc env :locals-atom (atom {})))
 
-(defn questionify!
+(defn generate-qa-env!
   "Generates question-answer pairs from ingested documents.
 
    Uses a multi-stage pipeline leveraging the RLM's iterative code execution:
@@ -4095,7 +4254,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
        (default: #{:factual :inferential :comparative :analytical :definitional :procedural}).
      - :model - String. Override default model.
       - :batch-size - Integer. Passages per generation batch (default: 5).
-      - :parallelism - Integer. Number of parallel batch workers for Phase 2 (default: 3).
+      - :parallel - Integer. Number of parallel batch workers for Phase 2 (default: 3).
       - :selection-model - String. Fast/cheap model for Phase 1 passage selection (default: :model).
       - :k-candidates - Integer. Generate k candidates per passage, keep best (default: 1).
       - :multi-hop? - Boolean. Generate cross-section questions from passage pairs (default: false).
@@ -4116,17 +4275,17 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
        :final-count, :by-difficulty (counts), :by-category (counts).
      - :iterations - Total iterations across all phases.
      - :duration-ms - Total execution time."
-  ([env] (questionify! env {}))
-   ([env {:keys [count difficulty categories model batch-size verify? debug? parallelism
-                selection-model k-candidates multi-hop? personas]
-         :or {count 10
-              difficulty #{:remember :understand :apply :analyze :evaluate :create}
-              categories #{:factual :inferential :comparative :analytical :definitional :procedural}
-              batch-size 5
-              verify? true
-              debug? false
-              parallelism 3
-              k-candidates 1}}]
+  ([env] (generate-qa-env! env {}))
+   ([env {:keys [count difficulty categories model batch-size verify? debug? parallel
+                 selection-model k-candidates multi-hop? personas]
+          :or {count 10
+               difficulty #{:remember :understand :apply :analyze :evaluate :create}
+               categories #{:factual :inferential :comparative :analytical :definitional :procedural}
+               batch-size 5
+               verify? true
+               debug? false
+               parallel 3
+               k-candidates 1}}]
    (when-not (:db-info-atom env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
 
@@ -4139,7 +4298,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
           ;; ===== PHASE 1: Passage Selection (fast-model TOC routing) =====
           effective-selection-model (or selection-model effective-model)
           db-info @(:db-info-atom env)
-          _ (trove/log! {:level :info :id ::questionify-phase1
+          _ (trove/log! {:level :info :id ::qa-phase1
                          :data {:target-passages passage-count :target-questions count
                                 :selection-model effective-selection-model}
                          :msg "Phase 1: Selecting passages via fast-model TOC routing"})
@@ -4160,7 +4319,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                                  (llm/user selection-prompt)]
                                       :model effective-selection-model})
           passages (or (:passages (:result selection-result)) [])
-          _ (trove/log! {:level :info :id ::questionify-phase1-done
+          _ (trove/log! {:level :info :id ::qa-phase1-done
                          :data {:passages-selected (clojure.core/count passages)
                                 :model-used effective-selection-model}
                          :msg "Phase 1 complete"})
@@ -4170,9 +4329,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
           persona-vec (when (seq personas) (vec personas))
           ;; Add multi-hop passage pairs if enabled
           multi-hop-pairs (when multi-hop? (create-multi-hop-pairs passages))
-          _ (trove/log! {:level :info :id ::questionify-phase2
+          _ (trove/log! {:level :info :id ::qa-phase2
                          :data {:passages (clojure.core/count passages) :batch-size batch-size
-                                :parallelism parallelism
+                                 :parallel parallel
                                 :k-candidates k-candidates
                                 :multi-hop-pairs (clojure.core/count (or multi-hop-pairs []))
                                 :personas (when persona-vec (mapv name persona-vec))}
@@ -4196,10 +4355,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                       all-batches)
           result-chan (async/chan batch-count)
           _ (async/pipeline-blocking
-              parallelism
+               parallel
+
               result-chan
               (map (fn [{:keys [batch-idx batch persona multi-hop? k-candidates]}]
-                     (trove/log! {:level :debug :id ::questionify-batch
+                     (trove/log! {:level :debug :id ::qa-batch
                                   :data {:batch batch-idx :passages-in-batch (clojure.core/count batch)
                                          :persona (when persona (name persona))
                                          :multi-hop? multi-hop?}
@@ -4210,7 +4370,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                       {:persona persona
                                        :k-candidates k-candidates
                                        :multi-hop? multi-hop?})
-                             result (query! forked-env prompt
+                             result (query-env! forked-env prompt
                                             {:spec QUESTIONIFY_SPEC
                                              :refine? false
                                              :learn? false
@@ -4222,7 +4382,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                           :trace (:trace result)
                           :iterations (or (:iterations result) 0)})
                        (catch Exception e
-                         (trove/log! {:level :error :id ::questionify-batch-error
+                         (trove/log! {:level :error :id ::qa-batch-error
                                       :data {:batch batch-idx :error (ex-message e)}
                                       :msg "Batch generation failed"})
                          {:batch-idx batch-idx
@@ -4237,7 +4397,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                                acc))]
                                (vec (sort-by :batch-idx results)))
           all-questions (vec (mapcat :questions generation-results))
-         _ (trove/log! {:level :info :id ::questionify-phase2-done
+         _ (trove/log! {:level :info :id ::qa-phase2-done
                         :data {:total-generated (clojure.core/count all-questions)}
                         :msg "Phase 2 complete"})
 
@@ -4245,11 +4405,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
           {:keys [passed dropped results ver-trace ver-iterations]}
           (if (and verify? (seq all-questions))
             (do
-              (trove/log! {:level :info :id ::questionify-phase3
+              (trove/log! {:level :info :id ::qa-phase3
                            :data {:questions-to-verify (clojure.core/count all-questions)}
                            :msg "Phase 3: Verifying Q&A pairs against source material"})
               (let [ver-prompt (build-verification-prompt all-questions)
-                    ver-result (query! env ver-prompt
+                    ver-result (query-env! env ver-prompt
                                        {:spec VERIFICATION_SPEC
                                         :refine? false
                                         :learn? false
@@ -4260,12 +4420,12 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                     filtered (filter-verified-questions all-questions verifications)
                     ;; Revision sub-phase: revise needs-revision questions instead of dropping
                     revised (when (seq (:needs-revision filtered))
-                              (trove/log! {:level :info :id ::questionify-phase3-revision
+                              (trove/log! {:level :info :id ::qa-phase3-revision
                                            :data {:needs-revision (clojure.core/count (:needs-revision filtered))}
                                            :msg "Phase 3: Revising questions with minor issues"})
                               (revise-questions (:needs-revision filtered) config effective-model))
                     all-passed (into (:passed filtered) (or revised []))]
-                (trove/log! {:level :info :id ::questionify-phase3-done
+                (trove/log! {:level :info :id ::qa-phase3-done
                              :data {:passed (clojure.core/count (:passed filtered))
                                     :revised (clojure.core/count (or revised []))
                                     :dropped (clojure.core/count (:dropped filtered))}
@@ -4295,8 +4455,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                 :by-difficulty (frequencies (map :difficulty final-questions))
                 :by-category (frequencies (map :category final-questions))}]
 
-     (trove/log! {:level :info :id ::questionify-done :data stats
-                  :msg "questionify! complete"})
+     (trove/log! {:level :info :id ::qa-done :data stats
+                  :msg "generate-qa-env! complete"})
 
      {:questions final-questions
       :dropped-questions dropped
@@ -4309,14 +4469,14 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
       :duration-ms duration-ms})))
 
 ;; =============================================================================
-;; save-questionify! - Serialize Q&A results to EDN and Markdown
+;; save-qa! - Serialize Q&A results to EDN and Markdown
 ;; =============================================================================
 
-(defn save-questionify!
-  "Saves questionify! results to EDN and/or Markdown files.
+(defn save-qa!
+  "Saves generate-qa-env! results to EDN and/or Markdown files.
 
    Params:
-   `result` - Map. Result from questionify!.
+   `result` - Map. Result from generate-qa-env!.
    `path` - String. Base file path without extension.
    `opts` - Map, optional:
      - :formats - Set of keywords. Output formats (default: #{:edn :markdown}).
@@ -4325,7 +4485,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
    Returns:
    Map with :files - vector of written file paths."
-  ([result path] (save-questionify! result path {}))
+  ([result path] (save-qa! result path {}))
   ([result path {:keys [formats include-dropped? include-stats?]
                  :or {formats #{:edn :markdown}
                       include-dropped? false
@@ -4340,9 +4500,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                     include-stats? (assoc :stats (:stats result)))]
          (spit edn-path (pr-str data))
          (swap! written-files conj edn-path)
-         (trove/log! {:level :info :id ::save-questionify-edn
+         (trove/log! {:level :info :id ::save-qa-edn
                       :data {:path edn-path :questions (clojure.core/count (:questions result))}
-                      :msg "Saved questionify results as EDN"})))
+                      :msg "Saved Q&A results as EDN"})))
 
      ;; Markdown output
      (when (contains? formats :markdown)
@@ -4386,8 +4546,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
              (.append sb "---\n\n")))
          (spit md-path (str sb))
          (swap! written-files conj md-path)
-         (trove/log! {:level :info :id ::save-questionify-md
+         (trove/log! {:level :info :id ::save-qa-md
                       :data {:path md-path :questions (clojure.core/count questions)}
-                      :msg "Saved questionify results as Markdown"})))
+                      :msg "Saved Q&A results as Markdown"})))
 
      {:files @written-files})))

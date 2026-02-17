@@ -21,11 +21,16 @@
     - `humanize-data` - Humanize string values in data structures
     - `humanizer` - Create a reusable humanizer function
     
-    Re-exports spec DSL (`field`, `spec`, `str->data`, `str->data-with-spec`,
-    `data->str`, `validate-data`, `spec->prompt`, `build-ref-registry`),
-    RLM (`create-env`, `register-fn!`, `register-def!`, `ingest!`, `dispose!`,
-    `query!`, `pprint-trace`, `print-trace`, `questionify!`), and
-    `make-config` so users can require only this namespace.
+     PageIndex:
+     - `index!` - Index a document file (PDF, MD, TXT) and save structured data
+     - `load-index` - Load an indexed document from a pageindex directory
+    
+     Re-exports spec DSL (`field`, `spec`, `str->data`, `str->data-with-spec`,
+     `data->str`, `validate-data`, `spec->prompt`, `build-ref-registry`),
+     RLM (`create-env`, `register-env-fn!`, `register-env-def!`, `ingest-to-env!`, `dispose-env!`,
+     `query-env!`, `pprint-trace`, `print-trace`, `generate-qa-env!`),
+     PageIndex (`index!`, `load-index`), and
+     `make-config` so users can require only this namespace.
    
    Configuration:
    Config MUST be passed explicitly to all LLM functions via the :config parameter.
@@ -50,6 +55,7 @@
    [com.blockether.svar.internal.humanize :as humanize]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm :as rlm]
+   [com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex]
    [com.blockether.svar.internal.spec :as spec]))
 
 ;; =============================================================================
@@ -361,31 +367,31 @@
   rlm/create-env)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def register-fn!
+(def register-env-fn!
   "Registers a custom function in the RLM's SCI sandbox.
    See internal.rlm for details."
-  rlm/register-fn!)
+  rlm/register-env-fn!)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def register-def!
+(def register-env-def!
   "Registers a constant in the RLM's SCI sandbox.
    See internal.rlm for details."
-  rlm/register-def!)
+  rlm/register-env-def!)
 
-(def ingest!
+(def ingest-to-env!
   "Ingests documents into an RLM environment for querying.
    See internal.rlm for details."
-  rlm/ingest!)
+  rlm/ingest-to-env!)
 
-(def dispose!
+(def dispose-env!
   "Disposes an RLM environment and cleans up resources.
    See internal.rlm for details."
-  rlm/dispose!)
+  rlm/dispose-env!)
 
-(def query!
+(def query-env!
   "Runs a query against an RLM environment using iterative code execution.
    See internal.rlm for details."
-  rlm/query!)
+  rlm/query-env!)
 
 (def pprint-trace
   "Pretty-prints an RLM trace to a string.
@@ -398,13 +404,61 @@
   rlm/print-trace)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def questionify!
+(def generate-qa-env!
   "Generates question-answer pairs from ingested documents using a multi-stage pipeline.
    See internal.rlm for details."
-  rlm/questionify!)
+  rlm/generate-qa-env!)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def save-questionify!
-  "Saves questionify! results to EDN and/or Markdown files.
+(def save-qa!
+  "Saves generate-qa-env! results to EDN and/or Markdown files.
    See internal.rlm for details."
-  rlm/save-questionify!)
+  rlm/save-qa!)
+
+;; =============================================================================
+;; Re-export PageIndex functions
+;; =============================================================================
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def index!
+  "Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files.
+   
+   Creates a .pageindex directory alongside the original file containing:
+     document.edn — structured document data
+     images/      — extracted images as PNG files
+   
+   Opts:
+     :config          - LLM config override
+     
+     Vision extraction:
+      :vision-model    - Model for vision page extraction
+     :parallel        - Max concurrent vision page extractions (default: 3)
+     
+     Quality refinement:
+     :refine?         - Enable post-extraction quality refinement (default: false)
+     :refine-model    - Model for eval/refine steps (default: \"gpt-4o\")
+     :parallel-refine - Max concurrent eval/refine operations (default: 2)
+   
+   Example:
+     (svar/index! \"docs/manual.pdf\")
+     (svar/index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\"
+                                       :parallel 5
+                                       :refine? true
+                                       :refine-model \"gpt-4o-mini\"
+                                       :parallel-refine 3})
+   
+   See internal.rlm.internal.pageindex.core for full options."
+  pageindex/index!)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def load-index
+  "Load an indexed document from a .pageindex directory.
+   
+   Reads the EDN + PNG files produced by `index!` and returns the document map.
+   Also supports loading legacy formats for backward compatibility.
+   
+   Example:
+     (svar/load-index \"docs/manual.pageindex\")
+   
+   See internal.rlm.internal.pageindex.core for details."
+  pageindex/load-index)

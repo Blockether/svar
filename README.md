@@ -32,45 +32,38 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 
 ## Functionalities
 
-#### `svar.core` — LLM Interactions
-
 | Function | Description |
 |----------|-------------|
-| **`ask!`** | Structured output from LLMs via a type-safe spec DSL. Returns validated Clojure maps with token/cost tracking. |
-| **`abstract!`** | Chain of Density summarization for entity-rich summaries. |
+| **`ask!`** | Structured output from LLMs via a type-safe spec DSL. Returns validated Clojure maps with token/cost tracking. Uses SAP (Schemaless Adaptive Parsing) — a Java-based parser that handles malformed JSON, unquoted keys, trailing commas, markdown blocks, and single quotes. Includes accurate token counting and cost estimation via JTokkit. |
+| **`abstract!`** | Chain of Density summarization for entity-rich summaries. Optional CoVe faithfulness verification via `:refine?`. |
 | **`eval!`** | LLM self-evaluation for quality assessment. |
 | **`refine!`** | Iterative refinement with decomposition and verification. |
 | **`models!`** | Lists available models from your LLM provider. |
 | **`sample!`** | Generates test data matching a spec with quality evaluation and self-correction. |
-
-#### `svar.core` — Utilities
-
-| Feature | Description |
-|---------|-------------|
-| **SAP Parser** | Java-based Schemaless Adaptive Parsing handles malformed JSON (unquoted keys, trailing commas, markdown blocks, single quotes). |
-| **Token counting** | Accurate counts and cost estimation via JTokkit. |
-| **Guardrails** | Static injection detection + LLM-based content moderation. |
-| **Humanizer** | Strips AI-style phrases from outputs. |
-
-#### `svar.core` — Output Schema DSL
-
-| Feature | Description |
-|---------|-------------|
-| **Spec DSL** | Define expected output schemas: types, cardinality, enums, optional fields, nested refs, namespaced keys, fixed-size vectors. |
-
-#### `svar.core` — Agentic Reasoning (RLM)
-
-| Function | Description |
-|----------|-------------|
+| **`static-guard`** | Pattern-based prompt injection detection. |
+| **`moderation-guard`** | LLM-based content moderation against configurable policies. |
+| **`guard`** | Chains multiple guards on input — static first (fast, free), then LLM moderation. |
+| **`humanize-string`** | Strips AI-style phrases from text (safe + aggressive modes). |
+| **`humanize-data`** | Recursively humanizes all strings in a data structure. |
+| **`humanizer`** | Creates a reusable humanizer function with optional custom patterns. |
+| **`spec`** | Define expected output schemas: types, cardinality, enums, optional fields, nested refs, namespaced keys, fixed-size vectors. |
+| **`field`** | Define a field within a spec: name, type, cardinality, description, enum values, optionality. |
+| **`spec->prompt`** | Generate the LLM prompt text from a spec definition. |
+| **`str->data`** | Schemaless parse — JSON string to Clojure data, no spec needed. |
+| **`str->data-with-spec`** | Parse JSON string with spec validation and type coercion. |
+| **`data->str`** | Serialize Clojure data to JSON string. |
+| **`validate-data`** | Validate parsed data against a spec. |
 | **`create-env`** | Create an RLM environment for processing large contexts via iterative code execution. |
-| **`ingest!`** | Ingest documents into an RLM environment for querying. |
-| **`query!`** | Run a query using iterative code execution in a sandboxed SCI environment. |
-| **`dispose!`** | Dispose an RLM environment and clean up resources. |
-| **`register-fn!`** | Register a custom function in the RLM's SCI sandbox. |
-| **`register-def!`** | Register a constant in the RLM's SCI sandbox. |
-| **`questionify!`** | Generate question-answer pairs from ingested documents. |
-| **`pprint-trace`** | Pretty-print an RLM trace to a string. |
-| **`print-trace`** | Pretty-print an RLM trace to stdout. |
+| **`ingest-to-env!`** | Ingest documents into an RLM environment for querying. |
+| **`query-env!`** | Run a query using iterative code execution in a sandboxed SCI environment. |
+| **`dispose-env!`** | Dispose an RLM environment and clean up resources. |
+| **`register-env-fn!`** | Register a custom function in the RLM's SCI sandbox. |
+| **`register-env-def!`** | Register a constant in the RLM's SCI sandbox. |
+| **`generate-qa-env!`** | Generate question-answer pairs from ingested documents. |
+| **`index!`** | Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files. |
+| **`load-index`** | Load an indexed document from a .pageindex directory. |
+| **`pprint-trace`** | Pretty-print an RLM trace to stdout (also returns the string). |
+| **`print-trace`** | Alias for `pprint-trace`. |
 
 ## Quick Start
 
@@ -315,20 +308,85 @@ Spec-driven humanization — mark specific fields with `::spec/humanize?` and pa
 
 ### Summarization (`abstract!`)
 
-Chain of Density summarization — iteratively produces entity-rich summaries. Each iteration adds salient entities while maintaining fixed length.
+Chain of Density summarization (Adams et al., 2023) — iteratively produces entity-rich summaries. Each iteration identifies salient entities with rationale and salience scores, then rewrites the summary to incorporate them while maintaining fixed length.
 
 ```clojure
-(def abstractions
-  (svar/abstract! {:text "Clojure is a dynamic, general-purpose programming language, combining the approachability and interactive development of a scripting language with an efficient and robust infrastructure for multithreaded programming. Clojure is a compiled language, yet remains completely dynamic. Every feature supported by Clojure is supported at runtime. Clojure provides easy access to the Java frameworks, with optional type hints and type inference, to ensure that calls to Java can avoid reflection. Clojure is a dialect of Lisp, and shares with Lisp the code-as-data philosophy and a powerful macro system."
-                   :model "gpt-4o"
-                   :iterations 2}))
+;; Result shape — each iteration is a map with :entities and :summary
+(def example-iteration
+  {:entities [{:entity "CRISPR-Cas9"  :rationale "Central gene-editing tool" :score 0.95}
+              {:entity "Jennifer Doudna" :rationale "Co-developer of the tool" :score 0.9}]
+   :summary "CRISPR-Cas9, developed by Jennifer Doudna and Emmanuelle Charpentier..."})
 
-;; One result per iteration, each with extracted entities and a rewritten summary
-(count abstractions)
-;; => 2
+;; Entity fields
+(:entity (first (:entities example-iteration)))
+;; => "CRISPR-Cas9"
+(:rationale (first (:entities example-iteration)))
+;; => "Central gene-editing tool"
+(:score (first (:entities example-iteration)))
+;; => 0.95
 ```
 
-Each iteration returns `{:entities [{:entity "..." :type "..." :importance 0.0-1.0}] :summary "..."}`.
+Basic usage — returns a vector of iterations, each denser than the last:
+
+```clojure
+(comment
+  ;; Live LLM call — produces 3 iterations of progressively denser summaries
+  (def result
+    (svar/abstract! {:text "Voyager 1, launched by NASA on September 5, 1977..."
+                     :model "gpt-4o"
+                     :iterations 3
+                     :target-length 80}))
+
+  (count result)            ;; => 3
+  (-> result first :entities count)  ;; typically 5-10 entities in first pass
+  (-> result last :summary)          ;; final dense summary with all entities packed in
+
+  ;; Entities are atomic names with salience scores:
+  ;; [{:entity "Voyager 1"     :rationale "Central subject"   :score 1.0}
+  ;;  {:entity "NASA"          :rationale "Launch org"        :score 0.8}
+  ;;  {:entity "Golden Record" :rationale "Cultural artifact" :score 0.6}]
+  )
+```
+
+With `:eval? true`, each iteration is scored against the source for faithfulness, density, coherence, and completeness:
+
+```clojure
+(comment
+  (def scored
+    (svar/abstract! {:text "..."
+                     :model "gpt-4o"
+                     :iterations 3
+                     :eval? true}))
+
+  ;; Each iteration gets :score (0.0-1.0) — quality typically improves across iterations
+  ;; (:score (first scored))  => 0.75
+  ;; (:score (last scored))   => 0.88
+  )
+```
+
+With `:refine? true`, the final summary is verified against the source via CoVe (Chain of Verification) — hallucinated framing and unfaithful claims are corrected:
+
+```clojure
+(comment
+  (svar/abstract! {:text "..."
+                   :model "gpt-4o"
+                   :iterations 3
+                   :eval? true           ;; quality gradient per iteration
+                   :refine? true         ;; CoVe faithfulness verification
+                   :threshold 0.9})      ;; min eval score to trigger refinement
+  ;; Last iteration includes :refined? true and :refinement-score
+  )
+```
+
+**Return shape reference:**
+
+| Key | Type | Present | Description |
+|-----|------|---------|-------------|
+| `:entities` | `[{:entity str :rationale str :score float}]` | Always | Salient entities with salience 0.0-1.0 |
+| `:summary` | `string` | Always | The summary text for this iteration |
+| `:score` | `float` | With `:eval?` | Overall iteration quality score 0.0-1.0 |
+| `:refined?` | `boolean` | With `:refine?` | `true` on last iteration after CoVe pass |
+| `:refinement-score` | `float` | With `:refine?` | Quality score after refinement |
 
 ### Self-Evaluation (`eval!`)
 
@@ -718,16 +776,16 @@ RLM enables an LLM to iteratively write and execute Clojure code to examine, fil
 ```clojure
 (comment
   ;; 1. Create environment
-  (def env (svar/create-env {:config config :db-path "/tmp/my-rlm"}))
+  (def env (svar/create-env {:config config :path "/tmp/my-rlm"}))
 
   ;; 2. Ingest documents (PageIndex format)
-  (svar/ingest! env documents)
+  (svar/ingest-to-env! env documents)
 
   ;; 3. Query
-  (svar/query! env "What are the key compliance requirements?")
+  (svar/query-env! env "What are the key compliance requirements?")
 
   ;; 4. Dispose when done
-  (svar/dispose! env))
+  (svar/dispose-env! env))
 ```
 
 ### Sandbox Extensibility
@@ -737,20 +795,20 @@ Inject custom functions and constants into the RLM's sandboxed SCI environment. 
 ```clojure
 (comment
   ;; Register a function the LLM can call
-  (svar/register-fn! env 'fetch-weather
+  (svar/register-env-fn! env 'fetch-weather
     (fn [city] {:temp 22 :condition "sunny"})
     "(fetch-weather city) - Returns weather data for a city")
 
   ;; Register a constant
-  (svar/register-def! env 'MAX_RETRIES 3
+  (svar/register-env-def! env 'MAX_RETRIES 3
     "MAX_RETRIES - Maximum retry attempts")
 
   ;; Both return the env for chaining
   (-> env
-      (svar/register-fn! 'lookup-user
+      (svar/register-env-fn! 'lookup-user
         (fn [id] {:name "Alice" :role "admin"})
         "(lookup-user id) - Looks up user by ID")
-      (svar/register-def! 'API_VERSION "v2"
+      (svar/register-env-def! 'API_VERSION "v2"
         "API_VERSION - Current API version")))
 ```
 
@@ -758,17 +816,17 @@ Inject custom functions and constants into the RLM's sandboxed SCI environment. 
 
 ```clojure
 (comment
-  (svar/query! env "Summarize the contract terms"
+  (svar/query-env! env "Summarize the contract terms"
     {:spec my-output-spec          ;; structured output (parsed with spec)
      :context {:extra "data"}      ;; additional data context
      :model "gpt-4o"               ;; override default model
      :max-iterations 30            ;; max code iterations (default: 50)
      :max-refinements 2            ;; max refine loops (default: 1)
-     :min-score 35                 ;; min eval score out of 40 (default: 32)
+     :threshold 0.85               ;; min eval score 0.0-1.0 (default: 0.8)
      :refine? true                 ;; enable self-critique refinement (default: true)
      :learn? true                  ;; store as example for future queries (default: true)
      :plan? true                   ;; LLM outlines a strategy before executing code (default: false)
-     :verify-claims? true          ;; CoVe fact-checking: LLM cites sources, verified post-query (default: false)
+     :verify? true                 ;; CoVe fact-checking: LLM cites sources, verified post-query (default: false)
      :max-context-tokens 8000      ;; token budget for context window
      :debug? true}))               ;; verbose iteration logging (default: false)
 ```
@@ -782,20 +840,20 @@ keeping iterations focused and reducing wasted exploration.
 ```clojure
 (comment
   ;; For complex multi-document queries, planning reduces iteration count
-  (svar/query! env "Compare the financial obligations across all agreements"
+  (svar/query-env! env "Compare the financial obligations across all agreements"
     {:plan? true}))
 ```
 
 ### Claim Verification (CoVe)
 
-When `:verify-claims? true`, the LLM gets `(cite! claim source)` and `(cite-page! claim page-num)` 
+When `:verify? true`, the LLM gets `(cite! claim source)` and `(cite-page! claim page-num)` 
 functions during execution. After the answer is produced, SVAR cross-checks every cited claim against 
 its source material. The result includes a `:verified-claims` vector.
 
 ```clojure
 (comment
-  (let [result (svar/query! env "What penalties apply for late payment?"
-                 {:verify-claims? true})]
+  (let [result (svar/query-env! env "What penalties apply for late payment?"
+                 {:verify? true})]
     (:verified-claims result)
     ;; => [{:claim "Late fee of 1.5% per month" :source "doc-1" :verified? true} ...]
     ))
@@ -817,41 +875,43 @@ substring matches over content, titles, names, and descriptions.
 
 ### Debugging RLM Traces
 
-Every `query!` result includes a `:trace` vector. Pretty-print it for debugging:
+Every `query-env!` result includes a `:trace` vector. Pretty-print it for debugging:
 
 ```clojure
 (comment
-  (let [result (svar/query! env "Find all parties in the agreement")]
-    ;; Pretty-print trace to string
-    (println (svar/pprint-trace (:trace result)))
+  (let [result (svar/query-env! env "Find all parties in the agreement")]
+    ;; Pretty-print trace to stdout (also returns the string)
+    (svar/pprint-trace (:trace result))
 
-    ;; Or print directly to stdout
-    (svar/print-trace (:trace result))
-
-    ;; With options
-    (svar/print-trace (:trace result)
+    ;; With truncation options
+    (svar/pprint-trace (:trace result)
       {:max-response-length 500   ;; truncate LLM response text
        :max-code-length 300       ;; truncate code blocks
        :max-result-length 200     ;; truncate execution results
-       :show-stdout? true})))     ;; show stdout from code execution
+       :show-stdout? true})       ;; show stdout from code execution
+
+    ;; Capture as string without printing
+    (let [trace-str (with-out-str (svar/pprint-trace (:trace result)))]
+      ;; use trace-str for logging, etc.
+      )))
 ```
 
-### Q&A Generation (`questionify!`)
+### Q&A Generation (`generate-qa-env!`)
 
 Generate question-answer pairs from ingested documents. The LLM iteratively explores the corpus using search functions, then produces diverse, grounded Q&A pairs with source provenance.
 
 ```clojure
 (comment
   ;; Generate 10 Q&A pairs (default settings)
-  (svar/questionify! env)
+  (svar/generate-qa-env! env)
 
   ;; Customized generation
-  (svar/questionify! env
+  (svar/generate-qa-env! env
     {:count 20                                       ;; target number of Q&A pairs
      :difficulty #{:easy :medium :hard}               ;; difficulty mix
      :categories #{:factual :inferential :comparative} ;; question types
      :model "gpt-4o"                                  ;; override model
-     :verify-answers? true                            ;; cross-check via refinement
+     :verify? true                                     ;; cross-check via refinement
      :debug? true}))                                  ;; verbose logging
 ```
 

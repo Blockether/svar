@@ -791,3 +791,255 @@
                       llm-response "{\"nodes\": [\"a\", \"b\", \"c\"]}"
                       parsed (sut/str->data-with-spec llm-response spec-def)]
                   (expect (= {:nodes ["a" "b" "c"]} parsed))))))
+
+;; =============================================================================
+;; Spec Field Defaults — null/missing field coercion in str->data-with-spec
+;; =============================================================================
+
+(def ^:private cod-entity-spec
+  "Reusable entity sub-spec for field defaults tests."
+  (sut/spec :CodEntity
+    (sut/field ::sut/name :entity
+               ::sut/type :spec.type/string
+               ::sut/cardinality :spec.cardinality/one
+               ::sut/description "Entity name")
+    (sut/field ::sut/name :rationale
+               ::sut/type :spec.type/string
+               ::sut/cardinality :spec.cardinality/one
+               ::sut/description "Why salient")
+    (sut/field ::sut/name :score
+               ::sut/type :spec.type/float
+               ::sut/cardinality :spec.cardinality/one
+               ::sut/description "Salience score 0.0-1.0")))
+
+(def ^:private cod-spec
+  "Reusable CoD spec with ref entities for field defaults tests."
+  (sut/spec
+   {:refs [cod-entity-spec]}
+   (sut/field ::sut/name :entities
+              ::sut/type :spec.type/ref
+              ::sut/cardinality :spec.cardinality/many
+              ::sut/target :CodEntity
+              ::sut/description "Salient entities")
+   (sut/field ::sut/name :summary
+              ::sut/type :spec.type/string
+              ::sut/cardinality :spec.cardinality/one
+              ::sut/description "The summary")))
+
+(defdescribe spec-field-defaults-test
+  "Tests for apply-spec-field-defaults — SAP coercion of null/missing fields."
+
+  (describe "cardinality-many null coercion"
+            (it "coerces null :many field to empty vector"
+                (let [parsed (sut/str->data-with-spec "{\"entities\": null, \"summary\": \"ok\"}" cod-spec)]
+                  (expect (= [] (:entities parsed)))
+                  (expect (= "ok" (:summary parsed)))))
+
+            (it "coerces missing :many field to empty vector"
+                (let [parsed (sut/str->data-with-spec "{\"summary\": \"ok\"}" cod-spec)]
+                  (expect (= [] (:entities parsed)))
+                  (expect (= "ok" (:summary parsed)))))
+
+            (it "preserves non-null :many field unchanged"
+                (let [parsed (sut/str->data-with-spec
+                              "{\"entities\": [{\"entity\": \"X\", \"rationale\": \"Y\", \"score\": 0.8}], \"summary\": \"ok\"}"
+                              cod-spec)]
+                  (expect (= [{:entity "X" :rationale "Y" :score 0.8}] (:entities parsed)))))
+
+            (it "preserves empty :many array"
+                (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": \"ok\"}" cod-spec)]
+                  (expect (= [] (:entities parsed))))))
+
+  (describe "cardinality-one missing key insertion"
+            (it "adds missing :one field with nil value"
+                (let [parsed (sut/str->data-with-spec "{\"entities\": []}" cod-spec)]
+                  (expect (contains? parsed :summary))
+                  (expect (nil? (:summary parsed)))))
+
+            (it "preserves null :one field as nil"
+                (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": null}" cod-spec)]
+                  (expect (contains? parsed :summary))
+                  (expect (nil? (:summary parsed)))))
+
+            (it "preserves non-null :one field unchanged"
+                (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": \"text\"}" cod-spec)]
+                  (expect (= "text" (:summary parsed))))))
+
+  (describe "empty JSON object"
+            (it "fills all missing fields with defaults"
+                (let [parsed (sut/str->data-with-spec "{}" cod-spec)]
+                  (expect (= [] (:entities parsed)))
+                  (expect (contains? parsed :summary))
+                  (expect (nil? (:summary parsed))))))
+
+  (describe "all-null response (LLM gave up)"
+            (it "coerces all fields to spec-appropriate defaults"
+                (let [parsed (sut/str->data-with-spec "{\"entities\": null, \"summary\": null}" cod-spec)]
+                  (expect (= [] (:entities parsed)))
+                  (expect (contains? parsed :summary))
+                  (expect (nil? (:summary parsed))))))
+
+  (describe "nested ref defaults"
+            (it "adds missing fields inside ref items"
+                (let [parsed (sut/str->data-with-spec
+                              "{\"entities\": [{\"entity\": \"Voyager\"}], \"summary\": \"ok\"}"
+                              cod-spec)]
+                  ;; :rationale and :score were missing in the entity — should be added as nil
+                  (expect (contains? (first (:entities parsed)) :rationale))
+                  (expect (contains? (first (:entities parsed)) :score))
+                  (expect (nil? (:rationale (first (:entities parsed)))))
+                  (expect (nil? (:score (first (:entities parsed)))))
+                  (expect (= "Voyager" (:entity (first (:entities parsed)))))))
+
+            (it "preserves null fields inside ref items"
+                (let [parsed (sut/str->data-with-spec
+                              "{\"entities\": [{\"entity\": \"X\", \"rationale\": null, \"score\": null}], \"summary\": \"ok\"}"
+                              cod-spec)]
+                  (expect (= "X" (:entity (first (:entities parsed)))))
+                  (expect (nil? (:rationale (first (:entities parsed)))))
+                  (expect (nil? (:score (first (:entities parsed)))))))
+
+            (it "fills all fields in empty ref item"
+                (let [parsed (sut/str->data-with-spec
+                              "{\"entities\": [{}], \"summary\": \"ok\"}"
+                              cod-spec)]
+                  (expect (= 1 (count (:entities parsed))))
+                  (let [entity (first (:entities parsed))]
+                    (expect (contains? entity :entity))
+                    (expect (contains? entity :rationale))
+                    (expect (contains? entity :score))
+                    (expect (nil? (:entity entity)))
+                    (expect (nil? (:rationale entity)))
+                    (expect (nil? (:score entity)))))))
+
+  (describe "simple spec (no refs)"
+            (it "coerces null :many string field to empty vector"
+                (let [simple-spec (sut/spec
+                                   (sut/field ::sut/name :tags
+                                              ::sut/type :spec.type/string
+                                              ::sut/cardinality :spec.cardinality/many
+                                              ::sut/description "Tags")
+                                   (sut/field ::sut/name :title
+                                              ::sut/type :spec.type/string
+                                              ::sut/cardinality :spec.cardinality/one
+                                              ::sut/description "Title"))
+                      parsed (sut/str->data-with-spec "{\"tags\": null, \"title\": \"hi\"}" simple-spec)]
+                  (expect (= [] (:tags parsed)))
+                  (expect (= "hi" (:title parsed)))))
+
+            (it "adds missing :many field in simple spec"
+                (let [simple-spec (sut/spec
+                                   (sut/field ::sut/name :items
+                                              ::sut/type :spec.type/int
+                                              ::sut/cardinality :spec.cardinality/many
+                                              ::sut/description "Items")
+                                   (sut/field ::sut/name :count
+                                              ::sut/type :spec.type/int
+                                              ::sut/cardinality :spec.cardinality/one
+                                              ::sut/description "Count"))
+                      parsed (sut/str->data-with-spec "{\"count\": 5}" simple-spec)]
+                  (expect (= [] (:items parsed)))
+                  (expect (= 5 (:count parsed))))))
+
+  (describe "non-map result passthrough"
+            (it "returns plain text unchanged when LLM produces no JSON"
+                (let [parsed (sut/str->data-with-spec "I cannot find entities." cod-spec)]
+                  ;; SAP returns the raw string — field defaults don't apply to non-maps
+                  (expect (string? parsed)))))
+
+  (describe "markdown-wrapped JSON"
+            (it "applies defaults after extracting from markdown"
+                (let [parsed (sut/str->data-with-spec
+                              "```json\n{\"entities\": null, \"summary\": \"ok\"}\n```"
+                              cod-spec)]
+                  (expect (= [] (:entities parsed)))
+                  (expect (= "ok" (:summary parsed)))))))
+
+;; =============================================================================
+;; coerce-data-with-spec — Clojure data coercion (for RLM/SCI answers)
+;; =============================================================================
+
+(def ^:private verification-result-spec
+  "Spec mimicking VERIFICATION_RESULT_SPEC in rlm.clj for testing coercion."
+  (sut/spec
+   :verification
+   {::sut/key-ns "verification"}
+   (sut/field {::sut/name :question-index
+               ::sut/type :spec.type/int
+               ::sut/cardinality :spec.cardinality/one
+               ::sut/description "Index"})
+   (sut/field {::sut/name :verdict
+               ::sut/type :spec.type/keyword
+               ::sut/cardinality :spec.cardinality/one
+               ::sut/values {"pass" "OK" "fail" "Bad" "needs-revision" "Fixable"}
+               ::sut/description "Verdict"})))
+
+(def ^:private verification-spec
+  "Wrapper spec with :many ref field."
+  (sut/spec
+   {:refs [verification-result-spec]}
+   (sut/field {::sut/name :verifications
+               ::sut/type :spec.type/ref
+               ::sut/target :verification
+               ::sut/cardinality :spec.cardinality/many
+               ::sut/description "Results"})))
+
+(def ^:private questions-spec
+  "Spec with single :many field for array normalization testing."
+  (sut/spec
+   (sut/field {::sut/name :questions
+               ::sut/type :spec.type/string
+               ::sut/cardinality :spec.cardinality/many
+               ::sut/description "Questions"})))
+
+(defdescribe coerce-data-with-spec-test
+  "Tests for coerce-data-with-spec — type coercion on Clojure data from SCI."
+
+  (describe "keyword type coercion"
+            (it "coerces string verdict to keyword"
+                (let [data {:verifications [{:question-index 0 :verdict "pass"}
+                                            {:question-index 1 :verdict "fail"}]}
+                      result (sut/coerce-data-with-spec data verification-spec)]
+                  (expect (= :pass (:verdict (first (:verifications result)))))
+                  (expect (= :fail (:verdict (second (:verifications result)))))))
+            (it "preserves keyword verdicts that are already correct"
+                (let [data {:verifications [{:question-index 0 :verdict :pass}]}
+                      result (sut/coerce-data-with-spec data verification-spec)]
+                  (expect (= :pass (:verdict (first (:verifications result)))))))
+            (it "coerces needs-revision string to keyword"
+                (let [data {:verifications [{:question-index 0 :verdict "needs-revision"}]}
+                      result (sut/coerce-data-with-spec data verification-spec)]
+                  (expect (= :needs-revision (:verdict (first (:verifications result))))))))
+
+  (describe "does NOT apply key-ns namespacing"
+            (it "keeps keys un-namespaced despite spec having key-ns"
+                (let [data {:verifications [{:question-index 0 :verdict "pass"}]}
+                      result (sut/coerce-data-with-spec data verification-spec)]
+                  ;; Keys should stay as :verdict, NOT become :verification/verdict
+                  (expect (contains? (first (:verifications result)) :verdict))
+                  (expect (not (contains? (first (:verifications result)) :verification/verdict))))))
+
+  (describe "array normalization"
+            (it "wraps bare vector when spec has single :many field"
+                (let [data ["Q1" "Q2" "Q3"]
+                      result (sut/coerce-data-with-spec data questions-spec)]
+                  (expect (= {:questions ["Q1" "Q2" "Q3"]} result))))
+            (it "passes through map unchanged"
+                (let [data {:questions ["Q1" "Q2"]}
+                      result (sut/coerce-data-with-spec data questions-spec)]
+                  (expect (= {:questions ["Q1" "Q2"]} result)))))
+
+  (describe "field defaults"
+            (it "coerces nil :many field to empty vector"
+                (let [data {:verifications nil}
+                      result (sut/coerce-data-with-spec data verification-spec)]
+                  (expect (= [] (:verifications result)))))
+            (it "adds missing :many field as empty vector"
+                (let [result (sut/coerce-data-with-spec {} verification-spec)]
+                  (expect (= [] (:verifications result))))))
+
+  (describe "non-map passthrough"
+            (it "returns nil unchanged"
+                (expect (nil? (sut/coerce-data-with-spec nil verification-spec))))
+            (it "returns string unchanged"
+                (expect (= "hello" (sut/coerce-data-with-spec "hello" verification-spec))))))

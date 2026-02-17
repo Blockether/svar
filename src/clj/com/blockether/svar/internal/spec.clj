@@ -1020,35 +1020,129 @@
     :else
     data))
 
-(defn- maybe-wrap-bare-array
-  "Wraps a bare array result if the spec expects an object with a single array field.
+(defn- spec-expects-map?
+  "Returns true if the spec defines a top-level object (not a single bare array).
+   A spec expects a map when it has any :cardinality/one field, or has multiple fields."
+  [spec-def]
+  (let [fields (::fields spec-def)]
+    (or (> (count fields) 1)
+        (and (= 1 (count fields))
+             (not= :spec.cardinality/many (::cardinality (first fields)))))))
+
+(defn- maybe-normalize-array-result
+  "Normalizes array results from LLMs based on spec cardinality.
    
-   LLMs often return bare arrays `[...]` when asked for a list, even when the spec
-   defines an object like `{nodes: [...]}`. This function detects this case and
-   wraps the array automatically.
+   LLMs produce two common array artifacts:
+   1. Bare array `[a, b]` when spec has single :many field — wrap as `{:field [a, b]}`
+   2. Wrapped object `[{...}]` when spec expects a map — unwrap to `{...}`
+   
+   Both corrections are driven by the spec's field cardinality.
    
    Params:
    `result` - The parsed JSON result (may be vector or map).
    `spec-def` - The spec definition.
    
    Returns:
-   Either the original result (if already a map or spec has multiple fields),
-   or the array wrapped in the expected field name."
+   Corrected result matching the shape the spec expects."
   [result spec-def]
   (if-not (vector? result)
-    ;; Not a bare array, return as-is
     result
-    ;; Got a bare array - check if spec has single array field
     (let [fields (::fields spec-def)]
-      (if (and (= 1 (count fields))
-               (= :spec.cardinality/many (::cardinality (first fields))))
-        ;; Spec has exactly one field with cardinality :many - wrap the array
+      (cond
+        ;; Case 1: Spec has single :many field, got bare array → wrap it
+        (and (= 1 (count fields))
+             (= :spec.cardinality/many (::cardinality (first fields))))
         (let [field-name (::name (first fields))]
           (trove/log! {:level :debug :data {:field field-name}
                        :msg "Auto-wrapping bare array in spec field"})
           {field-name result})
-        ;; Multiple fields or not cardinality :many - return as-is
-        result))))
+
+        ;; Case 2: Spec expects a map, got single-element array [{...}] → unwrap
+        (and (spec-expects-map? spec-def)
+             (= 1 (count result))
+             (map? (first result)))
+        (do
+          (trove/log! {:level :debug :data {:keys (keys (first result))}
+                       :msg "Unwrapping single-element array — spec expects map"})
+          (first result))
+
+        ;; No correction possible
+        :else result))))
+
+(defn- apply-spec-field-defaults
+  "Ensures all spec-defined fields exist in parsed result with type-appropriate defaults.
+
+   LLMs sometimes return null for fields or omit them entirely. This function walks
+   the parsed result against the spec definition and applies defaults:
+   - :cardinality/many fields that are nil or missing → []
+   - :cardinality/one fields that are missing → added with nil value (key presence guaranteed)
+   - Recurses into :type/ref fields to apply defaults to nested specs
+
+   Must be called AFTER key remapping and namespacing so field names match.
+
+   Params:
+   `data` - Parsed Clojure data (map, vector, or primitive).
+   `spec-def` - The spec definition.
+   `key-ns` - String or nil. The key namespace to apply to field names.
+
+   Returns:
+   Data with missing/null fields filled with spec-appropriate defaults."
+  [data spec-def key-ns]
+  (if-not (map? data)
+    data
+    (let [fields (::fields spec-def)
+          ref-registry (build-ref-registry spec-def)]
+      (reduce
+       (fn [result field]
+         (let [field-name (::name field)
+               ;; Apply namespace if configured
+               actual-key (if key-ns
+                            (keyword key-ns (name field-name))
+                            field-name)
+               cardinality (::cardinality field)
+               field-type (::type field)
+               current-val (get result actual-key ::not-found)
+               missing? (= current-val ::not-found)
+               nil-val? (nil? current-val)]
+           (cond
+             ;; :many field is nil or missing → default to []
+             (and (= cardinality :spec.cardinality/many)
+                  (or missing? nil-val?))
+             (assoc result actual-key [])
+
+             ;; :many ref field with items → recurse into each item
+             (and (= cardinality :spec.cardinality/many)
+                  (= field-type :spec.type/ref)
+                  (vector? current-val)
+                  (seq current-val))
+             (let [target (::target field)
+                   ref-spec (get ref-registry target)]
+               (if ref-spec
+                 (let [ref-key-ns (::key-ns ref-spec)]
+                   (assoc result actual-key
+                          (mapv #(apply-spec-field-defaults % ref-spec ref-key-ns) current-val)))
+                 result))
+
+             ;; :one ref field with value → recurse into it
+             (and (= cardinality :spec.cardinality/one)
+                  (= field-type :spec.type/ref)
+                  (map? current-val))
+             (let [target (::target field)
+                   ref-spec (get ref-registry target)]
+               (if ref-spec
+                 (let [ref-key-ns (::key-ns ref-spec)]
+                   (assoc result actual-key
+                          (apply-spec-field-defaults current-val ref-spec ref-key-ns)))
+                 result))
+
+             ;; :one field is missing → add key with nil
+             (and (= cardinality :spec.cardinality/one) missing?)
+             (assoc result actual-key nil)
+
+             ;; Field present and non-nil → leave as-is
+             :else result)))
+       data
+       fields))))
 
 (defn str->data-with-spec
   "Parses JSON response from LLM into Clojure data structure with spec-aware processing.
@@ -1089,7 +1183,7 @@
                 raw-result (:value parse-result)
                 warnings (:warnings parse-result)
                 ;; Auto-wrap bare arrays if spec expects object with single array field
-                wrapped-result (maybe-wrap-bare-array raw-result spec-def)
+                wrapped-result (maybe-normalize-array-result raw-result spec-def)
                 ;; Build key mapping from spec and remap keys
                 key-mapping (build-key-mapping spec-def)
                 remapped (if (empty? key-mapping)
@@ -1102,9 +1196,12 @@
                               (keywordize-fields remapped keyword-fields))
                 ;; Apply key namespace if configured
                 key-ns-map (collect-key-namespaces spec-def)
-                result (if (empty? key-ns-map)
-                         keywordized
-                         (namespace-keys keywordized key-ns-map))]
+                namespaced (if (empty? key-ns-map)
+                             keywordized
+                             (namespace-keys keywordized key-ns-map))
+                ;; Apply spec-aware field defaults (nil :many → [], missing keys → nil)
+                main-key-ns (::key-ns spec-def)
+                result (apply-spec-field-defaults namespaced spec-def main-key-ns)]
             {:result result :key-mapping key-mapping :keyword-fields keyword-fields
              :key-ns-map key-ns-map :warnings warnings}))]
     (trove/log! {:level :debug :data {:duration-ms duration-ms
@@ -1113,6 +1210,93 @@
                                       :keyword-fields (count keyword-fields)
                                       :key-ns-applied (seq key-ns-map)}
                  :msg "Parsed JSON response with spec-aware processing"})
+    result))
+
+(defn- apply-field-defaults-no-ns
+  "Like apply-spec-field-defaults but forces nil key-ns on ALL recursive calls.
+   Used by coerce-data-with-spec where we explicitly do NOT want namespacing,
+   even for nested ref specs that have ::key-ns configured."
+  [data spec-def]
+  (if-not (map? data)
+    data
+    (let [fields (::fields spec-def)
+          ref-registry (build-ref-registry spec-def)]
+      (reduce
+       (fn [result field]
+         (let [field-name (::name field)
+               actual-key field-name ;; never namespace
+               cardinality (::cardinality field)
+               field-type (::type field)
+               current-val (get result actual-key ::not-found)
+               missing? (= current-val ::not-found)
+               nil-val? (nil? current-val)]
+           (cond
+             ;; :many field is nil or missing → default to []
+             (and (= cardinality :spec.cardinality/many)
+                  (or missing? nil-val?))
+             (assoc result actual-key [])
+
+             ;; :many ref field with items → recurse into each item (no namespace)
+             (and (= cardinality :spec.cardinality/many)
+                  (= field-type :spec.type/ref)
+                  (vector? current-val)
+                  (seq current-val))
+             (let [target (::target field)
+                   ref-spec (get ref-registry target)]
+               (if ref-spec
+                 (assoc result actual-key
+                        (mapv #(apply-field-defaults-no-ns % ref-spec) current-val))
+                 result))
+
+             ;; :one ref field with value → recurse into it (no namespace)
+             (and (= cardinality :spec.cardinality/one)
+                  (= field-type :spec.type/ref)
+                  (map? current-val))
+             (let [target (::target field)
+                   ref-spec (get ref-registry target)]
+               (if ref-spec
+                 (assoc result actual-key
+                        (apply-field-defaults-no-ns current-val ref-spec))
+                 result))
+
+             ;; :one field is missing → add key with nil
+             (and (= cardinality :spec.cardinality/one) missing?)
+             (assoc result actual-key nil)
+
+             ;; Field present and non-nil → leave as-is
+             :else result)))
+       data
+       fields))))
+
+(defn coerce-data-with-spec
+  "Coerces Clojure data according to spec type definitions.
+
+   Unlike str->data-with-spec which parses JSON text, this operates on existing
+   Clojure data structures (e.g., from SCI eval). Applies:
+   1. Array normalization (vector wrapping a single object → unwrapped map)
+   2. Keyword type coercion (strings → keywords for :spec.type/keyword fields)
+   3. Spec field defaults (nil :many → [], missing keys → nil)
+
+   Does NOT apply ::key-ns namespacing — data keys are expected to already
+   be in their final form. Designed for RLM answers where SCI produces Clojure
+   data that needs type normalization but not JSON parsing or key restructuring.
+
+   Params:
+   `data` - Clojure data (map, vector, or primitive) to coerce.
+   `spec-def` - Map. Spec definition with ::fields, ::refs, etc.
+
+   Returns:
+   Coerced data with keyword fields converted and defaults applied."
+  [data spec-def]
+  (let [;; Normalize array wrapping (e.g., [{...}] when spec expects single object)
+        normalized (maybe-normalize-array-result data spec-def)
+        ;; Apply keyword type coercion for :spec.type/keyword fields
+        keyword-fields (build-keyword-fields spec-def)
+        keywordized (if (empty? keyword-fields)
+                      normalized
+                      (keywordize-fields normalized keyword-fields))
+        ;; Apply field defaults without key-ns (SCI data uses un-namespaced keys)
+        result (apply-field-defaults-no-ns keywordized spec-def)]
     result))
 
 ;; =============================================================================

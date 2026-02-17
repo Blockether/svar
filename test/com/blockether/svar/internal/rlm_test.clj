@@ -985,15 +985,15 @@
     (try
       (f env)
       (finally
-        (sut/dispose! env)))))
+        (sut/dispose-env! env)))))
 
-(defdescribe query!-integration-test
+(defdescribe query-env!-integration-test
   (describe "basic functionality"
             (it "processes simple string context with refinement"
                 (when (integration-tests-enabled?)
                   (with-integration-env*
                    (fn [env]
-                     (let [result (sut/query! env "What is the capital of France? Answer with just the city name."
+                     (let [result (sut/query-env! env "What is the capital of France? Answer with just the city name."
                                               {:context "Paris is the capital of France."
                                                :max-iterations 10
                                                :learn? false})]
@@ -1010,7 +1010,7 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env*
                    (fn [env]
-                     (let [result (sut/query! env "What is 2 + 2?"
+                     (let [result (sut/query-env! env "What is 2 + 2?"
                                               {:context "2 + 2 = 4"
                                                :max-iterations 5
                                                :refine? false
@@ -1029,7 +1029,7 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env*
                    (fn [env]
-                     (let [result (sut/query! env "What is the value of :count? Use (FINAL answer)"
+                     (let [result (sut/query-env! env "What is the value of :count? Use (FINAL answer)"
                                               {:context {:count 42}
                                                :max-iterations 10
                                                :refine? false
@@ -1044,7 +1044,7 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env*
                    (fn [env]
-                     (let [result (sut/query! env "Sum the numbers"
+                     (let [result (sut/query-env! env "Sum the numbers"
                                               {:context {:nums [1 2 3 4 5]}
                                                :max-iterations 10
                                                :max-refinements 1
@@ -1059,7 +1059,7 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env*
                    (fn [env]
-                     (let [result (sut/query! env "Echo the context"
+                     (let [result (sut/query-env! env "Echo the context"
                                               {:context "Test context"
                                                :max-iterations 5
                                                :refine? false
@@ -1072,12 +1072,12 @@
   (describe "validation"
             (it "throws when env is invalid"
                 (expect (throws? clojure.lang.ExceptionInfo
-                                 #(sut/query! {} "test query"))))
+                                 #(sut/query-env! {} "test query"))))
 
             (it "throws when query is missing"
                 (with-integration-env* (fn [env]
                                          (expect (throws? clojure.lang.ExceptionInfo
-                                                          #(sut/query! env nil))))))))
+                                                          #(sut/query-env! env nil))))))))
 
 (defdescribe make-llm-query-fn-test
   (describe "recursion depth tracking"
@@ -1942,8 +1942,8 @@
                                         :entity/page 0}]
                             :relationships []}))
           (let [env (sut/create-env {:config test-ingest-config})
-                result (sut/ingest! env [(make-test-single-page-document)] {:extract-entities? true})]
-            (sut/dispose! env)
+                result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
+            (sut/dispose-env! env)
             (expect (= 1 (count @calls)))
             (expect (pos? (get-in result [0 :entities-extracted])))))))
 
@@ -1954,8 +1954,8 @@
                           (make-mock-ask-response
                            {:entities [] :relationships []}))
           (let [env (sut/create-env {:config test-ingest-config})
-                result (sut/ingest! env [(make-test-image-only-document)] {:extract-entities? true})]
-            (sut/dispose! env)
+                result (sut/ingest-to-env! env [(make-test-image-only-document)] {:extract-entities? true})]
+            (sut/dispose-env! env)
             (expect (= 2 (count @calls)))
             ;; Images are now embedded in user messages as multimodal content arrays
             (expect (every? (fn [opts]
@@ -1972,8 +1972,8 @@
                           (make-mock-ask-response
                            {:entities [] :relationships []}))
           (let [env (sut/create-env {:config test-ingest-config})
-                _result (sut/ingest! env [(make-test-single-page-document)] {:extract-entities? true :extraction-model "gpt-4o-mini"})]
-            (sut/dispose! env)
+                _result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true :extraction-model "gpt-4o-mini"})]
+            (sut/dispose-env! env)
             (expect (every? #(= "gpt-4o-mini" (:model %)) @calls))))))
 
   (it "respects :max-vision-rescan-nodes cap"
@@ -1982,15 +1982,15 @@
                           (swap! calls conj opts)
                           (make-mock-ask-response {:entities [] :relationships []}))
           (let [env (sut/create-env {:config test-ingest-config})
-                result (sut/ingest! env [(make-test-image-only-document)] {:extract-entities? true :max-vision-rescan-nodes 1})]
-            (sut/dispose! env)
+                result (sut/ingest-to-env! env [(make-test-image-only-document)] {:extract-entities? true :max-vision-rescan-nodes 1})]
+            (sut/dispose-env! env)
             (expect (= 1 (count @calls)))
             (expect (= 1 (get-in result [0 :visual-nodes-scanned])))))))
 
   (it "returns zero counts for empty document"
       (let [env (sut/create-env {:config test-ingest-config})
-            result (sut/ingest! env [(make-test-empty-document)] {:extract-entities? true})]
-        (sut/dispose! env)
+            result (sut/ingest-to-env! env [(make-test-empty-document)] {:extract-entities? true})]
+        (sut/dispose-env! env)
         (expect (= 0 (get-in result [0 :entities-extracted])))
         (expect (= 0 (get-in result [0 :visual-nodes-scanned])))))
 
@@ -2001,8 +2001,8 @@
                           (make-mock-ask-response
                            {:entities [] :relationships []}))
           (let [env (sut/create-env {:config test-ingest-config})
-                _result (sut/ingest! env [(make-test-image-with-description-document)] {:extract-entities? true})]
-            (sut/dispose! env)
+                _result (sut/ingest-to-env! env [(make-test-image-with-description-document)] {:extract-entities? true})]
+            (sut/dispose-env! env)
             (expect (= 1 (count @calls)))
             (expect (nil? (:images (first @calls))))))))
 
@@ -2012,8 +2012,8 @@
                           (swap! calls inc)
                           (throw (ex-info "boom" {})))
           (let [env (sut/create-env {:config test-ingest-config})
-                result (sut/ingest! env [(make-test-single-page-document)] {:extract-entities? true})]
-            (sut/dispose! env)
+                result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
+            (sut/dispose-env! env)
             (expect (= 1 @calls))
             ;; extract-entities-from-page! catches the exception internally and returns
             ;; empty entities/relationships, so extraction-errors stays 0
@@ -2133,7 +2133,7 @@
 ;; =============================================================================
 
 (defmacro ^:private with-mock-chat!
-  "Stubs llm/chat-completion for testing query! iteration loop.
+  "Stubs llm/chat-completion for testing query-env! iteration loop.
    `response-fn` receives [messages model api-key base-url] and returns a string."
   [response-fn & body]
   `(let [v# (var com.blockether.svar.internal.llm/chat-completion)
@@ -2151,34 +2151,34 @@
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
           (with-mock-chat! (fn [& _] final-response)
-            (let [result (sut/query! env "What is X?" {:refine? false :learn? false})]
+            (let [result (sut/query-env! env "What is X?" {:refine? false :learn? false})]
               (expect (contains? result :answer))
               (expect (contains? result :eval-scores))
               (expect (contains? result :refinement-count))
               (expect (not (contains? result :verified-claims)))
               (expect (= "test answer" (:answer result)))
               (expect (= 0 (:refinement-count result)))))
-          (finally (sut/dispose! env)))))
+          (finally (sut/dispose-env! env)))))
 
-  (it "verify-claims? true includes :verified-claims in result"
+  (it "verify? true includes :verified-claims in result"
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
           (with-mock-chat! (fn [& _] final-response)
-            (let [result (sut/query! env "Find claims" {:verify-claims? true :refine? false :learn? false})]
+            (let [result (sut/query-env! env "Find claims" {:verify? true :refine? false :learn? false})]
               (expect (contains? result :verified-claims))
               (expect (vector? (:verified-claims result)))
             ;; No CITE called in mock, so claims empty
               (expect (= [] (:verified-claims result)))))
-          (finally (sut/dispose! env)))))
+          (finally (sut/dispose-env! env)))))
 
   (it "query on small docs returns answer"
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
-          (sut/ingest! env [(make-test-single-page-document)])
+          (sut/ingest-to-env! env [(make-test-single-page-document)])
           (with-mock-chat! (fn [& _] final-response)
-            (let [result (sut/query! env "test" {:refine? false :learn? false})]
+            (let [result (sut/query-env! env "test" {:refine? false :learn? false})]
               (expect (some? (:answer result)))))
-          (finally (sut/dispose! env)))))
+          (finally (sut/dispose-env! env)))))
 
   (it "ingest with extract-entities? returns extraction stats"
       (with-mock-ask! (fn [_opts]
@@ -2190,8 +2190,8 @@
                                       :entity/page 0}]
                           :relationships []}))
         (let [env (sut/create-env {:config test-ingest-config})
-              result (sut/ingest! env [(make-test-single-page-document)] {:extract-entities? true})]
-          (sut/dispose! env)
+              result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
+          (sut/dispose-env! env)
           (expect (pos? (get-in result [0 :entities-extracted])))
           (expect (number? (get-in result [0 :visual-nodes-scanned]))))))
 
@@ -2200,25 +2200,25 @@
         (try
           (with-mock-chat! (fn [& _] final-response)
             (with-mock-ask! (fn [_opts] (make-mock-ask-response {:evaluations []}))
-              (let [result (sut/query! env "anything"
-                                       {:verify-claims? true :refine? false :learn? false})]
+              (let [result (sut/query-env! env "anything"
+                                       {:verify? true :refine? false :learn? false})]
                 (expect (some? (:answer result)))
                 (expect (contains? result :verified-claims))
                 (expect (vector? (:verified-claims result))))))
-          (finally (sut/dispose! env)))))
+          (finally (sut/dispose-env! env)))))
 
   (it "ingest without extraction then query with all flags works"
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
         ;; Ingest without entity extraction
-          (sut/ingest! env [(make-test-single-page-document)])
+          (sut/ingest-to-env! env [(make-test-single-page-document)])
           (with-mock-chat! (fn [& _] final-response)
             (with-mock-ask! (fn [_opts] (make-mock-ask-response {:evaluations []}))
-              (let [result (sut/query! env "test query"
-                                       {:verify-claims? true :refine? false :learn? false})]
+              (let [result (sut/query-env! env "test query"
+                                       {:verify? true :refine? false :learn? false})]
                 (expect (= "test answer" (:answer result)))
                 (expect (contains? result :verified-claims)))))
-          (finally (sut/dispose! env)))))
+          (finally (sut/dispose-env! env)))))
 
   (it "refine? true produces eval-scores and refinement-count"
       (let [env (sut/create-env {:config test-ingest-config})]
@@ -2227,11 +2227,11 @@
             (with-mock-ask-and-eval!
               (fn [_opts] (make-mock-ask-response "refined answer"))
               (fn [_opts] (make-mock-eval-response 0.95))
-              (let [result (sut/query! env "test" {:refine? true :verify-claims? false :learn? false})]
+              (let [result (sut/query-env! env "test" {:refine? true :verify? false :learn? false})]
                 (expect (some? (:answer result)))
                 (expect (number? (:refinement-count result)))
                 (expect (pos? (:refinement-count result))))))
-          (finally (sut/dispose! env)))))
+          (finally (sut/dispose-env! env)))))
 
   (it "CITE functions compose in full lifecycle"
       (let [claims-atom (atom [])
@@ -2333,7 +2333,7 @@
             (it "extracts entities from document text nodes"
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
-                                           (let [result (sut/ingest! env [(make-test-single-page-document)]
+                                           (let [result (sut/ingest-to-env! env [(make-test-single-page-document)]
                                                                      {:extract-entities? true})]
             ;; Should return vector of ingest results
                                              (expect (vector? result))
@@ -2346,7 +2346,7 @@
             (it "extracts entities from legal document with multiple pages"
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
-                                           (let [result (sut/ingest! env [(make-test-legal-document)]
+                                           (let [result (sut/ingest-to-env! env [(make-test-legal-document)]
                                                                      {:extract-entities? true})]
             ;; Legal doc has parties (Acme Corp, Widget Inc) that should be extracted
                                              (expect (vector? result))
@@ -2357,8 +2357,8 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
           ;; Ingest multi-page document first
-                                           (sut/ingest! env [(make-test-multi-page-document)])
-                                           (let [result (sut/query! env "What was TechCorp's total revenue in 2024?"
+                                           (sut/ingest-to-env! env [(make-test-multi-page-document)])
+                                           (let [result (sut/query-env! env "What was TechCorp's total revenue in 2024?"
                                                                     {:refine? false
                                                                      :learn? false
                                                                      :max-iterations 25})]
@@ -2372,8 +2372,8 @@
             (it "queries small documents"
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
-                                           (sut/ingest! env [(make-test-single-page-document)])
-                                           (let [result (sut/query! env "What is the title?"
+                                           (sut/ingest-to-env! env [(make-test-single-page-document)])
+                                           (let [result (sut/query-env! env "What is the title?"
                                                                     {:refine? false
                                                                      :learn? false
                                                                      :max-iterations 25})]
@@ -2382,13 +2382,13 @@
                                              (expect (<= (:iterations result) 3))))))))
 
   (describe "CITE verification with real LLM"
-            (it "verifies claims when verify-claims? is true"
+            (it "verifies claims when verify? is true"
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
           ;; Ingest document with extractable facts
-                                           (sut/ingest! env [(make-test-multi-page-document)])
-                                           (let [result (sut/query! env "What was the 2024 revenue and who is the CEO? Cite your sources."
-                                                                    {:verify-claims? true
+                                           (sut/ingest-to-env! env [(make-test-multi-page-document)])
+                                           (let [result (sut/query-env! env "What was the 2024 revenue and who is the CEO? Cite your sources."
+                                                                    {:verify? true
                                                                      :refine? false
                                                                      :learn? false
                                                                      :max-iterations 25})]
@@ -2404,16 +2404,16 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
           ;; Ingest a simple document, then ask a trivial question that doesn't need citations
-                                           (sut/ingest! env [(make-test-single-page-document)])
-                                           (let [result (sut/query! env "What is the title of the document?"
-                                                                    {:verify-claims? true
+                                           (sut/ingest-to-env! env [(make-test-single-page-document)])
+                                           (let [result (sut/query-env! env "What is the title of the document?"
+                                                                    {:verify? true
                                                                      :refine? false
                                                                      :learn? false
                                                                      :max-iterations 10})]
             ;; Should have verified-claims key (even if empty)
                                              (expect (contains? result :verified-claims))
                                              (expect (vector? (:verified-claims result)))
-            ;; Consensus efficiency: trivial query with verify-claims should finish within 4 iterations
+            ;; Consensus efficiency: trivial query with verify should finish within 4 iterations
                                              (expect (<= (:iterations result) 4))))))))
 
   (describe "full knowledge engine pipeline"
@@ -2421,14 +2421,14 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
           ;; Step 1: Ingest with entity extraction
-                                           (let [ingest-result (sut/ingest! env [(make-test-multi-page-document)]
+                                           (let [ingest-result (sut/ingest-to-env! env [(make-test-multi-page-document)]
                                                                             {:extract-entities? true})]
                                              (expect (number? (get-in ingest-result [0 :entities-extracted])))
 
             ;; Step 2: Query with all knowledge engine flags enabled
-                                             (let [query-result (sut/query! env
+                                             (let [query-result (sut/query-env! env
                                                                             "Who is the CEO and what market expansion happened in 2024?"
-                                                                            {:verify-claims? true
+                                                                            {:verify? true
                                                                              :refine? false
                                                                              :learn? false
                                                                              :max-iterations 25})]
@@ -2448,12 +2448,12 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
           ;; Ingest both legal and multi-page documents
-                                           (sut/ingest! env [(make-test-legal-document) (make-test-multi-page-document)]
+                                           (sut/ingest-to-env! env [(make-test-legal-document) (make-test-multi-page-document)]
                                                         {:extract-entities? true})
 
           ;; Query that could span both documents
-                                           (let [result (sut/query! env "List all parties and companies mentioned in the documents."
-                                                                    {:verify-claims? true
+                                           (let [result (sut/query-env! env "List all parties and companies mentioned in the documents."
+                                                                    {:verify? true
                                                                      :refine? false
                                                                      :learn? false
                                                                      :max-iterations 25})]
@@ -2925,49 +2925,60 @@
 ;; =============================================================================
 
 (defdescribe flush-store-batching-test
-  (describe "mark-dirty! and flush-store!"
-            (it "flush-store! marks store as dirty"
+  (describe "mark-dirty-store! and per-collection persistence"
+            (it "mark-dirty-store! marks specific collection as dirty"
                 (let [db-info (#'sut/create-disposable-db)]
                   (try
-                    (expect (false? (:dirty? @(:store db-info))))
-                    (#'sut/flush-store! db-info)
-                    (expect (true? (:dirty? @(:store db-info))))
+                    (expect (empty? (:dirty @(:store db-info))))
+                    (#'sut/mark-dirty-store! db-info :messages)
+                    (expect (contains? (:dirty @(:store db-info)) :messages))
                     (finally
                       (#'sut/dispose-db! db-info)))))
 
-            (it "mark-dirty! sets dirty flag"
+            (it "mark-dirty-store! accumulates multiple dirty collections"
                 (let [db-info (#'sut/create-disposable-db)]
                   (try
-                    (expect (false? (:dirty? @(:store db-info))))
-                    (#'sut/mark-dirty! db-info)
-                    (expect (true? (:dirty? @(:store db-info))))
+                    (#'sut/mark-dirty-store! db-info :messages)
+                    (#'sut/mark-dirty-store! db-info :learnings)
+                    (expect (= #{:messages :learnings} (:dirty @(:store db-info))))
                     (finally
                       (#'sut/dispose-db! db-info)))))
 
-            (it "flush-store-now! resets dirty flag"
+            (it "mark-dirty-store! accepts a set of collection keys"
                 (let [db-info (#'sut/create-disposable-db)]
                   (try
-                    (#'sut/mark-dirty! db-info)
-                    (expect (true? (:dirty? @(:store db-info))))
+                    (#'sut/mark-dirty-store! db-info #{:entities :relationships})
+                    (expect (= #{:entities :relationships} (:dirty @(:store db-info))))
+                    (finally
+                      (#'sut/dispose-db! db-info)))))
+
+            (it "flush-store-now! resets dirty set"
+                (let [db-info (#'sut/create-disposable-db)]
+                  (try
+                    (#'sut/mark-dirty-store! db-info :messages)
+                    (expect (seq (:dirty @(:store db-info))))
                     (#'sut/flush-store-now! db-info)
-                    (expect (false? (:dirty? @(:store db-info))))
+                    (expect (empty? (:dirty @(:store db-info))))
                     (finally
                       (#'sut/dispose-db! db-info)))))
 
-            (it "flush-store-now! writes to disk"
+            (it "flush-store-now! writes only dirty collections to individual files"
                 (let [db-info (#'sut/create-disposable-db)]
                   (try
-                    ;; Add some data
+                    ;; Add some data and mark dirty
                     (swap! (:store db-info) update :entities conj
                            {:entity/id (UUID/randomUUID)
                             :entity/name "TestEntity"
                             :entity/type :test})
+                    (#'sut/mark-dirty-store! db-info :entities)
                     ;; Flush to disk
                     (#'sut/flush-store-now! db-info)
-                    ;; Verify file exists
-                    (let [store-file (java.io.File. (str (:path db-info) "/store.edn"))]
-                      (expect (.exists store-file))
-                      (expect (pos? (.length store-file))))
+                    ;; Verify entities.edn exists but messages.edn does not
+                    (let [entities-file (java.io.File. (str (:path db-info) "/entities.edn"))
+                          messages-file (java.io.File. (str (:path db-info) "/messages.edn"))]
+                      (expect (.exists entities-file))
+                      (expect (pos? (.length entities-file)))
+                      (expect (not (.exists messages-file))))
                     (finally
                       (#'sut/dispose-db! db-info)))))))
 
@@ -3026,7 +3037,7 @@
                       (#'sut/dispose-db! db-info)))))))
 
 ;; =============================================================================
-;; questionify! pipeline unit tests
+;; generate-qa-env! pipeline unit tests
 ;; =============================================================================
 
 (defdescribe compute-distribution-test
@@ -3109,7 +3120,21 @@
                 (let [result (#'sut/filter-verified-questions [] [])]
                   (expect (= [] (:passed result)))
                   (expect (= [] (:needs-revision result)))
-                  (expect (= [] (:dropped result)))))))
+                  (expect (= [] (:dropped result)))))
+            (it "handles mixed keyword and string verdicts via upstream coercion"
+                ;; Note: In production, coerce-data-with-spec runs before filter-verified-questions,
+                ;; converting string verdicts to keywords. This test verifies that keyword verdicts work.
+                (let [questions [{:question "Q1"} {:question "Q2"} {:question "Q3"}]
+                      verifications [{:question-index 0 :verdict :pass}
+                                     {:question-index 1 :verdict :fail :revision-note "bad"}
+                                     {:question-index 2 :verdict :needs-revision :revision-note "fix"}]
+                      result (#'sut/filter-verified-questions questions verifications)]
+                  (expect (= 1 (count (:passed result))))
+                  (expect (= "Q1" (:question (first (:passed result)))))
+                  (expect (= 1 (count (:dropped result))))
+                  (expect (= "Q2" (:question (first (:dropped result)))))
+                  (expect (= 1 (count (:needs-revision result))))
+                  (expect (= "Q3" (:question (first (:needs-revision result)))))))))
 
 (defdescribe build-chunk-selection-prompt-test
   (describe "build-chunk-selection-prompt"
@@ -3183,10 +3208,10 @@
                   (expect (str/includes? prompt "ANSWER-CONSISTENT"))
                   (expect (str/includes? prompt "FINAL"))))))
 
-(defdescribe save-questionify-test
-  (describe "save-questionify!"
+(defdescribe save-qa-test
+  (describe "save-qa!"
             (it "saves EDN file with correct structure"
-                (let [dir (str (fs/create-temp-dir {:prefix "questionify-test-"}))
+                (let [dir (str (fs/create-temp-dir {:prefix "qa-test-"}))
                       result {:questions [{:question "Q1" :answer "A1" :difficulty :understand
                                            :category :factual :source-document "d1" :source-page 0
                                            :evidence-span "evidence text"}]
@@ -3195,7 +3220,7 @@
                                       :duplicates-removed 0 :final-count 1
                                       :by-difficulty {:understand 1} :by-category {:factual 1}}}
                       path (str dir "/test-output")
-                      saved (sut/save-questionify! result path {:formats #{:edn}})]
+                      saved (sut/save-qa! result path {:formats #{:edn}})]
                   (expect (= 1 (count (:files saved))))
                   (expect (str/ends-with? (first (:files saved)) ".edn"))
                   (let [data (read-string (slurp (first (:files saved))))]
@@ -3203,7 +3228,7 @@
                     (expect (= "Q1" (:question (first (:questions data)))))
                     (expect (map? (:stats data))))))
             (it "saves Markdown file with formatted content"
-                (let [dir (str (fs/create-temp-dir {:prefix "questionify-test-"}))
+                (let [dir (str (fs/create-temp-dir {:prefix "qa-test-"}))
                       result {:questions [{:question "What is X?" :answer "X is Y"
                                            :difficulty :analyze :category :inferential
                                            :source-document "doc1" :source-page 3
@@ -3214,7 +3239,7 @@
                                       :duplicates-removed 0 :final-count 1
                                       :by-difficulty {:analyze 1} :by-category {:inferential 1}}}
                       path (str dir "/test-output")
-                      saved (sut/save-questionify! result path {:formats #{:markdown}})]
+                      saved (sut/save-qa! result path {:formats #{:markdown}})]
                   (expect (= 1 (count (:files saved))))
                   (expect (str/ends-with? (first (:files saved)) ".md"))
                   (let [content (slurp (first (:files saved)))]
@@ -3224,13 +3249,13 @@
                     (expect (str/includes? content "Evidence"))
                     (expect (str/includes? content "Chapter 2")))))
             (it "saves both formats when requested"
-                (let [dir (str (fs/create-temp-dir {:prefix "questionify-test-"}))
+                (let [dir (str (fs/create-temp-dir {:prefix "qa-test-"}))
                       result {:questions [] :dropped-questions []
                               :stats {:total-generated 0 :passed-verification 0
                                       :duplicates-removed 0 :final-count 0
                                       :by-difficulty {} :by-category {}}}
                       path (str dir "/test-output")
-                      saved (sut/save-questionify! result path)]
+                      saved (sut/save-qa! result path)]
                   (expect (= 2 (count (:files saved))))))))
 
 

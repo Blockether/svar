@@ -23,6 +23,31 @@
   "HTTP status codes that should trigger a retry."
   #{429 502 503 504})
 
+(defn- retryable-exception?
+  "Returns true if the exception represents a transient connection/read error
+   that should be retried (e.g., proxy dropping connection mid-response).
+
+   These errors have no HTTP status code because the response body was truncated
+   or the connection was reset before a complete response was received."
+  [^Exception e]
+  (let [msg (or (ex-message e) "")
+        cause (ex-cause e)
+        cause-msg (when cause (or (ex-message cause) ""))]
+    (or
+     ;; charred.api/read-json fails on truncated response body
+     (str/includes? msg "EOF reached while reading")
+     (str/includes? msg "Unexpected end of input")
+     ;; java.net.http connection errors
+     (instance? java.io.EOFException e)
+     (instance? java.io.EOFException cause)
+     (instance? java.net.SocketTimeoutException e)
+     (instance? java.net.SocketTimeoutException cause)
+     (and cause-msg (str/includes? cause-msg "Connection reset"))
+     (and cause-msg (str/includes? cause-msg "EOF"))
+     ;; babashka.http-client wraps errors in ExceptionInfo
+     (and (instance? clojure.lang.ExceptionInfo e)
+          (some-> cause retryable-exception?)))))
+
 (defn- http-post!
   "Makes an HTTP POST request with JSON body and OAuth token.
    
@@ -79,27 +104,32 @@
    Throws:
    ExceptionInfo if all retries exhausted."
   ([f] (with-retry f {}))
-  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier]
+   ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier]
        :or {max-retries 5
             initial-delay-ms 1000
             max-delay-ms 60000
             multiplier 2.0}}]
-   (loop [attempt 1
+    (loop [attempt 1
           delay-ms initial-delay-ms]
      (let [result (try
                     {:success (f)}
                     (catch Exception e
                       (let [ex-data-map (ex-data e)
-                            status (:status ex-data-map)]
-                        (if (and (contains? RETRYABLE_STATUS_CODES status)
-                                 (< attempt (long max-retries)))
-                          {:retry true :error e :status status}
+                            status (:status ex-data-map)
+                            retryable-status? (contains? RETRYABLE_STATUS_CODES status)
+                            retryable-conn? (retryable-exception? e)
+                            can-retry? (< attempt (long max-retries))]
+                        (if (and (or retryable-status? retryable-conn?) can-retry?)
+                          {:retry true :error e :status status
+                           :reason (if retryable-conn? :connection-error :http-status)}
                           {:error e}))))]
        (cond
          (:success result) (:success result)
          (:retry result) (do
                            (trove/log! {:level :warn :data {:attempt attempt
                                                             :status (:status result)
+                                                            :reason (:reason result)
+                                                            :error (ex-message (:error result))
                                                             :delay-ms delay-ms}
                                         :msg "Retrying HTTP request"})
                            (Thread/sleep (long delay-ms))
@@ -435,6 +465,9 @@
 ;; abstract! - Chain of Density summarization
 ;; =============================================================================
 
+;; Forward declare refine!/eval! — used by abstract! when :refine?/:eval? is true
+(declare refine! eval!)
+
 (def ^:private DEFAULT_ITERATIONS
   "Default number of Chain of Density iterations."
   5)
@@ -443,69 +476,32 @@
   "Default target length in words for Chain of Density summaries."
   80)
 
-(def ^:private COD_ENTITY_TYPES
-  "Shared XML definition of entity types for Chain of Density prompts."
-  "<entity_types>
-    <type name=\"person\">Named individuals, roles, or groups of people</type>
-    <type name=\"organization\">Companies, institutions, agencies, or formal groups</type>
-    <type name=\"location\">Geographic places, facilities, or spatial references</type>
-    <type name=\"event\">Specific occurrences, actions, or happenings with temporal context</type>
-    <type name=\"concept\">Abstract ideas, theories, methods, or technical terms</type>
-    <type name=\"artifact\">Physical objects, products, tools, or created works</type>
-    <type name=\"quantity\">Numbers, measurements, statistics, or amounts</type>
-    <type name=\"temporal\">Dates, time periods, durations, or temporal references</type>
-</entity_types>")
-
 (def ^:private COD_ENTITY_CRITERIA
-  "Shared XML definition of entity selection criteria."
+  "Shared XML definition of entity selection criteria.
+   Faithful to Adams et al., 2023 — entity types are intentionally open-ended."
   "<entity_criteria>
+    <criterion name=\"atomic\">Each entity must be a single named thing — a person, place, date, organization, concept, or term. NOT a phrase, clause, or description.</criterion>
     <criterion name=\"relevant\">Related to the main story or central theme</criterion>
-    <criterion name=\"specific\">Descriptive yet concise (5 words or fewer)</criterion>
-    <criterion name=\"faithful\">Actually present in the source text</criterion>
+    <criterion name=\"specific\">A proper noun, date, or precise term from the text — not a generic description or paraphrase</criterion>
+    <criterion name=\"faithful\">Must appear verbatim or near-verbatim in the source text — no invented modifiers or rewordings</criterion>
 </entity_criteria>")
-
-(def ^:private COD_IMPORTANCE_SCALE
-  "Shared XML definition of entity importance scoring."
-  "<importance_scoring>
-    <description>Rate each entity's importance to the core narrative from 0.0 to 1.0</description>
-    <scale>
-        <level range=\"0.8-1.0\">Critical - Essential to understanding the main point</level>
-        <level range=\"0.6-0.8\">High - Significantly enhances comprehension</level>
-        <level range=\"0.4-0.6\">Medium - Adds valuable context or detail</level>
-        <level range=\"0.2-0.4\">Low - Minor supporting information</level>
-        <level range=\"0.0-0.2\">Minimal - Tangential or background detail</level>
-    </scale>
-    <guideline>Prioritize entities with higher importance scores when space is limited</guideline>
-</importance_scoring>")
-
-(def ^:private COD_ENTITY_OUTPUT_FORMAT
-  "Shared XML definition of entity output format."
-  "<entity_format>
-    <description>Each entity must include:</description>
-    <field name=\"entity\">The entity text (5 words or fewer)</field>
-    <field name=\"type\">One of: person, organization, location, event, concept, artifact, quantity, temporal</field>
-    <field name=\"importance\">Float from 0.0 to 1.0 indicating relevance to core narrative</field>
-</entity_format>")
 
 (defn- build-cod-first-iteration-objective
   "Builds the Chain of Density objective for the first iteration (no previous summary)."
   [target-length special-instructions]
   (str "<chain_of_density_iteration>
-    <task>Create the first sparse summary of the provided text.</task>
+    <task>Create the first summary of the provided text, covering only the most prominent entities.</task>
     
     <instructions>
-        <instruction>Identify 1-3 key entities from the text to include</instruction>
-        <instruction>Write a long summary (4-5 sentences, ~" target-length " words)</instruction>
-        <instruction>Keep it highly non-specific with verbose fillers like \"this article discusses\"</instruction>
-        <instruction>The summary should contain little specific information beyond the identified entities</instruction>
-        <instruction>For each entity, classify its type and rate its importance to the narrative</instruction>
+        <instruction>Identify key salient entities from the text to include</instruction>
+        <instruction>Write a factual summary (4-5 sentences, ~" target-length " words) that covers the broad topic</instruction>
+        <instruction>Use ONLY words and facts that appear in the source text — do not add adjectives, modifiers, or characterizations not present in the original</instruction>
+        <instruction>Do NOT describe what the text is (e.g. \"this article discusses\") — summarize WHAT IT SAYS</instruction>
+        <instruction>Do NOT add evaluative language (e.g. \"revolutionary\", \"groundbreaking\", \"important\") unless the source text uses those exact words</instruction>
+        <instruction>This is the sparse starting point — later iterations will add more entities and compress further</instruction>
     </instructions>
     
-    " COD_ENTITY_TYPES "
-    
     " COD_ENTITY_CRITERIA "
-    
-    " COD_IMPORTANCE_SCALE "
     "
        (when special-instructions
          (str "
@@ -515,41 +511,26 @@
     "))
        "
     <output_requirements>
-        " COD_ENTITY_OUTPUT_FORMAT "
-        <field name=\"entities\">List of 1-3 entity objects with entity, type, and importance</field>
-        <field name=\"summary\">The initial sparse summary (~" target-length " words)</field>
+        <field name=\"entities\">Array of objects, each with 'entity' (atomic name), 'rationale' (why it's salient), and 'score' (0.0-1.0 salience)</field>
+        <field name=\"summary\">The initial factual summary (~" target-length " words)</field>
     </output_requirements>
 </chain_of_density_iteration>"))
 
 (defn- build-cod-subsequent-iteration-objective
-  "Builds the Chain of Density objective for subsequent iterations (has previous summary)."
+  "Builds the Chain of Density objective for subsequent iterations (has previous summary).
+   Special instructions are placed BEFORE guidelines so the LLM doesn't deprioritize them."
   [target-length special-instructions]
   (str "<chain_of_density_iteration>
     <task>Create a denser version of the previous summary by incorporating missing entities.</task>
     
     <process>
-        <step number=\"1\">Identify 1-3 informative entities from the SOURCE TEXT that are missing from the PREVIOUS SUMMARY</step>
-        <step number=\"2\">Classify each entity by type and rate its importance to the narrative</step>
-        <step number=\"3\">Rewrite the summary to incorporate these missing entities while maintaining the same word count</step>
+        <step number=\"1\">Review the already-extracted entities list — do NOT re-extract any of them</step>
+        <step number=\"2\">Identify salient entities from the SOURCE TEXT that are missing from BOTH the entity list AND the previous summary</step>
+        <step number=\"3\">Rewrite the summary to incorporate these genuinely new entities while maintaining the same word count</step>
     </process>
     
-    " COD_ENTITY_TYPES "
-    
     " COD_ENTITY_CRITERIA "
-    <criterion name=\"novel\">Not present in the previous summary</criterion>
-    
-    " COD_IMPORTANCE_SCALE "
-    
-    <guidelines>
-        <instruction>Make every word count by rewriting for better flow</instruction>
-        <instruction>Create space through fusion, compression, and removing fillers</instruction>
-        <instruction>The summary must be self-contained and understandable without the source</instruction>
-        <instruction>Missing entities can appear anywhere in the new summary</instruction>
-        <instruction>Never drop entities from the previous summary</instruction>
-        <instruction>Prioritize adding higher-importance entities when space is limited</instruction>
-        <instruction>If no space can be made, add fewer new entities rather than dropping old ones</instruction>
-        <constraint>Maintain exactly the same word count (~" target-length " words)</constraint>
-    </guidelines>
+    <criterion name=\"novel\">Not present in the previous summary or the already-extracted entities list</criterion>
     "
        (when special-instructions
          (str "
@@ -558,91 +539,184 @@
     </special_instructions>
     "))
        "
+    <guidelines>
+        <instruction>Make every word count by rewriting for better flow</instruction>
+        <instruction>Create space through fusion, compression, and removing fillers</instruction>
+        <instruction>Use ONLY information present in the source text — remove any interpretation, framing, or meta-commentary</instruction>
+        <instruction>Do NOT describe what the text is — summarize WHAT IT SAYS</instruction>
+        <instruction>The summary must be self-contained and understandable without the source</instruction>
+        <instruction>Missing entities can appear anywhere in the new summary</instruction>
+        <instruction>Never drop entities from the previous summary</instruction>
+        <instruction>If no space can be made, add fewer new entities rather than dropping old ones</instruction>
+        <constraint>Maintain approximately ~" target-length " words</constraint>
+    </guidelines>
+    
     <output_requirements>
-        " COD_ENTITY_OUTPUT_FORMAT "
-        <field name=\"entities\">List of 1-3 NEW entity objects (with entity, type, importance) added in this iteration</field>
+        <field name=\"entities\">Array of NEW entity objects added in this iteration, each with 'entity' (atomic name), 'rationale' (why it's salient), and 'score' (0.0-1.0 salience)</field>
         <field name=\"summary\">The rewritten denser summary (~" target-length " words)</field>
     </output_requirements>
 </chain_of_density_iteration>"))
 
 (defn- build-cod-task
-  "Builds the task content for a Chain of Density iteration."
-  [source-text previous-summary]
-  (if previous-summary
-    (str "<source_text>\n" source-text "\n</source_text>\n\n"
-         "<previous_summary>\n" previous-summary "\n</previous_summary>")
-    (str "<source_text>\n" source-text "\n</source_text>")))
+  "Builds the task content for a Chain of Density iteration.
+   For subsequent iterations, includes the accumulated entity names so the LLM
+   knows what's already been extracted and avoids re-extraction or phrase-gaming."
+  [source-text previous-summary accumulated-entities]
+  (cond-> (str "<source_text>\n" source-text "\n</source_text>")
+    previous-summary
+    (str "\n\n<previous_summary>\n" previous-summary "\n</previous_summary>")
+
+    (seq accumulated-entities)
+    (str "\n\n<already_extracted_entities>\n"
+         (str/join ", " accumulated-entities)
+         "\n</already_extracted_entities>")))
+
+(defn- build-cod-entity-spec
+  "Builds the entity sub-spec for Chain of Density iterations.
+   Each entity has a name, brief rationale, and a salience score."
+  []
+  (spec/spec :CodEntity
+    (spec/field ::spec/name :entity
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Atomic entity name — a single person, place, date, concept, or thing")
+    (spec/field ::spec/name :rationale
+                ::spec/type :spec.type/string
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Brief rationale: why this entity is salient to the text")
+    (spec/field ::spec/name :score
+                ::spec/type :spec.type/float
+                ::spec/cardinality :spec.cardinality/one
+                ::spec/description "Salience score from 0.0 to 1.0 — how central this entity is to the text's main point")))
 
 (defn- build-cod-spec
-  "Builds the spec for a single Chain of Density iteration output."
+  "Builds the spec for a single Chain of Density iteration output.
+   Each entity includes a rationale justifying its salience and a 0.0-1.0 score."
   []
   (spec/spec
+   {:refs [(build-cod-entity-spec)]}
    (spec/field ::spec/name :entities
-               ::spec/type :spec.type/string
+               ::spec/type :spec.type/ref
                ::spec/cardinality :spec.cardinality/many
-               ::spec/description "1-3 entities identified in this iteration")
-   (spec/field ::spec/name :entities/entity
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "The entity text, 5 words or fewer")
-   (spec/field ::spec/name :entities/type
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/values {"person" "A human being or character"
-                              "organization" "Company, institution, or group"
-                              "location" "Place, region, or geographic entity"
-                              "event" "Occurrence, happening, or occasion"
-                              "concept" "Abstract idea, principle, or theory"
-                              "artifact" "Object, product, or creation"
-                              "quantity" "Amount, number, or measurement"
-                              "temporal" "Time, date, or duration"
-                              "pattern" "Recurring structure or behavior"
-                              "abbreviation" "Acronym or shortened form"
-                              "category" "Classification or grouping"}
-               ::spec/description "Entity type classification")
-   (spec/field ::spec/name :entities/importance
-               ::spec/type :spec.type/float
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Importance score from 0.0 to 1.0")
+               ::spec/target :CodEntity
+               ::spec/description "Salient entities identified in this iteration, each with rationale and salience score")
    (spec/field ::spec/name :summary
                ::spec/type :spec.type/string
                ::spec/cardinality :spec.cardinality/one
                ::spec/description "The summary for this iteration")))
 
+(def ^:private COD_EVAL_CRITERIA
+  "Evaluation criteria for Chain of Density summaries."
+  {:faithfulness "Does the summary ONLY contain information present in the source text? No fabricated framing, meta-commentary, or interpretation."
+   :density "Does the summary pack salient entities and key information efficiently?"
+   :coherence "Is the summary well-structured, fluent, and easy to follow?"
+   :completeness "Does the summary cover the most important aspects of the source?"})
+
 (defn- cod-iteration-step
-  "Performs a single Chain of Density iteration step."
-  [source-text target-length model config special-instructions {:keys [iterations previous-summary] :as _state}]
+  "Performs a single Chain of Density iteration step.
+   Tracks accumulated entity names across iterations to prevent re-extraction."
+  [source-text target-length model config special-instructions eval?
+   {:keys [iterations previous-summary accumulated-entities] :as _state}]
   (let [first-iteration? (nil? previous-summary)
         objective (if first-iteration?
                     (build-cod-first-iteration-objective target-length special-instructions)
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
-        task (build-cod-task source-text previous-summary)
+        task (build-cod-task source-text previous-summary accumulated-entities)
         {:keys [result]} (ask! {:spec (build-cod-spec)
                                 :messages [(system objective)
                                            (user task)]
                                 :model model
-                                :config config})]
+                                :config config})
+        ;; SAP's apply-spec-field-defaults guarantees :entities is [] (not nil) and :summary key exists.
+        ;; If LLM returned null summary, fall back to previous summary (business logic, not nil-guarding).
+        result (cond-> result
+                 (nil? (:summary result))
+                 (assoc :summary (or previous-summary "")))
+        result (if eval?
+                 (let [eval-result (eval! {:task (str "Summarize the following text:\n\n" source-text)
+                                           :output (:summary result)
+                                           :model model
+                                           :config config
+                                           :criteria COD_EVAL_CRITERIA
+                                           :ground-truths [source-text]})]
+                   (assoc result :score (:overall-score eval-result)))
+                 result)
+        new-entity-names (keep :entity (:entities result))]
     {:iterations (conj iterations result)
-     :previous-summary (:summary result)}))
+     :previous-summary (:summary result)
+     :accumulated-entities (into (or accumulated-entities []) new-entity-names)}))
+
+(defn- build-cod-refinement-spec
+  "Builds a spec for the CoVe refinement pass on a CoD summary."
+  []
+  (spec/spec
+   (spec/field ::spec/name :summary
+               ::spec/type :spec.type/string
+               ::spec/cardinality :spec.cardinality/one
+               ::spec/description "The refined, faithful summary")))
 
 (defn abstract!
   "Creates a dense, entity-rich summary of text using Chain of Density prompting.
    
    Based on \"From Sparse to Dense: GPT-4 Summarization with Chain of Density Prompting\"
    (Adams et al., 2023). Iteratively refines a summary by identifying missing salient
-   entities and incorporating them while maintaining a fixed length."
-  [{:keys [text iterations target-length special-instructions] :as opts
+   entities and incorporating them while maintaining a fixed length.
+   
+    When `:eval?` is true, each iteration is scored against the source text using `eval!`,
+   giving a quality gradient across iterations (`:score` field per iteration).
+   
+   When `:refine?` is true, the final summary is verified against the source text using
+   Chain of Verification (CoVe) via `refine!`. This catches hallucinated framing,
+   unfaithful claims, and information not present in the source.
+   
+   Opts:
+     :text - String. Source text to summarize.
+     :model - String. LLM model to use.
+     :config - Map, optional. LLM config.
+     :iterations - Integer. Number of CoD densification iterations (default: 5).
+     :target-length - Integer. Target summary length in words (default: 80).
+     :special-instructions - String, optional. Additional instructions for the LLM.
+     :eval? - Boolean. Score each iteration for a quality gradient (default: false).
+     :refine? - Boolean. Run CoVe faithfulness verification on final summary (default: false).
+     :threshold - Float. Min eval score for refinement early stop, 0.0-1.0 (default: 0.9)."
+  [{:keys [text iterations target-length special-instructions eval? refine? threshold] :as opts
     :or {iterations DEFAULT_ITERATIONS
-         target-length DEFAULT_TARGET_LENGTH}}]
+         target-length DEFAULT_TARGET_LENGTH
+         eval? false
+         refine? false
+         threshold 0.9}}]
   (let [{:keys [config model]} (resolve-opts opts)
-        step-fn (partial cod-iteration-step text target-length model config special-instructions)
-        initial-state {:iterations [] :previous-summary nil}
+        step-fn (partial cod-iteration-step text target-length model config special-instructions eval?)
+        initial-state {:iterations [] :previous-summary nil :accumulated-entities []}
         final-state (->> initial-state
                          (iterate step-fn)
                          (drop 1)  ;; skip initial state
                          (take iterations)
-                         last)]
-    (:iterations final-state)))
+                         last)
+        cod-iterations (:iterations final-state)]
+    (if (and refine? (seq cod-iterations))
+      (let [final-summary (:summary (last cod-iterations))
+            refine-result (refine! {:spec (build-cod-refinement-spec)
+                                    :messages [(system (str "You are verifying and refining a summary for faithfulness. "
+                                                           "Every claim in the summary must be grounded in the source text. "
+                                                           "Remove any meta-commentary, interpretive framing, or information not present in the source. "
+                                                           "Preserve entity density and the ~" target-length " word length constraint."))
+                                               (user (str "<source_text>\n" text "\n</source_text>\n\n"
+                                                          "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
+                                    :model model
+                                    :config config
+                                    :iterations 1
+                                    :threshold threshold
+                                    :documents [{:id "source"
+                                                 :pages [{:page "0" :text text}]}]})
+            refined-summary (get-in refine-result [:result :summary]
+                                    (:result refine-result))]
+        (conj (vec (butlast cod-iterations))
+              (assoc (last cod-iterations)
+                     :summary (if (string? refined-summary) refined-summary final-summary)
+                     :refined? true
+                     :refinement-score (:final-score refine-result))))
+      cod-iterations)))
 
 ;; =============================================================================
 ;; eval! - LLM Self-Evaluation

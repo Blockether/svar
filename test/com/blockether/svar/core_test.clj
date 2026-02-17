@@ -2,8 +2,10 @@
   "Baseline tests for svar/core public API functions.
    
    Covers ask!, abstract!, eval!, refine! and spec-driven humanization.
-   All tests use mocked ask!/eval! to avoid real LLM calls."
+   All tests use mocked ask!/eval! to avoid real LLM calls.
+   Integration tests (real LLM) are guarded by OPENAI_API_KEY env var."
   (:require
+   [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.llm :as llm]
@@ -236,9 +238,7 @@
             (it "returns a vector of iteration maps"
                 (with-redefs [llm/ask! (fn [{:keys [_objective]}]
                                           (make-mock-ask-response
-                                           {:entities [{:entity "Test Entity"
-                                                        :type "concept"
-                                                        :importance 0.8}]
+                                           {:entities [{:entity "Test Entity" :rationale "Central topic" :score 0.9}]
                                             :summary "A test summary."}))]
                   (let [result (svar/abstract! {:text "Some article text for summarization."
                                                 :model "gpt-4o"
@@ -250,9 +250,8 @@
             (it "each iteration has :entities and :summary keys"
                 (with-redefs [llm/ask! (fn [_]
                                           (make-mock-ask-response
-                                           {:entities [{:entity "Alpha"
-                                                        :type "person"
-                                                        :importance 0.9}]
+                                           {:entities [{:entity "Alpha" :rationale "Key concept" :score 0.85}
+                                                       {:entity "Beta" :rationale "Supporting concept" :score 0.6}]
                                             :summary "Iteration summary."}))]
                   (let [result (svar/abstract! {:text "Article text."
                                                 :model "gpt-4o"
@@ -264,29 +263,31 @@
                     (expect (string? (:summary iter)))))))
 
   (describe "entity structure"
-            (it "entities have :entity, :type, and :importance"
+            (it "entities are maps with :entity, :rationale, and :score"
                 (with-redefs [llm/ask! (fn [_]
                                           (make-mock-ask-response
-                                           {:entities [{:entity "ACME Corp"
-                                                        :type "organization"
-                                                        :importance 0.85}]
+                                           {:entities [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
+                                                       {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
                                             :summary "Summary."}))]
                   (let [result (svar/abstract! {:text "ACME Corp reported earnings."
                                                 :model "gpt-4o"
                                                 :iterations 1})
-                        entity (first (:entities (first result)))]
-                    (expect (= "ACME Corp" (:entity entity)))
-                    (expect (= "organization" (:type entity)))
-                    (expect (number? (:importance entity)))))))
+                        entities (:entities (first result))]
+                    (expect (= [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
+                                {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
+                               entities))
+                    (expect (every? #(and (contains? % :entity)
+                                         (contains? % :rationale)
+                                         (contains? % :score)) entities))))))
 
   (describe "iteration progression"
-            (it "passes previous summary to subsequent iterations"
+            (it "passes previous summary and accumulated entities to subsequent iterations"
                 (let [call-log (atom [])]
                   (with-redefs [llm/ask! (fn [{:keys [messages]}]
                                              (let [user-content (->> messages (filter #(= "user" (:role %))) first :content)]
                                                (swap! call-log conj user-content))
                                              (make-mock-ask-response
-                                              {:entities [{:entity "E" :type "concept" :importance 0.5}]
+                                              {:entities [{:entity "Entity A" :rationale "Salient" :score 0.8}]
                                                :summary "Dense summary."}))]
                     (svar/abstract! {:text "Source text."
                                      :model "gpt-4o"
@@ -294,7 +295,9 @@
                     ;; First call has no previous_summary tag
                     (expect (not (re-find #"previous_summary" (first @call-log))))
                     ;; Second call includes previous_summary
-                    (expect (some? (re-find #"previous_summary" (second @call-log)))))))))
+                    (expect (some? (re-find #"previous_summary" (second @call-log))))
+                    ;; Second call includes accumulated entities
+                    (expect (some? (re-find #"already_extracted_entities" (second @call-log)))))))))
 
 ;; =============================================================================
 ;; eval! Baseline Tests
@@ -743,3 +746,244 @@
                 (let [img (svar/image "abc123" "image/jpeg")]
                   (expect (= "abc123" (:base64 img)))
                   (expect (= "image/jpeg" (:media-type img)))))))
+
+;; =============================================================================
+;; Integration Tests (real LLM calls, guarded by env var)
+;; =============================================================================
+
+(defn- integration-tests-enabled?
+  "Returns true if LLM integration tests should run.
+   SVAR's make-config auto-reads BLOCKETHER_OPENAI_API_KEY (primary)
+   and OPENAI_API_KEY (fallback)."
+  []
+  (or (some? (System/getenv "BLOCKETHER_OPENAI_API_KEY"))
+      (some? (System/getenv "OPENAI_API_KEY"))))
+
+;; Rich factual text about the Voyager missions — dense with entities, dates,
+;; distances, organizations, and scientific concepts. Perfect for CoD testing.
+(def ^:private VOYAGER_TEXT
+  "Voyager 1, launched by NASA on September 5, 1977, from Cape Canaveral aboard a Titan IIIE-Centaur rocket, is the most distant human-made object from Earth. As of 2024, it is over 24 billion kilometers from Earth, traveling through interstellar space at approximately 17 kilometers per second. The spacecraft carries a Golden Record, a 12-inch gold-plated copper phonograph record containing sounds and images selected to portray the diversity of life and culture on Earth — curated by a committee chaired by Carl Sagan of Cornell University. Voyager 1 made its closest approach to Jupiter on March 5, 1979, discovering volcanic activity on Io and revealing the intricate structure of Jupiter's ring system. It then flew past Saturn on November 12, 1980, where it studied the complex atmosphere and ring system, and made detailed observations of Titan, Saturn's largest moon, whose thick nitrogen atmosphere intrigued scientists. On August 25, 2012, Voyager 1 crossed the heliopause — the boundary where the solar wind gives way to the interstellar medium — becoming the first spacecraft to enter interstellar space. Its twin, Voyager 2, launched 16 days earlier on August 20, 1977, is the only spacecraft to have visited all four giant planets: Jupiter, Saturn, Uranus, and Neptune. Both spacecraft are powered by radioisotope thermoelectric generators (RTGs), which convert heat from the decay of plutonium-238 into electricity, and are expected to continue transmitting data until roughly 2025.")
+
+;; Short scientific text about CRISPR — compact, technical, entity-dense.
+(def ^:private CRISPR_TEXT
+  "CRISPR-Cas9, developed as a gene-editing tool by Jennifer Doudna at UC Berkeley and Emmanuelle Charpentier at the Max Planck Institute, earned them the 2020 Nobel Prize in Chemistry. The system uses a guide RNA to direct the Cas9 enzyme to a specific DNA sequence, where it creates a double-strand break. The cell's repair machinery then either disables the gene (via non-homologous end joining) or inserts a new sequence (via homology-directed repair). Since 2013, CRISPR has been applied to human diseases including sickle cell disease, beta-thalassemia, and certain cancers. In December 2023, the FDA approved Casgevy (exagamglogene autotemcel), developed by Vertex Pharmaceuticals and CRISPR Therapeutics, as the first CRISPR-based therapy for sickle cell disease. Despite its precision, off-target effects remain a concern — the enzyme occasionally cuts DNA at unintended sites, potentially causing harmful mutations.")
+
+(defdescribe abstract!-integration-test
+  (describe "basic Chain of Density with Voyager text"
+            (it "produces iterations with entities and summaries"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text VOYAGER_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 3
+                                                :target-length 80})]
+                    ;; Shape checks
+                    (expect (vector? result))
+                    (expect (= 3 (count result)))
+
+                    ;; Each iteration has the right structure
+                    (doseq [iter result]
+                      (expect (contains? iter :entities))
+                      (expect (contains? iter :summary))
+                      (expect (vector? (:entities iter)))
+                      (expect (string? (:summary iter)))
+                      ;; Entities are maps with :entity, :rationale, and :score
+                      (expect (every? #(and (contains? % :entity)
+                                           (contains? % :rationale)
+                                           (contains? % :score)) (:entities iter))))
+
+                    ;; First iteration should have some entities
+                    (expect (pos? (count (:entities (first result)))))
+
+                    ;; Summaries should be non-empty
+                    (expect (pos? (count (:summary (first result)))))
+                    (expect (pos? (count (:summary (last result)))))
+
+                    ;; --- Content quality checks ---
+                    ;; Across all iterations, must extract at least some key Voyager entities
+                    (let [all-entity-names (->> result
+                                                (mapcat :entities)
+                                                (map :entity)
+                                                (map str/lower-case)
+                                                set)]
+                      ;; "Voyager 1" should always appear (it's the central subject)
+                      (expect (some #(str/includes? % "voyager") all-entity-names))
+                      ;; At least 2 of these key entities should be found
+                      (let [key-entities #{"nasa" "golden record" "jupiter" "saturn" "heliopause"
+                                           "carl sagan" "titan" "voyager 2" "interstellar space"}
+                            found (count (filter (fn [key-ent]
+                                                  (some #(str/includes? % key-ent) all-entity-names))
+                                                key-entities))]
+                        (expect (>= found 2))))
+
+                    ;; Scores should be in 0.0-1.0 range
+                    (doseq [entity (->> result (mapcat :entities))]
+                      (expect (<= 0.0 (:score entity) 1.0)))
+
+                    ;; Summaries should mention Voyager
+                    (expect (some #(str/includes? (str/lower-case (:summary %)) "voyager") result)))))
+
+            (it "later iterations accumulate more entities without re-extraction"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text VOYAGER_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 3
+                                                :target-length 80})
+                        ;; Total entity count should grow across iterations
+                        cumulative-entities (reductions
+                                            (fn [acc iter] (into acc (map :entity (:entities iter))))
+                                            #{}
+                                            result)]
+                    ;; By iteration 3 we should have more total entities than iteration 1
+                    (expect (> (count (last cumulative-entities))
+                              (count (second cumulative-entities))))
+
+                    ;; Entities from later iterations should be genuinely new (no re-extraction)
+                    (let [iter1-names (set (map :entity (:entities (first result))))
+                          iter2-names (set (map :entity (:entities (second result))))]
+                      ;; Iteration 2 entities should not duplicate iteration 1 exactly
+                      (expect (empty? (clojure.set/intersection iter1-names iter2-names))))))))
+
+  (describe "basic Chain of Density with CRISPR text"
+            (it "handles technical scientific text"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text CRISPR_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 2
+                                                :target-length 60})]
+                    (expect (vector? result))
+                    (expect (= 2 (count result)))
+
+                    ;; Should extract meaningful scientific entities with rationales and scores
+                    (let [all-entities (into [] cat (map :entities result))
+                          entity-names (mapv :entity all-entities)
+                          lower-names (mapv str/lower-case entity-names)]
+                      (expect (pos? (count all-entities)))
+                      ;; Each entity has :entity, :rationale, and :score
+                      (expect (every? #(and (contains? % :entity)
+                                           (contains? % :rationale)
+                                           (contains? % :score)) all-entities))
+                      ;; Must find CRISPR-Cas9 (central subject, always score ~1.0)
+                      (expect (some #(str/includes? % "crispr") lower-names))
+                      ;; Must find at least one of the developers
+                      (expect (some #(or (str/includes? % "doudna")
+                                        (str/includes? % "charpentier")) lower-names))
+                      ;; Must find at least one disease application
+                      (expect (some #(or (str/includes? % "sickle")
+                                        (str/includes? % "beta-thalassemia")
+                                        (str/includes? % "cancer")) lower-names))
+                      ;; Scores are all within valid range
+                      (expect (every? #(<= 0.0 (:score %) 1.0) all-entities))
+                      ;; Rationales should be non-empty strings
+                      (expect (every? #(pos? (count (:rationale %))) all-entities)))
+
+                    ;; Summaries should mention CRISPR
+                    (expect (every? #(str/includes? (str/lower-case (:summary %)) "crispr") result))))))
+
+  (describe "with :eval? quality scoring"
+            (it "each iteration gets a numeric score reflecting quality"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text CRISPR_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 2
+                                                :target-length 60
+                                                :eval? true})]
+                    (expect (vector? result))
+                    (expect (= 2 (count result)))
+
+                    ;; Each iteration should have a :score in valid range
+                    (doseq [iter result]
+                      (expect (contains? iter :score))
+                      (expect (number? (:score iter)))
+                      (expect (<= 0.0 (:score iter) 1.0)))
+
+                    ;; Scores should be reasonable (not degenerate) — at least 0.5
+                    ;; for a well-formed summary of factual text
+                    (expect (>= (:score (first result)) 0.5))
+
+                    ;; Structure should still be complete
+                    (expect (pos? (count (:entities (first result)))))))))
+
+  (describe "with :refine? CoVe verification"
+            (it "last iteration is marked as refined"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text CRISPR_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 2
+                                                :target-length 60
+                                                :refine? true
+                                                :threshold 0.9})]
+                    (expect (vector? result))
+                    (expect (= 2 (count result)))
+
+                    ;; Last iteration should be marked as refined
+                    (let [last-iter (last result)]
+                      (expect (true? (:refined? last-iter)))
+                      (expect (some? (:summary last-iter)))
+                      ;; Refinement score key should be present
+                      (expect (contains? last-iter :refinement-score))
+                      ;; When score is non-nil, it should be numeric
+                      (when-let [score (:refinement-score last-iter)]
+                        (expect (number? score))))
+
+                    ;; Earlier iterations should not be refined
+                    (expect (nil? (:refined? (first result))))))))
+
+  (describe "with :eval? and :refine? combined"
+            (it "produces scored iterations with refined final summary"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text CRISPR_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 2
+                                                :target-length 60
+                                                :eval? true
+                                                :refine? true
+                                                :threshold 0.9})]
+                    (expect (vector? result))
+                    (expect (= 2 (count result)))
+
+                    ;; All iterations should have scores
+                    (doseq [iter result]
+                      (expect (number? (:score iter))))
+
+                    ;; Last iteration should be refined
+                    (expect (true? (:refined? (last result))))))))
+
+  (describe "with :special-instructions"
+            (it "date-focused instructions produce mostly temporal entities"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text VOYAGER_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 2
+                                                :target-length 60
+                                                :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."})
+                        ;; Collect all first-iteration entities (where special instructions have strongest effect)
+                        iter1-entities (:entities (first result))
+                        iter1-names (mapv :entity iter1-entities)]
+                    (expect (vector? result))
+                    (expect (= 2 (count result)))
+                    ;; Should still produce valid entity structure
+                    (doseq [iter result]
+                      (expect (string? (:summary iter)))
+                      (expect (vector? (:entities iter)))
+                      (expect (every? #(and (contains? % :entity)
+                                           (contains? % :rationale)
+                                           (contains? % :score)) (:entities iter))))
+                    ;; First iteration should have at least one date/temporal entity
+                    ;; (The text has: 1977, 1979, 1980, 2012, 2024, 2025)
+                    (expect (some #(re-find #"\d{4}" (:entity %)) iter1-entities))))))
+
+  (describe "target-length control"
+            (it "produces summaries near the target word count"
+                (when (integration-tests-enabled?)
+                  (let [result (svar/abstract! {:text VOYAGER_TEXT
+                                                :model "gpt-4o"
+                                                :iterations 2
+                                                :target-length 50})
+                        word-count (fn [s] (count (str/split (str/trim s) #"\s+")))]
+                    (expect (vector? result))
+                    ;; Summaries should be within reasonable range of target (50 words ± 50%)
+                    (doseq [iter result]
+                      (let [wc (word-count (:summary iter))]
+                        (expect (>= wc 25))
+                        (expect (<= wc 100)))))))))
+

@@ -43,8 +43,8 @@
    [clojure.pprint :as pprint]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.core :as svar]
-    [com.blockether.svar.internal.util :as util]
+    [com.blockether.svar.internal.llm :as llm]
+     [com.blockether.svar.internal.util :as util]
     [com.blockether.svar.internal.rlm.internal.pageindex.markdown :as markdown]
    [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
    [com.blockether.svar.internal.rlm.internal.pageindex.spec :as rlm-spec]
@@ -502,7 +502,7 @@
       (let [;; Combine all descriptions into a single text for summarization
             combined-text (str/join "\n\n" descriptions)
             ;; Target ~150 words for document abstract
-            abstracts (svar/abstract! {:text combined-text
+            abstracts (llm/abstract! {:text combined-text
                                        :model model
                                        :target-length 150
                                        :iterations 3
@@ -832,7 +832,7 @@
 ;; Public Serialization API
 ;; =============================================================================
 
-(defn- write-document-edn!
+(defn write-document-edn!
   "Writes a document to an EDN file, extracting image bytes to separate PNG files.
    
    Image data (byte arrays) in :page.node/image-data are written as PNG files
@@ -886,7 +886,7 @@
     (trove/log! {:level :debug :data {:path (str edn-file)} :msg "Wrote document EDN"})
     output-dir))
 
-(defn- read-document-edn
+(defn read-document-edn
   "Reads a document from an EDN file, resolving image paths back to byte arrays.
    
    Image paths in :page.node/image-path are read back as byte arrays
@@ -935,33 +935,43 @@
        document.edn    — structured data (EDN)
        images/          — extracted images as PNG files
    
-    Params:
-    `file-path` - String. Path to the document file.
-    `opts` - Map, optional:
-      - :output - Custom output directory path (default: same dir, .pageindex extension)
-      - :model - LLM model override for vision extraction
-      - :config - LLM config override
-      - :refine? - Boolean. Enable post-extraction quality refinement (default: false)
-      - :refine-model - String. Model for eval/refine steps (default: \"gpt-4o\")
-      - :refine-iterations - Integer. Max refine iterations per page (default: 1)
-      - :refine-threshold - Float. Min eval score to pass (default: 0.8)
-      - :refine-sample-size - Integer. Pages to sample for eval (default: 3)
-    
-    Returns:
-    Map with :document (the indexed document) and :output-path (directory where files were saved).
-    
-    Throws:
-    - ex-info if file not found
-    - ex-info if document fails spec validation
-    
-    Example:
-    (index! \"docs/manual.pdf\")
-    ;; => {:document {...} :output-path \"docs/manual.pageindex\"}
-    
-    ;; With quality refinement
-    (index! \"docs/manual.pdf\" {:refine? true :refine-model \"gpt-4o\"})"
+      Params:
+      `file-path` - String. Path to the document file.
+      `opts` - Map, optional:
+        - :output - Custom output directory path (default: same dir, .pageindex extension)
+        - :config - LLM config override
+        
+        Vision extraction:
+        - :vision-model - String. Model for vision page extraction (default: DEFAULT_VISION_MODEL).
+        - :parallel - Integer. Max concurrent vision page extractions for PDFs (default: 3)
+        
+        Quality refinement (opt-in):
+        - :refine? - Boolean. Enable post-extraction quality refinement (default: false)
+        - :refine-model - String. Model for eval/refine steps (default: \"gpt-4o\")
+        - :parallel-refine - Integer. Max concurrent eval/refine operations (default: 2)
+        - :refine-iterations - Integer. Max refine iterations per page (default: 1)
+        - :refine-threshold - Float. Min eval score to pass (default: 0.8)
+        - :refine-sample-size - Integer. Pages to sample for eval (default: 3)
+      
+      Returns:
+      Map with :document (the indexed document) and :output-path (directory where files were saved).
+      
+      Throws:
+      - ex-info if file not found
+      - ex-info if document fails spec validation
+      
+      Example:
+      (index! \"docs/manual.pdf\")
+      ;; => {:document {...} :output-path \"docs/manual.pageindex\"}
+      
+      ;; Separate models for vision vs refinement
+      (index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\"
+                                   :refine? true
+                                   :refine-model \"gpt-4o-mini\"
+                                   :parallel 5
+                                   :parallel-refine 3})"
   ([file-path] (index! file-path {}))
-   ([file-path {:keys [output model config
+   ([file-path {:keys [output vision-model config parallel parallel-refine
                       refine? refine-model refine-iterations
                       refine-threshold refine-sample-size]}]
     (let [abs-path (ensure-absolute file-path)
@@ -977,8 +987,10 @@
 
       ;; Run indexing
       (let [index-opts (cond-> {}
-                         model (assoc :model model)
+                         vision-model (assoc :model vision-model)
                          config (assoc :config config)
+                         parallel (assoc :parallel parallel)
+                         parallel-refine (assoc :parallel-refine parallel-refine)
                          refine? (assoc :refine? refine?)
                          refine-model (assoc :refine-model refine-model)
                          refine-iterations (assoc :refine-iterations refine-iterations)
