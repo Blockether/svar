@@ -150,7 +150,6 @@
   "Field option: When true, marks field for humanization via :humanizer in ask!."
   ::spec/humanize?)
 
-
 ;; =============================================================================
 ;; Type Keywords
 ;; =============================================================================
@@ -429,6 +428,9 @@
    
    Opts:
      :config          - LLM config override
+     :pages           - Page selector (1-indexed). Limits which pages are indexed.
+                        Supports: integer, [from to] range, or [[1 3] 5 [7 10]] mixed.
+                        nil = all pages (default).
      
      Vision extraction:
       :vision-model    - Model for vision page extraction
@@ -441,6 +443,8 @@
    
    Example:
      (svar/index! \"docs/manual.pdf\")
+     (svar/index! \"docs/manual.pdf\" {:pages [1 5]})
+     (svar/index! \"docs/manual.pdf\" {:pages [[1 3] 5 [7 10]]})
      (svar/index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\"
                                        :parallel 5
                                        :refine? true

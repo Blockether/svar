@@ -21,9 +21,9 @@
    [clojure.core.async :as async]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-    [com.blockether.svar.internal.llm :as llm]
-    [com.blockether.svar.internal.spec :as spec]
-    [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
+   [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.spec :as spec]
+   [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
    [taoensso.trove :as trove])
   (:import
    [java.awt Color Graphics2D]
@@ -229,9 +229,9 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                 ::spec/cardinality :spec.cardinality/one
                 ::spec/description "Page rotation in degrees clockwise (0, 90, 180, or 270)"
                 ::spec/values {"0" "Correct orientation, text reads left-to-right top-to-bottom"
-                             "90" "Rotated 90 degrees clockwise, text reads top-to-bottom"
-                             "180" "Upside down, text reads right-to-left bottom-to-top"
-                             "270" "Rotated 90 degrees counter-clockwise, text reads bottom-to-top"}})))
+                               "90" "Rotated 90 degrees clockwise, text reads top-to-bottom"
+                               "180" "Upside down, text reads right-to-left bottom-to-top"
+                               "270" "Rotated 90 degrees counter-clockwise, text reads bottom-to-top"}})))
 
 (defn- detect-rotation
   "Detects the rotation of a page image using vision LLM.
@@ -255,7 +255,7 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                :msg "Detecting page rotation"})
   (let [base64-image (image->base64 image)
         response (llm/ask! {:spec rotation-detection-spec
-                              :messages [(llm/system "You are a document orientation detector. Your ONLY job is to determine if this page image needs to be rotated to be read normally.
+                            :messages [(llm/system "You are a document orientation detector. Your ONLY job is to determine if this page image needs to be rotated to be read normally.
 
 CRITICAL: Look at the INDIVIDUAL CHARACTERS and LETTERS in the text:
 - If letters are upright and text flows left-to-right: rotation = 0
@@ -269,12 +269,12 @@ Pay special attention to:
 - Would you need to rotate the image to read the text comfortably?
 
 DO NOT assume 0. Actually examine the character orientation carefully.")
-                                         (llm/user "Look at the characters and text in this image. Are the letters upright (normal) or are they rotated sideways/upside down? Return the rotation needed to make text readable in normal left-to-right orientation."
-                                                    (llm/image base64-image "image/png"))]
-                              :model model
-                              :config config
-                              :check-context? false
-                              :timeout-ms timeout-ms})
+                                       (llm/user "Look at the characters and text in this image. Are the letters upright (normal) or are they rotated sideways/upside down? Return the rotation needed to make text readable in normal left-to-right orientation."
+                                                 (llm/image base64-image "image/png"))]
+                            :model model
+                            :config config
+                            :check-context? false
+                            :timeout-ms timeout-ms})
         rotation (get-in response [:result :rotation] 0)
         ;; Clamp to valid values
         valid-rotation (if (contains? #{0 90 180 270} rotation) rotation 0)]
@@ -744,7 +744,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    (spec/field {::spec/name :nodes
                 ::spec/type :spec.type/ref
                 ::spec/target [:section :heading :paragraph :list-item :toc-entry
-                             :image :table :header :footer :metadata]
+                               :image :table :header :footer :metadata]
                 ::spec/cardinality :spec.cardinality/many
                 ::spec/description "Document nodes in reading order (top to bottom, left to right)"})))
 
@@ -977,14 +977,14 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
     (trove/log! {:level :info :data {:page page-index :model refine-model}
                  :msg "Evaluating page extraction quality"})
     (let [result (llm/eval! {:task (str "Extract all visible content from document page " page-index
-                                         " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
-                                         "Image, Table) with correct parent-id hierarchy. Every piece of visible "
-                                         "text should be captured. Section descriptions should be meaningful "
-                                         "2-3 sentence summaries.")
-                              :output serialized
-                              :model refine-model
-                              :config config
-                              :criteria PAGE_EVAL_CRITERIA})]
+                                        " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
+                                        "Image, Table) with correct parent-id hierarchy. Every piece of visible "
+                                        "text should be captured. Section descriptions should be meaningful "
+                                        "2-3 sentence summaries.")
+                             :output serialized
+                             :model refine-model
+                             :config config
+                             :criteria PAGE_EVAL_CRITERIA})]
       (trove/log! {:level :info :data {:page page-index
                                        :score (:overall-score result)
                                        :correct? (:correct? result)}
@@ -1028,13 +1028,13 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
           task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.\n\nIMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coordinates MUST be within these bounds: xmin and xmax in range [0, %d], ymin and ymax in range [0, %d]."
                        img-width img-height img-width img-height)
           refine-result (llm/refine! {:spec vision-response-spec
-                                       :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
-                                                  (llm/user task (llm/image base64-image "image/png"))]
-                                       :model refine-model
-                                       :config config
-                                       :iterations refine-iterations
-                                       :threshold refine-threshold
-                                       :criteria PAGE_EVAL_CRITERIA})
+                                      :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
+                                                 (llm/user task (llm/image base64-image "image/png"))]
+                                      :model refine-model
+                                      :config config
+                                      :iterations refine-iterations
+                                      :threshold refine-threshold
+                                      :criteria PAGE_EVAL_CRITERIA})
           raw-nodes (get-in refine-result [:result :nodes] [])
           ;; Use refine-model for bbox scale since it generated the coordinates
           nodes (enrich-visual-nodes raw-nodes image refine-model page-index)]
@@ -1065,15 +1065,15 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                                    :content-length (count content)}
                :msg "Refining page extraction (text)"})
   (let [refine-result (llm/refine! {:spec vision-response-spec
-                                     :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
-                                                (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                                "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                                                "<document_content>\n" content "\n</document_content>"))]
-                                     :model refine-model
-                                     :config config
-                                     :iterations refine-iterations
-                                     :threshold refine-threshold
-                                     :criteria PAGE_EVAL_CRITERIA})
+                                    :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
+                                               (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
+                                                              "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                              "<document_content>\n" content "\n</document_content>"))]
+                                    :model refine-model
+                                    :config config
+                                    :iterations refine-iterations
+                                    :threshold refine-threshold
+                                    :criteria PAGE_EVAL_CRITERIA})
         nodes (get-in refine-result [:result :nodes] [])]
     (trove/log! {:level :info :data {:page page-index
                                      :nodes (count nodes)
@@ -1205,7 +1205,6 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                         (get refined-map (:page/index page) page))
                       pages)))))))))
 
-
 (defn- quality-pass-single
   "Post-extraction quality pass for single-page extractors.
    
@@ -1276,12 +1275,12 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coordinates MUST be within these bounds: xmin and xmax in range [0, %d], ymin and ymax in range [0, %d]."
                        img-width img-height img-width img-height)
           response (llm/ask! {:spec vision-response-spec
-                                :messages [(llm/system objective)
-                                           (llm/user task (llm/image base64-image "image/png"))]
-                                :model model
-                                :config config
-                                :check-context? false
-                                :timeout-ms timeout-ms})
+                              :messages [(llm/system objective)
+                                         (llm/user task (llm/image base64-image "image/png"))]
+                              :model model
+                              :config config
+                              :check-context? false
+                              :timeout-ms timeout-ms})
           raw-nodes (get-in response [:result :nodes] [])
           ;; Enrich visual nodes with extracted image data + rotation correction
           nodes (enrich-visual-nodes raw-nodes image model page-index)
@@ -1307,14 +1306,16 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    Uses node-based document structure extraction. Each page contains a vector of
    semantic nodes (headings, paragraphs, images, tables, etc.).
    
-    Params:
-    `pdf-path` - String. Path to the PDF file.
-    `opts` - Map with:
-      `:model` - String. Vision model to use.
-      `:objective` - String. System prompt for OCR.
-      `:config` - Map. LLM config with :api-key, :base-url (from llm-config-component).
-      `:parallel` - Integer. Max concurrent extractions (default: 4).
-      `:timeout-ms` - Integer, optional. HTTP timeout per page (default: 180000ms / 3 min).
+     Params:
+     `pdf-path` - String. Path to the PDF file.
+     `opts` - Map with:
+       `:model` - String. Vision model to use.
+       `:objective` - String. System prompt for OCR.
+       `:config` - Map. LLM config with :api-key, :base-url (from llm-config-component).
+       `:parallel` - Integer. Max concurrent extractions (default: 4).
+       `:timeout-ms` - Integer, optional. HTTP timeout per page (default: 180000ms / 3 min).
+       `:page-set` - Set of 0-indexed page numbers to extract, or nil for all pages.
+                     When provided, only pages in the set are sent to the vision LLM.
    
    Returns:
    Vector of maps, one per page:
@@ -1323,38 +1324,49 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    
    Throws:
    Anomaly (fault) if any page fails to extract."
-  [pdf-path {:keys [model objective parallel timeout-ms config refine?]
+  [pdf-path {:keys [model objective parallel timeout-ms config refine? page-set]
              :or {parallel 3 timeout-ms DEFAULT_VISION_TIMEOUT_MS}
              :as opts}]
   (trove/log! {:level :info :data {:pdf pdf-path :model model :parallel parallel :timeout-ms timeout-ms}
                :msg "Starting PDF text extraction"})
-  (let [images (pdf/pdf->images pdf-path)
+  (let [pdf-page-opts (when page-set {:page-set page-set})
+        ;; Only render selected pages (skips CPU-expensive image rendering for excluded pages)
+        images (pdf/pdf->images pdf-path (merge {} pdf-page-opts))
         page-count (count images)
-        ;; Detect text rotation per page using PDFBox heuristic (no LLM needed)
+        ;; Detect text rotation only for selected pages (no LLM needed)
         page-rotations (try
-                         (pdf/detect-text-rotation pdf-path)
+                         (pdf/detect-text-rotation pdf-path (or pdf-page-opts {}))
                          (catch Exception e
                            (trove/log! {:level :warn
                                         :data {:pdf pdf-path :error (ex-message e)}
                                         :msg "Text rotation detection failed, assuming no rotation"})
-                           (vec (repeat page-count 0))))]
+                           (vec (repeat page-count 0))))
+        ;; Build the page index mapping: images are returned in order of sorted page-set,
+        ;; so we need to map them back to their original 0-indexed page numbers.
+        page-indices (if page-set
+                       (let [total (pdf/page-count pdf-path)]
+                         (filterv #(< % total) (sort page-set)))
+                       (vec (range page-count)))]
+    (when page-set
+      (trove/log! {:level :info :data {:selected-pages page-count :page-set page-set}
+                   :msg "Rendering only selected pages"}))
     (trove/log! {:level :info :data {:pages page-count :rotations page-rotations}
                  :msg "PDF loaded, extracting text"})
 
-    ;; Handle empty PDF case
+    ;; Handle empty case (no pages or empty page-set)
     (if (zero? page-count)
       (do
-        (trove/log! {:level :warn :data {:pdf pdf-path} :msg "PDF has no pages"})
+        (trove/log! {:level :warn :data {:pdf pdf-path} :msg "PDF has no pages to extract"})
         [])
 
       ;; Use core.async for parallel extraction
-      (let [result-chan (async/chan page-count)
-            ;; Create work items with pre-computed rotation per page
-            work-items (map-indexed (fn [idx img]
-                                     {:index idx
-                                      :image img
-                                      :rotation (get page-rotations idx 0)})
-                                   images)
+      (let [;; Create work items with original page indices and pre-computed rotation
+            work-items (map (fn [img page-idx rotation]
+                              {:index page-idx
+                               :image img
+                               :rotation rotation})
+                            images page-indices page-rotations)
+            result-chan (async/chan (max 1 page-count))
             extract-opts {:model model :objective objective :timeout-ms timeout-ms :config config}]
 
         ;; Start parallel workers - capture errors as data since pipeline-blocking catches exceptions
@@ -1459,14 +1471,14 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
   (trove/log! {:level :info :data {:page page-index :model model :content-length (count content)}
                :msg "Extracting nodes from text content"})
   (let [response (llm/ask! {:spec vision-response-spec
-                              :messages [(llm/system objective)
-                                         (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                         "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                                         "<document_content>\n" content "\n</document_content>"))]
-                              :model model
-                              :config config
-                              :check-context? false
-                              :timeout-ms timeout-ms})
+                            :messages [(llm/system objective)
+                                       (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
+                                                      "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                      "<document_content>\n" content "\n</document_content>"))]
+                            :model model
+                            :config config
+                            :check-context? false
+                            :timeout-ms timeout-ms})
         nodes (get-in response [:result :nodes] [])
         section-count (count (filter :page.node/description nodes))
         heading-count (count (filter :page.node/level nodes))]
@@ -1669,12 +1681,12 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
                                         :metadata (count metadata)}
                    :msg "Inferring document title"})
       (let [response (llm/ask! {:spec title-inference-spec
-                                  :messages [(llm/system "You are a document analyst. Infer the most appropriate title for a document based on its structure and content.")
-                                             (llm/user (str "Based on the following document content, infer the document's title. "
-                                                             "Return the most likely title - it should be concise and descriptive.\n\n"
-                                                             context))]
-                                  :model model
-                                  :config config
-                                  :check-context? false
-                                  :timeout-ms timeout-ms})]
+                                :messages [(llm/system "You are a document analyst. Infer the most appropriate title for a document based on its structure and content.")
+                                           (llm/user (str "Based on the following document content, infer the document's title. "
+                                                          "Return the most likely title - it should be concise and descriptive.\n\n"
+                                                          context))]
+                                :model model
+                                :config config
+                                :check-context? false
+                                :timeout-ms timeout-ms})]
         (get-in response [:result :title])))))

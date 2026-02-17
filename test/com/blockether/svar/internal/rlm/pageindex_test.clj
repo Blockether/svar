@@ -133,7 +133,42 @@
 
             (it "throws for non-existent file"
                 (expect (throws? clojure.lang.ExceptionInfo
-                                 #(pdf/pdf->images "non-existent.pdf"))))))
+                                 #(pdf/pdf->images "non-existent.pdf")))))
+
+  (describe "pdf->images with :page-set"
+            (it "renders only selected pages"
+                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{0}})]
+                  (expect (vector? images))
+                  (expect (= 1 (count images)))
+                  (expect (instance? BufferedImage (first images)))))
+
+            (it "empty page-set renders nothing"
+                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{}})]
+                  (expect (vector? images))
+                  (expect (= 0 (count images)))))
+
+            (it "nil page-set renders all pages (default)"
+                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set nil})]
+                  (expect (= 1 (count images)))))
+
+            (it "page-set beyond page count renders nothing for that index"
+                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{5}})]
+                  (expect (= 0 (count images))))))
+
+  (describe "detect-text-rotation with :page-set"
+            (it "detects rotation only for selected pages"
+                (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH {:page-set #{0}})]
+                  (expect (vector? rotations))
+                  (expect (= 1 (count rotations)))))
+
+            (it "empty page-set returns empty vector"
+                (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH {:page-set #{}})]
+                  (expect (vector? rotations))
+                  (expect (= 0 (count rotations)))))
+
+            (it "nil page-set returns all pages (default)"
+                (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH)]
+                  (expect (= 1 (count rotations)))))))
 
 ;; =============================================================================
 ;; Spec Validation Tests (No LLM Required)
@@ -726,3 +761,222 @@
                     (let [indices (mapv :page/index (:document/pages doc))]
                       (expect (= (range (count indices)) indices)
                               (str base-name " page indices not sequential"))))))))
+
+;; =============================================================================
+;; Page Range Support Tests (TDD Red Phase)
+;; =============================================================================
+
+(defn- throws-with-type?
+  "Calls f and checks that it throws ExceptionInfo with the given :type in ex-data."
+  [expected-type f]
+  (try
+    (f)
+    false
+    (catch clojure.lang.ExceptionInfo e
+      (= expected-type (:type (ex-data e))))))
+
+(defdescribe normalize-page-spec-test
+  (describe "happy paths"
+            (it "nil returns nil (all pages)"
+                (expect (nil? (pageindex/normalize-page-spec nil 10))))
+
+            (it "single integer converts 1-indexed to 0-indexed"
+                (expect (= #{2} (pageindex/normalize-page-spec 3 10))))
+
+            (it "first page"
+                (expect (= #{0} (pageindex/normalize-page-spec 1 10))))
+
+            (it "last page"
+                (expect (= #{9} (pageindex/normalize-page-spec 10 10))))
+
+            (it "range vector expands to 0-indexed set"
+                (expect (= #{0 1 2} (pageindex/normalize-page-spec [1 3] 10))))
+
+            (it "single-element range where start equals end"
+                (expect (= #{4} (pageindex/normalize-page-spec [5 5] 10))))
+
+            (it "mixed vector of ranges and singles"
+                (expect (= #{0 1 2 4 6 7 8 9}
+                           (pageindex/normalize-page-spec [[1 3] 5 [7 10]] 10))))
+
+            (it "multiple disjoint ranges"
+                (expect (= #{0 1 3 4}
+                           (pageindex/normalize-page-spec [[1 2] [4 5]] 10))))
+
+            (it "full range covering all pages"
+                (expect (= #{0 1 2 3 4 5 6 7 8 9}
+                           (pageindex/normalize-page-spec [1 10] 10)))))
+
+  (describe "validation errors"
+            (it "page number 0 throws invalid-page-spec"
+                (expect (throws-with-type?
+                         :svar.pageindex/invalid-page-spec
+                         #(pageindex/normalize-page-spec 0 10))))
+
+            (it "negative page number throws invalid-page-spec"
+                (expect (throws-with-type?
+                         :svar.pageindex/invalid-page-spec
+                         #(pageindex/normalize-page-spec -1 10))))
+
+            (it "page beyond total throws page-out-of-bounds"
+                (expect (throws-with-type?
+                         :svar.pageindex/page-out-of-bounds
+                         #(pageindex/normalize-page-spec 11 10))))
+
+            (it "reversed range throws invalid-page-range"
+                (expect (throws-with-type?
+                         :svar.pageindex/invalid-page-range
+                         #(pageindex/normalize-page-spec [5 3] 10))))
+
+            (it "out-of-bounds page in mixed vector throws page-out-of-bounds"
+                (expect (throws-with-type?
+                         :svar.pageindex/page-out-of-bounds
+                         #(pageindex/normalize-page-spec [[1 3] 15] 10))))
+
+            (it "string input throws invalid-page-spec"
+                (expect (throws-with-type?
+                         :svar.pageindex/invalid-page-spec
+                         #(pageindex/normalize-page-spec "foo" 10))))
+
+            (it "non-integer in range throws invalid-page-spec"
+                (expect (throws-with-type?
+                         :svar.pageindex/invalid-page-spec
+                         #(pageindex/normalize-page-spec [1 "foo"] 10))))))
+
+(def ^:private sample-pages
+  "Sample page-list for filter-pages tests."
+  [{:page/index 0 :page/nodes ["a"]}
+   {:page/index 1 :page/nodes ["b"]}
+   {:page/index 2 :page/nodes ["c"]}
+   {:page/index 3 :page/nodes ["d"]}
+   {:page/index 4 :page/nodes ["e"]}])
+
+(defdescribe filter-pages-test
+  (describe "page filtering"
+            (it "nil page-set returns all pages"
+                (expect (= sample-pages
+                           (pageindex/filter-pages sample-pages nil))))
+
+            (it "single page set returns matching page"
+                (expect (= [(first sample-pages)]
+                           (pageindex/filter-pages sample-pages #{0}))))
+
+            (it "multiple pages in set returns matching pages in order"
+                (expect (= [(nth sample-pages 0)
+                            (nth sample-pages 2)
+                            (nth sample-pages 4)]
+                           (pageindex/filter-pages sample-pages #{0 2 4}))))
+
+            (it "empty set returns empty vector"
+                (expect (= []
+                           (pageindex/filter-pages sample-pages #{}))))
+
+            (it "empty page-list returns empty vector"
+                (expect (= []
+                           (pageindex/filter-pages [] #{0 1}))))))
+
+;; =============================================================================
+;; build-index :path with :pages option (TDD)
+;; =============================================================================
+
+(defdescribe build-index-pages-filter-test
+  (describe "build-index :path with :pages option"
+            (it "filters pages from extraction output"
+                (let [fake-pages (mapv (fn [i] {:page/index i
+                                                :page/nodes [{:page.node/type :paragraph
+                                                              :page.node/id (str "p" i)
+                                                              :page.node/content (str "Page " i)}]})
+                                       (range 5))]
+                  (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text
+                                (fn [_ _] fake-pages)
+                                com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract
+                                (fn [_ _] nil)
+                                com.blockether.svar.internal.rlm.internal.pageindex.vision/infer-document-title
+                                (fn [_ _] nil)]
+                    (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages [2 4]})]
+            ;; Pages 2,3,4 (1-indexed) = indices 1,2,3 (0-indexed)
+                      (expect (= 3 (count (:document/pages doc))))
+                      (expect (= [1 2 3] (mapv :page/index (:document/pages doc))))))))
+
+            (it "single page integer works"
+                (let [fake-pages (mapv (fn [i] {:page/index i
+                                                :page/nodes [{:page.node/type :paragraph
+                                                              :page.node/id (str "p" i)
+                                                              :page.node/content (str "Page " i)}]})
+                                       (range 5))]
+                  (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text
+                                (fn [_ _] fake-pages)
+                                com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract
+                                (fn [_ _] nil)
+                                com.blockether.svar.internal.rlm.internal.pageindex.vision/infer-document-title
+                                (fn [_ _] nil)]
+                    (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages 3})]
+                      (expect (= 1 (count (:document/pages doc))))
+                      (expect (= [2] (mapv :page/index (:document/pages doc))))))))
+
+            (it "nil pages returns all pages (default behavior)"
+                (let [fake-pages (mapv (fn [i] {:page/index i
+                                                :page/nodes [{:page.node/type :paragraph
+                                                              :page.node/id (str "p" i)
+                                                              :page.node/content (str "Page " i)}]})
+                                       (range 3))]
+                  (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text
+                                (fn [_ _] fake-pages)
+                                com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract
+                                (fn [_ _] nil)
+                                com.blockether.svar.internal.rlm.internal.pageindex.vision/infer-document-title
+                                (fn [_ _] nil)]
+                    (let [doc (pageindex/build-index "resources-test/example.pdf")]
+                      (expect (= 3 (count (:document/pages doc))))))))
+
+            (it "out-of-bounds pages throws"
+                (let [fake-pages [{:page/index 0
+                                   :page/nodes [{:page.node/type :paragraph
+                                                 :page.node/id "p0"
+                                                 :page.node/content "Only page"}]}]]
+                  (with-redefs [com.blockether.svar.internal.rlm.internal.pageindex.core/extract-text
+                                (fn [_ _] fake-pages)
+                                com.blockether.svar.internal.rlm.internal.pageindex.core/generate-document-abstract
+                                (fn [_ _] nil)
+                                com.blockether.svar.internal.rlm.internal.pageindex.vision/infer-document-title
+                                (fn [_ _] nil)]
+           ;; Requesting page 5 of a 1-page document
+                    (expect (throws? clojure.lang.ExceptionInfo
+                                     #(pageindex/build-index "resources-test/example.pdf" {:pages 5}))))))))
+
+(defdescribe extract-text-from-pdf-page-set-test
+  (describe "extract-text-from-pdf with :page-set"
+            (it "only sends selected pages to vision LLM"
+      ;; Track which page indices hit the vision extractor
+                (let [extracted-pages (atom [])]
+                  (with-redefs [vision/extract-text-from-image
+                                (fn [_image page-index _opts]
+                                  (swap! extracted-pages conj page-index)
+                                  {:page/index page-index
+                                   :page/nodes [{:page.node/type :paragraph
+                                                 :page.node/id (str "p" page-index)
+                                                 :page.node/content (str "Page " page-index)}]})]
+          ;; example.pdf has 1 page (index 0). Request only page 1 (1-indexed = index 0).
+                    (let [result (vision/extract-text-from-pdf TEST_PDF_PATH
+                                                               {:model "test"
+                                                                :objective "test"
+                                                                :page-set #{0}})]
+                      (expect (= 1 (count result)))
+                      (expect (= [0] @extracted-pages))
+                      (expect (= 0 (:page/index (first result))))))))
+
+            (it "nil page-set extracts all pages"
+                (let [extracted-pages (atom [])]
+                  (with-redefs [vision/extract-text-from-image
+                                (fn [_image page-index _opts]
+                                  (swap! extracted-pages conj page-index)
+                                  {:page/index page-index
+                                   :page/nodes [{:page.node/type :paragraph
+                                                 :page.node/id (str "p" page-index)
+                                                 :page.node/content (str "Page " page-index)}]})]
+                    (let [result (vision/extract-text-from-pdf TEST_PDF_PATH
+                                                               {:model "test"
+                                                                :objective "test"})]
+                      (expect (= 1 (count result)))
+                      (expect (= [0] @extracted-pages))))))))
+

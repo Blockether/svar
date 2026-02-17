@@ -42,35 +42,39 @@
    `pdf-path` - String. Path to the PDF file.
    `opts` - Optional map with:
      `:dpi` - Integer. Rendering DPI (default 150).
+     `:page-set` - Set of 0-indexed page numbers to render, or nil for all pages.
    
    Returns:
-   Vector of BufferedImage objects, one per page.
+   Vector of BufferedImage objects, one per selected page.
    
    Throws:
    ex-info for not-found, corrupted, or encrypted PDFs."
   ([pdf-path]
    (pdf->images pdf-path {}))
-  ([pdf-path {:keys [dpi] :or {dpi DEFAULT_DPI}}]
+  ([pdf-path {:keys [dpi page-set] :or {dpi DEFAULT_DPI}}]
    (let [file (File. ^String pdf-path)]
      (when-not (.exists file)
-        (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
+       (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
 
-      (let [^org.apache.pdfbox.pdmodel.PDDocument document
-            (try
-              (Loader/loadPDF file)
-              (catch IOException e
-                (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                                {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
-        (try
-          (when (.isEncrypted document)
-            (anomaly/incorrect! "PDF is encrypted/password protected"
-                                {:type :svar.pdf/encrypted :path pdf-path}))
+     (let [^org.apache.pdfbox.pdmodel.PDDocument document
+           (try
+             (Loader/loadPDF file)
+             (catch IOException e
+               (anomaly/fault! "Failed to load PDF - file may be corrupted"
+                               {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+       (try
+         (when (.isEncrypted document)
+           (anomaly/incorrect! "PDF is encrypted/password protected"
+                               {:type :svar.pdf/encrypted :path pdf-path}))
 
          (let [renderer (PDFRenderer. document)
-               page-count (.getNumberOfPages document)]
+               page-count (.getNumberOfPages document)
+               indices (if page-set
+                         (filterv #(< % page-count) (sort page-set))
+                         (range page-count))]
            (mapv (fn [page-idx]
                    (.renderImageWithDPI renderer page-idx (float dpi) ImageType/RGB))
-                 (range page-count)))
+                 indices))
 
          (finally
            (.close document)))))))
@@ -88,17 +92,17 @@
    Same exceptions as `pdf->images`."
   [pdf-path]
   (let [file (File. ^String pdf-path)]
-     (when-not (.exists file)
-       (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
+    (when-not (.exists file)
+      (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
 
-     (let [^org.apache.pdfbox.pdmodel.PDDocument document
-           (try
-             (Loader/loadPDF file)
-             (catch IOException e
-               (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                               {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
-       (try
-         (.getNumberOfPages document)
+    (let [^org.apache.pdfbox.pdmodel.PDDocument document
+          (try
+            (Loader/loadPDF file)
+            (catch IOException e
+              (anomaly/fault! "Failed to load PDF - file may be corrupted"
+                              {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+      (try
+        (.getNumberOfPages document)
         (finally
           (.close document))))))
 
@@ -133,17 +137,17 @@
    Same exceptions as `pdf->images`."
   [pdf-path]
   (let [file (File. ^String pdf-path)]
-     (when-not (.exists file)
-       (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
+    (when-not (.exists file)
+      (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
 
-     (let [^org.apache.pdfbox.pdmodel.PDDocument document
-           (try
-             (Loader/loadPDF file)
-             (catch IOException e
-               (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                               {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
-       (try
-         (let [^org.apache.pdfbox.pdmodel.PDDocumentInformation info
+    (let [^org.apache.pdfbox.pdmodel.PDDocument document
+          (try
+            (Loader/loadPDF file)
+            (catch IOException e
+              (anomaly/fault! "Failed to load PDF - file may be corrupted"
+                              {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+      (try
+        (let [^org.apache.pdfbox.pdmodel.PDDocumentInformation info
               (.getDocumentInformation document)]
           {:author (.getAuthor info)
            :title (.getTitle info)
@@ -175,59 +179,65 @@
    
    Params:
    `pdf-path` - String. Path to the PDF file.
+   `opts` - Optional map with:
+     `:page-set` - Set of 0-indexed page numbers to analyze, or nil for all pages.
    
    Returns:
-   Vector of integers, one per page. Each value is the clockwise rotation in degrees
-   (0, 90, 180, or 270) needed to correct the rendered image to normal orientation.
+   Vector of integers, one per selected page. Each value is the clockwise rotation
+   in degrees (0, 90, 180, or 270) needed to correct the rendered image.
    
    Example:
    [0 0 90] means pages 0-1 are normal, page 2 needs 90° CW rotation."
-  [pdf-path]
-  (let [file (File. ^String pdf-path)]
-    (when-not (.exists file)
-      (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
+  ([pdf-path] (detect-text-rotation pdf-path {}))
+  ([pdf-path {:keys [page-set]}]
+   (let [file (File. ^String pdf-path)]
+     (when-not (.exists file)
+       (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
 
-    (let [^org.apache.pdfbox.pdmodel.PDDocument document
-          (try
-            (Loader/loadPDF file)
-            (catch IOException e
-              (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                              {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
-      (try
-        (let [page-count (.getNumberOfPages document)]
-          (mapv
-           (fn [page-idx]
-             ;; Collect text directions for this page
-             (let [directions (atom [])
-                   stripper (proxy [PDFTextStripper] []
-                              (processTextPosition [^TextPosition text]
-                                (swap! directions conj (.getDir text))))]
-               (.setStartPage stripper (inc page-idx))
-               (.setEndPage stripper (inc page-idx))
-               (.getText stripper document)
+     (let [^org.apache.pdfbox.pdmodel.PDDocument document
+           (try
+             (Loader/loadPDF file)
+             (catch IOException e
+               (anomaly/fault! "Failed to load PDF - file may be corrupted"
+                               {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+       (try
+         (let [page-count (.getNumberOfPages document)
+               indices (if page-set
+                         (filterv #(< % page-count) (sort page-set))
+                         (range page-count))]
+           (mapv
+            (fn [page-idx]
+              ;; Collect text directions for this page
+              (let [directions (atom [])
+                    stripper (proxy [PDFTextStripper] []
+                               (processTextPosition [^TextPosition text]
+                                 (swap! directions conj (.getDir text))))]
+                (.setStartPage stripper (inc page-idx))
+                (.setEndPage stripper (inc page-idx))
+                (.getText stripper document)
 
-               ;; Determine majority text direction
-               (let [dirs @directions]
-                 (if (empty? dirs)
-                   0 ;; No text on page — assume correct orientation
-                   (let [freq (frequencies (map #(Math/round (double %)) dirs))
-                         ;; Find the direction with the most characters
-                         [majority-dir _] (apply max-key val freq)
-                         ;; The text direction IS the correction needed:
-                         ;; Text dir 0° → normal, no rotation
-                         ;; Text dir 90° → text sideways, rotate image 90° CW (right)
-                         ;; Text dir 180° → upside down, rotate 180°
-                         ;; Text dir 270° → text sideways other way, rotate 270° CW
-                         correction (case (long majority-dir)
-                                      0 0
-                                      90 90
-                                      180 180
-                                      270 270
-                                      0)]
-                     correction)))))
-           (range page-count)))
-        (finally
-          (.close document))))))
+                ;; Determine majority text direction
+                (let [dirs @directions]
+                  (if (empty? dirs)
+                    0 ;; No text on page — assume correct orientation
+                    (let [freq (frequencies (map #(Math/round (double %)) dirs))
+                          ;; Find the direction with the most characters
+                          [majority-dir _] (apply max-key val freq)
+                          ;; The text direction IS the correction needed:
+                          ;; Text dir 0° → normal, no rotation
+                          ;; Text dir 90° → text sideways, rotate image 90° CW (right)
+                          ;; Text dir 180° → upside down, rotate 180°
+                          ;; Text dir 270° → text sideways other way, rotate 270° CW
+                          correction (case (long majority-dir)
+                                       0 0
+                                       90 90
+                                       180 180
+                                       270 270
+                                       0)]
+                      correction)))))
+            indices))
+         (finally
+           (.close document)))))))
 
 (comment
   ;; Example usage

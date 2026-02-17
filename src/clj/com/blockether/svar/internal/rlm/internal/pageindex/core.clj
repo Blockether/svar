@@ -43,9 +43,9 @@
    [clojure.pprint :as pprint]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-    [com.blockether.svar.internal.llm :as llm]
-     [com.blockether.svar.internal.util :as util]
-    [com.blockether.svar.internal.rlm.internal.pageindex.markdown :as markdown]
+   [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.util :as util]
+   [com.blockether.svar.internal.rlm.internal.pageindex.markdown :as markdown]
    [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
    [com.blockether.svar.internal.rlm.internal.pageindex.spec :as rlm-spec]
    [com.blockether.svar.internal.rlm.internal.pageindex.vision :as vision]
@@ -503,15 +503,105 @@
             combined-text (str/join "\n\n" descriptions)
             ;; Target ~150 words for document abstract
             abstracts (llm/abstract! {:text combined-text
-                                       :model model
-                                       :target-length 150
-                                       :iterations 3
-                                       :config config})]
+                                      :model model
+                                      :target-length 150
+                                      :iterations 3
+                                      :config config})]
         (when (seq abstracts)
           (let [abstract (:summary (last abstracts))]
             (trove/log! {:level :info :data {:abstract-length (count abstract)}
                          :msg "Document abstract generated"})
             abstract))))))
+
+;; =============================================================================
+;; Page Range Normalization
+;; =============================================================================
+
+(defn- validate-page-number
+  "Validates a single 1-indexed page number against total-page-count.
+   Throws on invalid input."
+  [n total-page-count]
+  (when-not (integer? n)
+    (anomaly/incorrect! (str "Page spec must be an integer, got: " (pr-str n))
+                        {:type :svar.pageindex/invalid-page-spec
+                         :value n}))
+  (when (< n 1)
+    (anomaly/incorrect! (str "Page number must be >= 1, got: " n)
+                        {:type :svar.pageindex/invalid-page-spec
+                         :value n}))
+  (when (> n total-page-count)
+    (anomaly/incorrect! (str "Page " n " exceeds total page count " total-page-count)
+                        {:type :svar.pageindex/page-out-of-bounds
+                         :value n
+                         :total-page-count total-page-count})))
+
+(defn- normalize-range
+  "Expands a [from to] 1-indexed range into a set of 0-indexed page indices."
+  [[from to] total-page-count]
+  (validate-page-number from total-page-count)
+  (validate-page-number to total-page-count)
+  (when (> from to)
+    (anomaly/incorrect! (str "Invalid page range: start " from " > end " to)
+                        {:type :svar.pageindex/invalid-page-range
+                         :from from
+                         :to to}))
+  (set (range (dec from) to)))
+
+(defn normalize-page-spec
+  "Normalizes a page specification into a set of 0-indexed page indices.
+   
+   Accepts:
+   - nil             → nil (all pages)
+   - integer n       → #{(dec n)} (single 1-indexed page)
+   - [from to]       → set of 0-indexed pages in range (both ints, exactly 2 elements)
+   - [[1 3] 5 [7 10]] → union of expanded ranges and single pages
+   
+   Throws on invalid input (out of bounds, bad types, reversed ranges)."
+  [pages-spec total-page-count]
+  (cond
+    (nil? pages-spec)
+    nil
+
+    (integer? pages-spec)
+    (do (validate-page-number pages-spec total-page-count)
+        #{(dec pages-spec)})
+
+    (vector? pages-spec)
+    (if (and (= 2 (count pages-spec))
+             (every? integer? pages-spec))
+      ;; Two-integer vector → range [from to]
+      (normalize-range pages-spec total-page-count)
+      ;; Mixed vector of ranges and singles
+      (reduce (fn [acc item]
+                (cond
+                  (vector? item)
+                  (into acc (normalize-range item total-page-count))
+
+                  (integer? item)
+                  (do (validate-page-number item total-page-count)
+                      (conj acc (dec item)))
+
+                  :else
+                  (anomaly/incorrect! (str "Invalid element in page spec: " (pr-str item))
+                                      {:type :svar.pageindex/invalid-page-spec
+                                       :value item})))
+              #{}
+              pages-spec))
+
+    :else
+    (anomaly/incorrect! (str "Invalid page spec type: " (pr-str pages-spec))
+                        {:type :svar.pageindex/invalid-page-spec
+                         :value pages-spec})))
+
+(defn filter-pages
+  "Filters a page-list by a set of 0-indexed page indices.
+   
+   If page-set is nil, returns page-list unchanged (all pages).
+   Otherwise returns only pages whose :page/index is in page-set."
+  [page-list page-set]
+  (if (nil? page-set)
+    page-list
+    (filterv #(contains? page-set (:page/index %)) page-list)))
 
 ;; =============================================================================
 ;; Text Extraction
@@ -540,12 +630,19 @@
                                :file file-path
                                :extension extension
                                :supported-extensions SUPPORTED_EXTENSIONS})))
-     (trove/log! {:level :info :data {:file file-path :type ftype}
-                  :msg "Extracting text from document"})
-    (let [[page-list duration-ms]
+    (trove/log! {:level :info :data {:file file-path :type ftype}
+                 :msg "Extracting text from document"})
+    ;; For PDFs, resolve :pages to :page-set before extraction so vision layer
+    ;; can skip LLM calls for excluded pages.
+    (let [pdf-opts (if (and (= :pdf ftype) (:pages opts))
+                     (let [total (pdf/page-count file-path)
+                           page-set (normalize-page-spec (:pages opts) total)]
+                       (assoc opts :page-set page-set))
+                     opts)
+          [page-list duration-ms]
           (util/with-elapsed
             (case ftype
-              :pdf (vision/extract-text-from-pdf file-path opts)
+              :pdf (vision/extract-text-from-pdf file-path pdf-opts)
               :markdown (markdown/markdown-file->pages file-path)
               :text (vision/extract-text-from-text-file file-path opts)
               :image (vision/extract-text-from-image-file file-path opts)))]
@@ -603,29 +700,32 @@
    - If document has TOC pages, extracts TocEntry nodes and links to Sections
    - If no TOC exists, generates one from Section/Heading structure
    
-    Params:
-    `input` - String. File path or raw content.
-    `opts` - Optional map with:
-      ;; For dispatch (string input)
-      `:content-type` - Keyword. Required for string input: :md, :markdown, :txt, :text
-      `:doc-name` - String. Document name (required for string input).
-      
-      ;; For metadata (string input only - PDF extracts from file)
-      `:doc-title` - String. Document title.
-      `:doc-author` - String. Document author.
-      `:created-at` - Instant. Creation date.
-      `:updated-at` - Instant. Modification date.
-      
-      ;; For processing
-      `:model` - String. Vision LLM model to use.
-      
-      ;; Quality refinement (opt-in)
-      `:refine?` - Boolean, optional. Enable post-extraction quality refinement (default: false).
-      `:refine-model` - String, optional. Model for eval/refine steps (default: \"gpt-4o\").
-      `:refine-iterations` - Integer, optional. Max refine iterations per page (default: 1).
-      `:refine-threshold` - Float, optional. Min eval score to pass (default: 0.8).
-      `:refine-sample-size` - Integer, optional. Pages to sample for eval (default: 3).
-                              For PDFs, samples first + last + random middle pages.
+     Params:
+     `input` - String. File path or raw content.
+     `opts` - Optional map with:
+       ;; For dispatch (string input)
+       `:content-type` - Keyword. Required for string input: :md, :markdown, :txt, :text
+       `:doc-name` - String. Document name (required for string input).
+       
+       ;; For metadata (string input only - PDF extracts from file)
+       `:doc-title` - String. Document title.
+       `:doc-author` - String. Document author.
+       `:created-at` - Instant. Creation date.
+       `:updated-at` - Instant. Modification date.
+       
+       ;; For processing
+       `:model` - String. Vision LLM model to use.
+       `:pages` - Page selector (1-indexed). Limits which pages are included.
+                  Supports: integer, [from to] range, or [[1 3] 5 [7 10]] mixed vector.
+                  nil = all pages (default). Applied after extraction.
+       
+       ;; Quality refinement (opt-in)
+       `:refine?` - Boolean, optional. Enable post-extraction quality refinement (default: false).
+       `:refine-model` - String, optional. Model for eval/refine steps (default: \"gpt-4o\").
+       `:refine-iterations` - Integer, optional. Max refine iterations per page (default: 1).
+       `:refine-threshold` - Float, optional. Min eval score to pass (default: 0.8).
+       `:refine-sample-size` - Integer, optional. Pages to sample for eval (default: 3).
+                               For PDFs, samples first + last + random middle pages.
    
    Returns:
    Map with:
@@ -657,17 +757,17 @@
 (defmethod build-index :path
   [file-path & [opts]]
   ;; Validate file exists
-   (when-not (.exists (io/file file-path))
-     (anomaly/not-found! (str "File not found: " file-path)
-                         {:type :svar.pageindex/file-not-found :file file-path}))
+  (when-not (.exists (io/file file-path))
+    (anomaly/not-found! (str "File not found: " file-path)
+                        {:type :svar.pageindex/file-not-found :file file-path}))
    ;; Validate file type is supported
-   (when-not (supported-extension? file-path)
-     (let [extension (extract-extension file-path)]
-       (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
-                             {:type :svar.pageindex/unsupported-file-type
-                              :file file-path
-                              :extension extension
-                              :supported-extensions SUPPORTED_EXTENSIONS})))
+  (when-not (supported-extension? file-path)
+    (let [extension (extract-extension file-path)]
+      (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
+                            {:type :svar.pageindex/unsupported-file-type
+                             :file file-path
+                             :extension extension
+                             :supported-extensions SUPPORTED_EXTENSIONS})))
   (let [vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
         vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         vision-config (:config opts)
@@ -675,7 +775,13 @@
         vision-opts {:model vision-model :objective vision-objective :config vision-config}]
     (trove/log! {:level :info :data {:file file-path}
                  :msg "Starting text extraction from file"})
-    (let [page-list-raw (extract-text file-path (merge opts vision-opts))
+    (let [page-list-all (extract-text file-path (merge opts vision-opts))
+          ;; Step 0: Filter pages if :pages specified (safety net — vision layer
+          ;; already skips LLM calls for excluded pages, but this handles non-PDF
+          ;; extractors and stubbed extract-text in tests)
+          page-set (when-let [pages (:pages opts)]
+                     (normalize-page-spec pages (count page-list-all)))
+          page-list-raw (filter-pages page-list-all page-set)
            ;; Step 1: Translate local IDs to global UUIDs
           page-list-uuids (translate-all-ids page-list-raw)
           ;; Step 2: Group continuation nodes across pages
@@ -696,8 +802,8 @@
           pages-with-images (if output-dir
                               (let [dir-file (io/file output-dir)]
                                 (when-not (.exists dir-file)
-                                   (anomaly/not-found! (str "Output directory not found: " output-dir)
-                                                       {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
+                                  (anomaly/not-found! (str "Output directory not found: " output-dir)
+                                                      {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
                                 (mapv (fn [page]
                                         (update page :page/nodes
                                                 (fn [nodes]
@@ -758,11 +864,11 @@
         vision-config (:config opts)
         vision-opts {:model vision-model :objective vision-objective :config vision-config}]
     ;; Validate required options
-     (when-not content-type
-       (anomaly/incorrect! "Missing required :content-type option for string input"
-                           {:type :svar.pageindex/missing-content-type :valid-types [:md :txt]}))
-     (when-not doc-name
-       (anomaly/incorrect! "Missing required :doc-name option for string input" {:type :svar.pageindex/missing-doc-name}))
+    (when-not content-type
+      (anomaly/incorrect! "Missing required :content-type option for string input"
+                          {:type :svar.pageindex/missing-content-type :valid-types [:md :txt]}))
+    (when-not doc-name
+      (anomaly/incorrect! "Missing required :doc-name option for string input" {:type :svar.pageindex/missing-doc-name}))
     (trove/log! {:level :info :data {:doc-name doc-name :content-type content-type}
                  :msg "Starting text extraction from string content"})
     (let [page-list-raw (case content-type
@@ -774,9 +880,9 @@
                           :txt (vision/extract-text-from-string content (merge opts vision-opts))
                           :text (vision/extract-text-from-string content (merge opts vision-opts))
                           (anomaly/incorrect! "Unknown content-type"
-                                               {:type :svar.pageindex/unknown-content-type
-                                                :content-type content-type
-                                                :valid-types [:md :txt]}))
+                                              {:type :svar.pageindex/unknown-content-type
+                                               :content-type content-type
+                                               :valid-types [:md :txt]}))
           ;; Step 1: Translate local IDs to global UUIDs
           page-list-uuids (translate-all-ids page-list-raw)
           ;; Step 2: Group continuation nodes across pages
@@ -898,7 +1004,7 @@
    Returns:
    The PageIndex document map with image bytes restored."
   [index-dir]
-   (let [edn-file (io/file index-dir "document.edn")
+  (let [edn-file (io/file index-dir "document.edn")
         doc (edn/read-once edn-file)]
     ;; Resolve image paths back to byte arrays
     (update doc :document/pages
@@ -935,67 +1041,78 @@
        document.edn    — structured data (EDN)
        images/          — extracted images as PNG files
    
-      Params:
-      `file-path` - String. Path to the document file.
-      `opts` - Map, optional:
-        - :output - Custom output directory path (default: same dir, .pageindex extension)
-        - :config - LLM config override
-        
-        Vision extraction:
-        - :vision-model - String. Model for vision page extraction (default: DEFAULT_VISION_MODEL).
-        - :parallel - Integer. Max concurrent vision page extractions for PDFs (default: 3)
-        
-        Quality refinement (opt-in):
-        - :refine? - Boolean. Enable post-extraction quality refinement (default: false)
-        - :refine-model - String. Model for eval/refine steps (default: \"gpt-4o\")
-        - :parallel-refine - Integer. Max concurrent eval/refine operations (default: 2)
-        - :refine-iterations - Integer. Max refine iterations per page (default: 1)
-        - :refine-threshold - Float. Min eval score to pass (default: 0.8)
-        - :refine-sample-size - Integer. Pages to sample for eval (default: 3)
-      
-      Returns:
-      Map with :document (the indexed document) and :output-path (directory where files were saved).
-      
-      Throws:
-      - ex-info if file not found
-      - ex-info if document fails spec validation
-      
-      Example:
-      (index! \"docs/manual.pdf\")
-      ;; => {:document {...} :output-path \"docs/manual.pageindex\"}
-      
-      ;; Separate models for vision vs refinement
-      (index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\"
-                                   :refine? true
-                                   :refine-model \"gpt-4o-mini\"
-                                   :parallel 5
-                                   :parallel-refine 3})"
+       Params:
+       `file-path` - String. Path to the document file.
+       `opts` - Map, optional:
+         - :output - Custom output directory path (default: same dir, .pageindex extension)
+         - :config - LLM config override
+         - :pages - Page selector (1-indexed). Limits which pages are indexed.
+                    Supports: integer, [from to] range, or [[1 3] 5 [7 10]] mixed vector.
+                    nil = all pages (default).
+         
+         Vision extraction:
+         - :vision-model - String. Model for vision page extraction (default: DEFAULT_VISION_MODEL).
+         - :parallel - Integer. Max concurrent vision page extractions for PDFs (default: 3)
+         
+         Quality refinement (opt-in):
+         - :refine? - Boolean. Enable post-extraction quality refinement (default: false)
+         - :refine-model - String. Model for eval/refine steps (default: \"gpt-4o\")
+         - :parallel-refine - Integer. Max concurrent eval/refine operations (default: 2)
+         - :refine-iterations - Integer. Max refine iterations per page (default: 1)
+         - :refine-threshold - Float. Min eval score to pass (default: 0.8)
+         - :refine-sample-size - Integer. Pages to sample for eval (default: 3)
+       
+       Returns:
+       Map with :document (the indexed document) and :output-path (directory where files were saved).
+       
+       Throws:
+       - ex-info if file not found
+       - ex-info if document fails spec validation
+       - ex-info if :pages references out-of-bounds or invalid page numbers
+       
+       Example:
+       (index! \"docs/manual.pdf\")
+       ;; => {:document {...} :output-path \"docs/manual.pageindex\"}
+       
+       ;; Index only pages 1 through 5
+       (index! \"docs/manual.pdf\" {:pages [1 5]})
+       
+       ;; Index specific pages: 1-3, 5, and 7-10
+       (index! \"docs/manual.pdf\" {:pages [[1 3] 5 [7 10]]})
+       
+       ;; Separate models for vision vs refinement
+       (index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\"
+                                    :refine? true
+                                    :refine-model \"gpt-4o-mini\"
+                                    :parallel 5
+                                    :parallel-refine 3})"
   ([file-path] (index! file-path {}))
-   ([file-path {:keys [output vision-model config parallel parallel-refine
+  ([file-path {:keys [output vision-model config parallel parallel-refine
                       refine? refine-model refine-iterations
-                      refine-threshold refine-sample-size]}]
-    (let [abs-path (ensure-absolute file-path)
-          output-path (or output (derive-index-path abs-path))]
+                      refine-threshold refine-sample-size pages]}]
+   (let [abs-path (ensure-absolute file-path)
+         output-path (or output (derive-index-path abs-path))]
 
       ;; Validate input exists
-       (when-not (fs/exists? abs-path)
-         (trove/log! {:level :error :data {:path abs-path} :msg "File not found"})
-         (anomaly/not-found! "File not found" {:type :svar.pageindex/file-not-found :path abs-path}))
+     (when-not (fs/exists? abs-path)
+       (trove/log! {:level :error :data {:path abs-path} :msg "File not found"})
+       (anomaly/not-found! "File not found" {:type :svar.pageindex/file-not-found :path abs-path}))
 
-      (trove/log! {:level :info :data {:input abs-path :output output-path :refine? (boolean refine?)}
-                   :msg "Starting document indexing"})
+     (trove/log! {:level :info :data {:input abs-path :output output-path :refine? (boolean refine?)}
+                  :msg "Starting document indexing"})
 
       ;; Run indexing
-      (let [index-opts (cond-> {}
-                         vision-model (assoc :model vision-model)
-                         config (assoc :config config)
-                         parallel (assoc :parallel parallel)
-                         parallel-refine (assoc :parallel-refine parallel-refine)
-                         refine? (assoc :refine? refine?)
-                         refine-model (assoc :refine-model refine-model)
-                         refine-iterations (assoc :refine-iterations refine-iterations)
-                         refine-threshold (assoc :refine-threshold refine-threshold)
-                         refine-sample-size (assoc :refine-sample-size refine-sample-size))
+     (let [index-opts (cond-> {}
+                        vision-model (assoc :model vision-model)
+                        config (assoc :config config)
+                        parallel (assoc :parallel parallel)
+                        parallel-refine (assoc :parallel-refine parallel-refine)
+                        refine? (assoc :refine? refine?)
+                        refine-model (assoc :refine-model refine-model)
+                        refine-iterations (assoc :refine-iterations refine-iterations)
+                        refine-threshold (assoc :refine-threshold refine-threshold)
+                        refine-sample-size (assoc :refine-sample-size refine-sample-size)
+                        pages (assoc :pages pages))
            _ (trove/log! {:level :debug :data {:opts index-opts} :msg "Running build-index"})
            document (build-index abs-path index-opts)
            _ (trove/log! {:level :debug :data {:document/name (:document/name document)} :msg "build-index complete"})]
@@ -1045,7 +1162,7 @@
   (let [abs-path (ensure-absolute index-path)]
     (when-not (fs/exists? abs-path)
       (trove/log! {:level :error :data {:path abs-path} :msg "Index path not found"})
-       (anomaly/not-found! "Index path not found" {:type :svar.pageindex/index-not-found :path abs-path}))
+      (anomaly/not-found! "Index path not found" {:type :svar.pageindex/index-not-found :path abs-path}))
 
     (trove/log! {:level :debug :data {:path abs-path} :msg "Loading index"})
     (let [document (if (fs/directory? abs-path)
