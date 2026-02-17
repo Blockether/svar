@@ -4,7 +4,8 @@
 
 <div align="center">
 <i>svar</i> — "answer" in Swedish. Type-safe LLM output for Clojure, inspired by <a href="https://github.com/BoundaryML/baml">BAML</a>.
-Works with any text-producing LLM — no structured output support required.
+<br/>
+<sub>Works with any text-producing LLM — no structured output support required.</sub>
 </div>
 
 <div align="center">
@@ -34,36 +35,36 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 
 | Function | Description |
 |----------|-------------|
-| **`ask!`** | Structured output from LLMs via a type-safe spec DSL. Returns validated Clojure maps with token/cost tracking. Uses SAP (Schemaless Adaptive Parsing) — a Java-based parser that handles malformed JSON, unquoted keys, trailing commas, markdown blocks, and single quotes. Includes accurate token counting and cost estimation via JTokkit. |
-| **`abstract!`** | Chain of Density summarization for entity-rich summaries. Optional CoVe faithfulness verification via `:refine?`. |
-| **`eval!`** | LLM self-evaluation for quality assessment. |
-| **`refine!`** | Iterative refinement with decomposition and verification. |
-| **`models!`** | Lists available models from your LLM provider. |
-| **`sample!`** | Generates test data matching a spec with quality evaluation and self-correction. |
-| **`static-guard`** | Pattern-based prompt injection detection. |
-| **`moderation-guard`** | LLM-based content moderation against configurable policies. |
-| **`guard`** | Chains multiple guards on input — static first (fast, free), then LLM moderation. |
-| **`humanize-string`** | Strips AI-style phrases from text (safe + aggressive modes). |
-| **`humanize-data`** | Recursively humanizes all strings in a data structure. |
-| **`humanizer`** | Creates a reusable humanizer function with optional custom patterns. |
-| **`spec`** | Define expected output schemas: types, cardinality, enums, optional fields, nested refs, namespaced keys, fixed-size vectors. |
-| **`field`** | Define a field within a spec: name, type, cardinality, description, enum values, optionality. |
-| **`spec->prompt`** | Generate the LLM prompt text from a spec definition. |
-| **`str->data`** | Schemaless parse — JSON string to Clojure data, no spec needed. |
-| **`str->data-with-spec`** | Parse JSON string with spec validation and type coercion. |
-| **`data->str`** | Serialize Clojure data to JSON string. |
-| **`validate-data`** | Validate parsed data against a spec. |
-| **`create-env`** | Create an RLM environment for processing large contexts via iterative code execution. |
-| **`ingest-to-env!`** | Ingest documents into an RLM environment for querying. |
-| **`query-env!`** | Run a query using iterative code execution in a sandboxed SCI environment. |
-| **`dispose-env!`** | Dispose an RLM environment and clean up resources. |
-| **`register-env-fn!`** | Register a custom function in the RLM's SCI sandbox. |
-| **`register-env-def!`** | Register a constant in the RLM's SCI sandbox. |
-| **`generate-qa-env!`** | Generate question-answer pairs from ingested documents. |
-| **`index!`** | Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files. |
-| **`load-index`** | Load an indexed document from a .pageindex directory. |
-| **`pprint-trace`** | Pretty-print an RLM trace to stdout (also returns the string). |
-| **`print-trace`** | Alias for `pprint-trace`. |
+| [**<code>ask!</code>**](#schemaless-adaptive-parsing-ask) | Structured output from LLMs via a type-safe spec DSL. Returns validated Clojure maps with token/cost tracking. Uses SAP (Schemaless Adaptive Parsing) — a Java-based parser that handles malformed JSON, unquoted keys, trailing commas, markdown blocks, and single quotes. Includes accurate token counting and cost estimation via JTokkit. |
+| [**<code>abstract!</code>**](#summarization-abstract) | Chain of Density summarization for entity-rich summaries. Optional CoVe faithfulness verification via `:refine?`. |
+| [**<code>eval!</code>**](#self-evaluation-eval) | LLM self-evaluation for quality assessment. |
+| [**<code>refine!</code>**](#iterative-refinement-refine) | Iterative refinement with decomposition and verification. |
+| [**<code>models!</code>**](#available-models-models) | Lists available models from your LLM provider. |
+| [**<code>sample!</code>**](#test-data-generation-sample) | Generates test data matching a spec with quality evaluation and self-correction. |
+| [**<code>static&#8209;guard</code>**](#guardrails) | Pattern-based prompt injection detection. |
+| [**<code>moderation&#8209;guard</code>**](#guardrails) | LLM-based content moderation against configurable policies. |
+| [**<code>guard</code>**](#guardrails) | Chains multiple guards on input — static first (fast, free), then LLM moderation. |
+| [**<code>humanize&#8209;string</code>**](#humanizer) | Strips AI-style phrases from text (safe + aggressive modes). |
+| [**<code>humanize&#8209;data</code>**](#humanizer) | Recursively humanizes all strings in a data structure. |
+| [**<code>humanizer</code>**](#humanizer) | Creates a reusable humanizer function with optional custom patterns. |
+| [**<code>spec</code>**](#spec-dsl-reference) | Define expected output schemas: types, cardinality, enums, optional fields, nested refs, namespaced keys, fixed-size vectors. |
+| [**<code>field</code>**](#spec-dsl-reference) | Define a field within a spec: name, type, cardinality, description, enum values, optionality. |
+| [**<code>spec&#8209;>prompt</code>**](#spec-prompt) | Generate the LLM prompt text from a spec definition. |
+| [**<code>str&#8209;>data</code>**](#data-str--str-data) | Schemaless parse — JSON string to Clojure data, no spec needed. |
+| [**<code>str&#8209;>data&#8209;with&#8209;spec</code>**](#parsing--validation) | Parse JSON string with spec validation and type coercion. |
+| [**<code>data&#8209;>str</code>**](#data-str--str-data) | Serialize Clojure data to JSON string. |
+| [**<code>validate&#8209;data</code>**](#parsing--validation) | Validate parsed data against a spec. |
+| [**<code>create&#8209;env</code>**](#rlm--recursive-language-model) | Create an RLM environment for processing large contexts via iterative code execution. |
+| [**<code>ingest&#8209;to&#8209;env!</code>**](#rlm--recursive-language-model) | Ingest documents into an RLM environment for querying. |
+| [**<code>query&#8209;env!</code>**](#rlm--recursive-language-model) | Run a query using iterative code execution in a sandboxed SCI environment. |
+| [**<code>dispose&#8209;env!</code>**](#rlm--recursive-language-model) | Dispose an RLM environment and clean up resources. |
+| [**<code>register&#8209;env&#8209;fn!</code>**](#sandbox-extensibility) | Register a custom function in the RLM's SCI sandbox. |
+| [**<code>register&#8209;env&#8209;def!</code>**](#sandbox-extensibility) | Register a constant in the RLM's SCI sandbox. |
+| [**<code>generate&#8209;qa&#8209;env!</code>**](#qa-generation-generate-qa-env) | Generate question-answer pairs from ingested documents. |
+| [**<code>index!</code>**](#rlm--recursive-language-model) | Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files. |
+| [**<code>load&#8209;index</code>**](#rlm--recursive-language-model) | Load an indexed document from a .pageindex directory. |
+| [**<code>pprint&#8209;trace</code>**](#debugging-rlm-traces) | Pretty-print an RLM trace to stdout (also returns the string). |
+| [**<code>print&#8209;trace</code>**](#debugging-rlm-traces) | Alias for <code>pprint&#8209;trace</code>. |
 
 ## Quick Start
 
