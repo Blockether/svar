@@ -8,7 +8,7 @@
 
 ## How to run:
 ```bash
-clj -M:dev -cp src/clj:examples -M examples/reproduce_eof.clj -e "(reproduce-eof/-main \"resources-test/chapter.pdf\")"
+clj -Sdeps '{:aliases {:run {:extra-paths ["examples"]}}}' -M:run -m reproduce-eof
 ```
 
 ## Expected output:
