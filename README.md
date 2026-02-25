@@ -1,5 +1,5 @@
 <h2 align="center">
-  <img width="35%" alt="SVAR logo" src="logo.png"><br/>
+  <img width="35%" alt="SVAR logo" src="logo.svg"><br/>
 </h2>
 
 <div align="center">
@@ -20,12 +20,12 @@
 <div align="center">
 <h3>
 
-[Problem](#problem) • [Functionalities](#functionalities) • [Quick Start](#quick-start) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference) • [RLM](#rlm--recursive-language-model)
+[Rationale](#rationale) • [Functionalities](#functionalities) • [Quick Start](#quick-start) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference) • [RLM](#rlm--recursive-language-model)
 
 </h3>
 </div>
 
-## Problem
+## Rationale
 
 JSON Schema is the de facto way to get structured output from LLMs — but it's incomplete. Union types have poor cross-provider support, and the entire approach requires your LLM provider to support structured output mode. That rules out local models, smaller providers, and any setup where you just have a text completion endpoint.
 
