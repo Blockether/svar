@@ -1,5 +1,5 @@
 <h2 align="center">
-  <img width="35%" alt="SVAR logo" src="logo.svg"><br/>
+  <img width="35%" alt="SVAR logo" src="logo.png"><br/>
 </h2>
 
 <div align="center">
