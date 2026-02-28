@@ -1,0 +1,475 @@
+name: Allure Report
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+  actions: read
+
+concurrency:
+  group: allure-report
+  cancel-in-progress: false
+
+env:
+  PAGES_BASE_URL: https://blockether.github.io/svar
+  MAX_REPORTS: 50
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'cancelled'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - uses: DeLaGuardo/setup-clojure@13.5
+        with:
+          cli: latest
+
+      - name: Cache Clojure deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.clojure/.cpcache
+          key: allure-${{ hashFiles('deps.edn') }}
+          restore-keys: allure-
+
+      - name: Download Allure results from CI
+        if: github.event_name == 'workflow_run'
+        uses: actions/download-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore Allure history
+        uses: actions/cache/restore@v4
+        with:
+          path: .allure-history.jsonl
+          key: allure-history-jsonl-${{ github.event.workflow_run.run_number || github.run_number }}
+          restore-keys: allure-history-jsonl-
+
+      - name: Restore previous reports
+        if: github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache/restore@v4
+        with:
+          path: gh-pages-site
+          key: allure-site-${{ github.event.workflow_run.run_number || github.run_number }}
+          restore-keys: allure-site-
+
+      - name: Detect version
+        id: version
+        run: |
+          VERSION=$(cat resources/SVAR_VERSION 2>/dev/null || echo "unknown")
+          TAG=$(git describe --tags --exact-match 2>/dev/null || echo "")
+          if [ -n "$TAG" ]; then
+            echo "version=$TAG" >> $GITHUB_OUTPUT
+            echo "badge=release" >> $GITHUB_OUTPUT
+          else
+            echo "version=v${VERSION}-candidate" >> $GITHUB_OUTPUT
+            echo "badge=candidate" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check CI outcome
+        id: ci-outcome
+        run: |
+          echo "conclusion=${{ github.event.workflow_run.conclusion || 'success' }}" >> $GITHUB_OUTPUT
+
+      - name: Generate combined Allure report
+        if: github.event_name == 'workflow_run'
+        env:
+          LAZYTEST_ALLURE_LOGO: logo.png
+          FULL_MSG: ${{ github.event.workflow_run.head_commit.message || '' }}
+        run: |
+          FIRST_LINE=$(echo "$FULL_MSG" | head -n1 | cut -c1-100)
+          CI_RUN="${{ github.event.workflow_run.run_number }}"
+          SHA8="$(echo '${{ github.event.workflow_run.head_sha }}' | cut -c1-8)"
+          AUTHOR="${{ github.event.workflow_run.head_commit.author.name }}"
+          export LAZYTEST_ALLURE_REPORT_NAME="#${CI_RUN} · ${SHA8} · ${AUTHOR} · ${FIRST_LINE}"
+          clojure -M:test -e "
+            (require '[com.blockether.spel.allure-reporter :as r])
+            (r/generate-html-report! \"allure-results\" \"allure-report\")"
+
+      - name: Extract test counts from Allure results
+        if: github.event_name == 'workflow_run'
+        id: test-counts
+        run: |
+          PASSED=$(grep -l '"status": *"passed"' allure-results/*-result.json 2>/dev/null | wc -l | tr -d ' ')
+          FAILED=$(grep -l '"status": *"failed"' allure-results/*-result.json 2>/dev/null | wc -l | tr -d ' ')
+          BROKEN=$(grep -l '"status": *"broken"' allure-results/*-result.json 2>/dev/null | wc -l | tr -d ' ')
+          SKIPPED=$(grep -l '"status": *"skipped"' allure-results/*-result.json 2>/dev/null | wc -l | tr -d ' ')
+          TOTAL=$((PASSED + FAILED + BROKEN + SKIPPED))
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "broken=$BROKEN" >> $GITHUB_OUTPUT
+          echo "skipped=$SKIPPED" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "Test counts: passed=$PASSED, failed=$FAILED, broken=$BROKEN, skipped=$SKIPPED, total=$TOTAL"
+
+      # =========================================================================
+      # PR: Deploy report to /pr/<number>/ on gh-pages
+      # =========================================================================
+
+      - name: Resolve PR details
+        if: github.event.workflow_run.event == 'pull_request'
+        id: pr-details
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prs = context.payload.workflow_run.pull_requests;
+            if (!prs || prs.length === 0) {
+              core.setOutput('has_pr', 'false');
+              return;
+            }
+            const pr = prs[0];
+            const { data: fullPr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+            core.setOutput('has_pr', 'true');
+            core.setOutput('number', String(pr.number));
+            core.setOutput('title', fullPr.title);
+            core.setOutput('branch', fullPr.head.ref);
+            core.setOutput('sha', fullPr.head.sha);
+            core.setOutput('author', fullPr.user.login);
+
+      - name: Comment PR with live report link
+        if: steps.pr-details.outputs.has_pr == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNum = ${{ steps.pr-details.outputs.number || 0 }};
+            const reportUrl = `https://blockether.github.io/svar/pr/${prNum}/`;
+            const ciUrl = `${{ github.server_url }}/${{ github.repository }}/actions/workflows/ci.yml`;
+            const passed = '${{ steps.test-counts.outputs.passed }}';
+            const failed = '${{ steps.test-counts.outputs.failed }}';
+            const broken = '${{ steps.test-counts.outputs.broken }}';
+            const total = '${{ steps.test-counts.outputs.total }}';
+            const ciConclusion = '${{ steps.ci-outcome.outputs.conclusion }}';
+            const body = [
+              `## 📊 Allure Report`,
+              ``,
+              `🔗 **[View Report](${reportUrl})**`,
+              ``,
+              `| Metric | Value |`,
+              `|--------|-------|`,
+              `| Tests | ${passed} passed, ${failed} failed, ${broken} broken (${total} total) |`,
+              `| CI | ${ciConclusion} |`,
+            ].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNum,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' && c.body.includes('Allure Report')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNum,
+                body,
+              });
+            }
+
+      - name: Build PR deploy with metadata
+        if: steps.pr-details.outputs.has_pr == 'true'
+        env:
+          PR_NUM: ${{ steps.pr-details.outputs.number }}
+          PR_TITLE: ${{ steps.pr-details.outputs.title }}
+          PR_BRANCH: ${{ steps.pr-details.outputs.branch }}
+          PR_SHA: ${{ steps.pr-details.outputs.sha }}
+          PR_AUTHOR: ${{ steps.pr-details.outputs.author }}
+          TEST_PASSED: ${{ steps.test-counts.outputs.failed == '0' && steps.test-counts.outputs.broken == '0' }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}
+          TESTS_PASSED: ${{ steps.test-counts.outputs.passed }}
+          TESTS_FAILED: ${{ steps.test-counts.outputs.failed }}
+          TESTS_BROKEN: ${{ steps.test-counts.outputs.broken }}
+          TESTS_SKIPPED: ${{ steps.test-counts.outputs.skipped }}
+          TESTS_TOTAL: ${{ steps.test-counts.outputs.total }}
+        run: |
+          mkdir -p /tmp/pr-deploy/pr/${PR_NUM}
+          cp -r allure-report/* /tmp/pr-deploy/pr/${PR_NUM}/
+
+          curl -sSf "${PAGES_BASE_URL}/pr-builds.json" -o /tmp/pr-builds-current.json 2>/dev/null || echo '[]' > /tmp/pr-builds-current.json
+
+          TIMESTAMP=$(date +%s)000
+          PASSED_BOOL=$([ "${TEST_PASSED}" = "true" ] && echo "true" || echo "false")
+
+          jq -n \
+            --arg run "pr/${PR_NUM}" \
+            --argjson pr_number "${PR_NUM}" \
+            --arg pr_title "${PR_TITLE}" \
+            --arg branch "${PR_BRANCH}" \
+            --arg sha "${PR_SHA}" \
+            --arg author "${PR_AUTHOR}" \
+            --argjson timestamp "${TIMESTAMP}" \
+            --argjson passed "${PASSED_BOOL}" \
+            --argjson tp "${TESTS_PASSED:-0}" \
+            --argjson tf "${TESTS_FAILED:-0}" \
+            --argjson tb "${TESTS_BROKEN:-0}" \
+            --argjson ts "${TESTS_SKIPPED:-0}" \
+            --argjson tt "${TESTS_TOTAL:-0}" \
+            --arg run_url "${RUN_URL}" \
+            --arg repo_url "${REPO_URL}" \
+            '{
+              run: $run, pr_number: $pr_number, pr_title: $pr_title,
+              branch: $branch, type: "pr", sha: $sha, message: $pr_title,
+              author: $author, timestamp: $timestamp, passed: $passed,
+              status: "completed",
+              tests: { passed: $tp, failed: $tf, broken: $tb, skipped: $ts, total: $tt },
+              run_url: $run_url, repo_url: $repo_url
+            }' > /tmp/pr-entry.json
+
+          jq --slurpfile entry /tmp/pr-entry.json \
+             --argjson pr_num "${PR_NUM}" \
+             '[ $entry[0] ] + [ .[] | select(.pr_number != $pr_num) ] | .[0:20]' \
+             /tmp/pr-builds-current.json > /tmp/pr-deploy/pr-builds.json
+
+      - name: Deploy PR report to GitHub Pages
+        if: steps.pr-details.outputs.has_pr == 'true'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: /tmp/pr-deploy
+          keep_files: true
+
+      # =========================================================================
+      # Main: Full site deploy with per-build reports
+      # =========================================================================
+
+      - name: Inject report URL and commit info into history
+        if: github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          REPORT_URL: ${{ env.PAGES_BASE_URL }}/${{ github.event.workflow_run.run_number || github.run_number }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || '' }}
+          COMMIT_AUTHOR: ${{ github.event.workflow_run.head_commit.author.name || '' }}
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number || github.run_number }}
+        run: |
+          if [ -f .allure-history.jsonl ]; then
+            clojure -M:test -e "
+              (require '[com.blockether.spel.ci :as ci])
+              (ci/patch-allure-history!
+                {:history-file \".allure-history.jsonl\"
+                 :report-url   (System/getenv \"REPORT_URL\")
+                 :commit-sha   (System/getenv \"COMMIT_SHA\")
+                 :commit-msg   (System/getenv \"COMMIT_MSG\")
+                 :run-number   (System/getenv \"RUN_NUMBER\")})"
+          fi
+
+      - name: Preserve PR reports from gh-pages
+        if: github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch'
+        run: |
+          git fetch origin gh-pages --depth=1 || true
+          mkdir -p gh-pages-site
+          if git ls-tree --name-only origin/gh-pages pr/ >/dev/null 2>&1; then
+            git checkout origin/gh-pages -- 'pr/' || echo 'No PR reports to preserve'
+            if [ -d pr ]; then
+              cp -r pr gh-pages-site/pr/
+              rm -rf pr
+            fi
+          fi
+          if git show origin/gh-pages:pr-builds.json >/dev/null 2>&1; then
+            git show origin/gh-pages:pr-builds.json > gh-pages-site/pr-builds.json
+          fi
+
+      - name: Assemble site with per-build reports
+        if: github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number || github.run_number }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || '' }}
+          COMMIT_AUTHOR: ${{ github.event.workflow_run.head_commit.author.name || '' }}
+          COMMIT_TS: ${{ github.event.workflow_run.head_commit.timestamp || '' }}
+          TEST_PASSED: ${{ steps.test-counts.outputs.failed == '0' && steps.test-counts.outputs.broken == '0' }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id || github.run_id }}
+          VERSION: ${{ steps.version.outputs.version }}
+          VERSION_BADGE: ${{ steps.version.outputs.badge }}
+          TEST_COUNTS_PASSED: ${{ steps.test-counts.outputs.passed || '0' }}
+          TEST_COUNTS_FAILED: ${{ steps.test-counts.outputs.failed || '0' }}
+          TEST_COUNTS_BROKEN: ${{ steps.test-counts.outputs.broken || '0' }}
+          TEST_COUNTS_SKIPPED: ${{ steps.test-counts.outputs.skipped || '0' }}
+          TEST_COUNTS_TOTAL: ${{ steps.test-counts.outputs.total || '0' }}
+          LANDING_TITLE: svar
+          LANDING_SUBTITLE: "Clojure LLM Toolkit · Test Reports"
+        run: |
+          RUN="${RUN_NUMBER}"
+          mkdir -p gh-pages-site
+
+          if [ -d allure-report ]; then
+            cp -r allure-report "gh-pages-site/${RUN}"
+            echo "Added report #${RUN}"
+          fi
+
+          cd gh-pages-site
+
+          DIRS=$(ls -1d [0-9]* 2>/dev/null | sort -n)
+          COUNT=$(echo "$DIRS" | grep -c .)
+          if [ "$COUNT" -gt "$MAX_REPORTS" ]; then
+            REMOVE=$((COUNT - MAX_REPORTS))
+            echo "$DIRS" | head -n "$REMOVE" | while read -r dir; do
+              echo "Pruning old report: $dir"
+              rm -rf "$dir"
+            done
+          fi
+
+          [ -f "builds-meta.json" ] || echo '{}' > "builds-meta.json"
+          cp ../resources/allure-index.html index.html
+          cd ..
+
+          clojure -M:test -e "
+            (require '[com.blockether.spel.ci :as ci])
+            (ci/finalize-build!
+              {:site-dir    \"gh-pages-site\"
+               :run-number  (System/getenv \"RUN_NUMBER\")
+               :passed      (= \"true\" (System/getenv \"TEST_PASSED\"))})"
+
+          clojure -M:test -e "
+            (require '[com.blockether.spel.ci :as ci])
+            (ci/generate-builds-metadata!
+              {:site-dir       \"gh-pages-site\"
+               :run-number     (System/getenv \"RUN_NUMBER\")
+               :commit-sha     (System/getenv \"COMMIT_SHA\")
+               :commit-msg     (System/getenv \"COMMIT_MSG\")
+               :commit-author  (System/getenv \"COMMIT_AUTHOR\")
+               :commit-ts      (System/getenv \"COMMIT_TS\")
+               :tests-passed   (= \"true\" (System/getenv \"TEST_PASSED\"))
+               :repo-url       (System/getenv \"REPO_URL\")
+               :run-url        (System/getenv \"RUN_URL\")
+               :version        (System/getenv \"VERSION\")
+               :version-badge  (System/getenv \"VERSION_BADGE\")
+               :test-counts    {:passed  (parse-long (or (System/getenv \"TEST_COUNTS_PASSED\") \"0\"))
+                                :failed  (parse-long (or (System/getenv \"TEST_COUNTS_FAILED\") \"0\"))
+                                :broken  (parse-long (or (System/getenv \"TEST_COUNTS_BROKEN\") \"0\"))
+                                :skipped (parse-long (or (System/getenv \"TEST_COUNTS_SKIPPED\") \"0\"))
+                                :total   (parse-long (or (System/getenv \"TEST_COUNTS_TOTAL\") \"0\"))}})
+            (ci/patch-index-html!
+              {:index-file \"gh-pages-site/index.html\"
+               :logo-file  \"logo.png\"
+               :title      (System/getenv \"LANDING_TITLE\")
+               :subtitle   (System/getenv \"LANDING_SUBTITLE\")})"
+
+          cd gh-pages-site
+          mkdir -p latest
+          cat > latest/index.html <<EOF
+          <!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=../${RUN}/"></head><body></body></html>
+          EOF
+
+          if [ -f "${RUN}/badge.svg" ]; then
+            cp "${RUN}/badge.svg" badge.svg
+          fi
+
+          cd ..
+          echo "Site ready with $(ls -1d gh-pages-site/[0-9]* 2>/dev/null | wc -l) reports"
+
+      - name: Cache Allure history
+        if: github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache/save@v4
+        with:
+          path: .allure-history.jsonl
+          key: allure-history-jsonl-${{ github.event.workflow_run.run_number || github.run_number }}
+
+      - name: Cache site archive
+        if: github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/cache/save@v4
+        with:
+          path: gh-pages-site
+          key: allure-site-${{ github.event.workflow_run.run_number || github.run_number }}
+
+      - name: Deploy to GitHub Pages
+        if: github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch'
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages-site
+          keep_files: false
+
+      # =========================================================================
+      # Failure handler
+      # =========================================================================
+
+      - name: Mark build as failed on error
+        if: failure() && (github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          RUN_NUMBER: ${{ github.event.workflow_run.run_number || github.run_number }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          COMMIT_MSG: ${{ github.event.workflow_run.head_commit.message || '' }}
+          COMMIT_AUTHOR: ${{ github.event.workflow_run.head_commit.author.name || '' }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id || github.run_id }}
+          VERSION: ${{ steps.version.outputs.version }}
+          VERSION_BADGE: ${{ steps.version.outputs.badge }}
+        run: |
+          mkdir -p gh-pages-site
+          [ -f "gh-pages-site/builds-meta.json" ] || echo '{}' > "gh-pages-site/builds-meta.json"
+          cp resources/allure-index.html gh-pages-site/index.html
+
+          clojure -M:test -e "
+            (require '[com.blockether.spel.ci :as ci])
+            (ci/finalize-build!
+              {:site-dir    \"gh-pages-site\"
+               :run-number  (System/getenv \"RUN_NUMBER\")
+               :passed      false})"
+
+          clojure -M:test -e "
+            (require '[com.blockether.spel.ci :as ci])
+            (ci/generate-builds-metadata!
+              {:site-dir       \"gh-pages-site\"
+               :run-number     (System/getenv \"RUN_NUMBER\")
+               :commit-sha     (System/getenv \"COMMIT_SHA\")
+               :commit-msg     (System/getenv \"COMMIT_MSG\")
+               :commit-author  (System/getenv \"COMMIT_AUTHOR\")
+               :tests-passed   false
+               :repo-url       (System/getenv \"REPO_URL\")
+               :run-url        (System/getenv \"RUN_URL\")
+               :version        (System/getenv \"VERSION\")
+               :version-badge  (System/getenv \"VERSION_BADGE\")
+               :test-counts    {:passed 0 :failed 0 :broken 0 :skipped 0 :total 0}})
+            (ci/patch-index-html!
+              {:index-file \"gh-pages-site/index.html\"
+               :logo-file  \"logo.png\"})"
+
+          git fetch origin gh-pages --depth=1 || true
+          if git show origin/gh-pages:pr-builds.json >/dev/null 2>&1; then
+            git show origin/gh-pages:pr-builds.json > gh-pages-site/pr-builds.json
+          fi
+          if git ls-tree --name-only origin/gh-pages pr/ >/dev/null 2>&1; then
+            git checkout origin/gh-pages -- 'pr/' || true
+            if [ -d pr ]; then cp -r pr gh-pages-site/pr/ && rm -rf pr; fi
+          fi
+
+      - name: Deploy failed build to GitHub Pages
+        if: failure() && (github.event.workflow_run.event == 'push' || github.event_name == 'workflow_dispatch')
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./gh-pages-site
+          keep_files: false

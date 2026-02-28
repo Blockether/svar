@@ -27,7 +27,8 @@
         :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}}
 
   :test {:extra-paths ["test"]
-         :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}
+         :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}
+                      com.blockether/spel {:mvn/version "0.3.2"}}
          :main-opts ["-m" "lazytest.main"]}
 
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.12"}

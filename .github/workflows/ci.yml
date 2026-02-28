@@ -7,7 +7,8 @@ on:
     branches: ["main"]
 
 permissions:
-  contents: read
+  contents: write
+  checks: write
 
 jobs:
   test:
@@ -15,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeLaGuardo/setup-clojure@13.1
+      - uses: DeLaGuardo/setup-clojure@13.5
         with:
           cli: latest
 
@@ -36,17 +37,47 @@ jobs:
       - name: Compile Java sources
         run: clojure -T:build compile-java
 
-      - name: Run tests
-        run: clojure -M:test
+      - name: Clean Allure results
+        run: rm -rf allure-results allure-report
+
+      - name: Run tests with Allure reporter
+        id: tests
         env:
           BLOCKETHER_OPENAI_API_KEY: ${{ secrets.BLOCKETHER_OPENAI_API_KEY }}
           BLOCKETHER_OPENAI_BASE_URL: ${{ secrets.BLOCKETHER_OPENAI_BASE_URL }}
+          LAZYTEST_ALLURE_GENERATE_REPORT: "false"
+          FULL_MSG: ${{ github.event.head_commit.message || '' }}
+        run: |
+          FIRST_LINE=$(echo "$FULL_MSG" | head -n1 | cut -c1-100)
+          export LAZYTEST_ALLURE_REPORT_NAME="#${{ github.run_number }} · $(echo '${{ github.sha }}' | cut -c1-8) · ${{ github.event.head_commit.author.name }} · ${FIRST_LINE}"
+          clojure -M:test --output nested --output com.blockether.spel.allure-reporter/allure
+        continue-on-error: true
 
       - name: Run README doc tests
-        run: clojure -M:test --md README.md
+        id: tests-readme
         env:
           BLOCKETHER_OPENAI_API_KEY: ${{ secrets.BLOCKETHER_OPENAI_API_KEY }}
           BLOCKETHER_OPENAI_BASE_URL: ${{ secrets.BLOCKETHER_OPENAI_BASE_URL }}
+        run: clojure -M:test --md README.md
+        continue-on-error: true
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results/
+          retention-days: 7
 
       - name: Build jar
         run: clojure -T:build jar
+
+      - name: Verify test results
+        run: |
+          TESTS="${{ steps.tests.outcome }}"
+          README="${{ steps.tests-readme.outcome }}"
+          echo "Tests: $TESTS, README: $README"
+          if [ "$TESTS" != "success" ] || [ "$README" != "success" ]; then
+            echo "::error::Tests failed - tests=$TESTS, readme=$README"
+            exit 1
+          fi
