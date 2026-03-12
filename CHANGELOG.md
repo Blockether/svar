@@ -7,4 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-[Unreleased]: https://github.com/Blockether/svar/compare/HEAD...HEAD
+## [v0.1.1] - 2026-03-12
+
+### Changed
+- crop logo white space
+- Update logo width in README.md
+- Update logo size in README.md
+- Update README.md
+- update logo
+- feat(pageindex): add page range
+- fix(examples): syntax
+- Fix README: subtitle layout, non-breaking function names, and anchor links in table
+- Fix CI env vars
+- Reproduction
+- Questionify and major refactor
+- Fix ci/readme configuration
+- Add RLM, spec fixes
+- Initial commit
+
+
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.1.1...HEAD
+[v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
