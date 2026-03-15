@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.1.3] - 2026-03-15
+
+### Changed
+- feat: validate-data TYPE_REF recursion
+- release: update version files for v0.1.2
+
+
 ## [v0.1.2] - 2026-03-12
 
 ### Changed
@@ -47,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.1.3...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
+[v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
