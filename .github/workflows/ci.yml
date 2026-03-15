@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ['main']
   pull_request:
-    branches: ["main"]
+    branches: ['main']
 
 permissions:
   contents: read
@@ -39,14 +39,14 @@ jobs:
       - name: Run tests
         run: clojure -M:test
         env:
-          BLOCKETHER_OPENAI_API_KEY: ${{ secrets.BLOCKETHER_OPENAI_API_KEY }}
-          BLOCKETHER_OPENAI_BASE_URL: ${{ secrets.BLOCKETHER_OPENAI_BASE_URL }}
+          BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
+          BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
 
       - name: Run README doc tests
         run: clojure -M:test --md README.md
         env:
-          BLOCKETHER_OPENAI_API_KEY: ${{ secrets.BLOCKETHER_OPENAI_API_KEY }}
-          BLOCKETHER_OPENAI_BASE_URL: ${{ secrets.BLOCKETHER_OPENAI_BASE_URL }}
+          BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
+          BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
 
       - name: Build jar
         run: clojure -T:build jar

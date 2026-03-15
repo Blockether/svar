@@ -753,10 +753,10 @@
 
 (defn- integration-tests-enabled?
   "Returns true if LLM integration tests should run.
-   SVAR's make-config auto-reads BLOCKETHER_OPENAI_API_KEY (primary)
+   SVAR's make-config auto-reads BLOCKETHER_LLM_API_KEY (primary)
    and OPENAI_API_KEY (fallback)."
   []
-  (or (some? (System/getenv "BLOCKETHER_OPENAI_API_KEY"))
+  (or (some? (System/getenv "BLOCKETHER_LLM_API_KEY"))
       (some? (System/getenv "OPENAI_API_KEY"))))
 
 ;; Rich factual text about the Voyager missions — dense with entities, dates,

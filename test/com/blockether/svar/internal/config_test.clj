@@ -64,7 +64,7 @@
 
   (describe "with missing params"
             (it "throws on missing api-key when no env var set"
-                (if (or (System/getenv "BLOCKETHER_OPENAI_API_KEY")
+                (if (or (System/getenv "BLOCKETHER_LLM_API_KEY")
                         (System/getenv "OPENAI_API_KEY"))
                   (expect true) ;; Skip when any api-key env var is set
                   (try
@@ -75,7 +75,7 @@
 
             (it "falls back to env var for base-url"
                 (let [cfg (config/make-config {:api-key "sk-test"})
-                      expected-url (or (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
+                      expected-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
                                        (System/getenv "OPENAI_BASE_URL")
                                        config/DEFAULT_BASE_URL)]
                   (expect (= expected-url (:base-url cfg)))))))

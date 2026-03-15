@@ -5,8 +5,8 @@
    No DI, no global state. Config is a plain immutable map.
    
     Environment variables (used as fallback for :api-key and :base-url):
-     - BLOCKETHER_OPENAI_API_KEY (checked first)
-     - BLOCKETHER_OPENAI_BASE_URL (checked first)
+     - BLOCKETHER_LLM_API_KEY (checked first)
+     - BLOCKETHER_LLM_API_BASE_URL (checked first)
      - OPENAI_API_KEY
      - OPENAI_BASE_URL
    
@@ -62,9 +62,9 @@
    
    Params:
    `opts` - Map with keys:
-      - :api-key - String, optional. Falls back to BLOCKETHER_OPENAI_API_KEY,
+      - :api-key - String, optional. Falls back to BLOCKETHER_LLM_API_KEY,
                     then OPENAI_API_KEY env var.
-       - :base-url - String, optional. Falls back to BLOCKETHER_OPENAI_BASE_URL,
+       - :base-url - String, optional. Falls back to BLOCKETHER_LLM_API_BASE_URL,
                     then OPENAI_BASE_URL env var, then DEFAULT_BASE_URL.
       - :model - String, optional. Default model for all calls (default: \"gpt-4o\").
       - :network - Map, optional. Network settings (merged over defaults):
@@ -96,14 +96,14 @@
   ([] (make-config {}))
   ([{:keys [api-key base-url model network tokens]}]
    (let [api-key (or api-key
-                       (get-env "BLOCKETHER_OPENAI_API_KEY")
+                       (get-env "BLOCKETHER_LLM_API_KEY")
                        (get-env "OPENAI_API_KEY"))
            base-url (or base-url
-                        (get-env "BLOCKETHER_OPENAI_BASE_URL")
+                        (get-env "BLOCKETHER_LLM_API_BASE_URL")
                         (get-env "OPENAI_BASE_URL")
                         DEFAULT_BASE_URL)]
        (when-not api-key
-         (anomaly/incorrect! "LLM API key required. Set BLOCKETHER_OPENAI_API_KEY or OPENAI_API_KEY env var, or pass :api-key."
+         (anomaly/incorrect! "LLM API key required. Set BLOCKETHER_LLM_API_KEY or OPENAI_API_KEY env var, or pass :api-key."
                             {:type :svar/missing-api-key}))
       {:api-key api-key
        :base-url base-url
