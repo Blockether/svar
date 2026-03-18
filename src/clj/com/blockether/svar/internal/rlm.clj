@@ -3367,7 +3367,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
      - :max-refinements - Max refine iterations (default: 1).
       - :threshold - Min eval score 0.0-1.0 for refinement early stop (default: 0.8).
       - :verify? - Enable claim verification with citations (default: false).
-     - :refine? - Enable refinement (default: true).
+     - :refine? - Enable refinement (default: true for free-text, false when :spec is provided).
      - :learn? - Store as example (default: true).
       - :max-context-tokens - Token budget for context.
       - :debug? - Enable verbose debug logging (default: false). Logs iteration details,
@@ -3392,16 +3392,17 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
   ([env query-str]
    (query-env! env query-str {}))
    ([env query-str {:keys [context spec model max-iterations max-refinements threshold
-                           refine? learn? max-context-tokens max-recursion-depth verify?
-                           plan? debug?]
-                    :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
-                         refine? true learn? true max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
-                         plan? false debug? false}}]
+                            refine? learn? max-context-tokens max-recursion-depth verify?
+                            plan? debug?]
+                     :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
+                          learn? true max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
+                          plan? false debug? false}}]
    (when-not (:db-info-atom env)
-     (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
-   (when-not query-str
-     (anomaly/incorrect! "Missing query" {:type :rlm/missing-query}))
-   (let [config (:config env)
+      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
+    (when-not query-str
+      (anomaly/incorrect! "Missing query" {:type :rlm/missing-query}))
+    (let [refine? (if (some? refine?) refine? (nil? spec))
+          config (:config env)
          api-key (:api-key config)
          base-url (:base-url config)
          model (or model (:default-model config))
