@@ -780,6 +780,15 @@
         ;; Should NOT wrap because spec has multiple fields
         (expect (= ["a" "b"] parsed)))))
 
+  (describe "multi-element array of maps merged when spec expects map"
+    (it "merges split objects into single map"
+      (let [spec-def (sut/spec
+                       (sut/field ::sut/name :summary ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Summary")
+                       (sut/field ::sut/name :entities ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/many ::sut/description "Entities"))
+            llm-response "[{\"summary\": \"A summary\"}, {\"entities\": [\"e1\", \"e2\"]}]"
+            parsed (sut/str->data-with-spec llm-response spec-def)]
+        (expect (= {:summary "A summary" :entities ["e1" "e2"]} parsed)))))
+
   (describe "normal object response - no wrapping needed"
     (it "passes through object responses unchanged"
       (let [spec-def (sut/spec

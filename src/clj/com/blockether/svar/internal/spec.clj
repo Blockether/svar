@@ -1066,7 +1066,16 @@
                        :msg "Unwrapping single-element array — spec expects map"})
           (first result))
 
-        ;; No correction possible
+        ;; Case 3: Spec expects a map, got multi-element array of maps → merge them
+        ;; LLMs sometimes split a single object across multiple JSON objects
+        (and (spec-expects-map? spec-def)
+          (> (count result) 1)
+          (every? map? result))
+        (do
+          (trove/log! {:level :debug :data {:count (count result) :keys (mapcat keys result)}
+                       :msg "Merging multi-element array of maps — spec expects single map"})
+          (apply merge result))
+
         :else result))))
 
 (defn- apply-spec-field-defaults

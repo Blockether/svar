@@ -627,8 +627,11 @@
                                            (user task)]
                                 :model model
                                 :config config})
-        ;; SAP's apply-spec-field-defaults guarantees :entities is [] (not nil) and :summary key exists.
-        ;; Guard: if SAP returned a non-map (e.g. vector from malformed LLM output), wrap it.
+        _ (when-not (map? result)
+            (trove/log! {:level :warn
+                         :id ::cod-non-map-result
+                         :data {:result-type (type result) :result (pr-str result)}
+                         :msg "SAP returned non-map for CoD spec — check jsonish/spec pipeline"}))
         result (if (map? result) result {:summary (str result) :entities []})
         ;; If LLM returned null summary, fall back to previous summary (business logic, not nil-guarding).
         result (cond-> result
