@@ -2161,8 +2161,7 @@
                        'llm-query llm-query-fn
                        'FINAL (fn [answer] (let [v (realize-value answer)]
                                              {:rlm/final true :rlm/answer {:result v :type (type v)}}))
-                       'FINAL-VAR (fn [var-name] (let [v (realize-value (get @locals-atom var-name))]
-                                                   {:rlm/final true :rlm/answer {:result v :type (type v)}}))
+
                        ;; Locals inspection tools - LLM can check its own state on demand
                        'list-locals (fn []
                                       (into {}
@@ -2622,7 +2621,7 @@
   <tool name=\"llm-query\">(llm-query prompt) or (llm-query prompt {:spec my-spec}) - Simple text query to LLM</tool>
   <tool name=\"rlm-query\">(rlm-query sub-context query) or (rlm-query sub-context query {:spec s :max-iterations n}) - Spawn sub-RLM with code execution, SHARES the same database</tool>
   <tool name=\"FINAL\">(FINAL answer) - MUST call when you have the answer</tool>
-  <tool name=\"FINAL-VAR\">(FINAL-VAR 'var-name) - return a variable's value</tool>
+  
   <tool name=\"list-locals\">(list-locals) - see all variables you've defined (functions show as &lt;fn&gt;, large collections summarized)</tool>
   <tool name=\"get-local\">(get-local 'var-name) - get full value of a specific variable you defined</tool>
 </available_tools>
@@ -3465,7 +3464,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                ;; Normal completion - refine and finalize
                (let [answer-value (:result answer answer)
                      ;; Refinement path: stringify for LLM round-trip.
-                     ;; No-refine path: keep the native Clojure value from FINAL/FINAL-VAR.
+                     ;; No-refine path: keep the native Clojure value from FINAL.
                      {final-answer :answer
                       eval-scores  :eval-scores
                       refinement-count :refinement-count}
@@ -3510,7 +3509,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                          {:answer parsed
                           :eval-scores (:final-score raw-refine)
                           :refinement-count (:iterations-count raw-refine)})
-                       ;; No refinement — value is Clojure from FINAL/FINAL-VAR.
+                       ;; No refinement — value is Clojure from FINAL.
                        ;; When spec is provided, coerce through SAP for type correctness
                        ;; (e.g., string "pass" → keyword :pass for :spec.type/keyword fields).
                        {:answer (if spec

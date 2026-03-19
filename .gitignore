@@ -33,3 +33,6 @@ lancedb
 
 /data/
 /debug/
+allure-results/
+allure-report/
+.allure-history.jsonl
