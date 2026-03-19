@@ -106,7 +106,7 @@ jobs:
 
       - name: Generate Allure report
         run: |
-          clojure -A:test -M -e "
+          clojure -M:dev -e "
             (require '[com.blockether.svar.allure-reporter :as r])
             (r/generate-html-report! \"allure-results\" \"allure-report\")"
 
