@@ -632,7 +632,6 @@
                          :id ::cod-non-map-result
                          :data {:result-type (type result) :result (pr-str result)}
                          :msg "SAP returned non-map for CoD spec — check jsonish/spec pipeline"}))
-        result (if (map? result) result {:summary (str result) :entities []})
         ;; If LLM returned null summary, fall back to previous summary (business logic, not nil-guarding).
         result (cond-> result
                  (nil? (:summary result))

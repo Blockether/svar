@@ -30,6 +30,8 @@
          :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}
          :main-opts ["-m" "lazytest.main"]}
 
+  :allure {:extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}}
+
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.12"}
                  slipset/deps-deploy {:mvn/version "0.2.2"}}
           :ns-default build}
