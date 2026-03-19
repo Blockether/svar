@@ -16,9 +16,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: main
-          fetch-depth: 0
-          fetch-tags: true
+          fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch tags and changelog history
+        run: |
+          git fetch --tags --no-recurse-submodules origin
+          git fetch --deepen=200 origin main
 
       - uses: DeLaGuardo/setup-clojure@13.5
         with:
@@ -35,19 +39,16 @@ jobs:
           restore-keys: |
             deps-${{ runner.os }}-
 
-      # --- Generate changelog (safe, read-only — do FIRST) ---
       - name: Generate changelog
         id: changelog
         run: |
           PREV_TAG=$(git tag --sort=-v:refname | head -n 2 | tail -n 1)
           CURRENT_TAG=${{ github.ref_name }}
-
           if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" $CURRENT_TAG)
           else
             CHANGELOG=$(git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${CURRENT_TAG})
           fi
-
           {
             echo "## What's Changed"
             echo ""
@@ -56,13 +57,11 @@ jobs:
             echo "**Full Changelog**: https://github.com/Blockether/svar/compare/${PREV_TAG}...${CURRENT_TAG}"
           } > /tmp/release_body.md
 
-      # --- GitHub Release (reversible — do before Clojars) ---
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           body_path: /tmp/release_body.md
 
-      # --- Deploy to Clojars (irreversible — do LAST, with existence check) ---
       - name: Check if version exists on Clojars
         id: check-clojars
         run: |
@@ -88,7 +87,6 @@ jobs:
           CLOJARS_PASSWORD: ${{ secrets.CLOJARS_DEPLOY_TOKEN }}
         run: clojure -T:build deploy
 
-      # --- Update version files on main ---
       - name: Update README.md version
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -99,20 +97,16 @@ jobs:
           PREV_TAG=$(git tag --sort=-v:refname | head -n 2 | tail -n 1)
           CURRENT_TAG=${{ github.ref_name }}
           DATE=$(date +%Y-%m-%d)
-
           if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "$CURRENT_TAG" ]; then
             COMMITS=$(git log --pretty=format:"- %s" $CURRENT_TAG)
           else
             COMMITS=$(git log --pretty=format:"- %s" ${PREV_TAG}..${CURRENT_TAG})
           fi
-
           UNRELEASED_LINE=$(grep -n '^## \[Unreleased\]' CHANGELOG.md | head -1 | cut -d: -f1)
-
           if [ -z "$UNRELEASED_LINE" ]; then
             echo "ERROR: Could not find ## [Unreleased] section in CHANGELOG.md"
             exit 1
           fi
-
           {
             head -n "$UNRELEASED_LINE" CHANGELOG.md
             echo ""
@@ -123,19 +117,28 @@ jobs:
             echo ""
             tail -n +$((UNRELEASED_LINE + 1)) CHANGELOG.md
           } > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
-
           sed -i "s|\[Unreleased\]: .*|[Unreleased]: https://github.com/Blockether/svar/compare/${CURRENT_TAG}...HEAD|" CHANGELOG.md
-
           if ! grep -q "^\[${CURRENT_TAG}\]:" CHANGELOG.md; then
             echo "[$CURRENT_TAG]: https://github.com/Blockether/svar/releases/tag/${CURRENT_TAG}" >> CHANGELOG.md
           fi
+
+      - name: Bump SVAR_VERSION to next patch
+        run: |
+          CURRENT="${GITHUB_REF_NAME#v}"
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          NEXT_PATCH=$((PATCH + 1))
+          NEXT_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}"
+          echo "$NEXT_VERSION" > resources/SVAR_VERSION
+          echo "Bumped SVAR_VERSION to $NEXT_VERSION"
 
       - name: Commit version updates
         run: |
           git config user.name "blockether-deployer"
           git config user.email "contact@blockether.com"
-          git add README.md CHANGELOG.md
+          git add README.md CHANGELOG.md resources/SVAR_VERSION
           git diff --cached --quiet && echo "No changes to commit" || {
-            git commit -m "release: update version files for ${{ github.ref_name }}"
+            git commit -m "release: update version files for ${{ github.ref_name }}, bump to next dev version"
             git push origin main
           }

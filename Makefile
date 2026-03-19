@@ -1,4 +1,4 @@
-.PHONY: test test-ff test-readme test-watch clean jar install deploy lint compile-java prepare
+.PHONY: test test-ff test-readme test-watch clean jar install deploy lint compile-java prepare test-allure allure-serve allure
 
 prepare: compile-java
 
@@ -51,3 +51,12 @@ install:
 
 deploy:
 	clojure -T:build deploy
+
+test-allure: target/classes
+	rm -rf allure-results allure-report
+	clojure -M:test --output nested --output com.blockether.svar.allure-reporter/allure
+
+allure-serve:
+	npx --yes allure@3.2.0 open allure-report
+
+allure: test-allure allure-serve

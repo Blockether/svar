@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ['main']
+    branches: ["main"]
   pull_request:
-    branches: ['main']
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -12,10 +12,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeLaGuardo/setup-clojure@13.1
+      - uses: DeLaGuardo/setup-clojure@13.5
         with:
           cli: latest
 
@@ -26,9 +27,9 @@ jobs:
             ~/.m2/repository
             ~/.gitlibs
             ~/.clojure/.cpcache
-          key: ci-${{ hashFiles('deps.edn') }}
+          key: deps-${{ runner.os }}-${{ hashFiles('deps.edn') }}
           restore-keys: |
-            ci-
+            deps-${{ runner.os }}-
 
       - name: Check Clojure syntax
         run: clojure -M -e "(println \"Syntax check passed\")"
@@ -36,17 +37,37 @@ jobs:
       - name: Compile Java sources
         run: clojure -T:build compile-java
 
-      - name: Run tests
-        run: clojure -M:test
+      - name: Clean Allure results
+        run: rm -rf allure-results allure-report
+
+      - name: Run tests with Allure reporter
+        id: tests
         env:
+          LAZYTEST_ALLURE_GENERATE_REPORT: "false"
           BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
           BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
+        run: clojure -M:test --output nested --output com.blockether.svar.allure-reporter/allure
+        continue-on-error: true
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: allure-results/
+          retention-days: 7
+
+      - name: Fail if tests failed
+        if: steps.tests.outcome == 'failure'
+        run: |
+          echo "::error::Tests failed"
+          exit 1
 
       - name: Run README doc tests
-        run: clojure -M:test --md README.md
         env:
           BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
           BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
+        run: clojure -M:test --md README.md
 
       - name: Build jar
         run: clojure -T:build jar
