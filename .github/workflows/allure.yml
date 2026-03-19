@@ -206,6 +206,11 @@ jobs:
           <!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=../${RUN_NUMBER}/"></head><body></body></html>
           HTMLEOF
 
+          # Root index.html → redirect to latest
+          cat > index.html <<HTMLEOF
+          <!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=latest/"></head><body></body></html>
+          HTMLEOF
+
           # Copy badge
           if [ -f "${RUN_NUMBER}/badge.svg" ]; then
             cp "${RUN_NUMBER}/badge.svg" badge.svg

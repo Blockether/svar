@@ -628,6 +628,8 @@
                                 :model model
                                 :config config})
         ;; SAP's apply-spec-field-defaults guarantees :entities is [] (not nil) and :summary key exists.
+        ;; Guard: if SAP returned a non-map (e.g. vector from malformed LLM output), wrap it.
+        result (if (map? result) result {:summary (str result) :entities []})
         ;; If LLM returned null summary, fall back to previous summary (business logic, not nil-guarding).
         result (cond-> result
                  (nil? (:summary result))
