@@ -63,7 +63,7 @@
    Params:
    `opts` - Map with keys:
       - :api-key - String, optional. Falls back to BLOCKETHER_LLM_API_KEY,
-                    then OPENAI_API_KEY env var.
+                    then BLOCKETHER_OPENAI_API_KEY, then OPENAI_API_KEY env var.
        - :base-url - String, optional. Falls back to BLOCKETHER_LLM_API_BASE_URL,
                     then OPENAI_BASE_URL env var, then DEFAULT_BASE_URL.
       - :model - String, optional. Default model for all calls (default: \"gpt-4o\").
@@ -97,13 +97,14 @@
   ([{:keys [api-key base-url model network tokens]}]
    (let [api-key (or api-key
                        (get-env "BLOCKETHER_LLM_API_KEY")
+                       (get-env "BLOCKETHER_OPENAI_API_KEY")
                        (get-env "OPENAI_API_KEY"))
            base-url (or base-url
                         (get-env "BLOCKETHER_LLM_API_BASE_URL")
                         (get-env "OPENAI_BASE_URL")
                         DEFAULT_BASE_URL)]
        (when-not api-key
-         (anomaly/incorrect! "LLM API key required. Set BLOCKETHER_LLM_API_KEY or OPENAI_API_KEY env var, or pass :api-key."
+         (anomaly/incorrect! "LLM API key required. Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY env var, or pass :api-key."
                             {:type :svar/missing-api-key}))
       {:api-key api-key
        :base-url base-url

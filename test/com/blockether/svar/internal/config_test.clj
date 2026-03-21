@@ -65,6 +65,7 @@
   (describe "with missing params"
             (it "throws on missing api-key when no env var set"
                 (if (or (System/getenv "BLOCKETHER_LLM_API_KEY")
+                        (System/getenv "BLOCKETHER_OPENAI_API_KEY")
                         (System/getenv "OPENAI_API_KEY"))
                   (expect true) ;; Skip when any api-key env var is set
                   (try
