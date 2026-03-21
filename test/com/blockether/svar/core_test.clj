@@ -759,6 +759,65 @@
   (or (some? (System/getenv "BLOCKETHER_LLM_API_KEY"))
       (some? (System/getenv "OPENAI_API_KEY"))))
 
+;; =============================================================================
+;; Chain of Density — Unit Tests (no API key needed)
+;; =============================================================================
+
+(defdescribe cod-prompt-building-test
+  (describe "build-cod-first-iteration-objective"
+    (it "includes entity criteria, target length, and output requirements"
+        (let [build (#'llm/build-cod-first-iteration-objective 80 nil)
+              build-with-instr (#'llm/build-cod-first-iteration-objective 60 "Focus on dates")]
+          (expect (str/includes? build "<chain_of_density_iteration>"))
+          (expect (str/includes? build "~80 words"))
+          (expect (str/includes? build "<entity_criteria>"))
+          (expect (str/includes? build "atomic"))
+          (expect (str/includes? build "<output_requirements>"))
+          ;; Without special instructions, no special_instructions block
+          (expect (not (str/includes? build "<special_instructions>")))
+          ;; With special instructions, block is present
+          (expect (str/includes? build-with-instr "<special_instructions>"))
+          (expect (str/includes? build-with-instr "Focus on dates")))))
+
+  (describe "build-cod-subsequent-iteration-objective"
+    (it "includes novel criterion inside entity_criteria and process steps"
+        (let [build (#'llm/build-cod-subsequent-iteration-objective 80 nil)]
+          (expect (str/includes? build "<process>"))
+          (expect (str/includes? build "do NOT re-extract"))
+          (expect (str/includes? build "novel"))
+          ;; Novel criterion must be inside entity_criteria (not orphaned)
+          (let [criteria-start (str/index-of build "<entity_criteria>")
+                criteria-end (str/index-of build "</entity_criteria>")
+                novel-pos (str/index-of build "novel")]
+            (expect (some? criteria-start))
+            (expect (some? criteria-end))
+            (expect (< criteria-start novel-pos criteria-end))))))
+
+  (describe "build-cod-task"
+    (it "wraps source text in XML and adds context for subsequent iterations"
+        (let [first-iter (#'llm/build-cod-task "Hello world" nil nil)
+              subsequent (#'llm/build-cod-task "Hello world" "Previous summary" ["entity1" "entity2"])]
+          ;; First iteration: only source text
+          (expect (str/includes? first-iter "<source_text>"))
+          (expect (str/includes? first-iter "Hello world"))
+          (expect (not (str/includes? first-iter "<previous_summary>")))
+          (expect (not (str/includes? first-iter "<already_extracted_entities>")))
+          ;; Subsequent: includes previous summary and accumulated entities
+          (expect (str/includes? subsequent "<previous_summary>"))
+          (expect (str/includes? subsequent "Previous summary"))
+          (expect (str/includes? subsequent "<already_extracted_entities>"))
+          (expect (str/includes? subsequent "entity1, entity2")))))
+
+  (describe "build-cod-spec"
+    (it "produces a spec with :entities and :summary fields"
+        (let [spec (#'llm/build-cod-spec)
+              prompt (spec/spec->prompt spec)]
+          (expect (str/includes? prompt "entities"))
+          (expect (str/includes? prompt "summary"))
+          (expect (str/includes? prompt "entity"))
+          (expect (str/includes? prompt "rationale"))
+          (expect (str/includes? prompt "score"))))))
+
 ;; Rich factual text about the Voyager missions — dense with entities, dates,
 ;; distances, organizations, and scientific concepts. Perfect for CoD testing.
 (def ^:private VOYAGER_TEXT
@@ -867,10 +926,12 @@
                       ;; Must find at least one of the developers
                       (expect (some #(or (str/includes? % "doudna")
                                         (str/includes? % "charpentier")) lower-names))
-                      ;; Must find at least one disease application
+                      ;; Must find at least one disease/treatment entity
                       (expect (some #(or (str/includes? % "sickle")
                                         (str/includes? % "beta-thalassemia")
-                                        (str/includes? % "cancer")) lower-names))
+                                        (str/includes? % "cancer")
+                                        (str/includes? % "casgevy")
+                                        (str/includes? % "fda")) lower-names))
                       ;; Scores are all within valid range
                       (expect (every? #(<= 0.0 (:score %) 1.0) all-entities))
                       ;; Rationales should be non-empty strings

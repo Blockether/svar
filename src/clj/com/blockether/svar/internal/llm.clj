@@ -529,8 +529,10 @@
         <step number=\"3\">Rewrite the summary to incorporate these genuinely new entities while maintaining the same word count</step>
     </process>
     
-    " COD_ENTITY_CRITERIA "
-    <criterion name=\"novel\">Not present in the previous summary or the already-extracted entities list</criterion>
+    " (str/replace COD_ENTITY_CRITERIA
+                   "</entity_criteria>"
+                   (str "    <criterion name=\"novel\">Not present in the previous summary or the already-extracted entities list</criterion>\n"
+                        "</entity_criteria>")) "
     "
        (when special-instructions
          (str "
@@ -622,33 +624,49 @@
                     (build-cod-first-iteration-objective target-length special-instructions)
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary accumulated-entities)
-        {:keys [result]} (ask! {:spec (build-cod-spec)
-                                :messages [(system objective)
-                                           (user task)]
-                                :model model
-                                :config config})
+        ask-resp (ask! {:spec (build-cod-spec)
+                        :messages [(system objective)
+                                   (user task)]
+                        :model model
+                        :config config})
+        result (:result ask-resp)
         _ (when-not (map? result)
             (trove/log! {:level :warn
                          :id ::cod-non-map-result
                          :data {:result-type (type result) :result (pr-str result)}
                          :msg "SAP returned non-map for CoD spec — check jsonish/spec pipeline"}))
-        ;; If LLM returned null summary, fall back to previous summary (business logic, not nil-guarding).
+        ;; First-iteration nil summary is unrecoverable; subsequent iterations fall back.
+        _ (when (and first-iteration? (nil? (:summary result)))
+            (anomaly/fault! "LLM returned nil summary on first CoD iteration"
+                            {:result result}))
         result (cond-> result
                  (nil? (:summary result))
-                 (assoc :summary (or previous-summary "")))
-        result (if eval?
-                 (let [eval-result (eval! {:task (str "Summarize the following text:\n\n" source-text)
-                                           :output (:summary result)
-                                           :model model
-                                           :config config
-                                           :criteria COD_EVAL_CRITERIA
-                                           :ground-truths [source-text]})]
-                   (assoc result :score (:overall-score eval-result)))
+                 (assoc :summary previous-summary))
+        eval-resp (when eval?
+                    (eval! {:task (str "Summarize the following text:\n\n" source-text)
+                            :output (:summary result)
+                            :model model
+                            :config config
+                            :criteria COD_EVAL_CRITERIA}))
+        result (if eval-resp
+                 (assoc result :score (:overall-score eval-resp))
                  result)
-        new-entity-names (keep :entity (:entities result))]
+        _ (when (empty? (:entities result))
+            (trove/log! {:level :warn :id ::cod-empty-entities
+                         :data {:iteration (inc (count iterations)) :first? first-iteration?}
+                         :msg "CoD iteration returned zero entities"}))
+        ;; Case-insensitive dedup against accumulated entities
+        accumulated-lower (set (map str/lower-case (or accumulated-entities [])))
+        new-entity-names (->> (keep :entity (:entities result))
+                              (remove #(contains? accumulated-lower (str/lower-case %))))
+        ;; Aggregate token/cost from ask + eval
+        iter-tokens (merge-with + (:tokens ask-resp) (:tokens eval-resp))
+        iter-cost (merge-with + (:cost ask-resp) (:cost eval-resp))]
     {:iterations (conj iterations result)
      :previous-summary (:summary result)
-     :accumulated-entities (into (or accumulated-entities []) new-entity-names)}))
+     :accumulated-entities (into (or accumulated-entities []) new-entity-names)
+     :total-tokens (merge-with + (:total-tokens _state) iter-tokens)
+     :total-cost (merge-with + (:total-cost _state) iter-cost)}))
 
 (defn- build-cod-refinement-spec
   "Builds a spec for the CoVe refinement pass on a CoD summary."
@@ -691,14 +709,26 @@
          threshold 0.9}}]
   (let [{:keys [config model]} (resolve-opts opts)
         step-fn (partial cod-iteration-step text target-length model config special-instructions eval?)
-        initial-state {:iterations [] :previous-summary nil :accumulated-entities []}
-        final-state (->> initial-state
-                         (iterate step-fn)
-                         (drop 1)  ;; skip initial state
-                         (take iterations)
-                         last)
+        initial-state {:iterations [] :previous-summary nil :accumulated-entities []
+                       :total-tokens {} :total-cost {}}
+        final-state (loop [state initial-state
+                           remaining iterations]
+                      (if (zero? remaining)
+                        state
+                        (let [next-state (step-fn state)
+                              iters (:iterations next-state)]
+                          (if (and eval? (>= (count iters) 2))
+                            (let [prev-score (:score (nth iters (- (count iters) 2)))
+                                  curr-score (:score (last iters))]
+                              (if (or (and curr-score (>= curr-score threshold))
+                                      (and prev-score curr-score
+                                           (< (Math/abs (double (- curr-score prev-score))) 0.02)))
+                                next-state
+                                (recur next-state (dec remaining))))
+                            (recur next-state (dec remaining))))))
         cod-iterations (:iterations final-state)]
-    (if (and refine? (seq cod-iterations))
+    (with-meta
+      (if (and refine? (seq cod-iterations))
       (let [final-summary (:summary (last cod-iterations))
             refine-result (refine! {:spec (build-cod-refinement-spec)
                                     :messages [(system (str "You are verifying and refining a summary for faithfulness. "
@@ -720,7 +750,9 @@
                      :summary (if (string? refined-summary) refined-summary final-summary)
                      :refined? true
                      :refinement-score (:final-score refine-result))))
-      cod-iterations)))
+        cod-iterations)
+      {:tokens (:total-tokens final-state)
+       :cost (:total-cost final-state)})))
 
 ;; =============================================================================
 ;; eval! - LLM Self-Evaluation
