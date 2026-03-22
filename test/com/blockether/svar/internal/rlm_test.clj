@@ -1086,8 +1086,8 @@
                       query-fn (#'sut/make-llm-query-fn "gpt-4o" depth-atom nil nil)]
                   (reset! depth-atom sut/DEFAULT_RECURSION_DEPTH)
                   (let [result (query-fn "test")]
-                    (expect (string? result))
-                    (expect (re-find #"(?i)max.*recursion.*depth" result)))))
+                    (expect (map? result))
+                    (expect (re-find #"(?i)max.*recursion.*depth" (:content result))))))
 
             (it "decrements depth after call"
                 (let [depth-atom (atom 0)
@@ -2134,12 +2134,17 @@
 
 (defmacro ^:private with-mock-chat!
   "Stubs llm/chat-completion for testing query-env! iteration loop.
-   `response-fn` receives [messages model api-key base-url] and returns a string."
+   `response-fn` receives [messages model api-key base-url] and returns a string.
+   The macro wraps the string in {:content str :reasoning nil :api-usage nil}
+   to match the new chat-completion return type."
   [response-fn & body]
   `(let [v# (var com.blockether.svar.internal.llm/chat-completion)
-         orig# (deref v#)]
+         orig# (deref v#)
+         wrapped-fn# (fn [& args#]
+                       (let [result# (apply ~response-fn args#)]
+                         (if (map? result#) result# {:content result# :reasoning nil :api-usage nil})))]
      (try
-       (alter-var-root v# (constantly ~response-fn))
+       (alter-var-root v# (constantly wrapped-fn#))
        ~@body
        (finally
          (alter-var-root v# (constantly orig#))))))

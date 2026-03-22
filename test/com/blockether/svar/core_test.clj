@@ -235,15 +235,19 @@
 
 (defdescribe abstract!-baseline-test
   (describe "return shape"
-            (it "returns a vector of iteration maps"
+            (it "returns a map with :result vector of iteration maps"
                 (with-redefs [llm/ask! (fn [{:keys [_objective]}]
                                           (make-mock-ask-response
                                            {:entities [{:entity "Test Entity" :rationale "Central topic" :score 0.9}]
                                             :summary "A test summary."}))]
-                  (let [result (svar/abstract! {:text "Some article text for summarization."
-                                                :model "gpt-4o"
-                                                :iterations 2
-                                                :target-length 80})]
+                  (let [response (svar/abstract! {:text "Some article text for summarization."
+                                                   :model "gpt-4o"
+                                                   :iterations 2
+                                                   :target-length 80})
+                        result (:result response)]
+                    (expect (map? response))
+                    (expect (contains? response :tokens))
+                    (expect (contains? response :cost))
                     (expect (vector? result))
                     (expect (= 2 (count result))))))
 
@@ -253,10 +257,10 @@
                                            {:entities [{:entity "Alpha" :rationale "Key concept" :score 0.85}
                                                        {:entity "Beta" :rationale "Supporting concept" :score 0.6}]
                                             :summary "Iteration summary."}))]
-                  (let [result (svar/abstract! {:text "Article text."
-                                                :model "gpt-4o"
-                                                :iterations 1})
-                        iter (first result)]
+                  (let [response (svar/abstract! {:text "Article text."
+                                                   :model "gpt-4o"
+                                                   :iterations 1})
+                        iter (first (:result response))]
                     (expect (contains? iter :entities))
                     (expect (contains? iter :summary))
                     (expect (vector? (:entities iter)))
@@ -269,10 +273,10 @@
                                            {:entities [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
                                                        {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
                                             :summary "Summary."}))]
-                  (let [result (svar/abstract! {:text "ACME Corp reported earnings."
-                                                :model "gpt-4o"
-                                                :iterations 1})
-                        entities (:entities (first result))]
+                  (let [response (svar/abstract! {:text "ACME Corp reported earnings."
+                                                   :model "gpt-4o"
+                                                   :iterations 1})
+                        entities (:entities (first (:result response)))]
                     (expect (= [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
                                 {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
                                entities))

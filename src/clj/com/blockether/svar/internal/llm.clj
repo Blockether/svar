@@ -141,10 +141,12 @@
 ;; LLM API
 ;; =============================================================================
 
-(defn- extract-content
-  "Extracts the assistant's response content from an OpenAI-compatible API response."
+(defn- extract-response-data
+  "Extracts content, reasoning, and usage data from an OpenAI-compatible API response."
   [response]
-  (get-in response [:choices 0 :message :content]))
+  {:content (get-in response [:choices 0 :message :content])
+   :reasoning (get-in response [:choices 0 :message :reasoning_content])
+   :api-usage (get-in response [:usage])})
 
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API."
@@ -212,7 +214,7 @@
       (with-retry
         (fn []
           (let [parsed (http-post! chat-url request-body api-key timeout-ms)]
-            (extract-content parsed)))
+            (extract-response-data parsed)))
         retry-opts)
       (catch Exception e
         ;; Check for API key configuration errors
@@ -242,7 +244,10 @@
 
 ;; PUBLIC — rlm.clj accesses this directly
 (defn chat-completion
-  "Calls the LLM API (OpenAI compatible) with the given messages."
+  "Calls the LLM API (OpenAI compatible) with the given messages.
+
+   Returns:
+   Map with :content, :reasoning (may be nil), :api-usage."
   ([messages model api-key base-url]
    (chat-completion messages model api-key base-url {}))
   ([messages model api-key base-url retry-opts]
@@ -442,24 +447,26 @@
                             check))
           ;; API call
           retry-opts (merge network {:timeout-ms timeout-ms})
-          [response duration-ms] (util/with-elapsed
-                                   (chat-completion messages model api-key chat-url retry-opts))
-          ;; Token counting — reuse pre-counted input tokens when available
-          token-stats (tokens/count-and-estimate model messages response
-                                                 (cond-> {:pricing pricing}
+          [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
+                                                                (chat-completion messages model api-key chat-url retry-opts))
+          ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
+          token-stats (tokens/count-and-estimate model messages content
+                                                 (cond-> {:pricing pricing :api-usage api-usage}
                                                    context-check (assoc :input-tokens (:input-tokens context-check))))
           ;; Parse response
-          raw-result (spec/str->data-with-spec response spec)
+          raw-result (spec/str->data-with-spec content spec)
           ;; Apply spec-driven humanization if humanizer fn provided
           result (if humanizer
                    (apply-spec-humanizer raw-result spec humanizer)
                    raw-result)]
-      {:result result
-       :tokens {:input (:input-tokens token-stats)
-                :output (:output-tokens token-stats)
-                :total (:total-tokens token-stats)}
-       :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
-       :duration-ms duration-ms}))
+      (cond-> {:result result
+               :tokens {:input (:input-tokens token-stats)
+                        :output (:output-tokens token-stats)
+                        :reasoning (:reasoning-tokens token-stats)
+                        :total (:total-tokens token-stats)}
+               :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+               :duration-ms duration-ms}
+        reasoning (assoc :reasoning reasoning))))
 
 ;; =============================================================================
 ;; abstract! - Chain of Density summarization
@@ -726,33 +733,35 @@
                                 next-state
                                 (recur next-state (dec remaining))))
                             (recur next-state (dec remaining))))))
-        cod-iterations (:iterations final-state)]
-    (with-meta
-      (if (and refine? (seq cod-iterations))
-      (let [final-summary (:summary (last cod-iterations))
-            refine-result (refine! {:spec (build-cod-refinement-spec)
-                                    :messages [(system (str "You are verifying and refining a summary for faithfulness. "
-                                                           "Every claim in the summary must be grounded in the source text. "
-                                                           "Remove any meta-commentary, interpretive framing, or information not present in the source. "
-                                                           "Preserve entity density and the ~" target-length " word length constraint."))
-                                               (user (str "<source_text>\n" text "\n</source_text>\n\n"
-                                                          "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
-                                    :model model
-                                    :config config
-                                    :iterations 1
-                                    :threshold threshold
-                                    :documents [{:id "source"
-                                                 :pages [{:page "0" :text text}]}]})
-            refined-summary (get-in refine-result [:result :summary]
-                                    (:result refine-result))]
-        (conj (vec (butlast cod-iterations))
-              (assoc (last cod-iterations)
-                     :summary (if (string? refined-summary) refined-summary final-summary)
-                     :refined? true
-                     :refinement-score (:final-score refine-result))))
-        cod-iterations)
-      {:tokens (:total-tokens final-state)
-       :cost (:total-cost final-state)})))
+        cod-iterations (:iterations final-state)
+        [result duration-ms] (util/with-elapsed
+                               (if (and refine? (seq cod-iterations))
+                                 (let [final-summary (:summary (last cod-iterations))
+                                       refine-result (refine! {:spec (build-cod-refinement-spec)
+                                                               :messages [(system (str "You are verifying and refining a summary for faithfulness. "
+                                                                                      "Every claim in the summary must be grounded in the source text. "
+                                                                                      "Remove any meta-commentary, interpretive framing, or information not present in the source. "
+                                                                                      "Preserve entity density and the ~" target-length " word length constraint."))
+                                                                          (user (str "<source_text>\n" text "\n</source_text>\n\n"
+                                                                                     "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
+                                                               :model model
+                                                               :config config
+                                                               :iterations 1
+                                                               :threshold threshold
+                                                               :documents [{:id "source"
+                                                                            :pages [{:page "0" :text text}]}]})
+                                       refined-summary (get-in refine-result [:result :summary]
+                                                               (:result refine-result))]
+                                   (conj (vec (butlast cod-iterations))
+                                         (assoc (last cod-iterations)
+                                                :summary (if (string? refined-summary) refined-summary final-summary)
+                                                :refined? true
+                                                :refinement-score (:final-score refine-result))))
+                                 cod-iterations))]
+    {:result result
+     :tokens (:total-tokens final-state)
+     :cost (:total-cost final-state)
+     :duration-ms duration-ms}))
 
 ;; =============================================================================
 ;; eval! - LLM Self-Evaluation

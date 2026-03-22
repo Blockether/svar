@@ -2158,7 +2158,10 @@
    `custom-bindings` - Map of symbol->value for custom bindings (can be nil)"
   [context-data llm-query-fn rlm-query-fn locals-atom db-info-atom custom-bindings]
   (let [base-bindings {'context context-data
-                       'llm-query llm-query-fn
+                       'llm-query (fn
+                                    ([prompt] (:content (llm-query-fn prompt)))
+                                    ([prompt opts] (:content (llm-query-fn prompt opts))))
+                       'llm-query-full llm-query-fn
                        'FINAL (fn [answer] (let [v (realize-value answer)]
                                              {:rlm/final true :rlm/answer {:result v :type (type v)}}))
 
@@ -2476,24 +2479,25 @@
 ;; =============================================================================
 
 (defn- make-llm-query-fn
-  "Creates the llm-query function for simple text queries (no code execution)."
+  "Creates the llm-query function for simple text queries (no code execution).
+   Returns a map with :content, :reasoning (may be nil), :api-usage."
   [model depth-atom api-key base-url]
   (fn llm-query
     ([prompt]
      (if (>= @depth-atom *max-recursion-depth*)
-       (str "Max recursion depth (" *max-recursion-depth* ") exceeded")
+       {:content (str "Max recursion depth (" *max-recursion-depth* ") exceeded")}
        (try
          (swap! depth-atom inc)
          (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url)
          (finally (swap! depth-atom dec)))))
     ([prompt opts]
      (if (>= @depth-atom *max-recursion-depth*)
-       (str "Max recursion depth (" *max-recursion-depth* ") exceeded")
+       {:content (str "Max recursion depth (" *max-recursion-depth* ") exceeded")}
        (try
          (swap! depth-atom inc)
          (if-let [spec (:spec opts)]
-            (:result (llm/ask! {:spec spec :messages [(llm/system "You are a helpful assistant.") (llm/user prompt)]
-                                 :model model :api-key api-key :base-url base-url}))
+            {:content (pr-str (:result (llm/ask! {:spec spec :messages [(llm/system "You are a helpful assistant.") (llm/user prompt)]
+                                                   :model model :api-key api-key :base-url base-url})))}
            (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url))
          (finally (swap! depth-atom dec)))))))
 
@@ -2864,8 +2868,11 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 (defn- run-iteration [rlm-env messages model api-key base-url]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
     (let [_ (rlm-debug! {:model model :msg-count (count messages)} "LLM call started")
-          response (llm/chat-completion messages model api-key base-url)
+          response-data (llm/chat-completion messages model api-key base-url)
+          response (:content response-data)
+          model-reasoning (:reasoning response-data)
           _ (rlm-debug! {:response-len (count response)
+                         :has-reasoning (some? model-reasoning)
                          :response-preview (str-truncate response 300)} "LLM response received")
         ;; Parse structured response via spec (primary), fall back to code fences
           parsed (try (let [p (spec/str->data-with-spec response ITERATION_SPEC)]
@@ -2875,7 +2882,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                       ;; Fallback: extract code from markdown fences
                         (rlm-debug! {:parse-error (ex-message e)} "Spec parse failed, falling back to markdown extraction")
                         {:thinking response :code (extract-code-blocks response)}))
-          thinking (:thinking parsed)
+          thinking (or model-reasoning (:thinking parsed))
           code-blocks (vec (remove str/blank? (or (:code parsed) [])))
           _ (rlm-debug! {:code-block-count (count code-blocks)
                          :code-previews (mapv #(str-truncate % 120) code-blocks)} "Code blocks extracted")

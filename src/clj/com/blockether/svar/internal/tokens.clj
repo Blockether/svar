@@ -694,14 +694,18 @@
    ;;     :cost {:input-cost 0.00002 :output-cost 0.00009 :total-cost 0.00011 ...}}"
   ([^String model messages ^String output-text]
    (count-and-estimate model messages output-text {}))
-  ([^String model messages ^String output-text {:keys [pricing input-tokens]}]
-   (let [input-tokens (long (or input-tokens (count-messages model messages)))
-         output-tokens (count-tokens model output-text)
+  ([^String model messages ^String output-text {:keys [pricing input-tokens api-usage]}]
+   (let [input-tokens (long (or (:prompt_tokens api-usage) input-tokens (count-messages model messages)))
+         output-tokens (long (or (:completion_tokens api-usage) (count-tokens model output-text)))
+         reasoning-tokens (long (or (get-in api-usage [:completion_tokens_details :reasoning_tokens]) 0))
+         cached-tokens (long (or (get-in api-usage [:prompt_tokens_details :cached_tokens]) 0))
          total-tokens (+ input-tokens output-tokens)
          cost (estimate-cost model input-tokens output-tokens
                              (or pricing DEFAULT_MODEL_PRICING))]
      {:input-tokens input-tokens
       :output-tokens output-tokens
+      :reasoning-tokens reasoning-tokens
+      :cached-tokens cached-tokens
       :total-tokens total-tokens
       :cost cost})))
 
