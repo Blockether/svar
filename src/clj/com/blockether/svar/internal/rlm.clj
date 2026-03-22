@@ -2480,25 +2480,32 @@
 
 (defn- make-llm-query-fn
   "Creates the llm-query function for simple text queries (no code execution).
-   Returns a map with :content, :reasoning (may be nil), :api-usage."
-  [model depth-atom api-key base-url]
+   Returns a map with :content, :reasoning (may be nil), :api-usage.
+   Calls on-query callback (if provided) with {:prompt :response :reasoning}."
+  [model depth-atom api-key base-url & [{:keys [on-query]}]]
   (fn llm-query
     ([prompt]
      (if (>= @depth-atom *max-recursion-depth*)
        {:content (str "Max recursion depth (" *max-recursion-depth* ") exceeded")}
        (try
          (swap! depth-atom inc)
-         (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url)
+         (let [result (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url)]
+           (when on-query
+             (try (on-query {:prompt prompt :response (:content result) :reasoning (:reasoning result)}) (catch Exception _)))
+           result)
          (finally (swap! depth-atom dec)))))
     ([prompt opts]
      (if (>= @depth-atom *max-recursion-depth*)
        {:content (str "Max recursion depth (" *max-recursion-depth* ") exceeded")}
        (try
          (swap! depth-atom inc)
-         (if-let [spec (:spec opts)]
-            {:content (pr-str (:result (llm/ask! {:spec spec :messages [(llm/system "You are a helpful assistant.") (llm/user prompt)]
-                                                   :model model :api-key api-key :base-url base-url})))}
-           (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url))
+         (let [result (if-let [spec (:spec opts)]
+                        {:content (pr-str (:result (llm/ask! {:spec spec :messages [(llm/system "You are a helpful assistant.") (llm/user prompt)]
+                                                               :model model :api-key api-key :base-url base-url})))}
+                        (llm/chat-completion [{:role "user" :content prompt}] model api-key base-url))]
+           (when on-query
+             (try (on-query {:prompt prompt :response (:content result) :reasoning (:reasoning result)}) (catch Exception _)))
+           result)
          (finally (swap! depth-atom dec)))))))
 
 (defn- make-rlm-query-fn
@@ -2920,7 +2927,8 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                  executions)))
 
 (defn- iteration-loop [rlm-env query model api-key base-url max-iterations
-                       {:keys [output-spec examples max-context-tokens custom-docs pre-fetched-context]}]
+                       {:keys [output-spec examples max-context-tokens custom-docs pre-fetched-context
+                               on-iteration]}]
   (let [history-enabled? (:history-enabled? rlm-env)
         system-prompt (build-system-prompt {:output-spec output-spec
                                             :examples examples
@@ -2976,6 +2984,9 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                              :thinking thinking
                              :executions executions
                              :final? (boolean final-result)}]
+          ;; Notify caller of iteration progress
+            (when on-iteration
+              (try (on-iteration trace-entry) (catch Exception _)))
           ;; Store assistant response if tracking
             (when history-enabled?
               (store-message! db-info :assistant response {:iteration iteration :model model}))
@@ -3212,14 +3223,17 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         _ (init-message-history! db-info)
         _ (init-document-schema! db-info)
         _ (init-learning-schema! db-info)
+        ;; Hooks atom — set by query-env! to inject callbacks
+        hooks-atom (atom {})
         ;; Create query functions
-        llm-query-fn (make-llm-query-fn model depth-atom api-key base-url)
+        llm-query-fn (make-llm-query-fn model depth-atom api-key base-url {:on-query #(when-let [f (:on-query @hooks-atom)] (f %))})
         rlm-query-fn (make-rlm-query-fn model depth-atom api-key base-url db-info-atom)
         env-id (str (java.util.UUID/randomUUID))]
     {:env-id env-id
      :config config
      :depth-atom depth-atom
      :locals-atom locals-atom
+     :hooks-atom hooks-atom
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
@@ -3399,7 +3413,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
    (query-env! env query-str {}))
    ([env query-str {:keys [context spec model max-iterations max-refinements threshold
                             refine? learn? max-context-tokens max-recursion-depth verify?
-                            plan? debug?]
+                            plan? debug? on-iteration]
                      :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
                           learn? true max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
                           plan? false debug? false}}]
@@ -3437,6 +3451,9 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
          (rlm-debug! {:query query-str :model model :max-iterations max-iterations
                         :verify? verify? :plan? plan?
                        :refine? refine?} "RLM query-env! started")
+          ;; Set hooks for this query
+          (when-let [ha (:hooks-atom env)]
+            (reset! ha {:on-query on-iteration}))
           (let [start-time (System/nanoTime)
                 examples (get-examples query-str {})
                 db-info @db-info-atom
@@ -3454,7 +3471,8 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                                                   :examples examples
                                                   :max-context-tokens max-context-tokens
                                                   :custom-docs (into (or custom-docs []) cite-docs)
-                                                  :pre-fetched-context plan-context})
+                                                  :pre-fetched-context plan-context
+                                                  :on-iteration on-iteration})
                {:keys [answer trace iterations status]} iteration-result]
            (if status
                ;; Execution hit max iterations - return with trace
