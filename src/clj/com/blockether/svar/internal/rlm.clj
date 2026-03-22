@@ -2158,10 +2158,7 @@
    `custom-bindings` - Map of symbol->value for custom bindings (can be nil)"
   [context-data llm-query-fn rlm-query-fn locals-atom db-info-atom custom-bindings]
   (let [base-bindings {'context context-data
-                       'llm-query (fn
-                                    ([prompt] (:content (llm-query-fn prompt)))
-                                    ([prompt opts] (:content (llm-query-fn prompt opts))))
-                       'llm-query-full llm-query-fn
+                       'llm-query llm-query-fn
                        'FINAL (fn [answer] (let [v (realize-value answer)]
                                              {:rlm/final true :rlm/answer {:result v :type (type v)}}))
 
