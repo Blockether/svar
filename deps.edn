@@ -16,6 +16,8 @@
         org.babashka/sci {:mvn/version "0.12.51"}
         ;; Fast EDN - drop-in replacement for clojure.edn (~6x faster)
         io.github.tonsky/fast-edn {:mvn/version "1.1.3"}
+        ;; Datalevin - embedded Datalog database
+        datalevin/datalevin {:mvn/version "0.10.7"}
         ;; PDFBox - PDF processing (for pageindex)
         org.apache.pdfbox/pdfbox {:mvn/version "3.0.7"}
         ;; Core.async - for parallel processing (for pageindex)

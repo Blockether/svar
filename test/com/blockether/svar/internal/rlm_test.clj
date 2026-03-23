@@ -2,9 +2,11 @@
   (:require
    [babashka.fs :as fs]
    [clojure.string :as str]
+   [datalevin.core :as d]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm :as sut]
+   [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.core :as svar])
   (:import
    [java.util UUID]))
@@ -25,8 +27,12 @@
    RLM environment map."
   ([context] (create-test-env context {}))
   ([context {:keys [_db] :as opts}]
-   (let [depth-atom (atom 0)]
-     (#'sut/create-rlm-env context "gpt-4o" depth-atom nil nil opts))))
+   (let [depth-atom (atom 0)
+         test-router (router/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                           :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
+                                                    :refinement "gpt-4o" :planning "gpt-4o"}
+                                           :rpm 500 :tpm 200000 :priority 0}])]
+     (#'sut/create-rlm-env context "gpt-4o" depth-atom nil nil (assoc opts :router test-router)))))
 
 (defn- with-test-env*
   "Creates a test environment, executes f with it, then disposes.
@@ -144,46 +150,46 @@
 ;; =============================================================================
 
 (defdescribe disposable-db-test
-  (describe "create-disposable-db"
+  (describe "create-rlm-conn"
             (it "creates a database with required keys"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (expect (contains? db-info :store))
+                    (expect (contains? db-info :conn))
                     (expect (contains? db-info :path))
                     (expect (contains? db-info :owned?))
                     (expect (true? (:owned? db-info)))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
-            (it "creates database with custom schema"
-                (let [db-info (#'sut/create-disposable-db {:schema {:test/name {:db/valueType :db.type/string}}})]
+            (it "creates database with conn and owned? true"
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (expect (some? (:store db-info)))
+                    (expect (some? (:conn db-info)))
                     (expect (true? (:owned? db-info)))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
-  (describe "wrap-external-db"
-            (it "wraps external store atom with owned? false"
-                (let [external-store (atom @#'sut/EMPTY_STORE)
-                      db-info (#'sut/wrap-external-db external-store)]
-                  (expect (= external-store (:store db-info)))
-                  (expect (false? (:owned? db-info))))))
+  (describe "external conn reuse"
+            (it "reuses external conn with owned? false"
+                (let [external-db (#'sut/create-rlm-conn nil)]
+                  (try
+                    (let [reused (assoc external-db :owned? false)]
+                      (expect (false? (:owned? reused)))
+                      (expect (some? (:conn reused))))
+                    (finally
+                      (#'sut/dispose-rlm-conn! external-db))))))
 
-  (describe "dispose-db!"
+  (describe "dispose-rlm-conn!"
             (it "disposes owned database and cleans up path"
-                (let [db-info (#'sut/create-disposable-db)
+                (let [db-info (#'sut/create-rlm-conn nil)
                       path (:path db-info)]
-                  ;; Create the path so we can verify cleanup
-                  (fs/create-dirs path)
                   (expect (fs/exists? path))
-                  (#'sut/dispose-db! db-info)
+                  (#'sut/dispose-rlm-conn! db-info)
                   (expect (not (fs/exists? path)))))
 
-            (it "does nothing when path does not exist"
-                (let [db-info (#'sut/create-disposable-db)]
-                  ;; Should not throw even if path was never created
-                  (#'sut/dispose-db! db-info)))))
+            (it "does not throw when called on a fresh conn"
+                (let [db-info (#'sut/create-rlm-conn nil)]
+                  (#'sut/dispose-rlm-conn! db-info)))))
 
 (defdescribe execute-code-test
   (it "executes simple arithmetic"
@@ -412,23 +418,10 @@
 ;; =============================================================================
 
 (defdescribe message-history-test
-  (describe "init-message-history!"
-            (it "initializes schema in database"
-                (let [db-info (#'sut/create-disposable-db)]
-                  (try
-                    (let [result (#'sut/init-message-history! db-info)]
-                      (expect (= :schema-initialized result)))
-                    (finally
-                      (#'sut/dispose-db! db-info)))))
-
-            (it "returns nil for nil db-info"
-                (expect (nil? (#'sut/init-message-history! nil)))))
-
   (describe "store-message!"
             (it "stores a message with generated id"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (let [result (#'sut/store-message! db-info :user "Hello, world!")]
                       (expect (some? (:id result)))
                       (expect (= :user (:role result)))
@@ -436,25 +429,23 @@
                       (expect (some? (:tokens result)))
                       (expect (some? (:timestamp result))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "stores iteration number when provided"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (let [result (#'sut/store-message! db-info :assistant "Response" {:iteration 3})]
                       (expect (= :assistant (:role result))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "returns nil for nil db-info"
                 (expect (nil? (#'sut/store-message! nil :user "test")))))
 
   (describe "get-recent-messages"
             (it "returns messages in reverse chronological order"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (#'sut/store-message! db-info :user "First")
                     (Thread/sleep 10) ; Ensure different timestamps
                     (#'sut/store-message! db-info :assistant "Second")
@@ -465,44 +456,40 @@
                       (expect (= "Third" (:content (first results))))
                       (expect (= "First" (:content (last results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "respects limit parameter"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (doseq [i (range 5)]
                       (#'sut/store-message! db-info :user (str "Message " i)))
                     (let [results (#'sut/get-recent-messages db-info 2)]
                       (expect (= 2 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
   (describe "count-history-tokens"
             (it "counts total tokens across messages"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (#'sut/store-message! db-info :user "Hello")
                     (#'sut/store-message! db-info :assistant "World")
                     (let [total (#'sut/count-history-tokens db-info)]
                       (expect (pos? total)))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "returns 0 for empty history"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (expect (= 0 (#'sut/count-history-tokens db-info)))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
   (describe "get-recent-messages retrieval"
             (it "returns messages with expected keys"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (#'sut/store-message! db-info :user "How do I bake chocolate cookies?")
                     (#'sut/store-message! db-info :assistant "Mix flour, sugar, chocolate chips and bake at 350F")
                     (let [results (#'sut/get-recent-messages db-info 2)]
@@ -510,7 +497,7 @@
                       (expect (every? #(contains? % :content) results))
                       (expect (every? #(contains? % :role) results)))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; History Query Functions Tests (SCI Bindings)
@@ -601,44 +588,29 @@
 ;; =============================================================================
 
 (defdescribe learnings-test
-  (describe "init-learning-schema!"
-            (it "initializes schema in database"
-                (let [db-info (#'sut/create-disposable-db)]
-                  (try
-                    (let [result (#'sut/init-learning-schema! db-info)]
-                      (expect (= :schema-initialized result)))
-                    (finally
-                      (#'sut/dispose-db! db-info)))))
-
-            (it "returns nil for nil db-info"
-                (expect (nil? (#'sut/init-learning-schema! nil)))))
-
   (describe "db-store-learning!"
             (it "stores a learning with insight"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (let [result (#'sut/db-store-learning! db-info "Always verify data recency")]
                       (expect (some? (:learning/id result)))
                       (expect (= "Always verify data recency" (:learning/insight result)))
                       (expect (some? (:learning/timestamp result))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "stores learning with context"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (let [result (#'sut/db-store-learning! db-info "Check for duplicates" "aggregation tasks")]
                       (expect (= "aggregation tasks" (:learning/context result))))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
   (describe "db-get-learnings"
             (it "finds semantically similar learnings"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (#'sut/db-store-learning! db-info "For date questions, always verify the year in the context")
                     (#'sut/db-store-learning! db-info "Check database connection before queries")
           ;; Search with related wording
@@ -646,13 +618,12 @@
                       (expect (<= (count learnings) 2))
                       (expect (every? #(contains? % :insight) learnings)))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
   (describe "db-learning-stats"
             (it "returns learning statistics including voting stats"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (#'sut/db-store-learning! db-info "Insight without context")
                     (#'sut/db-store-learning! db-info "Insight with context" "some domain")
                     (let [stats (#'sut/db-learning-stats db-info)]
@@ -664,36 +635,33 @@
                       (expect (= 0 (:total-votes stats)))
                       (expect (= 0 (:total-applications stats))))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
   (describe "db-vote-learning!"
             (it "records positive vote"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (let [stored (#'sut/db-store-learning! db-info "Test insight")
                           voted (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)]
                       (expect (= 1 (:learning/useful-count voted)))
                       (expect (= 0 (:learning/not-useful-count voted)))
                       (expect (false? (:learning/decayed? voted))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "records negative vote"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (let [stored (#'sut/db-store-learning! db-info "Test insight")
                           voted (#'sut/db-vote-learning! db-info (:learning/id stored) :not-useful)]
                       (expect (= 0 (:learning/useful-count voted)))
                       (expect (= 1 (:learning/not-useful-count voted))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "accumulates multiple votes"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (let [stored (#'sut/db-store-learning! db-info "Test insight")]
                       (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)
                       (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)
@@ -701,13 +669,12 @@
                         (expect (= 2 (:learning/useful-count voted)))
                         (expect (= 1 (:learning/not-useful-count voted)))))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
   (describe "learning decay"
             (it "marks learning as decayed after 5+ votes with >70% negative"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (let [stored (#'sut/db-store-learning! db-info "Bad insight")]
             ;; Vote 1 useful, 5 not-useful (>70% negative, 6 total votes)
                       (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)
@@ -716,12 +683,11 @@
                       (let [final-vote (#'sut/db-vote-learning! db-info (:learning/id stored) :not-useful)]
                         (expect (true? (:learning/decayed? final-vote)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "filters decayed learnings from search results"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
           ;; Store two learnings
                     (let [_ (#'sut/db-store-learning! db-info "Good insight about testing")
                           bad-learning (#'sut/db-store-learning! db-info "Bad insight about testing")]
@@ -733,23 +699,21 @@
                         (expect (= 1 (count results)))
                         (expect (= "Good insight about testing" (:insight (first results))))))
                     (finally
-                      (#'sut/dispose-db! db-info))))))
+                      (#'sut/dispose-rlm-conn! db-info))))))
 
   (describe "db-increment-applied-count!"
             (it "increments applied count"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (let [stored (#'sut/db-store-learning! db-info "Test insight")]
                       (expect (= 1 (#'sut/db-increment-applied-count! db-info (:learning/id stored))))
                       (expect (= 2 (#'sut/db-increment-applied-count! db-info (:learning/id stored)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "search-learnings auto-increments applied count"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (#'sut/db-store-learning! db-info "Test insight for tracking")
           ;; Search twice - verify results are returned so we know tracking should work
                     (let [results1 (#'sut/db-get-learnings db-info "insight for tracking" {:top-k 5})
@@ -761,7 +725,7 @@
                       (let [stats (#'sut/db-learning-stats db-info)]
                         (expect (= 2 (:total-applications stats)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 (defdescribe learnings-sci-bindings-test
   (it "store-learning is available in SCI"
@@ -917,11 +881,14 @@
   (describe "make-rlm-query-fn"
             (it "enforces max recursion depth"
                 (let [depth-atom (atom 5)
-                      db-info (#'sut/create-disposable-db)]
+                      db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-message-history! db-info)
                     (let [db-info-atom (atom db-info)
-                          rlm-query-fn (#'sut/make-rlm-query-fn "gpt-4o" depth-atom nil nil db-info-atom)]
+                          test-router (router/make-router [{:id :test :api-key "t" :base-url "http://x"
+                                                           :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
+                                                                    :refinement "gpt-4o" :planning "gpt-4o"}
+                                                           :rpm 500 :priority 0}])
+                          rlm-query-fn (#'sut/make-rlm-query-fn :root depth-atom test-router db-info-atom)]
             ;; Should return error when at max depth
                       (binding [sut/*max-recursion-depth* 5]
                         (let [result (rlm-query-fn {:data "test"} "What is this?")]
@@ -929,7 +896,7 @@
                           (expect (some? (:error result)))
                           (expect (str/includes? (str (:error result)) "recursion")))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; Format Execution Results Tests
@@ -965,18 +932,21 @@
 ;; =============================================================================
 
 (def ^:private test-config
-  "LLM config for integration tests. 
+  "LLM config for integration tests.
    Uses OPENAI_API_KEY env var."
-  {:api-key (System/getenv "OPENAI_API_KEY")
-   :base-url (or (System/getenv "OPENAI_BASE_URL")
-                 "https://api.openai.com/v1")
-   :default-model "gpt-4o"})
+  {:providers [{:id :openai
+                :api-key (System/getenv "OPENAI_API_KEY")
+                :base-url (or (System/getenv "OPENAI_BASE_URL")
+                              "https://api.openai.com/v1")
+                :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
+                         :refinement "gpt-4o" :planning "gpt-4o"}
+                :rpm 500 :tpm 200000 :priority 0}]})
 
 (defn- integration-tests-enabled?
   "Returns true if LLM integration tests should run.
    Checks if test-config has a valid API key from environment."
   []
-  (some? (:api-key test-config)))
+  (some? (get-in test-config [:providers 0 :api-key])))
 
 (defn- with-integration-env*
   "Creates an RLM environment for integration tests, executes f, then disposes."
@@ -1271,7 +1241,7 @@
   (it "creates DB and stores entity"
       (with-test-env* {} (fn [env]
                            (let [db-info @(:db-info-atom env)
-                                 store (:store db-info)
+                                 conn (:conn db-info)
                                  entity-id (java.util.UUID/randomUUID)
                                  entity {:entity/id entity-id
                                          :entity/name "John Doe"
@@ -1282,18 +1252,17 @@
                                          :entity/section "Section 1"
                                          :entity/created-at (java.util.Date.)}]
                              ;; Store entity
-                             (swap! store update :entities conj entity)
+                             (d/transact! conn [entity])
                              ;; Query it back
-                             (let [entities (:entities @store)
-                                   found (filter #(= entity-id (:entity/id %)) entities)]
-                               (expect (= 1 (count found)))
-                               (expect (= "John Doe" (:entity/name (first found))))
-                               (expect (= :party (:entity/type (first found)))))))))
+                             (let [found (d/pull (d/db conn) '[*] [:entity/id entity-id])]
+                               (expect (some? (:db/id found)))
+                               (expect (= "John Doe" (:entity/name found)))
+                               (expect (= :party (:entity/type found))))))))
 
   (it "stores and retrieves entity with legal extension attributes"
       (with-test-env* {} (fn [env]
                            (let [db-info @(:db-info-atom env)
-                                 store (:store db-info)
+                                 conn (:conn db-info)
                                  entity-id (java.util.UUID/randomUUID)
                                  entity {:entity/id entity-id
                                          :entity/name "Contractor"
@@ -1307,10 +1276,10 @@
                                          :legal/effective-date "2025-01-01"
                                          :legal/expiry-date "2026-01-01"}]
                              ;; Store entity with legal attributes
-                             (swap! store update :entities conj entity)
+                             (d/transact! conn [entity])
                              ;; Query it back
-                             (let [found (first (filter #(= entity-id (:entity/id %)) (:entities @store)))]
-                               (expect (some? found))
+                             (let [found (d/pull (d/db conn) '[*] [:entity/id entity-id])]
+                               (expect (some? (:db/id found)))
                                (expect (= :contractor (:legal/party-role found)))
                                (expect (= "2025-01-01" (:legal/effective-date found)))
                                (expect (= "2026-01-01" (:legal/expiry-date found))))))))
@@ -1318,7 +1287,7 @@
   (it "stores and retrieves relationship between two entities"
       (with-test-env* {} (fn [env]
                            (let [db-info @(:db-info-atom env)
-                                 store (:store db-info)
+                                 conn (:conn db-info)
                                  source-id (java.util.UUID/randomUUID)
                                  target-id (java.util.UUID/randomUUID)
                                  rel-id (java.util.UUID/randomUUID)
@@ -1345,13 +1314,10 @@
                                                :relationship/document-id "doc-789"
                                                :relationship/description "Party A is obligated to perform"}]
                              ;; Store entities and relationship
-                             (swap! store update :entities conj source-entity)
-                             (swap! store update :entities conj target-entity)
-                             (swap! store update :relationships conj relationship)
+                             (d/transact! conn [source-entity target-entity relationship])
                              ;; Query relationship
-                             (let [rels (:relationships @store)
-                                   found (first (filter #(= rel-id (:relationship/id %)) rels))]
-                               (expect (some? found))
+                             (let [found (d/pull (d/db conn) '[*] [:relationship/id rel-id])]
+                               (expect (some? (:db/id found)))
                                (expect (= source-id (:relationship/source-entity-id found)))
                                (expect (= target-id (:relationship/target-entity-id found)))
                                (expect (= :obligates (:relationship/type found)))
@@ -1360,7 +1326,7 @@
   (it "stores and retrieves claim with citation and verification verdict"
       (with-test-env* {} (fn [env]
                            (let [db-info @(:db-info-atom env)
-                                 store (:store db-info)
+                                 conn (:conn db-info)
                                  claim-id (java.util.UUID/randomUUID)
                                  query-id (java.util.UUID/randomUUID)
                                  claim {:claim/id claim-id
@@ -1375,10 +1341,10 @@
                                         :claim/verification-verdict "correct"
                                         :claim/created-at (java.util.Date.)}]
                              ;; Store claim
-                             (swap! store update :claims conj claim)
+                             (d/transact! conn [claim])
                              ;; Query it back
-                             (let [found (first (filter #(= claim-id (:claim/id %)) (:claims @store)))]
-                               (expect (some? found))
+                             (let [found (d/pull (d/db conn) '[*] [:claim/id claim-id])]
+                               (expect (some? (:db/id found)))
                                (expect (= "The contract is valid" (:claim/text found)))
                                (expect (= "This contract is valid and binding" (:claim/quote found)))
                                (expect (= 0.95 (:claim/confidence found)))
@@ -1914,9 +1880,12 @@
 ;; =============================================================================
 
 (def ^:private test-ingest-config
-  {:api-key "test"
-   :base-url "https://api.openai.com/v1"
-   :default-model "gpt-4o"})
+  {:providers [{:id :test
+                :api-key "test"
+                :base-url "https://api.openai.com/v1"
+                :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
+                         :refinement "gpt-4o" :planning "gpt-4o"}
+                :rpm 500 :tpm 200000 :priority 0}]})
 
 (defn- make-test-image-with-description-document
   "Creates a doc with an image node that has description but no image-data."
@@ -2480,7 +2449,7 @@
 (defdescribe search-page-nodes-test
   (describe "db-search-page-nodes"
             (it "finds nodes matching content text"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :paragraph
@@ -2494,10 +2463,10 @@
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:page.node/content (first results)) "comply")))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "finds nodes matching description text"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :image
@@ -2507,10 +2476,10 @@
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:page.node/description (first results)) "revenue")))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "returns empty for non-matching query"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :paragraph
@@ -2519,10 +2488,10 @@
                     (let [results (#'sut/db-search-page-nodes db-info "xyznonexistent")]
                       (expect (= 0 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "falls back to list mode for blank query"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :paragraph
@@ -2535,10 +2504,10 @@
                     (let [results (#'sut/db-search-page-nodes db-info "")]
                       (expect (= 2 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "respects :document-id filter"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :paragraph
@@ -2552,10 +2521,10 @@
                       (expect (= 1 (count results)))
                       (expect (= "doc-1" (:page.node/document-id (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "respects :type filter"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :heading
@@ -2570,10 +2539,10 @@
                       (expect (= 1 (count results)))
                       (expect (= :heading (:page.node/type (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "includes content and description in results"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :paragraph
@@ -2586,12 +2555,12 @@
                       (expect (= "The full content is here." (:page.node/content node)))
                       (expect (= "A brief description." (:page.node/description node))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 (defdescribe search-toc-entries-test
   (describe "db-search-toc-entries"
             (it "finds entries matching title text"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-toc-entry! db-info
                       {:document.toc/title "Chapter 1: Compliance"
@@ -2607,10 +2576,10 @@
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:document.toc/title (first results)) "Compliance")))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "finds entries matching description text"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-toc-entry! db-info
                       {:document.toc/title "Appendix A"
@@ -2621,10 +2590,10 @@
                     (let [results (#'sut/db-search-toc-entries db-info "regulations")]
                       (expect (= 1 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "returns empty for non-matching query"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-toc-entry! db-info
                       {:document.toc/title "Introduction"
@@ -2634,10 +2603,10 @@
                     (let [results (#'sut/db-search-toc-entries db-info "xyznonexistent")]
                       (expect (= 0 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "falls back to list mode for blank query"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-toc-entry! db-info
                       {:document.toc/title "First Entry"
@@ -2652,109 +2621,106 @@
                     (let [results (#'sut/db-search-toc-entries db-info "")]
                       (expect (= 2 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 (defdescribe search-entities-test
   (describe "db-search-entities"
             (it "finds entities matching name"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "Acme Corp"
-                            :entity/type :organization
-                            :entity/description "A technology company"
-                            :entity/document-id "doc-1"
-                            :entity/created-at (java.util.Date.)})
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "Jane Smith"
-                            :entity/type :person
-                            :entity/description "Chief executive officer"
-                            :entity/document-id "doc-1"
-                            :entity/created-at (java.util.Date.)})
+                    (d/transact! (:conn db-info)
+                                 [{:entity/id (UUID/randomUUID)
+                                   :entity/name "Acme Corp"
+                                   :entity/type :organization
+                                   :entity/description "A technology company"
+                                   :entity/document-id "doc-1"
+                                   :entity/created-at (java.util.Date.)}
+                                  {:entity/id (UUID/randomUUID)
+                                   :entity/name "Jane Smith"
+                                   :entity/type :person
+                                   :entity/description "Chief executive officer"
+                                   :entity/document-id "doc-1"
+                                   :entity/created-at (java.util.Date.)}])
                     (let [results (#'sut/db-search-entities db-info "acme")]
                       (expect (= 1 (count results)))
                       (expect (= "Acme Corp" (:entity/name (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "finds entities matching description"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "Bob"
-                            :entity/type :person
-                            :entity/description "Senior compliance officer"
-                            :entity/document-id "doc-1"
-                            :entity/created-at (java.util.Date.)})
+                    (d/transact! (:conn db-info)
+                                 [{:entity/id (UUID/randomUUID)
+                                   :entity/name "Bob"
+                                   :entity/type :person
+                                   :entity/description "Senior compliance officer"
+                                   :entity/document-id "doc-1"
+                                   :entity/created-at (java.util.Date.)}])
                     (let [results (#'sut/db-search-entities db-info "compliance")]
                       (expect (= 1 (count results)))
                       (expect (= "Bob" (:entity/name (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "returns empty for non-matching query"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "TestCo"
-                            :entity/type :organization
-                            :entity/description "A company"
-                            :entity/document-id "doc-1"
-                            :entity/created-at (java.util.Date.)})
+                    (d/transact! (:conn db-info)
+                                 [{:entity/id (UUID/randomUUID)
+                                   :entity/name "TestCo"
+                                   :entity/type :organization
+                                   :entity/description "A company"
+                                   :entity/document-id "doc-1"
+                                   :entity/created-at (java.util.Date.)}])
                     (let [results (#'sut/db-search-entities db-info "xyznonexistent")]
                       (expect (= 0 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "respects :type filter"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "Acme Corp"
-                            :entity/type :organization
-                            :entity/description "A global corp"
-                            :entity/document-id "doc-1"
-                            :entity/created-at (java.util.Date.)})
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "Acme Division"
-                            :entity/type :person
-                            :entity/description "Acme division lead"
-                            :entity/document-id "doc-1"
-                            :entity/created-at (java.util.Date.)})
+                    (d/transact! (:conn db-info)
+                                 [{:entity/id (UUID/randomUUID)
+                                   :entity/name "Acme Corp"
+                                   :entity/type :organization
+                                   :entity/description "A global corp"
+                                   :entity/document-id "doc-1"
+                                   :entity/created-at (java.util.Date.)}
+                                  {:entity/id (UUID/randomUUID)
+                                   :entity/name "Acme Division"
+                                   :entity/type :person
+                                   :entity/description "Acme division lead"
+                                   :entity/document-id "doc-1"
+                                   :entity/created-at (java.util.Date.)}])
                     (let [results (#'sut/db-search-entities db-info "acme" {:type :organization})]
                       (expect (= 1 (count results)))
                       (expect (= :organization (:entity/type (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "respects :document-id filter"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "Shared Name"
-                            :entity/type :organization
-                            :entity/description "In doc 1"
-                            :entity/document-id "doc-1"
-                            :entity/created-at (java.util.Date.)})
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "Shared Name"
-                            :entity/type :organization
-                            :entity/description "In doc 2"
-                            :entity/document-id "doc-2"
-                            :entity/created-at (java.util.Date.)})
+                    (d/transact! (:conn db-info)
+                                 [{:entity/id (UUID/randomUUID)
+                                   :entity/name "Shared Name"
+                                   :entity/type :organization
+                                   :entity/description "In doc 1"
+                                   :entity/document-id "doc-1"
+                                   :entity/created-at (java.util.Date.)}
+                                  {:entity/id (UUID/randomUUID)
+                                   :entity/name "Shared Name"
+                                   :entity/type :organization
+                                   :entity/description "In doc 2"
+                                   :entity/document-id "doc-2"
+                                   :entity/created-at (java.util.Date.)}])
                     (let [results (#'sut/db-search-entities db-info "shared" {:document-id "doc-2"})]
                       (expect (= 1 (count results)))
                       (expect (= "doc-2" (:entity/document-id (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: Learnings Text Search Tests
@@ -2763,49 +2729,45 @@
 (defdescribe learnings-text-search-test
   (describe "db-get-learnings text filtering"
             (it "filters learnings by query text"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (#'sut/db-store-learning! db-info "Always verify date ranges in financial data")
                     (#'sut/db-store-learning! db-info "Check network connectivity before API calls")
                     (let [results (#'sut/db-get-learnings db-info "financial" {:top-k 10 :track-usage? false})]
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:insight (first results)) "financial")))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "searches context text too"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (#'sut/db-store-learning! db-info "Use pagination for large results" "database queries")
                     (let [results (#'sut/db-get-learnings db-info "database" {:top-k 10 :track-usage? false})]
                       (expect (= 1 (count results)))
                       (expect (= "database queries" (:context (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "returns all when query is blank"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (#'sut/db-store-learning! db-info "Insight one")
                     (#'sut/db-store-learning! db-info "Insight two")
                     (#'sut/db-store-learning! db-info "Insight three")
                     (let [results (#'sut/db-get-learnings db-info "" {:top-k 10 :track-usage? false})]
                       (expect (= 3 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "case-insensitive search"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (#'sut/init-learning-schema! db-info)
                     (#'sut/db-store-learning! db-info "always validate input parameters")
                     (let [results (#'sut/db-get-learnings db-info "VALIDATE INPUT" {:top-k 10 :track-usage? false})]
                       (expect (= 1 (count results))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: search-examples Text Search Tests
@@ -2881,7 +2843,7 @@
 (defdescribe list-page-nodes-truncation-test
   (describe "db-list-page-nodes content truncation"
             (it "includes content truncated to 200 chars"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (let [long-content (apply str (repeat 50 "abcdefg"))] ;; 350 chars
                       (#'sut/db-store-page-node! db-info
@@ -2894,10 +2856,10 @@
                         (expect (some? (:page.node/content node)))
                         (expect (= 200 (count (:page.node/content node))))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "includes description truncated to 200 chars"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (let [long-desc (apply str (repeat 50 "abcdefg"))] ;; 350 chars
                       (#'sut/db-store-page-node! db-info
@@ -2910,10 +2872,10 @@
                         (expect (some? (:page.node/description node)))
                         (expect (= 200 (count (:page.node/description node))))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
             (it "does not truncate short content"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
                     (#'sut/db-store-page-node! db-info
                       {:page.node/type :paragraph
@@ -2923,69 +2885,40 @@
                           node (first results)]
                       (expect (= "Short content." (:page.node/content node))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: Flush Store Batching Tests
 ;; =============================================================================
 
-(defdescribe flush-store-batching-test
-  (describe "mark-dirty-store! and per-collection persistence"
-            (it "mark-dirty-store! marks specific collection as dirty"
-                (let [db-info (#'sut/create-disposable-db)]
+(defdescribe datalevin-persistence-test
+  (describe "Datalevin auto-persistence"
+            (it "persists data immediately on transact without flush"
+                (let [db-info (#'sut/create-rlm-conn nil)
+                      conn (:conn db-info)]
                   (try
-                    (expect (empty? (:dirty @(:store db-info))))
-                    (#'sut/mark-dirty-store! db-info :messages)
-                    (expect (contains? (:dirty @(:store db-info)) :messages))
+                    (datalevin.core/transact! conn [{:entity/id (UUID/randomUUID)
+                                                     :entity/name "TestEntity"
+                                                     :entity/type :test
+                                                     :entity/description "auto-persisted"
+                                                     :entity/document-id "doc-persist"
+                                                     :entity/created-at (java.util.Date.)}])
+                    (let [results (datalevin.core/q '[:find [(pull ?e [*]) ...]
+                                                      :where [?e :entity/name "TestEntity"]]
+                                                    (datalevin.core/db conn))]
+                      (expect (= 1 (count results)))
+                      (expect (= "TestEntity" (:entity/name (first results)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
-            (it "mark-dirty-store! accumulates multiple dirty collections"
-                (let [db-info (#'sut/create-disposable-db)]
+            (it "DB path exists and is a directory after conn creation"
+                (let [db-info (#'sut/create-rlm-conn nil)
+                      path (:path db-info)]
                   (try
-                    (#'sut/mark-dirty-store! db-info :messages)
-                    (#'sut/mark-dirty-store! db-info :learnings)
-                    (expect (= #{:messages :learnings} (:dirty @(:store db-info))))
+                    (expect (fs/exists? path))
+                    (expect (fs/directory? path))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
-
-            (it "mark-dirty-store! accepts a set of collection keys"
-                (let [db-info (#'sut/create-disposable-db)]
-                  (try
-                    (#'sut/mark-dirty-store! db-info #{:entities :relationships})
-                    (expect (= #{:entities :relationships} (:dirty @(:store db-info))))
-                    (finally
-                      (#'sut/dispose-db! db-info)))))
-
-            (it "flush-store-now! resets dirty set"
-                (let [db-info (#'sut/create-disposable-db)]
-                  (try
-                    (#'sut/mark-dirty-store! db-info :messages)
-                    (expect (seq (:dirty @(:store db-info))))
-                    (#'sut/flush-store-now! db-info)
-                    (expect (empty? (:dirty @(:store db-info))))
-                    (finally
-                      (#'sut/dispose-db! db-info)))))
-
-            (it "flush-store-now! writes only dirty collections to individual files"
-                (let [db-info (#'sut/create-disposable-db)]
-                  (try
-                    ;; Add some data and mark dirty
-                    (swap! (:store db-info) update :entities conj
-                           {:entity/id (UUID/randomUUID)
-                            :entity/name "TestEntity"
-                            :entity/type :test})
-                    (#'sut/mark-dirty-store! db-info :entities)
-                    ;; Flush to disk
-                    (#'sut/flush-store-now! db-info)
-                    ;; Verify entities.edn exists but messages.edn does not
-                    (let [entities-file (java.io.File. (str (:path db-info) "/entities.edn"))
-                          messages-file (java.io.File. (str (:path db-info) "/messages.edn"))]
-                      (expect (.exists entities-file))
-                      (expect (pos? (.length entities-file)))
-                      (expect (not (.exists messages-file))))
-                    (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: Relationship Storage Tests
@@ -2994,52 +2927,52 @@
 (defdescribe relationship-storage-test
   (describe "two-phase entity + relationship storage"
             (it "stores relationships with resolved entity UUIDs"
-                (let [db-info (#'sut/create-disposable-db)]
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (let [uuid-a (UUID/randomUUID)
-                          uuid-b (UUID/randomUUID)]
+                    (let [conn (:conn db-info)
+                          uuid-a (UUID/randomUUID)
+                          uuid-b (UUID/randomUUID)
+                          rel-id (UUID/randomUUID)]
                       ;; Phase 1: Store entities
-                      (swap! (:store db-info) update :entities conj
-                             {:entity/id uuid-a
-                              :entity/name "Alice"
-                              :entity/type :person
-                              :entity/description "Engineer"
-                              :entity/document-id "doc-1"
-                              :entity/created-at (java.util.Date.)})
-                      (swap! (:store db-info) update :entities conj
-                             {:entity/id uuid-b
-                              :entity/name "Bob"
-                              :entity/type :person
-                              :entity/description "Manager"
-                              :entity/document-id "doc-1"
-                              :entity/created-at (java.util.Date.)})
+                      (d/transact! conn
+                                   [{:entity/id uuid-a
+                                     :entity/name "Alice"
+                                     :entity/type :person
+                                     :entity/description "Engineer"
+                                     :entity/document-id "doc-1"
+                                     :entity/created-at (java.util.Date.)}
+                                    {:entity/id uuid-b
+                                     :entity/name "Bob"
+                                     :entity/type :person
+                                     :entity/description "Manager"
+                                     :entity/document-id "doc-1"
+                                     :entity/created-at (java.util.Date.)}])
                       ;; Phase 2: Store relationship with resolved UUIDs
-                      (swap! (:store db-info) update :relationships conj
-                             {:relationship/id (UUID/randomUUID)
-                              :relationship/type :works-with
-                              :relationship/source-entity-id uuid-a
-                              :relationship/target-entity-id uuid-b
-                              :relationship/description "Alice works with Bob"
-                              :relationship/document-id "doc-1"
-                              :relationship/created-at (java.util.Date.)})
+                      (d/transact! conn
+                                   [{:relationship/id rel-id
+                                     :relationship/type :works-with
+                                     :relationship/source-entity-id uuid-a
+                                     :relationship/target-entity-id uuid-b
+                                     :relationship/description "Alice works with Bob"
+                                     :relationship/document-id "doc-1"}])
                       ;; Verify entities stored
-                      (expect (= 2 (count (:entities @(:store db-info)))))
+                      (expect (= 2 (count (d/q '[:find ?e :where [?e :entity/id _]] (d/db conn)))))
                       ;; Verify relationship stored
-                      (expect (= 1 (count (:relationships @(:store db-info)))))
-                      (let [rel (first (:relationships @(:store db-info)))]
+                      (expect (= 1 (count (d/q '[:find ?e :where [?e :relationship/id _]] (d/db conn)))))
+                      (let [rel (d/pull (d/db conn) '[*] [:relationship/id rel-id])]
                         (expect (= uuid-a (:relationship/source-entity-id rel)))
                         (expect (= uuid-b (:relationship/target-entity-id rel)))
                         (expect (= :works-with (:relationship/type rel)))
                         (expect (= "Alice works with Bob" (:relationship/description rel)))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))
+                      (#'sut/dispose-rlm-conn! db-info)))))
 
-             (it "relationships vector starts empty in EMPTY_STORE"
-                (let [db-info (#'sut/create-disposable-db)]
+             (it "relationships start empty in a fresh db"
+                (let [db-info (#'sut/create-rlm-conn nil)]
                   (try
-                    (expect (= [] (:relationships @(:store db-info))))
+                    (expect (= 0 (count (d/q '[:find ?e :where [?e :relationship/id _]] (d/db (:conn db-info))))))
                     (finally
-                      (#'sut/dispose-db! db-info)))))))
+                      (#'sut/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; generate-qa-env! pipeline unit tests

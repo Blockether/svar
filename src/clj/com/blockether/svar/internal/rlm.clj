@@ -61,20 +61,19 @@
     - (get-history n) - Get recent messages (default 10)"
   (:require
    [babashka.fs :as fs]
-   [clojure.pprint :as pprint]
    [clojure.core.async :as async]
    [clojure.set :as set]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]
-    [com.blockether.svar.internal.jsonish :as jsonish]
-     [com.blockether.svar.internal.tokens :as tokens]
-     [com.blockether.svar.internal.util :as util]
-     [com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex]
-     [com.blockether.svar.internal.rlm.internal.pageindex.spec :as rlm-spec]
-   [fast-edn.core :as edn]
-   [clojure.java.io :as io]
+   [com.blockether.svar.internal.jsonish :as jsonish]
+   [com.blockether.svar.internal.tokens :as tokens]
+   [com.blockether.svar.internal.util :as util]
+   [com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex]
+   [com.blockether.svar.internal.rlm.internal.pageindex.spec :as rlm-spec]
+   [datalevin.core :as d]
    [sci.core :as sci]
    [taoensso.trove :as trove])
   (:import
@@ -95,6 +94,14 @@
 (def EVAL_TIMEOUT_MS
   "Timeout in milliseconds for code evaluation in SCI sandbox."
   30000)
+
+(def ^:private STDOUT_TRUNCATION_LIMIT
+  "Maximum characters of stdout/result to include in iteration feedback.
+   Per the RLM paper: 'Only (constant-size) metadata about stdout, like a short
+   prefix and length, is appended to the model's history for the next iteration.
+   This is key: it forces the model to rely on variables and sub-calls to manage
+   long strings instead of polluting its window.'"
+  300)
 
 (def ^:private ENTITY_EXTRACTION_OBJECTIVE
   "Extract entities and relationships from the provided content.\n\nReturn only the fields in the schema.\nFocus on concrete entities, avoid duplication, and include page/section when known.")
@@ -198,7 +205,7 @@
   nil)
 
 ;; Forward declarations for mutually dependent functions
-(declare make-llm-query-fn make-rlm-query-fn run-sub-rlm
+(declare make-llm-query-fn make-routed-llm-query-fn make-rlm-query-fn run-sub-rlm
          build-system-prompt run-iteration format-executions)
 
 ;; =============================================================================
@@ -261,6 +268,51 @@
 (defn- str-includes? [s substr] (when s (str/includes? s substr)))
 (defn- str-starts-with? [s prefix] (when s (str/starts-with? s prefix)))
 (defn- str-ends-with? [s suffix] (when s (str/ends-with? s suffix)))
+
+;; =============================================================================
+;; Stdout Truncation (RLM Paper §3: constant-size metadata)
+;; =============================================================================
+
+(defn- truncate-for-history
+  "Truncates output for conversation history, adding length metadata."
+  [s max-chars]
+  (if (or (nil? s) (<= (count s) max-chars))
+    s
+    (str (subs s 0 max-chars)
+         "\n... [" (- (count s) max-chars) " more chars — store in a variable with (def my-var ...)]")))
+
+;; =============================================================================
+;; Raw Text Access (RLM Paper §3: symbolic handle to prompt P)
+;; =============================================================================
+
+(defn- build-raw-text
+  "Concatenates all page node content from Datalevin conn into a single string."
+  [conn]
+  (when conn
+    (->> (d/q '[:find [(pull ?e [:page.node/content :page.node/document-id :page.node/page-id :page.node/id]) ...]
+               :where [?e :page.node/id _]]
+             (d/db conn))
+         (sort-by (juxt :page.node/document-id :page.node/page-id :page.node/id))
+         (keep :page.node/content)
+         (str/join "\n"))))
+
+(defn- build-page-texts
+  "Builds a vector of page texts indexed by page number across all documents."
+  [conn]
+  (when conn
+    (let [page-nodes (d/q '[:find [(pull ?e [:page.node/content :page.node/page-id :page.node/id]) ...]
+                            :where [?e :page.node/id _]]
+                          (d/db conn))
+          pages (d/q '[:find [(pull ?e [:page/id :page/document-id :page/index]) ...]
+                       :where [?e :page/id _]]
+                     (d/db conn))
+          nodes-by-page (group-by :page.node/page-id page-nodes)
+          sorted-pages (sort-by (juxt :page/document-id :page/index) pages)]
+      (mapv (fn [page]
+              (let [nodes (get nodes-by-page (:page/id page) [])
+                    sorted-nodes (sort-by :page.node/id nodes)]
+                (str/join "\n" (keep :page.node/content sorted-nodes))))
+            sorted-pages))))
 
 ;; =============================================================================
 ;; Debug Logging
@@ -414,126 +466,129 @@
   (str (java.time.LocalDate/now)))
 
 ;; =============================================================================
-;; In-Memory Store
+;; Datalevin Schema and Connection Lifecycle
 ;; =============================================================================
 
-(def ^:private STORE_COLLECTIONS
-  "Flat collection keys persisted as individual EDN files."
-  #{:messages :learnings :entities :relationships :claims})
+(def ^:private RLM_SCHEMA
+  "Unified Datalevin schema for all RLM data."
+  {;; Messages
+   :message/id        {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :message/role      {:db/valueType :db.type/keyword}
+   :message/content   {:db/valueType :db.type/string :db/fulltext true}
+   :message/tokens    {:db/valueType :db.type/long}
+   :message/timestamp {:db/valueType :db.type/instant}
+   :message/iteration {:db/valueType :db.type/long}
 
-(def ^:private EMPTY_STORE
-  "Empty store structure — the shape of all in-memory RLM data.
-   
-   Document data (documents, pages, page-nodes, toc-entries) is derived from
-   :raw-documents on load. On flush, raw-documents are written in pageindex format
-   under documents/{name}/document.edn."
-  {:messages []
-   :learnings []
-   ;; Decomposed document data (in-memory only, derived from raw-documents)
-   :documents []
-   :pages []
-   :page-nodes []
-   :toc-entries []
-   ;; Full PageIndex documents keyed by doc-id — the source of truth for persistence
-   :raw-documents {}
-   ;; Extracted knowledge graph
-   :entities []
-   :relationships []
-   :claims []
-   :schema {}
-   :dirty #{}})
+   ;; Documents
+   :document/id         {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :document/name       {:db/valueType :db.type/string}
+   :document/title      {:db/valueType :db.type/string :db/fulltext true}
+   :document/abstract   {:db/valueType :db.type/string :db/fulltext true}
+   :document/extension  {:db/valueType :db.type/string}
+   :document/author     {:db/valueType :db.type/string}
+   :document/page-count {:db/valueType :db.type/long}
+   :document/created-at {:db/valueType :db.type/instant}
+   :document/updated-at {:db/valueType :db.type/instant}
 
-(defn- flush-store-now!
-  "Persists dirty data to disk.
-   
-   Flat collections (messages, learnings, entities, relationships, claims) are
-   written as individual EDN files: messages.edn, learnings.edn, etc.
-   
-   Documents are written in pageindex format under documents/{name}/:
-     documents/{name}/document.edn  — full PageIndex document
-     documents/{name}/images/       — extracted images as PNG files
-   
-   Only writes collections that are marked dirty. Resets dirty set after write."
-  [{:keys [store path]}]
-  (when (and path store)
-    (let [dirty-keys (:dirty @store)]
-      (when (seq dirty-keys)
-        (try
-          (let [store-data @store
-                docs-dir (io/file path "documents")]
-            (io/make-parents (io/file path "schema.edn"))
-            ;; Write dirty flat collections
-            (doseq [k (filter STORE_COLLECTIONS dirty-keys)]
-              (let [coll-file (io/file path (str (name k) ".edn"))
-                    coll-data (get store-data k)]
-                (spit coll-file (with-out-str (pprint/pprint coll-data)))))
-            ;; Write documents in pageindex format
-            (when (contains? dirty-keys :raw-documents)
-              (doseq [[_doc-id doc] (:raw-documents store-data)]
-                (let [doc-name (or (:document/name doc) (str _doc-id))
-                      doc-dir (io/file docs-dir doc-name)]
-                  (pageindex/write-document-edn! (str doc-dir) doc))))
-            ;; Always write schema (cheap, keeps consistent)
-            (spit (io/file path "schema.edn") (with-out-str (pprint/pprint (:schema store-data))))
-            (swap! store assoc :dirty #{}))
-          (catch Exception e
-            (trove/log! {:level :warn :data {:error (ex-message e) :dirty dirty-keys}
-                         :msg "Failed to flush store to disk"})))))))
+   ;; Pages
+   :page/id          {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :page/document-id {:db/valueType :db.type/string}
+   :page/index       {:db/valueType :db.type/long}
 
-(defn- mark-dirty-store!
-  "Marks specific collection(s) as dirty (has unsaved changes).
-   
-   Params:
-   `db-info` - Map with :store atom.
-   `ks` - Keyword or collection of keywords identifying which store collections changed."
-  [{:keys [store]} ks]
-  (when store
-    (let [ks (if (keyword? ks) #{ks} (set ks))]
-      (swap! store update :dirty into ks))))
+   ;; Page Nodes (content)
+   :page.node/id           {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :page.node/page-id      {:db/valueType :db.type/string}
+   :page.node/document-id  {:db/valueType :db.type/string}
+   :page.node/local-id     {:db/valueType :db.type/string}
+   :page.node/type         {:db/valueType :db.type/keyword}
+   :page.node/content      {:db/valueType :db.type/string :db/fulltext true}
+   :page.node/description  {:db/valueType :db.type/string :db/fulltext true}
+   :page.node/level        {:db/valueType :db.type/string}
+   :page.node/parent-id    {:db/valueType :db.type/string}
+   :page.node/image-data   {:db/valueType :db.type/bytes}
+   :page.node/continuation? {:db/valueType :db.type/boolean}
+   :page.node/caption      {:db/valueType :db.type/string}
+   :page.node/kind         {:db/valueType :db.type/string}
+   :page.node/bbox         {:db/valueType :db.type/string}
+   :page.node/group-id     {:db/valueType :db.type/string}
 
-(defn- create-temp-db-path []
-  (let [tmp-dir (System/getProperty "java.io.tmpdir")
-        unique-id (str (java.util.UUID/randomUUID))]
-    (str tmp-dir "/rlm-db-" unique-id)))
+   ;; TOC Entries
+   :document.toc/id              {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :document.toc/document-id     {:db/valueType :db.type/string}
+   :document.toc/type            {:db/valueType :db.type/keyword}
+   :document.toc/title           {:db/valueType :db.type/string :db/fulltext true}
+   :document.toc/description     {:db/valueType :db.type/string :db/fulltext true}
+   :document.toc/target-page     {:db/valueType :db.type/long}
+   :document.toc/target-section-id {:db/valueType :db.type/string}
+   :document.toc/level           {:db/valueType :db.type/string}
+   :document.toc/parent-id       {:db/valueType :db.type/string}
+   :document.toc/created-at      {:db/valueType :db.type/instant}
 
-(defn- create-disposable-db
-  "Creates a disposable in-memory store for RLM use.
-   
-   Params:
-   `opts` - Map, optional:
-     - :schema - Map. Initial schema to merge.
-   
-   Returns:
-   Map with :store (atom), :path, :owned?."
-  ([] (create-disposable-db {}))
-  ([{:keys [schema]}]
-   (let [path (create-temp-db-path)]
-     {:store (atom (cond-> EMPTY_STORE
-                     schema (update :schema merge schema)))
-      :path path
-      :owned? true})))
+   ;; Entities
+   :entity/id          {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :entity/name        {:db/valueType :db.type/string :db/fulltext true}
+   :entity/type        {:db/valueType :db.type/keyword}
+   :entity/description {:db/valueType :db.type/string :db/fulltext true}
+   :entity/document-id {:db/valueType :db.type/string}
+   :entity/page        {:db/valueType :db.type/long}
+   :entity/section     {:db/valueType :db.type/string}
+   :entity/created-at  {:db/valueType :db.type/instant}
 
-(defn- wrap-external-db
-  "Wraps an externally-provided store atom (will NOT be disposed)."
-  [store-atom]
-  {:store store-atom :path nil :owned? false})
+   ;; Relationships
+   :relationship/id               {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :relationship/type             {:db/valueType :db.type/keyword}
+   :relationship/source-entity-id {:db/valueType :db.type/uuid}
+   :relationship/target-entity-id {:db/valueType :db.type/uuid}
+   :relationship/description      {:db/valueType :db.type/string}
+   :relationship/document-id      {:db/valueType :db.type/string}
 
-(defn- rlm-store?
-  "Returns true if value is an RLM store (map with :store atom)."
-  [x]
-  (and (map? x) (contains? x :store) (instance? clojure.lang.Atom (:store x))))
+   ;; Learnings
+   :learning/id               {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :learning/insight          {:db/valueType :db.type/string :db/fulltext true}
+   :learning/context          {:db/valueType :db.type/string :db/fulltext true}
+   :learning/timestamp        {:db/valueType :db.type/instant}
+   :learning/useful-count     {:db/valueType :db.type/long}
+   :learning/not-useful-count {:db/valueType :db.type/long}
+   :learning/applied-count    {:db/valueType :db.type/long}
+   :learning/last-evaluated   {:db/valueType :db.type/instant}
 
-(defn- dispose-db!
-  "Flushes dirty data and disposes a database if it's owned."
-  [{:keys [store path owned?] :as db-info}]
-  ;; Always flush dirty data before disposing
-  (when (and store (seq (:dirty @store)))
-    (flush-store-now! db-info))
-  (when owned?
+   ;; Claims
+   :claim/id                   {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :claim/text                 {:db/valueType :db.type/string}
+   :claim/document-id          {:db/valueType :db.type/string}
+   :claim/page                 {:db/valueType :db.type/long}
+   :claim/section              {:db/valueType :db.type/string}
+   :claim/quote                {:db/valueType :db.type/string}
+   :claim/confidence           {:db/valueType :db.type/double}
+   :claim/query-id             {:db/valueType :db.type/uuid}
+   :claim/verified?            {:db/valueType :db.type/boolean}
+   :claim/verification-verdict {:db/valueType :db.type/string}
+   :claim/created-at           {:db/valueType :db.type/instant}
+
+   ;; Raw documents (PageIndex source of truth, stored as EDN string)
+   :raw-document/id      {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :raw-document/content {:db/valueType :db.type/string}})
+
+(defn- create-rlm-conn
+  "Creates a Datalevin connection for RLM.
+   With path: persistent DB. Without: temp DB (deleted on dispose)."
+  [path]
+  (let [dir (or path (str (System/getProperty "java.io.tmpdir") "/rlm-" (UUID/randomUUID)))
+        conn (d/get-conn dir RLM_SCHEMA)]
+    {:conn conn :path dir :owned? (nil? path)}))
+
+(defn- dispose-rlm-conn!
+  "Closes the Datalevin connection and deletes temp DB if owned."
+  [{:keys [conn path owned?]}]
+  (try
+    (d/close conn)
+    (catch Exception e
+      (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to close RLM connection"})))
+  (when (and owned? path (fs/exists? path))
     (try
-      (when (and path (fs/exists? path)) (fs/delete-tree path))
+      (fs/delete-tree path)
       (catch Exception e
-        (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to dispose RLM database"})))))
+        (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to delete temp RLM DB"})))))
 
 (declare get-recent-messages)
 (declare db-list-page-nodes)
@@ -541,56 +596,32 @@
 (declare db-list-entities)
 
 ;; =============================================================================
-;; Message History Schema
+;; Message History (Datalevin-backed)
 ;; =============================================================================
-
-(def MESSAGE_HISTORY_SCHEMA
-  "Schema for storing conversation messages."
-  {:message/id        {:db/unique :db.unique/identity
-                       :db/valueType :db.type/uuid}
-   :message/role      {:db/valueType :db.type/keyword}  ;; :user, :assistant, :system
-   :message/content   {:db/valueType :db.type/string}
-   :message/tokens    {:db/valueType :db.type/long}
-   :message/timestamp {:db/valueType :db.type/instant}
-   :message/iteration {:db/valueType :db.type/long}})   ;; Which iteration this message was from
-
-(defn- init-message-history!
-  "Initializes the message history schema in the store.
-   
-   Params:
-   `db-info` - Map with :store atom.
-   
-   Returns:
-   :schema-initialized"
-  [{:keys [store]}]
-  (when store
-    (swap! store update :schema merge MESSAGE_HISTORY_SCHEMA)
-    :schema-initialized))
 
 (defn- store-message!
   "Stores a conversation message.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `role` - Keyword. :user, :assistant, or :system.
    `content` - String. Message content.
    `opts` - Map, optional:
      - :iteration - Integer. Which iteration this message is from.
      - :tokens - Integer. Pre-computed token count (computed if not provided).
      - :model - String. Model for token counting (default: gpt-4o).
-   
+
    Returns:
    Map with :id, :role, :content, :tokens, :timestamp."
   ([db-info role content]
    (store-message! db-info role content {}))
-  ([{:keys [store] :as db-info} role content {:keys [iteration tokens model] :or {model "gpt-4o"}}]
-   (when (and store (not (str/blank? content)))  ;; Skip empty content
-     (let [msg-id (java.util.UUID/randomUUID)
-           ;; Lazy require to avoid circular dependency
-            token-count (or tokens
-                            (try
-                              (tokens/count-tokens model content)
-                              (catch Exception _ (quot (count content) 4))))
+  ([{:keys [conn]} role content {:keys [iteration tokens model] :or {model "gpt-4o"}}]
+   (when (and conn (not (str/blank? content)))
+     (let [msg-id (UUID/randomUUID)
+           token-count (or tokens
+                           (try
+                             (tokens/count-tokens model content)
+                             (catch Exception _ (quot (count content) 4))))
            timestamp (java.util.Date.)
            msg {:message/id msg-id
                 :message/role role
@@ -598,42 +629,45 @@
                 :message/tokens token-count
                 :message/timestamp timestamp
                 :message/iteration (or iteration 0)}]
-       (swap! store update :messages conj msg)
-       (mark-dirty-store! db-info :messages)
+       (d/transact! conn [msg])
        {:id msg-id :role role :content content :tokens token-count :timestamp timestamp}))))
 
 (defn- get-recent-messages
   "Gets the most recent messages by timestamp.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `limit` - Integer. Maximum messages to return.
-   
+
    Returns:
    Vector of maps with :content, :role, :tokens, :timestamp."
-  [{:keys [store]} limit]
-  (when store
-    (->> (:messages @store)
-         (map (fn [msg]
-                {:content (:message/content msg)
-                 :role (:message/role msg)
-                 :tokens (:message/tokens msg)
-                 :timestamp (:message/timestamp msg)}))
-         (sort-by :timestamp #(compare %2 %1)) ; Most recent first
+  [{:keys [conn]} limit]
+  (when conn
+    (->> (d/q '[:find [(pull ?e [:message/content :message/role :message/tokens :message/timestamp]) ...]
+               :where [?e :message/id _]]
+             (d/db conn))
+         (sort-by :message/timestamp #(compare %2 %1))
          (take limit)
-         vec)))
+         (mapv (fn [m]
+                 {:content (:message/content m)
+                  :role (:message/role m)
+                  :tokens (:message/tokens m)
+                  :timestamp (:message/timestamp m)})))))
 
 (defn- count-history-tokens
   "Counts total tokens in message history.
-   
+
    Params:
-   `db-info` - Map with :store key.
-   
+   `db-info` - Map with :conn key.
+
    Returns:
    Integer. Total tokens across all stored messages."
-  [{:keys [store]}]
-  (when store
-    (reduce + 0 (map :message/tokens (:messages @store)))))
+  [{:keys [conn]}]
+  (when conn
+    (let [tokens (d/q '[:find ?tokens
+                        :where [?e :message/tokens ?tokens]]
+                      (d/db conn))]
+      (reduce + 0 (map first tokens)))))
 
 ;; =============================================================================
 ;; Smart Context Selection (Semantic + Token-Aware)
@@ -663,7 +697,7 @@
     {:keys [model preserve-recent] :or {model "gpt-4o" preserve-recent 4}}]
    (let [;; If no DB or not enough messages, just truncate normally
          msg-count (count current-messages)]
-     (if (or (nil? db-info) (nil? (:store db-info)) (<= msg-count (inc preserve-recent)))
+     (if (or (nil? db-info) (nil? (:conn db-info)) (<= msg-count (inc preserve-recent)))
        (tokens/truncate-messages model current-messages max-tokens)
 
         ;; Recency-based selection
@@ -718,229 +752,8 @@
              ;; Combine: system + selected history + recent
              (vec (concat [system-msg] ordered-middle recent-msgs)))))))))
 
-;; =============================================================================
-;; Node Resource Schema (PageIndex-based)
-;; =============================================================================
+;; (Individual schema defs removed — unified RLM_SCHEMA used at conn creation)
 
-;; =============================================================================
-;; PageIndex Document Schema (Complete Structure)
-;; =============================================================================
-
-(def DOCUMENT_SCHEMA
-  "Schema for storing PageIndex documents exactly as produced by PageIndex.
-   Matches :document/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec."
-  {:document/id         {:db/unique :db.unique/identity
-                         :db/valueType :db.type/string
-                         :db/doc "Generated UUID string for the document"}
-   :document/name       {:db/valueType :db.type/string
-                         :db/doc "Filename without extension"}
-   :document/title      {:db/valueType :db.type/string
-                         :db/doc "Extracted title from metadata or first heading"}
-   :document/abstract   {:db/valueType :db.type/string
-                         :db/doc "LLM-generated summary from section descriptions"}
-   :document/extension  {:db/valueType :db.type/string
-                         :db/doc "File type: pdf, md, txt, docx, html"}
-   :document/author     {:db/valueType :db.type/string
-                         :db/doc "Document author if available"}
-   :document/created-at {:db/valueType :db.type/instant
-                         :db/doc "When document was created/indexed"}
-   :document/updated-at {:db/valueType :db.type/instant
-                         :db/doc "When document was last updated"}})
-
-(def PAGE_SCHEMA
-  "Schema for storing PageIndex pages exactly as produced by PageIndex.
-   Matches :page/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec."
-  {:page/id          {:db/unique :db.unique/identity
-                      :db/valueType :db.type/string
-                      :db/doc "Generated UUID string: document-id + page-index"}
-   :page/document-id {:db/valueType :db.type/string
-                      :db/doc "Reference to parent document"}
-   :page/index       {:db/valueType :db.type/long
-                      :db/doc "Page number (0-based)"}})
-
-(def PAGE_NODE_SCHEMA
-  "Schema for storing PageIndex page nodes exactly as produced by PageIndex.
-   Matches :page.node/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec.
-   These are the actual content elements: paragraphs, headings, images, tables, etc."
-  {:page.node/id           {:db/unique :db.unique/identity
-                            :db/valueType :db.type/string
-                            :db/doc "Unique ID: page-id + node-id"}
-   :page.node/page-id      {:db/valueType :db.type/string
-                            :db/doc "Reference to parent page"}
-   :page.node/document-id  {:db/valueType :db.type/string
-                            :db/doc "Reference to parent document (for direct queries)"}
-   :page.node/local-id     {:db/valueType :db.type/string
-                            :db/doc "Original node ID within page (1, 2, 3, etc.)"}
-   :page.node/type         {:db/valueType :db.type/keyword
-                            :db/doc "Node type: :section :heading :paragraph :list-item :image :table :header :footer :metadata"}
-   :page.node/parent-id    {:db/valueType :db.type/string
-                            :db/doc "Parent node ID for hierarchy (nil for top-level)"}
-   :page.node/level        {:db/valueType :db.type/string
-                            :db/doc "Level: h1-h6 for headings, l1-l6 for lists, paragraph/citation/code for paragraphs"}
-   :page.node/content      {:db/valueType :db.type/string
-                            :db/doc "Text content for text nodes"}
-   :page.node/image-data   {:db/valueType :db.type/bytes
-                            :db/doc "Raw PNG image bytes for visual nodes (images/tables)"}
-   :page.node/description  {:db/valueType :db.type/string
-                            :db/doc "AI-generated description for sections/images/tables"}
-   :page.node/continuation? {:db/valueType :db.type/boolean
-                             :db/doc "True if continues from previous page"}
-   :page.node/caption      {:db/valueType :db.type/string
-                            :db/doc "Caption text for images/tables"}
-   :page.node/kind         {:db/valueType :db.type/string
-                            :db/doc "Kind of visual: photo, diagram, chart, data, form, etc."}
-   :page.node/bbox         {:db/valueType :db.type/string
-                            :db/doc "Bounding box as JSON string [xmin, ymin, xmax, ymax]"}
-   :page.node/group-id     {:db/valueType :db.type/string
-                            :db/doc "Shared UUID for continuation grouping across pages"}})
-
-(def TOC_ENTRY_SCHEMA
-  "Schema for storing PageIndex TOC entries exactly as produced by PageIndex.
-   Matches :document.toc/* namespace from com.blockether.svar.internal.rlm.internal.pageindex.spec."
-  {:document.toc/id           {:db/unique :db.unique/identity
-                               :db/valueType :db.type/string
-                               :db/doc "UUID string identifier for the TOC entry"}
-   :document.toc/document-id  {:db/valueType :db.type/string
-                               :db/doc "Reference to parent document"}
-   :document.toc/type         {:db/valueType :db.type/keyword
-                               :db/doc "Entry type (always :toc-entry)"}
-   :document.toc/parent-id    {:db/valueType :db.type/string
-                               :db/doc "Parent entry ID (nil for root entries)"}
-   :document.toc/title        {:db/valueType :db.type/string
-                               :db/doc "TOC entry title"}
-   :document.toc/description  {:db/valueType :db.type/string
-                               :db/doc "Optional description"}
-   :document.toc/target-page  {:db/valueType :db.type/long
-                               :db/doc "Target page (0-based index)"}
-   :document.toc/target-section-id {:db/valueType :db.type/string
-                                    :db/doc "UUID string linking to page node"}
-   :document.toc/level        {:db/valueType :db.type/string
-                               :db/doc "Level (l1, l2, l3, etc.)"}
-   :document.toc/created-at   {:db/valueType :db.type/instant
-                               :db/doc "When entry was stored in RLM"}})
-
-(def LEARNING_SCHEMA
-  "Schema for storing learnings (meta-insights).
-   Learnings capture HOW to approach problems, not just query→answer pairs.
-   
-   Voting system:
-   - Learnings are voted on after tasks complete (positive/negative)
-   - Learnings with >70% negative votes after 5+ total votes are 'decayed' (filtered from queries)
-   - :applied-count tracks how many times a learning was retrieved"
-  {:learning/id             {:db/unique :db.unique/identity
-                             :db/valueType :db.type/uuid
-                             :db/doc "Unique identifier for the learning"}
-   :learning/insight        {:db/valueType :db.type/string
-                             :db/doc "The learning/insight text"}
-   :learning/context        {:db/valueType :db.type/string
-                             :db/doc "Task/domain context this learning applies to"}
-   :learning/timestamp      {:db/valueType :db.type/instant
-                             :db/doc "When learning was stored"}
-   ;; Voting fields
-   :learning/useful-count   {:db/valueType :db.type/long
-                             :db/doc "Number of positive votes (learning was helpful)"}
-   :learning/not-useful-count {:db/valueType :db.type/long
-                               :db/doc "Number of negative votes (learning was not helpful)"}
-   :learning/applied-count  {:db/valueType :db.type/long
-                             :db/doc "Number of times this learning was retrieved/used"}
-   :learning/last-evaluated {:db/valueType :db.type/instant
-                             :db/doc "When learning was last evaluated for usefulness"}})
-
-;; =============================================================================
-;; Entity Schema (Generic Entity Attributes)
-;; =============================================================================
-
-(def ENTITY_SCHEMA
-  "Schema for storing generic entities extracted from documents.
-   Entities are the fundamental building blocks: parties, obligations, conditions, terms, clauses, cross-references.
-   Each entity has a type and description."
-  {:entity/id              {:db/unique :db.unique/identity
-                            :db/valueType :db.type/uuid
-                            :db/doc "Unique identifier for the entity"}
-   :entity/name            {:db/valueType :db.type/string
-                            :db/doc "Entity name or label"}
-   :entity/type            {:db/valueType :db.type/keyword
-                            :db/doc "Entity type: :party, :obligation, :condition, :term, :clause, :cross-reference"}
-   :entity/description     {:db/valueType :db.type/string
-                            :db/doc "Extracted context/description of the entity"}
-   :entity/document-id     {:db/valueType :db.type/string
-                            :db/doc "Reference to source document"}
-   :entity/page            {:db/valueType :db.type/long
-                            :db/doc "Source page number"}
-   :entity/section         {:db/valueType :db.type/string
-                            :db/doc "Source section identifier"}
-   :entity/created-at      {:db/valueType :db.type/instant
-                            :db/doc "When entity was created/extracted"}})
-
-;; =============================================================================
-;; Legal Entity Schema (Legal-Specific Extensions)
-;; =============================================================================
-
-(def LEGAL_ENTITY_SCHEMA
-  "Schema for legal-specific entity attributes.
-   Extends ENTITY_SCHEMA with domain-specific fields for parties, obligations, conditions, etc."
-  {:legal/party-role       {:db/valueType :db.type/keyword
-                            :db/doc "Party role: :plaintiff, :defendant, :contractor, :client, :guarantor"}
-   :legal/obligation-type  {:db/valueType :db.type/keyword
-                            :db/doc "Obligation type: :payment, :delivery, :performance, :confidentiality"}
-   :legal/condition-type   {:db/valueType :db.type/keyword
-                            :db/doc "Condition type: :precedent, :subsequent, :termination, :force-majeure"}
-   :legal/effective-date   {:db/valueType :db.type/string
-                            :db/doc "Effective date reference from document"}
-   :legal/expiry-date      {:db/valueType :db.type/string
-                            :db/doc "Expiry date reference from document"}})
-
-;; =============================================================================
-;; Relationship Schema (Entity Relationships)
-;; =============================================================================
-
-(def RELATIONSHIP_SCHEMA
-  "Schema for storing relationships between entities.
-   Relationships capture how entities interact: references, definitions, obligations, conditions, amendments."
-  {:relationship/id            {:db/unique :db.unique/identity
-                                :db/valueType :db.type/uuid
-                                :db/doc "Unique identifier for the relationship"}
-   :relationship/source-entity-id {:db/valueType :db.type/uuid
-                                   :db/doc "Source entity UUID"}
-   :relationship/target-entity-id {:db/valueType :db.type/uuid
-                                   :db/doc "Target entity UUID"}
-   :relationship/type          {:db/valueType :db.type/keyword
-                                :db/doc "Relationship type: :references, :defines, :obligates, :conditions, :amends"}
-   :relationship/document-id   {:db/valueType :db.type/string
-                                :db/doc "Source document reference"}
-   :relationship/description   {:db/valueType :db.type/string
-                                :db/doc "Relationship context/description"}})
-
-;; =============================================================================
-;; Claim Schema (Verified Claims Storage)
-;; =============================================================================
-
-(def CLAIM_SCHEMA
-  "Schema for storing verified claims extracted from documents.
-   Claims are assertions with citations, confidence scores, and verification verdicts."
-  {:claim/id                {:db/unique :db.unique/identity
-                             :db/valueType :db.type/uuid
-                             :db/doc "Unique identifier for the claim"}
-   :claim/text              {:db/valueType :db.type/string
-                             :db/doc "The claim text"}
-   :claim/document-id       {:db/valueType :db.type/string
-                             :db/doc "Source document reference"}
-   :claim/page              {:db/valueType :db.type/long
-                             :db/doc "Source page number"}
-   :claim/section           {:db/valueType :db.type/string
-                             :db/doc "Source section identifier"}
-   :claim/quote             {:db/valueType :db.type/string
-                             :db/doc "Exact quote from source"}
-   :claim/confidence        {:db/valueType :db.type/float
-                             :db/doc "Confidence score (0.0 to 1.0)"}
-   :claim/query-id          {:db/valueType :db.type/uuid
-                             :db/doc "Links to which query produced this claim"}
-   :claim/verified?         {:db/valueType :db.type/boolean
-                             :db/doc "Whether claim has been verified"}
-   :claim/verification-verdict {:db/valueType :db.type/string
-                                :db/doc "Verification result: correct, incorrect, partially-correct, uncertain"}
-   :claim/created-at        {:db/valueType :db.type/instant
-                             :db/doc "When claim was created"}})
 
 ;; =============================================================================
 ;; Example Learning (Embedding-Based Semantic Similarity)
@@ -1101,39 +914,23 @@
 ;; =============================================================================
 
 (def ^:private LEARNING_SIMILARITY_THRESHOLD
-  "Minimum cosine similarity to consider a learning relevant."
+  "Minimum text similarity to consider a learning relevant."
   0.6)
-
-(defn- init-learning-schema!
-  "Initializes the learning schema in the store.
-   
-   Params:
-   `db-info` - Map with :store atom.
-   
-   Returns:
-   :schema-initialized"
-  [{:keys [store]}]
-  (when store
-    (swap! store update :schema merge LEARNING_SCHEMA)
-    :schema-initialized))
 
 (defn- db-store-learning!
   "Stores a meta-insight/learning for future retrieval.
-   
-   Learnings capture HOW to approach problems, not just query→answer pairs.
-   Initializes voting counts to 0.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `insight` - String. The learning/insight to store.
    `context` - String, optional. Task/domain context.
-   
+
    Returns:
    Map with :learning/id, :learning/insight, :learning/context, :learning/timestamp."
   ([db-info insight] (db-store-learning! db-info insight nil))
-  ([{:keys [store] :as db-info} insight context]
-   (when store
-     (let [learning-id (java.util.UUID/randomUUID)
+  ([{:keys [conn]} insight context]
+   (when conn
+     (let [learning-id (UUID/randomUUID)
            timestamp (java.util.Date.)
            learning (cond-> {:learning/id learning-id
                              :learning/insight insight
@@ -1142,8 +939,7 @@
                              :learning/not-useful-count 0
                              :learning/applied-count 0}
                       context (assoc :learning/context context))]
-       (swap! store update :learnings conj learning)
-       (mark-dirty-store! db-info :learnings)
+       (d/transact! conn [learning])
        {:learning/id learning-id
         :learning/insight insight
         :learning/context context
@@ -1158,14 +954,7 @@
   5)
 
 (defn- learning-decayed?
-  "Returns true if a learning has decayed (>70% negative votes after 5+ total votes).
-   
-   Params:
-   `useful-count` - Number of positive votes.
-   `not-useful-count` - Number of negative votes.
-   
-   Returns:
-   Boolean."
+  "Returns true if a learning has decayed (>70% negative votes after 5+ total votes)."
   [useful-count not-useful-count]
   (let [total (+ (or useful-count 0) (or not-useful-count 0))]
     (and (>= total DECAY_MIN_VOTES)
@@ -1173,35 +962,28 @@
 
 (defn- db-vote-learning!
   "Records a vote for a learning's usefulness.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `learning-id` - UUID. The learning to vote on.
    `vote` - Keyword. Either :useful or :not-useful.
-   
+
    Returns:
    Updated learning map with new vote counts, or nil if learning not found."
-  [{:keys [store] :as db-info} learning-id vote]
-  (when store
-    (let [learnings (:learnings @store)
-          entity (first (filter #(= learning-id (:learning/id %)) learnings))]
-      (when entity
+  [{:keys [conn]} learning-id vote]
+  (when conn
+    (let [entity (d/pull (d/db conn) '[*] [:learning/id learning-id])]
+      (when (:db/id entity)
         (let [current-useful (or (:learning/useful-count entity) 0)
               current-not-useful (or (:learning/not-useful-count entity) 0)
               [new-useful new-not-useful] (case vote
                                             :useful [(inc current-useful) current-not-useful]
                                             :not-useful [current-useful (inc current-not-useful)]
                                             [current-useful current-not-useful])]
-          (swap! store update :learnings
-                 (fn [ls]
-                   (mapv (fn [l]
-                           (if (= learning-id (:learning/id l))
-                             (assoc l :learning/useful-count new-useful
-                                    :learning/not-useful-count new-not-useful
-                                    :learning/last-evaluated (java.util.Date.))
-                             l))
-                          ls)))
-          (mark-dirty-store! db-info :learnings)
+          (d/transact! conn [{:learning/id learning-id
+                              :learning/useful-count new-useful
+                              :learning/not-useful-count new-not-useful
+                              :learning/last-evaluated (java.util.Date.)}])
           {:learning/id learning-id
            :learning/insight (:learning/insight entity)
            :learning/useful-count new-useful
@@ -1209,52 +991,50 @@
            :learning/decayed? (learning-decayed? new-useful new-not-useful)})))))
 
 (defn- db-increment-applied-count!
-  "Increments the applied count for a learning (called when learning is retrieved).
-   
+  "Increments the applied count for a learning.
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `learning-id` - UUID. The learning that was applied.
-   
+
    Returns:
    New applied count, or nil if learning not found."
-  [{:keys [store] :as db-info} learning-id]
-  (when store
-    (let [entity (first (filter #(= learning-id (:learning/id %)) (:learnings @store)))]
+  [{:keys [conn]} learning-id]
+  (when conn
+    (let [entity (d/pull (d/db conn) '[:learning/applied-count] [:learning/id learning-id])]
       (when entity
         (let [new-count (inc (or (:learning/applied-count entity) 0))]
-          (swap! store update :learnings
-                 (fn [ls]
-                   (mapv (fn [l]
-                           (if (= learning-id (:learning/id l))
-                             (assoc l :learning/applied-count new-count)
-                             l))
-                          ls)))
-          (mark-dirty-store! db-info :learnings)
+          (d/transact! conn [{:learning/id learning-id :learning/applied-count new-count}])
           new-count)))))
 
 (defn- db-get-learnings
   "Searches learnings by insight and context text, sorted by recency.
-   
+
    Filters out decayed learnings (>70% negative votes after 5+ total votes).
    Automatically increments applied-count for returned learnings.
    When query is nil/blank, returns all non-decayed learnings by recency.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `query` - String. Case-insensitive text search over insight and context.
    `opts` - Map, optional:
      - :top-k - Integer. Max learnings to return (default: 5).
      - :include-decayed? - Boolean. Include decayed learnings (default: false).
      - :track-usage? - Boolean. Increment applied-count (default: true).
-   
+
    Returns:
    Vector of learning maps with :learning/id, :insight, :context, :useful-count, :not-useful-count."
   ([db-info query] (db-get-learnings db-info query {}))
-  ([{:keys [store] :as db-info} query {:keys [top-k include-decayed? track-usage?]
-                                       :or {top-k 5 include-decayed? false track-usage? true}}]
-   (when store
-     (let [q (when-not (str/blank? (str query)) (str-lower query))
-           filtered (->> (:learnings @store)
+  ([{:keys [conn] :as db-info} query {:keys [top-k include-decayed? track-usage?]
+                                      :or {top-k 5 include-decayed? false track-usage? true}}]
+   (when conn
+     (let [all (d/q '[:find [(pull ?e [:learning/id :learning/insight :learning/context
+                                       :learning/timestamp :learning/useful-count
+                                       :learning/not-useful-count :learning/applied-count]) ...]
+                     :where [?e :learning/id _]]
+                    (d/db conn))
+           q (when-not (str/blank? (str query)) (str-lower query))
+           filtered (->> all
                          (map (fn [l]
                                 {:learning/id (:learning/id l)
                                  :insight (:learning/insight l)
@@ -1267,13 +1047,12 @@
                          (filter #(or include-decayed? (not (:decayed? %))))
                          (filter (fn [l]
                                    (if q
-                                     (or (str-includes? (str-lower (:insight l)) q)
-                                         (str-includes? (str-lower (:context l)) q))
+                                     (or (str-includes? (str-lower (str (:insight l))) q)
+                                         (str-includes? (str-lower (str (:context l))) q))
                                      true)))
                          (sort-by :timestamp #(compare %2 %1))
                          (take top-k)
                          vec)]
-       ;; Track usage by incrementing applied-count
        (when track-usage?
          (doseq [{:keys [learning/id]} filtered]
            (db-increment-applied-count! db-info id)))
@@ -1281,32 +1060,37 @@
 
 (defn- db-learning-stats
   "Gets statistics about stored learnings including voting stats.
-   
+
    Params:
-   `db-info` - Map with :store key.
-   
+   `db-info` - Map with :conn key.
+
    Returns:
    Map with :total-learnings, :active-learnings, :decayed-learnings,
    :with-context, :without-context, :total-votes, :total-applications."
-  [{:keys [store]}]
-  (when store
-    (let [all-learnings (:learnings @store)
-          total (count all-learnings)
-          with-context (count (filter #(some? (:learning/context %)) all-learnings))
+  [{:keys [conn]}]
+  (if conn
+    (let [all (d/q '[:find [(pull ?e [:learning/id :learning/context :learning/useful-count
+                                      :learning/not-useful-count :learning/applied-count]) ...]
+                    :where [?e :learning/id _]]
+                   (d/db conn))
+          total (count all)
+          with-context (count (filter #(some? (:learning/context %)) all))
           decayed (count (filter #(learning-decayed? (or (:learning/useful-count %) 0)
                                                      (or (:learning/not-useful-count %) 0))
-                                all-learnings))
+                                 all))
           total-votes (reduce + (map #(+ (or (:learning/useful-count %) 0)
                                          (or (:learning/not-useful-count %) 0))
-                                     all-learnings))
-          total-applications (reduce + (map #(or (:learning/applied-count %) 0) all-learnings))]
+                                     all))
+          total-applications (reduce + (map #(or (:learning/applied-count %) 0) all))]
       {:total-learnings total
        :active-learnings (- total decayed)
        :decayed-learnings decayed
        :with-context with-context
        :without-context (- total with-context)
        :total-votes total-votes
-       :total-applications total-applications})))
+       :total-applications total-applications})
+    {:total-learnings 0 :active-learnings 0 :decayed-learnings 0
+     :with-context 0 :without-context 0 :total-votes 0 :total-applications 0}))
 
 ;; -----------------------------------------------------------------------------
 ;; Learnings SCI Functions (DB-backed, for LLM to call during execution)
@@ -1357,47 +1141,22 @@
 ;; PageIndex Document Storage System
 ;; =============================================================================
 
-(defn- init-document-schema!
-  "Initializes all PageIndex document schemas in the database.
-    
-    Schemas initialized:
-    - DOCUMENT_SCHEMA (:document/*)
-    - PAGE_SCHEMA (:page/*)
-    - PAGE_NODE_SCHEMA (:page.node/*)
-    - TOC_ENTRY_SCHEMA (:document.toc/*)
-    - ENTITY_SCHEMA (:entity/*)
-    - LEGAL_ENTITY_SCHEMA (:legal/*)
-    - RELATIONSHIP_SCHEMA (:relationship/*)
-    - CLAIM_SCHEMA (:claim/*)
-    
-    Params:
-    `db-info` - Map with :store key containing the store atom.
-    
-    Returns:
-    :schema-initialized"
-  [{:keys [store]}]
-  (when store
-    (swap! store update :schema merge
-           DOCUMENT_SCHEMA PAGE_SCHEMA PAGE_NODE_SCHEMA TOC_ENTRY_SCHEMA
-           ENTITY_SCHEMA LEGAL_ENTITY_SCHEMA RELATIONSHIP_SCHEMA CLAIM_SCHEMA)
-    :schema-initialized))
-
 ;; -----------------------------------------------------------------------------
 ;; Document Storage
 ;; -----------------------------------------------------------------------------
 
 (defn- db-store-document!
   "Stores a PageIndex document (metadata only, not pages/toc).
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `doc` - PageIndex document map.
    `doc-id` - String. Generated document ID.
-   
+
    Returns:
    The stored document entity."
-  [{:keys [store] :as db-info} doc doc-id]
-  (when store
+  [{:keys [conn]} doc doc-id]
+  (when conn
     (let [entity (cond-> {:document/id doc-id
                           :document/name (:document/name doc)
                           :document/extension (:document/extension doc)}
@@ -1406,16 +1165,17 @@
                    (:document/author doc) (assoc :document/author (:document/author doc))
                    (:document/created-at doc) (assoc :document/created-at (:document/created-at doc))
                    (:document/updated-at doc) (assoc :document/updated-at (:document/updated-at doc)))]
-      (swap! store update :documents conj entity)
-      (mark-dirty-store! db-info :documents)
+      (d/transact! conn [entity])
       entity)))
 
 (defn- get-document-toc
   "Gets TOC entries for a document, formatted as a readable list."
-  [{:keys [store]} doc-id]
-  (when store
-    (->> (:toc-entries @store)
-         (filter #(= doc-id (:document.toc/document-id %)))
+  [{:keys [conn]} doc-id]
+  (when conn
+    (->> (d/q '[:find [(pull ?e [:document.toc/title :document.toc/level :document.toc/target-page]) ...]
+               :in $ ?doc-id
+               :where [?e :document.toc/document-id ?doc-id]]
+             (d/db conn) doc-id)
          (map (fn [e]
                 {:title (:document.toc/title e)
                  :level (:document.toc/level e)
@@ -1424,41 +1184,39 @@
          vec)))
 
 (defn- db-get-document
-   "Gets a document by ID with abstract and TOC.
-   
+  "Gets a document by ID with abstract and TOC.
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `doc-id` - String. Document ID.
-   
+
    Returns:
    Document map with :document/toc (formatted list) or nil."
-  [{:keys [store] :as db-info} doc-id]
-  (when store
-    (let [doc (first (filter #(= doc-id (:document/id %)) (:documents @store)))]
-      (when doc
-        (let [toc (get-document-toc db-info doc-id)]
-          (assoc doc :document/toc toc))))))
+  [{:keys [conn] :as db-info} doc-id]
+  (when conn
+    (let [doc (d/pull (d/db conn) '[*] [:document/id doc-id])]
+      (when (:db/id doc)
+        (-> (dissoc doc :db/id)
+            (assoc :document/toc (get-document-toc db-info doc-id)))))))
 
 (defn- db-list-documents
   "Lists all stored documents with abstracts and TOC summaries.
-   
-   Each document includes:
-   - Basic metadata (id, name, title, extension)
-   - Abstract (if available)
-   - TOC as formatted list: [{:title \"Chapter 1\" :level \"l1\" :page 0} ...]
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `opts` - Map, optional:
      - :limit - Integer. Max results (default: 100).
      - :include-toc? - Boolean. Include TOC (default: true).
-   
+
    Returns:
    Vector of document maps with :document/toc."
    ([db-info] (db-list-documents db-info {}))
-   ([{:keys [store] :as db-info} {:keys [limit include-toc?] :or {limit 100 include-toc? true}}]
-    (when store
-      (let [docs (:documents @store)]
+   ([{:keys [conn] :as db-info} {:keys [limit include-toc?] :or {limit 100 include-toc? true}}]
+    (when conn
+      (let [docs (d/q '[:find [(pull ?e [:document/id :document/name :document/title
+                                         :document/extension :document/abstract]) ...]
+                        :where [?e :document/id _]]
+                      (d/db conn))]
         (->> docs
              (map (fn [doc]
                     (cond-> (select-keys doc [:document/id :document/name :document/title :document/extension])
@@ -1474,43 +1232,44 @@
 
 (defn- db-store-page!
   "Stores a page (internal - called by db-store-pageindex-document!)."
-  [{:keys [store] :as db-info} page doc-id]
-  (when store
+  [{:keys [conn]} page doc-id]
+  (when conn
     (let [page-id (str doc-id "-page-" (:page/index page))
           page-data {:page/id page-id
                      :page/document-id doc-id
                      :page/index (:page/index page)}]
-      (swap! store update :pages conj page-data)
-      (mark-dirty-store! db-info :pages)
+      (d/transact! conn [page-data])
       page-id)))
 
 (defn- db-get-page
   "Gets a page by ID.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `page-id` - String. Page ID.
-   
+
    Returns:
    Page map or nil."
-  [{:keys [store]} page-id]
-  (when store
-    (first (filter #(= page-id (:page/id %)) (:pages @store)))))
+  [{:keys [conn]} page-id]
+  (when conn
+    (let [e (d/pull (d/db conn) '[*] [:page/id page-id])]
+      (when (:db/id e) (dissoc e :db/id)))))
 
 (defn- db-list-pages
   "Lists pages for a document.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `doc-id` - String. Document ID.
-   
+
    Returns:
    Vector of page maps sorted by index."
-  [{:keys [store]} doc-id]
-  (when store
-    (->> (:pages @store)
-         (filter #(= doc-id (:page/document-id %)))
-         (map #(select-keys % [:page/id :page/index :page/document-id]))
+  [{:keys [conn]} doc-id]
+  (when conn
+    (->> (d/q '[:find [(pull ?e [:page/id :page/index :page/document-id]) ...]
+               :in $ ?doc-id
+               :where [?e :page/document-id ?doc-id]]
+             (d/db conn) doc-id)
          (sort-by :page/index)
          vec)))
 
@@ -1520,9 +1279,9 @@
 
 (defn- db-store-page-node!
   "Stores a page node (internal - called by db-store-pageindex-document!)."
-  [{:keys [store] :as db-info} node page-id doc-id]
-  (when store
-    (let [node-id (str page-id "-node-" (:page.node/id node))
+  [{:keys [conn]} node page-id doc-id]
+  (when conn
+    (let [node-id (str page-id "-node-" (or (:page.node/id node) (UUID/randomUUID)))
           visual-node? (#{:image :table} (:page.node/type node))
           img-bytes (:page.node/image-data node)
           image-too-large? (and visual-node?
@@ -1532,29 +1291,28 @@
                                 img-bytes
                                 (not image-too-large?))
                        img-bytes)
-          tx-data [(cond-> {:page.node/id node-id
-                            :page.node/page-id page-id
-                            :page.node/document-id doc-id
-                            :page.node/local-id (:page.node/id node)
-                            :page.node/type (:page.node/type node)}
-                     (:page.node/parent-id node) (assoc :page.node/parent-id (:page.node/parent-id node))
-                     (:page.node/level node) (assoc :page.node/level (:page.node/level node))
-                     (and (not visual-node?) (:page.node/content node))
-                     (assoc :page.node/content (:page.node/content node))
-                     image-data (assoc :page.node/image-data image-data)
-                     (:page.node/description node) (assoc :page.node/description (:page.node/description node))
-                     (some? (:page.node/continuation? node)) (assoc :page.node/continuation? (:page.node/continuation? node))
-                     (:page.node/caption node) (assoc :page.node/caption (:page.node/caption node))
-                     (:page.node/kind node) (assoc :page.node/kind (:page.node/kind node))
-                     (:page.node/bbox node) (assoc :page.node/bbox (pr-str (:page.node/bbox node)))
-                     (:page.node/group-id node) (assoc :page.node/group-id (:page.node/group-id node)))]]
+          entity (cond-> {:page.node/id node-id
+                          :page.node/page-id page-id
+                          :page.node/document-id doc-id
+                          :page.node/type (:page.node/type node)}
+                   (:page.node/id node) (assoc :page.node/local-id (:page.node/id node))
+                   (:page.node/parent-id node) (assoc :page.node/parent-id (:page.node/parent-id node))
+                   (:page.node/level node) (assoc :page.node/level (:page.node/level node))
+                   (and (not visual-node?) (:page.node/content node))
+                   (assoc :page.node/content (:page.node/content node))
+                   image-data (assoc :page.node/image-data image-data)
+                   (:page.node/description node) (assoc :page.node/description (:page.node/description node))
+                   (some? (:page.node/continuation? node)) (assoc :page.node/continuation? (:page.node/continuation? node))
+                   (:page.node/caption node) (assoc :page.node/caption (:page.node/caption node))
+                   (:page.node/kind node) (assoc :page.node/kind (:page.node/kind node))
+                   (:page.node/bbox node) (assoc :page.node/bbox (pr-str (:page.node/bbox node)))
+                   (:page.node/group-id node) (assoc :page.node/group-id (:page.node/group-id node)))]
       (when image-too-large?
         (trove/log! {:level :warn
                      :data {:page-node-id node-id
                             :bytes-size (alength ^bytes img-bytes)}
                      :msg "Skipping page node image-data (exceeds 5MB limit)"}))
-      (swap! store update :page-nodes conj (first tx-data))
-      (mark-dirty-store! db-info :page-nodes)
+      (d/transact! conn [entity])
       node-id)))
 
 (defn- db-search-page-nodes
@@ -1572,73 +1330,74 @@
    Returns:
    Vector of page node maps with content included."
   ([db-info query] (db-search-page-nodes db-info query {}))
-  ([{:keys [store] :as db-info} query {:keys [top-k document-id type] :or {top-k 10}}]
+  ([{:keys [conn] :as db-info} query {:keys [top-k document-id type] :or {top-k 10}}]
    (if (str/blank? (str query))
-     (db-list-page-nodes db-info {:document-id document-id
-                                  :type type
-                                  :limit top-k})
-     (when store
-       (let [q (str-lower query)]
-         (->> (:page-nodes @store)
+     (db-list-page-nodes db-info {:document-id document-id :type type :limit top-k})
+     (when conn
+       (let [q (str-lower query)
+             all (d/q '[:find [(pull ?e [:page.node/id :page.node/page-id :page.node/document-id
+                                         :page.node/type :page.node/level :page.node/local-id
+                                         :page.node/content :page.node/description]) ...]
+                       :where [?e :page.node/id _]]
+                      (d/db conn))]
+         (->> all
               (filter (fn [n]
-                        (or (str-includes? (str-lower (:page.node/content n)) q)
-                            (str-includes? (str-lower (:page.node/description n)) q))))
+                        (or (str-includes? (str-lower (str (:page.node/content n))) q)
+                            (str-includes? (str-lower (str (:page.node/description n))) q))))
               (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
               (filter #(or (nil? type) (= type (:page.node/type %))))
               (take top-k)
-              (mapv (fn [n]
-                      {:page.node/id (:page.node/id n)
-                       :page.node/page-id (:page.node/page-id n)
-                       :page.node/document-id (:page.node/document-id n)
-                       :page.node/type (:page.node/type n)
-                       :page.node/level (:page.node/level n)
-                       :page.node/local-id (:page.node/local-id n)
-                       :page.node/content (:page.node/content n)
-                       :page.node/description (:page.node/description n)}))))))))
+              vec))))))
 
 (defn- db-get-page-node
   "Gets a page node by ID with full details.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `node-id` - String. Page node ID.
-   
+
    Returns:
    Page node map or nil."
-  [{:keys [store]} node-id]
-  (when store
-    (first (filter #(= node-id (:page.node/id %)) (:page-nodes @store)))))
+  [{:keys [conn]} node-id]
+  (when conn
+    (let [e (d/pull (d/db conn) '[*] [:page.node/id node-id])]
+      (when (:db/id e) (dissoc e :db/id)))))
 
 (defn- db-list-page-nodes
   "Lists page nodes, optionally filtered.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `opts` - Map, optional:
      - :page-id - String. Filter by page.
      - :document-id - String. Filter by document.
      - :type - Keyword. Filter by node type.
      - :limit - Integer. Max results (default: 100).
-   
+
    Returns:
    Vector of page node maps."
-   ([db-info] (db-list-page-nodes db-info {}))
-   ([{:keys [store]} {:keys [page-id document-id type limit] :or {limit 100}}]
-    (when store
-      (->> (:page-nodes @store)
-           (filter #(or (nil? page-id) (= page-id (:page.node/page-id %))))
-           (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
-           (filter #(or (nil? type) (= type (:page.node/type %))))
-           (take limit)
-           (mapv (fn [n]
-                   {:page.node/id (:page.node/id n)
-                    :page.node/page-id (:page.node/page-id n)
-                    :page.node/document-id (:page.node/document-id n)
-                    :page.node/type (:page.node/type n)
-                    :page.node/level (:page.node/level n)
-                    :page.node/local-id (:page.node/local-id n)
-                    :page.node/content (str-truncate (:page.node/content n) 200)
-                    :page.node/description (str-truncate (:page.node/description n) 200)}))))))
+  ([db-info] (db-list-page-nodes db-info {}))
+  ([{:keys [conn]} {:keys [page-id document-id type limit] :or {limit 100}}]
+   (when conn
+     (let [all (d/q '[:find [(pull ?e [:page.node/id :page.node/page-id :page.node/document-id
+                                        :page.node/type :page.node/level :page.node/local-id
+                                        :page.node/content :page.node/description]) ...]
+                     :where [?e :page.node/id _]]
+                    (d/db conn))]
+       (->> all
+            (filter #(or (nil? page-id) (= page-id (:page.node/page-id %))))
+            (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
+            (filter #(or (nil? type) (= type (:page.node/type %))))
+            (take limit)
+            (mapv (fn [n]
+                    {:page.node/id (:page.node/id n)
+                     :page.node/page-id (:page.node/page-id n)
+                     :page.node/document-id (:page.node/document-id n)
+                     :page.node/type (:page.node/type n)
+                     :page.node/level (:page.node/level n)
+                     :page.node/local-id (:page.node/local-id n)
+                     :page.node/content (str-truncate (:page.node/content n) 200)
+                     :page.node/description (str-truncate (:page.node/description n) 200)})))))))
 
 ;; -----------------------------------------------------------------------------
 ;; TOC Entry Storage
@@ -1646,50 +1405,51 @@
 
 (defn- db-store-toc-entry!
   "Stores a PageIndex TOC entry exactly as-is.
-   
-   Preserves the exact structure from PageIndex - no transformation.
-   Only adds :document.toc/created-at.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `entry` - Map with PageIndex TOC entry fields (document.toc/* namespace).
    `doc-id` - String, optional. Parent document ID (defaults to \"standalone\").
-   
+
    Returns:
    The stored entry."
   ([db-info entry] (db-store-toc-entry! db-info entry "standalone"))
-  ([{:keys [store] :as db-info} entry doc-id]
-   (when store
+  ([{:keys [conn]} entry doc-id]
+   (when conn
      (let [timestamp (java.util.Date.)
-           entry-data (assoc entry
-                             :document.toc/document-id doc-id
-                             :document.toc/created-at timestamp)]
-       (swap! store update :toc-entries conj entry-data)
-       (mark-dirty-store! db-info :toc-entries)
+           entry-data (cond-> (assoc entry
+                                     :document.toc/document-id doc-id
+                                     :document.toc/created-at timestamp)
+                        (not (:document.toc/id entry))
+                        (assoc :document.toc/id (str (UUID/randomUUID))))]
+       (d/transact! conn [entry-data])
        entry-data))))
 
 (defn- db-search-toc-entries
   "Searches TOC entries by title and description text.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `query` - String. Case-insensitive text search over title and description.
-             When nil/blank, falls back to list mode.
    `opts` - Map, optional:
      - :top-k - Integer. Max results (default: 10).
-   
+
    Returns:
    Vector of TOC entry maps with :document.toc/* fields."
   ([db-info query] (db-search-toc-entries db-info query {}))
-  ([{:keys [store] :as db-info} query {:keys [top-k] :or {top-k 10}}]
+  ([{:keys [conn] :as db-info} query {:keys [top-k] :or {top-k 10}}]
    (if (str/blank? (str query))
      (db-list-toc-entries db-info {:limit top-k})
-     (when store
-       (let [q (str-lower query)]
-         (->> (:toc-entries @store)
+     (when conn
+       (let [q (str-lower query)
+             all (d/q '[:find [(pull ?e [:document.toc/id :document.toc/title :document.toc/level
+                                         :document.toc/description :document.toc/target-page]) ...]
+                       :where [?e :document.toc/id _]]
+                      (d/db conn))]
+         (->> all
               (filter (fn [e]
-                        (or (str-includes? (str-lower (:document.toc/title e)) q)
-                            (str-includes? (str-lower (:document.toc/description e)) q))))
+                        (or (str-includes? (str-lower (str (:document.toc/title e))) q)
+                            (str-includes? (str-lower (str (:document.toc/description e))) q))))
               (take top-k)
               (mapv (fn [e]
                       {:document.toc/id (:document.toc/id e)
@@ -1701,43 +1461,49 @@
 
 (defn- db-get-toc-entry
   "Gets a TOC entry by ID with full details.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `entry-id` - String. The TOC entry ID.
-   
+
    Returns:
    TOC entry map with all fields, or nil if not found."
-  [{:keys [store]} entry-id]
-  (when store
-    (first (filter #(= entry-id (:document.toc/id %)) (:toc-entries @store)))))
+  [{:keys [conn]} entry-id]
+  (when conn
+    (let [e (d/pull (d/db conn) '[*] [:document.toc/id entry-id])]
+      (when (:db/id e) (dissoc e :db/id)))))
 
 (defn- db-list-toc-entries
   "Lists all TOC entries, optionally filtered.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `opts` - Map, optional:
      - :parent-id - String. Filter by parent.
      - :limit - Integer. Max results (default: 100).
-   
+
    Returns:
    Vector of TOC entry maps."
-   ([db-info] (db-list-toc-entries db-info {}))
-   ([{:keys [store]} {:keys [parent-id limit] :or {limit 100}}]
-    (when store
-      (->> (:toc-entries @store)
-           (filter #(or (nil? parent-id) (= parent-id (:document.toc/parent-id %))))
-           (map (fn [e]
-                  {:document.toc/id (:document.toc/id e)
-                   :document.toc/title (:document.toc/title e)
-                   :document.toc/level (:document.toc/level e)
-                   :document.toc/description (when-not (= "" (str (:document.toc/description e)))
-                                               (:document.toc/description e))
-                   :document.toc/target-page (:document.toc/target-page e)}))
-           (sort-by :document.toc/level)
-           (take limit)
-           vec))))
+  ([db-info] (db-list-toc-entries db-info {}))
+  ([{:keys [conn]} {:keys [parent-id limit] :or {limit 100}}]
+   (when conn
+     (let [all (d/q '[:find [(pull ?e [:document.toc/id :document.toc/title :document.toc/level
+                                        :document.toc/description :document.toc/target-page
+                                        :document.toc/parent-id]) ...]
+                     :where [?e :document.toc/id _]]
+                    (d/db conn))]
+       (->> all
+            (filter #(or (nil? parent-id) (= parent-id (:document.toc/parent-id %))))
+            (map (fn [e]
+                   {:document.toc/id (:document.toc/id e)
+                    :document.toc/title (:document.toc/title e)
+                    :document.toc/level (:document.toc/level e)
+                    :document.toc/description (when-not (= "" (str (:document.toc/description e)))
+                                                (:document.toc/description e))
+                    :document.toc/target-page (:document.toc/target-page e)}))
+            (sort-by :document.toc/level)
+            (take limit)
+            vec)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Entity/Relationship Query Functions
@@ -1745,30 +1511,31 @@
 
 (defn- db-search-entities
   "Searches entities by name and description text, optionally filtered by type and document.
-   
+
    Params:
-   `db-info` - Map with :store key.
-   `query` - String. Case-insensitive text search over name and description.
-             When nil/blank, falls back to list mode.
+   `db-info` - Map with :conn key.
+   `query` - String. Case-insensitive text search.
    `opts` - Map, optional:
      - :top-k - Integer. Max results (default: 10).
      - :type - Keyword. Filter by entity type.
      - :document-id - String. Filter by document.
-   
+
    Returns:
    Vector of entity maps."
   ([db-info query] (db-search-entities db-info query {}))
-  ([{:keys [store] :as db-info} query {:keys [top-k type document-id] :or {top-k 10}}]
+  ([{:keys [conn] :as db-info} query {:keys [top-k type document-id] :or {top-k 10}}]
    (if (str/blank? (str query))
-     (db-list-entities db-info {:type type
-                                :document-id document-id
-                                :limit top-k})
-     (when store
-       (let [q (str-lower query)]
-         (->> (:entities @store)
+     (db-list-entities db-info {:type type :document-id document-id :limit top-k})
+     (when conn
+       (let [q (str-lower query)
+             all (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type :entity/description
+                                         :entity/document-id :entity/page :entity/section]) ...]
+                       :where [?e :entity/id _]]
+                      (d/db conn))]
+         (->> all
               (filter (fn [e]
-                        (or (str-includes? (str-lower (:entity/name e)) q)
-                            (str-includes? (str-lower (:entity/description e)) q))))
+                        (or (str-includes? (str-lower (str (:entity/name e))) q)
+                            (str-includes? (str-lower (str (:entity/description e))) q))))
               (filter #(or (nil? type) (= type (:entity/type %))))
               (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
               (take top-k)
@@ -1783,87 +1550,100 @@
 
 (defn- db-get-entity
   "Gets an entity by UUID.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `entity-id` - UUID. Entity ID.
-   
+
    Returns:
    Entity map or nil."
-  [{:keys [store]} entity-id]
-  (when store
-    (first (filter #(= entity-id (:entity/id %)) (:entities @store)))))
+  [{:keys [conn]} entity-id]
+  (when conn
+    (let [e (d/pull (d/db conn) '[*] [:entity/id entity-id])]
+      (when (:db/id e) (dissoc e :db/id)))))
 
 (defn- db-list-entities
   "Lists entities, optionally filtered.
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `opts` - Map, optional:
      - :type - Keyword. Filter by entity type.
      - :document-id - String. Filter by document.
      - :limit - Integer. Max results (default: 100).
-   
+
    Returns:
    Vector of entity maps."
-   ([db-info] (db-list-entities db-info {}))
-   ([{:keys [store]} {:keys [type document-id limit] :or {limit 100}}]
-    (when store
-      (->> (:entities @store)
-           (map (fn [e]
-                  {:entity/id (:entity/id e)
-                   :entity/name (:entity/name e)
-                   :entity/type (:entity/type e)
-                   :entity/description (when-not (= "" (str (:entity/description e))) (:entity/description e))
-                   :entity/document-id (:entity/document-id e)
-                   :entity/page (:entity/page e)
-                   :entity/section (when-not (= "" (str (:entity/section e))) (:entity/section e))}))
-           (filter #(or (nil? type) (= type (:entity/type %))))
-           (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
-           (sort-by :entity/name)
-           (take limit)
-           vec))))
+  ([db-info] (db-list-entities db-info {}))
+  ([{:keys [conn]} {:keys [type document-id limit] :or {limit 100}}]
+   (when conn
+     (let [all (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type :entity/description
+                                        :entity/document-id :entity/page :entity/section]) ...]
+                     :where [?e :entity/id _]]
+                    (d/db conn))]
+       (->> all
+            (filter #(or (nil? type) (= type (:entity/type %))))
+            (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
+            (sort-by :entity/name)
+            (take limit)
+            (mapv (fn [e]
+                    {:entity/id (:entity/id e)
+                     :entity/name (:entity/name e)
+                     :entity/type (:entity/type e)
+                     :entity/description (when-not (= "" (str (:entity/description e))) (:entity/description e))
+                     :entity/document-id (:entity/document-id e)
+                     :entity/page (:entity/page e)
+                     :entity/section (when-not (= "" (str (:entity/section e))) (:entity/section e))}))
+            vec)))))
 
 (defn- db-list-relationships
   "Lists relationships for an entity (as source or target).
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `entity-id` - UUID. Entity ID.
    `opts` - Map, optional:
      - :type - Keyword. Filter by relationship type.
-   
+
    Returns:
    Vector of relationship maps."
-   ([db-info entity-id] (db-list-relationships db-info entity-id {}))
-   ([{:keys [store]} entity-id {:keys [type]}]
-    (when store
-      (->> (:relationships @store)
-           (filter #(or (= entity-id (:relationship/source-entity-id %))
-                        (= entity-id (:relationship/target-entity-id %))))
-           (map (fn [r]
-                  {:relationship/id (:relationship/id r)
-                   :relationship/type (:relationship/type r)
-                   :relationship/source-entity-id (:relationship/source-entity-id r)
-                   :relationship/target-entity-id (:relationship/target-entity-id r)
-                   :relationship/description (when-not (= "" (str (:relationship/description r)))
-                                               (:relationship/description r))}))
-           (filter #(or (nil? type) (= type (:relationship/type %))))
-           vec))))
+  ([db-info entity-id] (db-list-relationships db-info entity-id {}))
+  ([{:keys [conn]} entity-id {:keys [type]}]
+   (when conn
+     (let [all (d/q '[:find [(pull ?e [:relationship/id :relationship/type
+                                        :relationship/source-entity-id :relationship/target-entity-id
+                                        :relationship/description]) ...]
+                     :in $ ?eid
+                     :where (or [?e :relationship/source-entity-id ?eid]
+                                [?e :relationship/target-entity-id ?eid])]
+                    (d/db conn) entity-id)]
+       (->> all
+            (filter #(or (nil? type) (= type (:relationship/type %))))
+            (mapv (fn [r]
+                    {:relationship/id (:relationship/id r)
+                     :relationship/type (:relationship/type r)
+                     :relationship/source-entity-id (:relationship/source-entity-id r)
+                     :relationship/target-entity-id (:relationship/target-entity-id r)
+                     :relationship/description (when-not (= "" (str (:relationship/description r)))
+                                                (:relationship/description r))})))))))
 
 (defn- db-entity-stats
   "Gets entity and relationship statistics.
-   
+
    Params:
-   `db-info` - Map with :store key.
-   
+   `db-info` - Map with :conn key.
+
    Returns:
    Map with :total-entities, :types (map of type->count), :total-relationships."
-  [{:keys [store]}]
-  (if store
-    (let [entities (:entities @store)
+  [{:keys [conn]}]
+  (if conn
+    (let [entities (d/q '[:find [(pull ?e [:entity/type]) ...]
+                          :where [?e :entity/id _]]
+                        (d/db conn))
           types-map (frequencies (map :entity/type entities))
-          rel-count (count (:relationships @store))]
+          rel-count (count (d/q '[:find ?e
+                                  :where [?e :relationship/id _]]
+                                (d/db conn)))]
       {:total-entities (count entities)
        :types types-map
        :total-relationships rel-count})
@@ -1875,25 +1655,19 @@
 
 (defn- db-store-pageindex-document!
   "Stores an entire PageIndex document with all its components.
-   
-   Stores the complete document structure exactly as PageIndex produces it:
-   - Document metadata (decomposed for search)
-   - All pages (decomposed for search)
-   - All page nodes (decomposed for search)
-   - All TOC entries (decomposed for search)
-   - Raw document (preserved for pageindex-compatible persistence)
-   
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `doc` - Complete PageIndex document (spec-validated).
-   
+
    Returns:
    Map with :document-id and counts of stored entities."
   [db-info doc]
-  (let [doc-id (str (java.util.UUID/randomUUID))
-        ;; Store raw document for pageindex-compatible persistence
-        _ (swap! (:store db-info) assoc-in [:raw-documents doc-id] doc)
-        ;; Store document metadata (decomposed for search)
+  (let [doc-id (str (UUID/randomUUID))
+        ;; Store raw document for persistence
+        _ (d/transact! (:conn db-info) [{:raw-document/id doc-id
+                                         :raw-document/content (pr-str doc)}])
+        ;; Store document metadata
         _ (db-store-document! db-info doc doc-id)
         ;; Store pages and their nodes
         page-count (atom 0)
@@ -1909,7 +1683,6 @@
         _ (doseq [entry (:document/toc doc)]
             (db-store-toc-entry! db-info entry doc-id)
             (swap! toc-count inc))]
-    (mark-dirty-store! db-info :raw-documents)
     {:document-id doc-id
      :pages-stored @page-count
      :nodes-stored @node-count
@@ -2221,8 +1994,18 @@
                              'vote-learning (make-vote-learning-fn db-info-atom)
                              'learning-stats (make-learning-stats-fn db-info-atom)}
                             {})
+        ;; Raw text access (RLM paper §3: symbolic handle to P)
+        raw-text-bindings (when db-info-atom
+                            (let [conn (:conn @db-info-atom)
+                                  raw-text (build-raw-text conn)
+                                  page-texts (build-page-texts conn)]
+                              {'P raw-text
+                               'P-len (count raw-text)
+                               'get-page (fn [n] (get page-texts n))
+                               'page-count (fn [] (count page-texts))}))
         all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
-                            example-bindings learning-bindings (or custom-bindings {}))]
+                            example-bindings learning-bindings raw-text-bindings
+                            (or custom-bindings {}))]
     (sci/init {:namespaces {'user all-bindings}
                :classes {'java.util.regex.Pattern java.util.regex.Pattern
                          'java.util.regex.Matcher java.util.regex.Matcher
@@ -2231,125 +2014,6 @@
                          'java.util.UUID java.util.UUID}
                :deny '[require import ns eval load-string read-string]})))
 
-(defn- load-collection-file
-  "Loads a single collection EDN file, returning nil on missing/corrupt."
-  [path filename]
-  (let [f (io/file path filename)]
-    (when (.exists f)
-      (try
-        (edn/read-string (slurp f))
-        (catch Exception e
-          (trove/log! {:level :warn :data {:error (ex-message e) :file filename}
-                       :msg "Failed to load collection file, skipping"})
-          nil)))))
-
-(defn- load-documents-from-disk
-  "Loads PageIndex documents from documents/{name}/document.edn directories.
-   Returns a map of {doc-id -> document}."
-  [path]
-  (let [docs-dir (io/file path "documents")]
-    (if (and (.exists docs-dir) (.isDirectory docs-dir))
-      (let [subdirs (filter #(.isDirectory ^java.io.File %) (.listFiles docs-dir))]
-        (reduce (fn [acc ^java.io.File dir]
-                  (let [doc-file (io/file dir "document.edn")]
-                    (if (.exists doc-file)
-                      (try
-                        (let [doc (pageindex/read-document-edn (str dir))
-                              doc-id (str (java.util.UUID/randomUUID))]
-                          (assoc acc doc-id doc))
-                        (catch Exception e
-                          (trove/log! {:level :warn :data {:error (ex-message e) :dir (str dir)}
-                                       :msg "Failed to load document, skipping"})
-                          acc))
-                      acc)))
-                {}
-                subdirs))
-      {})))
-
-(defn- decompose-raw-documents
-  "Decomposes raw PageIndex documents into flat search collections.
-   Returns a map with :documents, :pages, :page-nodes, :toc-entries vectors."
-  [raw-documents]
-  (let [documents (atom [])
-        pages (atom [])
-        page-nodes (atom [])
-        toc-entries (atom [])]
-    (doseq [[doc-id doc] raw-documents]
-      ;; Document metadata
-      (swap! documents conj
-             (cond-> {:document/id doc-id
-                      :document/name (:document/name doc)
-                      :document/extension (:document/extension doc)
-                      :document/page-count (count (:document/pages doc))
-                      :document/created-at (java.util.Date.)}
-               (:document/title doc) (assoc :document/title (:document/title doc))
-               (:document/abstract doc) (assoc :document/abstract (:document/abstract doc))
-               (:document/author doc) (assoc :document/author (:document/author doc))
-               (:document/created-at doc) (assoc :document/created-at (:document/created-at doc))
-               (:document/updated-at doc) (assoc :document/updated-at (:document/updated-at doc))))
-      ;; Pages and nodes
-      (doseq [page (:document/pages doc)]
-        (let [page-id (str doc-id "-page-" (:page/index page))]
-          (swap! pages conj {:page/id page-id
-                             :page/document-id doc-id
-                             :page/index (:page/index page)})
-          (doseq [node (:page/nodes page)]
-            (let [node-id (str (or (:page.node/id node) (java.util.UUID/randomUUID)))]
-              (swap! page-nodes conj
-                     (cond-> {:page.node/id node-id
-                              :page.node/page-id page-id
-                              :page.node/document-id doc-id
-                              :page.node/type (:page.node/type node)
-                              :page.node/created-at (java.util.Date.)}
-                       (:page.node/content node) (assoc :page.node/content (:page.node/content node))
-                       (:page.node/description node) (assoc :page.node/description (:page.node/description node))
-                       (:page.node/level node) (assoc :page.node/level (:page.node/level node))
-                       (:page.node/parent-id node) (assoc :page.node/parent-id (:page.node/parent-id node))
-                       (:page.node/kind node) (assoc :page.node/kind (:page.node/kind node))
-                       (:page.node/caption node) (assoc :page.node/caption (:page.node/caption node))
-                       (:page.node/bbox node) (assoc :page.node/bbox (:page.node/bbox node))
-                       (:page.node/continuation? node) (assoc :page.node/continuation? (:page.node/continuation? node))))))))
-      ;; TOC entries
-      (doseq [entry (:document/toc doc)]
-        (swap! toc-entries conj
-               (cond-> {:document.toc/id (str (or (:document.toc/id entry) (java.util.UUID/randomUUID)))
-                        :document.toc/document-id doc-id
-                        :document.toc/created-at (java.util.Date.)}
-                 (:document.toc/type entry) (assoc :document.toc/type (:document.toc/type entry))
-                 (:document.toc/title entry) (assoc :document.toc/title (:document.toc/title entry))
-                 (:document.toc/description entry) (assoc :document.toc/description (:document.toc/description entry))
-                 (:document.toc/target-page entry) (assoc :document.toc/target-page (:document.toc/target-page entry))
-                 (:document.toc/target-section-id entry) (assoc :document.toc/target-section-id (:document.toc/target-section-id entry))
-                 (:document.toc/level entry) (assoc :document.toc/level (:document.toc/level entry))
-                 (:document.toc/parent-id entry) (assoc :document.toc/parent-id (:document.toc/parent-id entry))))))
-    {:documents @documents
-     :pages @pages
-     :page-nodes @page-nodes
-     :toc-entries @toc-entries}))
-
-(defn- create-persistent-db
-  "Creates a persistent store at the given path.
-   Loads flat collections from individual EDN files and documents from
-   documents/{name}/document.edn in pageindex format.
-   Unlike create-disposable-db, this store is NOT deleted when disposed."
-  [path]
-  (let [;; Load flat collections
-        base-store (reduce (fn [store k]
-                             (if-let [data (load-collection-file path (str (name k) ".edn"))]
-                               (assoc store k data)
-                               store))
-                           EMPTY_STORE
-                           STORE_COLLECTIONS)
-        ;; Load documents from pageindex format
-        raw-documents (load-documents-from-disk path)
-        ;; Decompose documents into search collections
-        decomposed (decompose-raw-documents raw-documents)
-        ;; Load schema
-        schema-data (load-collection-file path "schema.edn")]
-    {:store (atom (cond-> (merge base-store decomposed {:raw-documents raw-documents :dirty #{}})
-                    schema-data (assoc :schema schema-data)))
-     :path path
-     :owned? false}))
 
 (defn- create-rlm-env
   "Creates an RLM execution environment (internal use only).
@@ -2374,39 +2038,36 @@
     The same in-memory store is used for conversation history, documents, and learnings."
   ([context-data model depth-atom api-key base-url]
    (create-rlm-env context-data model depth-atom api-key base-url {}))
-   ([context-data model depth-atom api-key base-url {:keys [db db-opts path documents config]}]
+   ([context-data model depth-atom api-key base-url {:keys [db db-opts path documents config router]}]
    (let [locals-atom (atom {})
           db-info (cond
                     (false? db) nil
-                    (rlm-store? db) (assoc db :owned? false)
-                   ;; Persistent DB path provided - history survives across sessions
-                   path (create-persistent-db path)
-                   ;; Default: disposable in-memory DB
-                   :else (create-disposable-db (or db-opts {})))
+                    (and (map? db) (:conn db)) (assoc db :owned? false)
+                    :else (create-rlm-conn path))
          db-info-atom (when db-info (atom db-info))
-         ;; Initialize all schemas when DB is available
-         _ (when db-info-atom
-             (init-message-history! @db-info-atom)
-             (init-document-schema! @db-info-atom)
-             (init-learning-schema! @db-info-atom))
          ;; Preload documents if provided (stores complete structure)
          _ (when (and db-info-atom (seq documents))
              (doseq [doc documents]
                (db-store-pageindex-document! @db-info-atom doc)))
          ;; Create query functions
-         llm-query-fn (make-llm-query-fn model depth-atom api-key base-url)
+         llm-query-fn (if router
+                        (make-routed-llm-query-fn :root depth-atom router)
+                        (make-llm-query-fn model depth-atom api-key base-url))
          rlm-query-fn (when db-info-atom
-                        (make-rlm-query-fn model depth-atom api-key base-url db-info-atom))]
-     {:sci-ctx (create-sci-context context-data llm-query-fn rlm-query-fn locals-atom db-info-atom nil)
-      :context context-data
-      :llm-query-fn llm-query-fn
-      :rlm-query-fn rlm-query-fn
-      :locals-atom locals-atom
-      :db-info-atom db-info-atom
-      :history-enabled? (boolean db-info-atom)})))
+                        (if router
+                          (make-rlm-query-fn :root depth-atom router db-info-atom)
+                          (make-rlm-query-fn model depth-atom nil db-info-atom)))]
+     (cond-> {:sci-ctx (create-sci-context context-data llm-query-fn rlm-query-fn locals-atom db-info-atom nil)
+              :context context-data
+              :llm-query-fn llm-query-fn
+              :rlm-query-fn rlm-query-fn
+              :locals-atom locals-atom
+              :db-info-atom db-info-atom
+              :history-enabled? (boolean db-info-atom)}
+       router (assoc :router router)))))
 
 (defn- dispose-rlm-env! [{:keys [db-info-atom]}]
-  (when db-info-atom (dispose-db! @db-info-atom)))
+  (when db-info-atom (dispose-rlm-conn! @db-info-atom)))
 
 (defn- get-locals [rlm-env] @(:locals-atom rlm-env))
 
@@ -2419,19 +2080,17 @@
     (let [_ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
           start-time (System/currentTimeMillis)
           vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
-          execution-future (future
-                             (try
-                               (let [stdout-writer (java.io.StringWriter.)
-                                     result (binding [*out* stdout-writer] (sci/eval-string* sci-ctx code))]
-                                 {:result result :stdout (str stdout-writer) :error nil})
-                               (catch Exception e {:result nil :stdout "" :error (ex-message e)})))
-          execution-result (try (deref execution-future EVAL_TIMEOUT_MS nil)
-                                (catch Exception e {:result nil :stdout "" :error (ex-message e)}))
+          exec-ch (async/thread
+                    (try
+                      (let [stdout-writer (java.io.StringWriter.)
+                            result (binding [*out* stdout-writer] (sci/eval-string* sci-ctx code))]
+                        {:result result :stdout (str stdout-writer) :error nil})
+                      (catch Exception e {:result nil :stdout "" :error (ex-message e)})))
+          [execution-result _] (async/alts!! [exec-ch (async/timeout EVAL_TIMEOUT_MS)])
           execution-time (- (System/currentTimeMillis) start-time)
           timed-out? (nil? execution-result)]
       (if timed-out?
-        (do (future-cancel execution-future)
-            (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
+        (do (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
             {:result nil :stdout "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)")
              :execution-time-ms execution-time :timeout? true})
         (let [{:keys [result stdout error]} execution-result
@@ -2505,12 +2164,49 @@
            result)
          (finally (swap! depth-atom dec)))))))
 
+(defn- make-routed-llm-query-fn
+  "Creates an llm-query function that routes across providers via a router.
+   Errors are caught and returned as {:content \"ERROR: ...\" :error true} so the
+   LLM can see them and adapt (e.g., retry with different approach, call FINAL)."
+  [use-case depth-atom rlm-router & [{:keys [on-query]}]]
+  (fn llm-query
+    ([prompt]
+     (if (>= @depth-atom *max-recursion-depth*)
+       {:content (str "Max recursion depth (" *max-recursion-depth* ") exceeded") :error true}
+       (try
+         (swap! depth-atom inc)
+         (let [result (router/routed-chat-completion rlm-router [{:role "user" :content prompt}] use-case)]
+           (when on-query
+             (try (on-query {:prompt prompt :response (:content result) :reasoning (:reasoning result)}) (catch Exception _)))
+           result)
+         (catch Exception e
+           (trove/log! {:level :warn :data {:error (ex-message e) :use-case use-case} :msg "llm-query failed"})
+           {:content (str "ERROR: " (ex-message e)) :error true})
+         (finally (swap! depth-atom dec)))))
+    ([prompt opts]
+     (if (>= @depth-atom *max-recursion-depth*)
+       {:content (str "Max recursion depth (" *max-recursion-depth* ") exceeded") :error true}
+       (try
+         (swap! depth-atom inc)
+         (let [result (if-let [spec (:spec opts)]
+                        {:content (pr-str (:result (router/routed-ask! rlm-router
+                                                                        {:spec spec :messages [(llm/system "You are a helpful assistant.") (llm/user prompt)]}
+                                                                        use-case)))}
+                        (router/routed-chat-completion rlm-router [{:role "user" :content prompt}] use-case))]
+           (when on-query
+             (try (on-query {:prompt prompt :response (:content result) :reasoning (:reasoning result)}) (catch Exception _)))
+           result)
+         (catch Exception e
+           (trove/log! {:level :warn :data {:error (ex-message e) :use-case use-case} :msg "llm-query failed"})
+           {:content (str "ERROR: " (ex-message e)) :error true})
+         (finally (swap! depth-atom dec)))))))
+
 (defn- make-rlm-query-fn
   "Creates the rlm-query function for sub-RLM queries that share the same database.
-   
+
     This allows the LLM to spawn sub-queries with code execution that reuse
     the same database, enabling complex multi-step analysis."
-  [model depth-atom api-key base-url db-info-atom]
+  [use-case depth-atom rlm-router db-info-atom]
   (fn rlm-query
     ([context sub-query]
      (rlm-query context sub-query {}))
@@ -2519,32 +2215,31 @@
        {:error (str "Max recursion depth (" *max-recursion-depth* ") exceeded")}
        (try
          (swap! depth-atom inc)
-         (run-sub-rlm context sub-query model api-key base-url db-info-atom
+         (run-sub-rlm context sub-query use-case rlm-router db-info-atom
                       (merge {:max-iterations 10} opts))
          (finally (swap! depth-atom dec)))))))
 
 (defn- run-sub-rlm
   "Runs a sub-RLM query that shares the same database as the parent.
-   
+
     This enables nested RLM queries where the sub-query can read/write
     to the same store, access the same history, etc.
-   
+
    Params:
    `context` - Data context for the sub-query
    `query` - The question to answer
-   `model` - LLM model
-   `api-key` - API key
-   `base-url` - Base URL
+   `use-case` - Use-case keyword for routing (e.g. :root, :sub)
+   `rlm-router` - Router for LLM calls
    `db-info-atom` - Shared database atom from parent RLM
    `opts` - Options including :max-iterations, :spec"
-  [context query model api-key base-url db-info-atom opts]
+  [context query use-case rlm-router db-info-atom opts]
   (let [sub-env-id (str (java.util.UUID/randomUUID))
         parent-env-id (:rlm-env-id *rlm-ctx*)
         depth-atom (atom 0)
         locals-atom (atom {})
         ;; Create query functions that share the same DB
-        llm-query-fn (make-llm-query-fn model depth-atom api-key base-url)
-        rlm-query-fn (make-rlm-query-fn model depth-atom api-key base-url db-info-atom)
+        llm-query-fn (make-routed-llm-query-fn :root depth-atom rlm-router)
+        rlm-query-fn (make-rlm-query-fn :root depth-atom rlm-router db-info-atom)
         ;; Create SCI context with shared DB (no custom bindings in sub-RLM)
         sci-ctx (create-sci-context context llm-query-fn rlm-query-fn locals-atom db-info-atom nil)
         sub-env {:env-id sub-env-id
@@ -2555,6 +2250,7 @@
                  :rlm-query-fn rlm-query-fn
                  :locals-atom locals-atom
                  :db-info-atom db-info-atom
+                 :router rlm-router
                  :history-enabled? true}
         max-iterations (or (:max-iterations opts) 10)
         output-spec (:spec opts)
@@ -2569,7 +2265,7 @@
                           {:role "user" :content initial-user-content}]
         ;; Store to shared history
         db-info @db-info-atom
-        _ (store-message! db-info :user initial-user-content {:iteration 0 :model model})]
+        _ (store-message! db-info :user initial-user-content {:iteration 0 :use-case use-case})]
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-env-id sub-env-id :rlm-type :sub :rlm-parent-id parent-env-id :rlm-phase :sub-iteration-loop})]
       (rlm-debug! {:query query :max-iterations max-iterations :parent-env-id parent-env-id} "Sub-RLM started")
       (loop [iteration 0 messages initial-messages]
@@ -2577,8 +2273,8 @@
           (do (trove/log! {:level :warn :data {:iteration iteration} :msg "Sub-RLM max iterations reached"})
               {:status :max-iterations :iterations iteration})
           (let [{:keys [response thinking executions final-result]}
-                (run-iteration sub-env messages model api-key base-url)]
-            (store-message! db-info :assistant response {:iteration iteration :model model})
+                (run-iteration sub-env messages nil nil nil)]
+            (store-message! db-info :assistant response {:iteration iteration :use-case use-case})
             (if final-result
               (do (rlm-debug! {:iteration iteration} "Sub-RLM FINAL detected")
                   {:answer (:result (:answer final-result) (:answer final-result)) :iterations iteration})
@@ -2588,7 +2284,7 @@
                                     (str iteration-header "\nNo code was executed. You MUST include Clojure expressions in the \"code\" JSON array. Respond with valid JSON: {\"thinking\": \"...\", \"code\": [\"...\"]}")
                                     (str iteration-header "\n" exec-feedback))]
                 (rlm-debug! {:iteration iteration :code-blocks (count executions) :has-thinking? (some? thinking)} "Sub-RLM iteration feedback")
-                (store-message! db-info :user user-feedback {:iteration (inc iteration) :model model})
+                (store-message! db-info :user user-feedback {:iteration (inc iteration) :use-case use-case})
                 (recur (inc iteration)
                        (conj messages
                              {:role "assistant" :content response}
@@ -2607,15 +2303,37 @@
 ;; System Prompt
 ;; =============================================================================
 
+(defn- format-param
+  "Formats a single parameter for the system prompt."
+  [{:keys [name type required description default]}]
+  (str "      " name " - " (clojure.core/name (or type :any))
+       (when-not (true? required) " (optional)")
+       (when (some? default) (str ", default: " (pr-str default)))
+       (when description (str " — " description))))
+
+(defn- format-tool-doc
+  "Formats a tool doc entry for the system prompt."
+  [{:keys [type sym doc params returns examples]}]
+  (str "  <" (clojure.core/name type) " name=\"" sym "\">\n"
+       (when doc (str "    " doc "\n"))
+       (when (seq params)
+         (str "    Parameters:\n"
+              (str/join "\n" (map format-param params)) "\n"))
+       (when returns
+         (str "    Returns: " (clojure.core/name (or (:type returns) :any))
+              (when (:description returns) (str " — " (:description returns)))
+              "\n"))
+       (when (seq examples)
+         (str "    Examples:\n"
+              (str/join "\n" (map #(str "      " %) examples)) "\n"))
+       "  </" (clojure.core/name type) ">"))
+
 (defn- format-custom-docs
   "Formats custom docs for the system prompt."
   [custom-docs]
   (when (seq custom-docs)
     (str "\n<custom_tools>\n"
-         (str/join "\n"
-                   (map (fn [{:keys [type sym doc]}]
-                          (str "  <" (name type) " name=\"" sym "\">" doc "</" (name type) ">"))
-                        custom-docs))
+         (str/join "\n" (map format-tool-doc custom-docs))
          "\n</custom_tools>\n")))
 
 (defn- build-system-prompt
@@ -2628,11 +2346,26 @@
   <tool name=\"context\">The data context - access as 'context' variable</tool>
   <tool name=\"llm-query\">(llm-query prompt) or (llm-query prompt {:spec my-spec}) - Simple text query to LLM</tool>
   <tool name=\"rlm-query\">(rlm-query sub-context query) or (rlm-query sub-context query {:spec s :max-iterations n}) - Spawn sub-RLM with code execution, SHARES the same database</tool>
+  <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce patterns over many chunks.</tool>
   <tool name=\"FINAL\">(FINAL answer) - MUST call when you have the answer</tool>
-  
+
   <tool name=\"list-locals\">(list-locals) - see all variables you've defined (functions show as &lt;fn&gt;, large collections summarized)</tool>
   <tool name=\"get-local\">(get-local 'var-name) - get full value of a specific variable you defined</tool>
 </available_tools>
+
+<raw_text_tools>
+  <description>Direct programmatic access to the full document text. Use for exhaustive iteration, regex across entire content, or arbitrary slicing.</description>
+  <tool name=\"P\">P - The full concatenated text of all ingested documents as a single string. Use (subs P start end) for slicing, (count P) for length, (re-seq pattern P) for regex.</tool>
+  <tool name=\"P-len\">P-len - Length of P in characters (pre-computed).</tool>
+  <tool name=\"get-page\">(get-page n) - Returns the raw text content of page n (0-indexed).</tool>
+  <tool name=\"page-count\">(page-count) - Total number of pages across all documents.</tool>
+  <usage_tips>
+    - For RETRIEVAL tasks (finding specific clauses, entities): prefer search-page-nodes — it's faster
+    - For AGGREGATION tasks (counting, summarizing all entries): use get-page + loop — it's exhaustive
+    - Combine both: search to find relevant pages, then get-page for full content
+    - For regex across entire corpus: (re-seq #\"pattern\" P)
+  </usage_tips>
+</raw_text_tools>
 
 <document_tools>
   <description>Query stored PageIndex documents. Documents contain metadata, pages, page nodes (actual content), and TOC entries.</description>
@@ -2836,16 +2569,53 @@
        ;; Include examples
        (format-examples-for-prompt examples)
 
-       "\n<workflow>
+       "
+<rlm_patterns>
+  <description>Proven strategies for processing large documents. Choose based on task type.</description>
+
+  <pattern name=\"Partition + Map (aggregation tasks)\">
+    Use when the answer depends on MANY or ALL entries (counting, summarizing, comparing).
+    Process pages in batches with llm-query-batch for parallelism:
+
+    (def total-pages (page-count))
+    (def chunk-size 5)
+    (def chunks (partition-all chunk-size (range total-pages)))
+    (def batch-results
+      (llm-query-batch
+        (mapv (fn [page-group]
+                (str \"Analyze pages \" (first page-group) \"-\" (last page-group) \":\\n\"
+                     (str-join \"\\n---\\n\" (mapv get-page page-group))))
+              chunks)))
+    (def Final (:content (llm-query (str \"Synthesize these results:\\n\" (str-join \"\\n\" (mapv :content batch-results))))))
+  </pattern>
+
+  <pattern name=\"Targeted Search (retrieval tasks)\">
+    Use when looking for SPECIFIC information (clauses, entities, definitions):
+
+    (def hits (search-page-nodes \"penalty clause\"))
+    (def relevant-content (mapv #(get-page-node (:page.node/id %)) hits))
+    (FINAL {:answer \"...\" :sources (mapv :page.node/page-id relevant-content)})
+  </pattern>
+
+  <pattern name=\"Regex Scan (structured extraction)\">
+    Use when data follows a pattern across the full text:
+
+    (def matches (re-seq #\"Section \\d+\\.\\d+\" P))
+    (def date-refs (re-seq #\"\\d{4}-\\d{2}-\\d{2}\" P))
+  </pattern>
+</rlm_patterns>
+
+<workflow>
 0. FIRST: Check <context> - if it directly answers the query, call (FINAL answer) immediately without searching
 1. If more info needed, check available documents: (list-documents)
 2. Browse TOC to understand document structure: (list-toc-entries)
 3. Pick sections from TOC, get content: (get-page-node node-id) or (list-page-nodes {:document-id id})
-4. Check entities if relevant: (entity-stats), then (list-entities {:type :party})
-5. Write code to analyze data, store intermediate results with def"
+4. For exhaustive analysis, iterate pages: (get-page 0), (get-page 1), ... or use llm-query-batch
+5. Check entities if relevant: (entity-stats), then (list-entities {:type :party})
+6. Write code to analyze data, store intermediate results with (def my-var ...)"
        (when history-enabled?
-         "\n6. Use get-history to check recent conversation")
-       "\n" (if history-enabled? "7" "6") ". Call (FINAL answer) when done
+         "\n7. Use get-history to check recent conversation")
+       "\n" (if history-enabled? "8" "7") ". Call (FINAL answer) when done
 </workflow>
 
 <response_format>
@@ -2854,9 +2624,11 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 </response_format>
 
 <critical>
+- STDOUT IS TRUNCATED: Output in your history is capped at " STDOUT_TRUNCATION_LIMIT " chars. Store important results in variables with (def my-var ...) — variables persist across ALL iterations. Do NOT rely on reading past output.
 - CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(list-documents)` calls the function, `list-documents` just references the function object and returns nothing useful. Same for FINAL: `(FINAL answer)` terminates, `FINAL answer` does NOT.
 - FAST PATH: If <context> already contains the answer, call (FINAL answer) IMMEDIATELY - no searching needed!
 - USE list-page-nodes or search-page-nodes FOR CONTENT (not just TOC entries!)
+- FOR LARGE DOCUMENTS: Use llm-query-batch for parallel processing instead of sequential llm-query calls
 - ALWAYS call (FINAL answer) when you have the answer - don't keep searching after finding it
 - Max " MAX_ITERATIONS " iterations, " (/ EVAL_TIMEOUT_MS 1000) "s timeout per execution"
        (when history-enabled?
@@ -2869,10 +2641,12 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 ;; Iteration Loop
 ;; =============================================================================
 
-(defn- run-iteration [rlm-env messages model api-key base-url]
+(defn- run-iteration [rlm-env messages _model api-key base-url]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
-    (let [_ (rlm-debug! {:model model :msg-count (count messages)} "LLM call started")
-          response-data (llm/chat-completion messages model api-key base-url)
+    (let [_ (rlm-debug! {:msg-count (count messages)} "LLM call started")
+          response-data (if-let [r (:router rlm-env)]
+                          (router/routed-chat-completion r messages :root)
+                          (llm/chat-completion messages _model api-key base-url))
           response (:content response-data)
           model-reasoning (:reasoning response-data)
           _ (rlm-debug! {:response-len (count response)
@@ -2918,15 +2692,28 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                           (if (fn? result)
                             (str "  <value>" (str/trim code) " evaluated to a function object. "
                                  "Did you mean to call it? Use `(" (str/trim code) ")` instead.</value>")
-                            (str "  <value>" (pr-str (realize-value result)) "</value>"
-                                 (when-not (str/blank? stdout) (str "\n  <stdout>" stdout "</stdout>")))))
+                            (let [result-str (pr-str (realize-value result))
+                                  truncated-result (truncate-for-history result-str STDOUT_TRUNCATION_LIMIT)]
+                              (str "  <value>" truncated-result "</value>"
+                                   (when-not (str/blank? stdout)
+                                     (str "\n  <stdout>" (truncate-for-history stdout STDOUT_TRUNCATION_LIMIT) "</stdout>"))))))
                         "\n</result_" id ">"))
                  executions)))
+
+(defn- resolve-root-model
+  "Resolves the root model name from a router, or falls back to a default.
+   Used for token counting (store-message!, truncate-messages)."
+  [rlm-router]
+  (when rlm-router
+    (when-let [[_provider model] (router/select-provider rlm-router :root)]
+      model)))
 
 (defn- iteration-loop [rlm-env query model api-key base-url max-iterations
                        {:keys [output-spec examples max-context-tokens custom-docs pre-fetched-context
                                on-iteration]}]
-  (let [history-enabled? (:history-enabled? rlm-env)
+  (let [;; Resolve effective model name for token counting
+        effective-model (or (when-let [r (:router rlm-env)] (resolve-root-model r)) model "gpt-4o")
+        history-enabled? (:history-enabled? rlm-env)
         system-prompt (build-system-prompt {:output-spec output-spec
                                             :examples examples
                                             :history-enabled? history-enabled?
@@ -2943,9 +2730,9 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         ;; Store initial messages if history tracking is enabled
         db-info (when-let [atom (:db-info-atom rlm-env)] @atom)
         _ (when history-enabled?
-            (store-message! db-info :system system-prompt {:iteration 0 :model model})
-            (store-message! db-info :user initial-user-content {:iteration 0 :model model}))]
-    (rlm-debug! {:query query :max-iterations max-iterations :model model
+            (store-message! db-info :system system-prompt {:iteration 0 :model effective-model})
+            (store-message! db-info :user initial-user-content {:iteration 0 :model effective-model}))]
+    (rlm-debug! {:query query :max-iterations max-iterations :model effective-model
                  :has-output-spec? (some? output-spec) :has-pre-fetched? (some? pre-fetched-context)
                  :msg-count (count initial-messages)} "Iteration loop started")
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :iteration-loop})]
@@ -2966,27 +2753,50 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                                      (and history-enabled? max-context-tokens (> (count messages) 4))
                                       (select-rlm-iteration-context
                                        db-info messages max-context-tokens
-                                       {:model model})
+                                       {:model effective-model})
 
                                    ;; Simple truncation when just budget set
                                      max-context-tokens
-                                      (tokens/truncate-messages model messages max-context-tokens)
+                                      (tokens/truncate-messages effective-model messages max-context-tokens)
 
                                    ;; No budget - use all messages
                                      :else messages)
-                {:keys [response thinking executions final-result]} (run-iteration rlm-env effective-messages model api-key base-url)
-              ;; Build trace entry for this iteration
-                trace-entry {:iteration iteration
-                             :response response
-                             :thinking thinking
-                             :executions executions
-                             :final? (boolean final-result)}]
+                iteration-result (try
+                                   (run-iteration rlm-env effective-messages model api-key base-url)
+                                   (catch Exception e
+                                     (let [err-msg (ex-message e)
+                                           err-type (:type (ex-data e))]
+                                       (trove/log! {:level :warn
+                                                    :data {:iteration iteration :error err-msg :type err-type}
+                                                    :msg "RLM iteration failed, feeding error to LLM"})
+                                       ;; Return ::iteration-error sentinel — loop will feed error to LLM
+                                       {::iteration-error {:message err-msg :type err-type}})))]
+            (if-let [iter-err (::iteration-error iteration-result)]
+              ;; Error path: feed error back to LLM as user message, let it recover
+              (let [error-feedback (str "[Iteration " (inc iteration) "/" max-iterations "]\n"
+                                        "<error>LLM call failed: " (:message iter-err) "</error>\n"
+                                        "The previous attempt failed. Adjust your approach or call (FINAL answer) with what you have.")
+                    trace-entry {:iteration iteration :error iter-err :final? false}]
+                (when on-iteration
+                  (try (on-iteration trace-entry) (catch Exception _)))
+                (when history-enabled?
+                  (store-message! db-info :user error-feedback {:iteration (inc iteration) :model effective-model}))
+                (recur (inc iteration)
+                       (conj messages {:role "user" :content error-feedback})
+                       (conj trace trace-entry)))
+              ;; Normal path
+              (let [{:keys [response thinking executions final-result]} iteration-result
+                    trace-entry {:iteration iteration
+                                 :response response
+                                 :thinking thinking
+                                 :executions executions
+                                 :final? (boolean final-result)}]
           ;; Notify caller of iteration progress
             (when on-iteration
               (try (on-iteration trace-entry) (catch Exception _)))
           ;; Store assistant response if tracking
             (when history-enabled?
-              (store-message! db-info :assistant response {:iteration iteration :model model}))
+              (store-message! db-info :assistant response {:iteration iteration :model effective-model}))
             (if final-result
               (do (trove/log! {:level :info :data {:iteration iteration :answer (str-truncate (answer-str (:answer final-result)) 200)} :msg "FINAL detected"})
                   {:answer (:answer final-result)
@@ -3005,12 +2815,12 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                              :feedback-len (count user-feedback)} "Iteration feedback")
               ;; Store user feedback if tracking
                 (when history-enabled?
-                  (store-message! db-info :user user-feedback {:iteration (inc iteration) :model model}))
+                  (store-message! db-info :user user-feedback {:iteration (inc iteration) :model effective-model}))
                 (recur (inc iteration)
                        (conj messages
                              {:role "assistant" :content response}
                              {:role "user" :content user-feedback})
-                       (conj trace trace-entry))))))))))
+                       (conj trace trace-entry))))))))))))
 
 ;; =============================================================================
 ;; Entity Extraction Functions
@@ -3018,22 +2828,21 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 
 (defn- extract-entities-from-page!
   "Extracts entities from a page's text nodes using LLM.
-   
+
    Params:
    `text-content` - String. Combined text from page nodes.
-   `model` - String. Model name for extraction.
-   `config` - Map. LLM configuration.
-   
+   `rlm-router` - Router from router/make-router.
+
    Returns:
    Map with :entities and :relationships keys (empty if extraction fails)."
-  [text-content model config]
+  [text-content rlm-router]
   (try
     (let [truncated (if (> (count text-content) 8000) (subs text-content 0 8000) text-content)
-          response (llm/ask! {:config config
-                                :spec ENTITY_EXTRACTION_SPEC
-                                :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
-                                           (llm/user truncated)]
-                                :model model})]
+          response (router/routed-ask! rlm-router
+                                       {:spec ENTITY_EXTRACTION_SPEC
+                                        :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
+                                                   (llm/user truncated)]}
+                                       :extraction)]
       (or (:result response) {:entities [] :relationships []}))
     (catch Exception e
       (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Entity extraction failed for page"})
@@ -3041,15 +2850,14 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 
 (defn- extract-entities-from-visual-node!
   "Extracts entities from a visual node (image/table) using vision or text.
-   
+
    Params:
    `node` - Map. Page node with :page.node/type, :page.node/image-data, :page.node/description.
-   `model` - String. Model name for extraction.
-   `config` - Map. LLM configuration.
-   
+   `rlm-router` - Router from router/make-router.
+
    Returns:
    Map with :entities and :relationships keys (empty if extraction fails)."
-  [node model config]
+  [node rlm-router]
   (try
     (let [image-data (:page.node/image-data node)
           description (:page.node/description node)]
@@ -3057,20 +2865,20 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         ;; Has image data - use vision
         image-data
         (let [b64 (bytes->base64 image-data)
-               response (llm/ask! {:config config
-                                    :spec ENTITY_EXTRACTION_SPEC
-                                    :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
-                                               (llm/user (or description "Extract entities from this image")
-                                                          (llm/image b64 "image/png"))]
-                                    :model model})]
+              response (router/routed-ask! rlm-router
+                                           {:spec ENTITY_EXTRACTION_SPEC
+                                            :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
+                                                       (llm/user (or description "Extract entities from this image")
+                                                                  (llm/image b64 "image/png"))]}
+                                           :extraction)]
           (or (:result response) {:entities [] :relationships []}))
         ;; Has description only - text extraction
         description
-        (let [response (llm/ask! {:config config
-                                    :spec ENTITY_EXTRACTION_SPEC
-                                    :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
-                                               (llm/user description)]
-                                    :model model})]
+        (let [response (router/routed-ask! rlm-router
+                                           {:spec ENTITY_EXTRACTION_SPEC
+                                            :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
+                                                       (llm/user description)]}
+                                           :extraction)]
           (or (:result response) {:entities [] :relationships []}))
         ;; Neither - skip
         :else
@@ -3082,18 +2890,17 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 
 (defn- extract-entities-from-document!
   "Extracts entities from all pages of a document.
-   
+
    Params:
    `db-info` - Map. Database info with :store key.
    `document` - Map. PageIndex document.
-   `model` - String. Model name for extraction.
-   `config` - Map. LLM configuration.
+   `rlm-router` - Router from router/make-router.
    `opts` - Map. Options with :max-extraction-pages, :max-vision-rescan-nodes.
-   
+
    Returns:
-   Map with extraction statistics: :entities-extracted, :relationships-extracted, 
+   Map with extraction statistics: :entities-extracted, :relationships-extracted,
    :pages-processed, :extraction-errors, :visual-nodes-scanned."
-  [db-info document model config opts]
+  [db-info document rlm-router opts]
   (let [max-pages (or (:max-extraction-pages opts) 50)
         max-vision (or (:max-vision-rescan-nodes opts) 10)
         pages (take max-pages (:document/pages document))
@@ -3112,7 +2919,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
           (let [text (str/join "\n" (keep :page.node/content text-nodes))]
             (when (not (str/blank? text))
               (try
-                (let [result (extract-entities-from-page! text model config)]
+                (let [result (extract-entities-from-page! text rlm-router)]
                   (swap! entities-atom into (:entities result))
                   (swap! relationships-atom into (:relationships result)))
                 (catch Exception _ (swap! errors-atom inc))))))
@@ -3120,7 +2927,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         (doseq [vnode visual-nodes]
           (when (< @vision-count-atom max-vision)
             (try
-              (let [result (extract-entities-from-visual-node! vnode model config)]
+              (let [result (extract-entities-from-visual-node! vnode rlm-router)]
                 (swap! vision-count-atom inc)
                 (swap! entities-atom into (:entities result))
                 (swap! relationships-atom into (:relationships result)))
@@ -3128,23 +2935,24 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
     ;; Store entities and relationships in DB (two-phase)
     (let [entities @entities-atom
           relationships @relationships-atom
+          conn (:conn db-info)
           name->uuid (atom {})]
       ;; Phase 1: Store entities, build name→UUID map
       (doseq [entity entities]
         (try
           (let [entity-id (java.util.UUID/randomUUID)
                 entity-name (or (:entity/name entity) (:name entity) "unknown")
-                entity-data (merge {:entity/id entity-id
-                                    :entity/name entity-name
-                                    :entity/type (or (:entity/type entity) (:type entity) :unknown)
-                                    :entity/description (or (:entity/description entity) (:description entity) "")
-                                    :entity/document-id (str doc-id)
-                                    :entity/created-at (java.util.Date.)}
-                                   (when-let [s (or (:entity/section entity) (:section entity))]
-                                     {:entity/section s})
-                                   (when-let [p (or (:entity/page entity) (:page entity))]
-                                     {:entity/page (long p)}))]
-            (swap! (:store db-info) update :entities conj entity-data)
+                entity-data (cond-> {:entity/id entity-id
+                                     :entity/name entity-name
+                                     :entity/type (or (:entity/type entity) (:type entity) :unknown)
+                                     :entity/description (or (:entity/description entity) (:description entity) "")
+                                     :entity/document-id (str doc-id)
+                                     :entity/created-at (java.util.Date.)}
+                              (or (:entity/section entity) (:section entity))
+                              (assoc :entity/section (or (:entity/section entity) (:section entity)))
+                              (or (:entity/page entity) (:page entity))
+                              (assoc :entity/page (long (or (:entity/page entity) (:page entity)))))]
+            (d/transact! conn [entity-data])
             (swap! name->uuid assoc (str/lower-case entity-name) entity-id))
           (catch Exception e
             (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store entity"}))))
@@ -3156,17 +2964,14 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                 src-id (get @name->uuid (some-> src-name str str/lower-case))
                 tgt-id (get @name->uuid (some-> tgt-name str str/lower-case))]
             (when (and src-id tgt-id)
-              (swap! (:store db-info) update :relationships conj
-                     {:relationship/id (java.util.UUID/randomUUID)
-                      :relationship/type (or (:relationship/type rel) (:type rel) :unknown)
-                      :relationship/source-entity-id src-id
-                      :relationship/target-entity-id tgt-id
-                      :relationship/description (or (:relationship/description rel) (:description rel) "")
-                      :relationship/document-id (str doc-id)
-                      :relationship/created-at (java.util.Date.)})))
+              (d/transact! conn [{:relationship/id (java.util.UUID/randomUUID)
+                                  :relationship/type (or (:relationship/type rel) (:type rel) :unknown)
+                                  :relationship/source-entity-id src-id
+                                  :relationship/target-entity-id tgt-id
+                                  :relationship/description (or (:relationship/description rel) (:description rel) "")
+                                  :relationship/document-id (str doc-id)}])))
           (catch Exception e
             (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store relationship"}))))
-      (mark-dirty-store! db-info #{:entities :relationships})
       {:entities-extracted (count entities)
        :relationships-extracted (count relationships)
        :pages-processed (count pages)
@@ -3188,106 +2993,133 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
    Usage:
    ```clojure
    (def env (rlm/create-env {:config llm-config}))
-   (rlm/register-env-fn! env 'my-fn (fn [x] (* x 2)) \"(my-fn x) - Doubles x\")
-   (rlm/register-env-def! env 'MAX_RETRIES 3 \"MAX_RETRIES - Max retry attempts\")
+   (rlm/register-env-fn! env 'my-fn (fn [x] (* x 2))
+     {:doc \"Doubles a number\"
+      :params [{:name \"x\" :type :int :required true :description \"Number to double\"}]
+      :returns {:type :int :description \"x * 2\"}})
+   (rlm/register-env-def! env 'MAX_RETRIES 3
+     {:doc \"Maximum retry attempts\" :returns {:type :int}})
    (rlm/ingest-to-env! env documents)
    (rlm/query-env! env \"What is X?\")
    (rlm/dispose-env! env)
    ```
    
    Params:
-   - :config - Required. LLM config with :api-key, :base-url, :default-model.
+   - :config - Required. LLM config with :providers (vector of provider maps) and :default-model.
     - :path - Optional. Path for persistent DB. If provided, data survives across sessions.
-    
+
     Returns:
     RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
   [{:keys [config path]}]
   (when-not config
     (anomaly/incorrect! "Missing :config" {:type :rlm/missing-config}))
-  (let [api-key (:api-key config)
-        base-url (:base-url config)
-        model (:default-model config)
+  (when-not (seq (:providers config))
+    (anomaly/incorrect! "Missing :providers in config — provide at least one provider"
+                        {:type :rlm/missing-providers}))
+  (let [rlm-router (router/make-router (:providers config))
         depth-atom (atom 0)
         locals-atom (atom {})
-        ;; Custom bindings for SCI (registered via register-env-fn!/register-env-def!)
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
-         db-info (if path
-                   (create-persistent-db path)
-                   (create-disposable-db {}))
+        db-info (create-rlm-conn path)
         db-info-atom (atom db-info)
-        ;; Initialize all schemas
-        _ (init-message-history! db-info)
-        _ (init-document-schema! db-info)
-        _ (init-learning-schema! db-info)
-        ;; Hooks atom — set by query-env! to inject callbacks
         hooks-atom (atom {})
-        ;; Create query functions
-        llm-query-fn (make-llm-query-fn model depth-atom api-key base-url {:on-query #(when-let [f (:on-query @hooks-atom)] (f %))})
-        rlm-query-fn (make-rlm-query-fn model depth-atom api-key base-url db-info-atom)
+        on-query-fn #(when-let [f (:on-query @hooks-atom)] (f %))
+        llm-query-fn (make-routed-llm-query-fn :root depth-atom rlm-router {:on-query on-query-fn})
+        sub-llm-query-fn (make-routed-llm-query-fn :sub depth-atom rlm-router {:on-query on-query-fn})
+        rlm-query-fn (make-rlm-query-fn :root depth-atom rlm-router db-info-atom)
         env-id (str (java.util.UUID/randomUUID))]
     {:env-id env-id
-     :config config
+     :config (router/sanitize-config config)
      :depth-atom depth-atom
      :locals-atom locals-atom
      :hooks-atom hooks-atom
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
+     :router rlm-router
      :llm-query-fn llm-query-fn
+     :sub-llm-query-fn sub-llm-query-fn
      :rlm-query-fn rlm-query-fn
      :history-enabled? true}))
 
 (defn register-env-fn!
   "Registers a function in the RLM environment's SCI sandbox.
-   
+
    The function becomes available to the LLM during code execution.
-   The doc-string is included in the system prompt so the LLM knows how to use it.
-   
+   Documentation is included in the system prompt so the LLM knows how to use it.
+
    Params:
    `env` - RLM environment from create-env.
    `sym` - Symbol. The function name (e.g., 'fetch-weather).
    `f` - Function. The implementation.
-   `doc-string` - String. Documentation for the LLM (e.g., \"(fetch-weather city) - Returns weather data\").
-   
+   `tool-def` - Map. Structured tool definition:
+     - :doc - String. Description of what the function does.
+     - :params - Vector of parameter maps, each with:
+         :name - String. Parameter name.
+         :type - Keyword. :string, :int, :keyword, :map, :vector, :any, etc.
+         :required - Boolean. Whether the parameter is required (default true).
+         :description - String. What the parameter is for.
+         :default - Any. Default value (rendered as-is, can be a map, keyword, etc.).
+     - :returns - Map. Return type description:
+         {:type :map :description \"Weather data with :temp, :humidity\"}
+     - :examples - Vector of strings. Usage examples.
+
+   Usage:
+   ```clojure
+   (register-env-fn! env 'fetch-weather
+     (fn [city & [{:keys [units]}]] ...)
+     {:doc \"Fetches current weather for a city\"
+      :params [{:name \"city\" :type :string :required true :description \"City name\"}
+               {:name \"opts\" :type :map :required false
+                :description \"Options map with :units (:celsius or :fahrenheit)\"
+                :default {:units :celsius}}]
+      :returns {:type :map :description \"Weather data with :temp, :humidity, :conditions\"}
+      :examples [\"(fetch-weather \\\"Berlin\\\")\"
+                 \"(fetch-weather \\\"Tokyo\\\" {:units :fahrenheit})\"]})
+   ```
+
    Returns:
    The environment (for chaining)."
-  [env sym f doc-string]
+  [env sym f tool-def]
   (when-not (:custom-bindings-atom env)
     (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
   (when-not (symbol? sym)
     (anomaly/incorrect! "sym must be a symbol" {:type :rlm/invalid-sym :sym sym}))
   (when-not (fn? f)
     (anomaly/incorrect! "f must be a function" {:type :rlm/invalid-fn}))
-  (when-not (string? doc-string)
-    (anomaly/incorrect! "doc-string must be a string" {:type :rlm/invalid-doc}))
+  (when-not (map? tool-def)
+    (anomaly/incorrect! "tool-def must be a map" {:type :rlm/invalid-tool-def}))
   (swap! (:custom-bindings-atom env) assoc sym f)
-  (swap! (:custom-docs-atom env) conj {:type :fn :sym sym :doc doc-string})
+  (swap! (:custom-docs-atom env) conj (assoc tool-def :type :fn :sym sym))
   env)
 
 (defn register-env-def!
   "Registers a constant/value in the RLM environment's SCI sandbox.
-   
+
    The value becomes available to the LLM during code execution.
-   The doc-string is included in the system prompt so the LLM knows about it.
-   
+   Documentation is included in the system prompt so the LLM knows about it.
+
    Params:
    `env` - RLM environment from create-env.
    `sym` - Symbol. The constant name (e.g., 'MAX_RETRIES).
    `value` - Any value. The constant value.
-   `doc-string` - String. Documentation for the LLM (e.g., \"MAX_RETRIES - Maximum retry attempts\").
-   
+   `tool-def` - Map. Structured definition:
+     - :doc - String. Description.
+     - :returns - Map. Type/value description:
+         {:type :int :description \"Maximum retry attempts\"}
+
    Returns:
    The environment (for chaining)."
-  [env sym value doc-string]
+  [env sym value tool-def]
   (when-not (:custom-bindings-atom env)
     (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
   (when-not (symbol? sym)
     (anomaly/incorrect! "sym must be a symbol" {:type :rlm/invalid-sym :sym sym}))
-  (when-not (string? doc-string)
-    (anomaly/incorrect! "doc-string must be a string" {:type :rlm/invalid-doc}))
+  (when-not (map? tool-def)
+    (anomaly/incorrect! "tool-def must be a map" {:type :rlm/invalid-tool-def}))
   (swap! (:custom-bindings-atom env) assoc sym value)
-  (swap! (:custom-docs-atom env) conj {:type :def :sym sym :doc doc-string})
+  (swap! (:custom-docs-atom env) conj (assoc tool-def :type :def :sym sym))
   env)
 
 (defn ingest-to-env!
@@ -3324,18 +3156,15 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                          {:type :rlm/invalid-documents
                           :explanation (rlm-spec/explain-documents documents)}))
    (let [db-info @(:db-info-atom env)
-          config (:config env)
+          rlm-router (:router env)
           extract? (:extract-entities? opts false)
-          extraction-model (or (:extraction-model opts) (:default-model config))
           base-results (mapv #(db-store-pageindex-document! db-info %) documents)
           results (if extract?
                     (mapv (fn [doc base-result]
-                            (let [extraction-result (extract-entities-from-document! db-info doc extraction-model config opts)]
+                            (let [extraction-result (extract-entities-from-document! db-info doc rlm-router opts)]
                               (merge base-result extraction-result)))
                           documents base-results)
                     base-results)]
-      ;; Single flush after all documents are ingested
-      (flush-store-now! db-info)
       results)))
 
 (defn dispose-env!
@@ -3348,7 +3177,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
    `env` - RLM environment from create-env."
   [env]
   (when-let [db-info-atom (:db-info-atom env)]
-    (dispose-db! @db-info-atom)))
+    (dispose-rlm-conn! @db-info-atom)))
 
 (defn query-env!
   "Runs a query on an RLM environment using iterative LLM code execution.
@@ -3419,15 +3248,15 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
     (when-not query-str
       (anomaly/incorrect! "Missing query" {:type :rlm/missing-query}))
     (let [refine? (if (some? refine?) refine? (nil? spec))
-          config (:config env)
-         api-key (:api-key config)
-         base-url (:base-url config)
-         model (or model (:default-model config))
+          rlm-router (:router env)
+          ;; Resolve root model name for token counting / refine! config
+          root-model (or (when rlm-router (resolve-root-model rlm-router)) model "gpt-4o")
          ;; Rebuild SCI context with current context-data and custom bindings
          locals-atom (:locals-atom env)
          db-info-atom (:db-info-atom env)
          llm-query-fn (:llm-query-fn env)
          rlm-query-fn (:rlm-query-fn env)
+         sub-llm-fn (or (:sub-llm-query-fn env) (:llm-query-fn env))
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
           claims-atom (when verify? (atom []))
@@ -3440,12 +3269,23 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                       {:type :fn :sym 'CITE-UNVERIFIED :doc "(CITE-UNVERIFIED claim-text) - Record a claim without source verification. Lower confidence."}
                       {:type :fn :sym 'list-claims :doc "(list-claims) - List all claims cited so far in this query."}
                       {:type :note :sym 'CITE-PRIORITY :doc "CITE is OPTIONAL. ALWAYS call (FINAL answer) as soon as you have the answer. Only use CITE BEFORE calling FINAL if the query explicitly asks for citations. Do NOT delay FINAL to gather citations."}])
-         sci-ctx (create-sci-context context llm-query-fn rlm-query-fn locals-atom db-info-atom (merge custom-bindings cite-bindings))
+          llm-query-overrides {'llm-query sub-llm-fn
+                               'llm-query-batch (fn [prompts]
+                                                  (let [chs (mapv (fn [p]
+                                                                    (async/thread
+                                                                      (try
+                                                                        (sub-llm-fn p)
+                                                                        (catch Exception e
+                                                                          {:error (ex-message e)}))))
+                                                                  prompts)]
+                                                    (mapv async/<!! chs)))}
+         sci-ctx (create-sci-context context sub-llm-fn rlm-query-fn locals-atom db-info-atom
+                                     (merge custom-bindings cite-bindings llm-query-overrides))
          rlm-env (assoc env :sci-ctx sci-ctx :context context)
          env-id (:env-id env)]
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
        (binding [*max-recursion-depth* max-recursion-depth]
-         (rlm-debug! {:query query-str :model model :max-iterations max-iterations
+         (rlm-debug! {:query query-str :root-model root-model :max-iterations max-iterations
                         :verify? verify? :plan? plan?
                        :refine? refine?} "RLM query-env! started")
           ;; Set hooks for this query
@@ -3456,14 +3296,14 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                 db-info @db-info-atom
                 ;; Optional planning phase — LLM outlines approach before code execution
                 plan-context (when plan?
-                               (let [plan-result (llm/ask! {:config config
-                                                             :messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
-                                                                        (llm/user (str "Query: " query-str))]
-                                                             :model model})]
+                               (let [plan-result (router/routed-ask! rlm-router
+                                                                      {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
+                                                                                 (llm/user (str "Query: " query-str))]}
+                                                                      :planning)]
                                  (when-let [plan (:result plan-result)]
                                    (str "<plan>\n" plan "\n</plan>"))))
                  ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
-                iteration-result (iteration-loop rlm-env query-str model api-key base-url max-iterations
+                iteration-result (iteration-loop rlm-env query-str nil nil nil max-iterations
                                                  {:output-spec spec
                                                   :examples examples
                                                   :max-context-tokens max-context-tokens
@@ -3475,7 +3315,6 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                ;; Execution hit max iterations - return with trace
                (let [duration-ms (util/elapsed-since start-time)]
                  (rlm-debug! {:status status :iterations iterations :duration-ms duration-ms} "RLM query-env! finished (max iterations)")
-                 (flush-store-now! db-info)
                 (cond-> {:answer nil
                         :raw-answer (:result answer answer)
                         :status status
@@ -3492,22 +3331,35 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                       refinement-count :refinement-count}
                      (if refine?
                        (let [answer-as-str (answer-str answer)
-                             stored-docs (when-let [docs (seq (:documents @(:store db-info)))]
-                                           (mapv (fn [doc]
-                                                   {:id (or (:document/id doc) (:document/name doc))
-                                                    :pages (mapv (fn [pn]
-                                                                   {:page (or (:page.node/page-id pn) "0")
-                                                                    :text (or (:page.node/content pn) "")})
-                                                                 (filter #(= (or (:document/id doc) (:document/name doc))
-                                                                             (:page.node/document-id %))
-                                                                         (:page-nodes @(:store db-info))))})
-                                                 docs))
+                             conn (:conn db-info)
+                             stored-docs (when conn
+                                           (let [docs (d/q '[:find [(pull ?e [*]) ...]
+                                                              :where [?e :document/id _]]
+                                                            (d/db conn))]
+                                             (when (seq docs)
+                                               (mapv (fn [doc]
+                                                       (let [doc-id (or (:document/id doc) (:document/name doc))
+                                                             nodes (d/q '[:find [(pull ?e [:page.node/page-id :page.node/content]) ...]
+                                                                           :in $ ?doc-id
+                                                                           :where [?e :page.node/document-id ?doc-id]]
+                                                                         (d/db conn) doc-id)]
+                                                         {:id doc-id
+                                                          :pages (mapv (fn [pn]
+                                                                         {:page (or (:page.node/page-id pn) "0")
+                                                                          :text (or (:page.node/content pn) "")})
+                                                                       nodes)}))
+                                                     docs))))
+                             ;; Build a temporary config for refine! from the refinement provider
+                             refine-config (when-let [[provider refine-model] (router/select-provider rlm-router :refinement)]
+                                             {:api-key (:api-key provider)
+                                              :base-url (:base-url provider)
+                                              :default-model refine-model})
                              refine-opts (cond-> {:spec spec
                                                   :messages [(llm/system (str "You are verifying and refining an answer to a specific query. "
                                                                               "Check the answer for accuracy, completeness, and correctness."))
                                                              (llm/user (str "<query>\n" query-str "\n</query>\n\n"
                                                                             "<answer>\n" answer-as-str "\n</answer>"))]
-                                                  :config config :model model
+                                                  :config refine-config :model root-model
                                                    :iterations max-refinements :threshold threshold}
                                            (seq stored-docs) (assoc :documents stored-docs))
                              raw-refine (llm/refine! refine-opts)
@@ -3523,10 +3375,11 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                                         (try
                                           (spec/str->data-with-spec refined-str spec)
                                           (catch Exception _
-                                            (:result (llm/ask! {:config config :spec spec
-                                                                :messages [(llm/system "Extract structured data.")
-                                                                           (llm/user (str "From:\n" refined-str))]
-                                                                :model model}))))
+                                            (:result (router/routed-ask! rlm-router
+                                                                          {:spec spec
+                                                                           :messages [(llm/system "Extract structured data.")
+                                                                                      (llm/user (str "From:\n" refined-str))]}
+                                                                          :sub))))
                                         refined-str))]
                          {:answer parsed
                           :eval-scores (:final-score raw-refine)
@@ -3547,20 +3400,18 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                                   (str final-answer) (get-in eval-scores [:total] 0) nil))
                   (when (and verify? (seq @claims-atom))
                    (let [db-info @db-info-atom
+                         conn (:conn db-info)
                          query-id (UUID/randomUUID)]
                      (doseq [claim @claims-atom]
                        (try
-                         (swap! (:store db-info) update :claims conj
-                                 (merge claim {:claim/query-id query-id
-                                               :claim/verified? (boolean (get claim :claim/verified? true))}))
-                          (mark-dirty-store! db-info :claims)
+                         (d/transact! conn [(merge claim {:claim/id (UUID/randomUUID)
+                                                          :claim/query-id query-id
+                                                          :claim/verified? (boolean (get claim :claim/verified? true))})])
                          (catch Exception e
                            (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
                  (rlm-debug! {:iterations iterations :duration-ms duration-ms
                                :refinement-count refinement-count
                                :answer-preview (str-truncate (pr-str final-answer) 200)} "RLM query-env! finished (success)")
-                  ;; Single flush after query completion (all messages, claims, learnings batched)
-                  (flush-store-now! db-info)
                   (cond-> {:answer final-answer
                           :raw-answer answer-value
                           :eval-scores eval-scores
