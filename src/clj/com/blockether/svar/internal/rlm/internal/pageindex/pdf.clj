@@ -18,9 +18,8 @@
    [org.apache.pdfbox.rendering ImageType PDFRenderer]
    [org.apache.pdfbox.text PDFTextStripper TextPosition]))
 
-;; Prevent AWT from spawning a Dock icon / Preview window on macOS.
-;; Must be set before the AWT toolkit initializes.
-(System/setProperty "java.awt.headless" "true")
+;; NOTE: Do NOT set java.awt.headless globally — it breaks Swing-based TUIs.
+;; Callers that need headless PDF rendering should set it themselves.
 
 ;; =============================================================================
 ;; Constants
