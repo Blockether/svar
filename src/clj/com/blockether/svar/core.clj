@@ -360,8 +360,19 @@
 ;; Re-export RLM (Recursive Language Model) — direct requires, no requiring-resolve
 ;; =============================================================================
 
+(def RLM_SCHEMA
+  "Datalevin schema for RLM data. Merge into your app's schema for unified DB."
+  rlm/RLM_SCHEMA)
+
+(def make-default-persistence
+  "Build Datalevin-backed persistence callbacks from a db-info atom.
+   Use to create persistence backed by your own DB for unified storage.
+   Pass the result as :persistence to create-env."
+  rlm/make-default-persistence)
+
 (def create-env
   "Creates an RLM environment for processing large contexts via iterative code execution.
+   Accepts :conn for unified DB, :path for standalone, or neither for temp DB.
    See internal.rlm for details."
   rlm/create-env)
 

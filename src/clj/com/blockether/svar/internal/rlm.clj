@@ -469,8 +469,8 @@
 ;; Datalevin Schema and Connection Lifecycle
 ;; =============================================================================
 
-(def ^:private RLM_SCHEMA
-  "Unified Datalevin schema for all RLM data."
+(def RLM_SCHEMA
+  "Datalevin schema for all RLM data. Public so callers can merge into their own DB."
   {;; Messages (tagged by env-id to distinguish parent vs sub-RLM)
    :message/id        {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
    :message/env-id    {:db/valueType :db.type/string :db/doc "RLM environment that wrote this message"}
@@ -582,12 +582,20 @@
    :raw-document/content {:db/valueType :db.type/string}})
 
 (defn- create-rlm-conn
-  "Creates a Datalevin connection for RLM.
-   With path: persistent DB. Without: temp DB (deleted on dispose)."
-  [path]
-  (let [dir (or path (str (System/getProperty "java.io.tmpdir") "/rlm-" (UUID/randomUUID)))
-        conn (d/get-conn dir RLM_SCHEMA)]
-    {:conn conn :path dir :owned? (nil? path)}))
+  "Creates or wraps a Datalevin connection for RLM.
+
+   - conn: external connection (unified DB). Svar will NOT close it on dispose.
+     Caller must ensure RLM_SCHEMA is merged into the external DB schema.
+   - path: persistent DB at given path. Svar owns and closes it.
+   - neither: temp DB (deleted on dispose).
+
+   For unified storage, pass :conn AND :persistence callbacks to create-env."
+  [{:keys [conn path]}]
+  (if conn
+    {:conn conn :path nil :owned? false}
+    (let [dir (or path (str (System/getProperty "java.io.tmpdir") "/rlm-" (UUID/randomUUID)))
+          c (d/get-conn dir RLM_SCHEMA)]
+      {:conn c :path dir :owned? (nil? path)})))
 
 (defn- dispose-rlm-conn!
   "Closes the Datalevin connection and deletes temp DB if owned."
@@ -3176,10 +3184,11 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 ;; Public API - Component-Based Architecture
 ;; =============================================================================
 
-(defn- make-default-persistence
-  "Build the default Datalevin-backed persistence callbacks.
+(defn make-default-persistence
+  "Build Datalevin-backed persistence callbacks from a db-info atom.
 
-   Callers can override any of these by passing a :persistence map to create-env.
+   Use this to create persistence backed by YOUR database (unified DB).
+   Pass the result as :persistence to create-env.
 
    Params:
    `db-info-atom` - Atom holding {:conn datalevin-conn}.
@@ -3235,7 +3244,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 
     Returns:
     RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
-  [{:keys [config path persistence]}]
+  [{:keys [config path conn persistence]}]
   (when-not config
     (anomaly/incorrect! "Missing :config" {:type :rlm/missing-config}))
   (when-not (seq (:providers config))
@@ -3246,7 +3255,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         locals-atom (atom {})
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
-        db-info (create-rlm-conn path)
+        db-info (create-rlm-conn {:conn conn :path path})
         db-info-atom (atom db-info)
         store (merge (make-default-persistence db-info-atom) persistence)
         hooks-atom (atom {})
