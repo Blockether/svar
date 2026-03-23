@@ -471,13 +471,25 @@
 
 (def ^:private RLM_SCHEMA
   "Unified Datalevin schema for all RLM data."
-  {;; Messages
+  {;; Messages (tagged by env-id to distinguish parent vs sub-RLM)
    :message/id        {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :message/env-id    {:db/valueType :db.type/string :db/doc "RLM environment that wrote this message"}
    :message/role      {:db/valueType :db.type/keyword}
    :message/content   {:db/valueType :db.type/string :db/fulltext true}
    :message/tokens    {:db/valueType :db.type/long}
    :message/timestamp {:db/valueType :db.type/instant}
    :message/iteration {:db/valueType :db.type/long}
+
+   ;; Tool Calls (recorded during SCI code execution)
+   :tool-call/id          {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
+   :tool-call/env-id      {:db/valueType :db.type/string :db/doc "RLM environment that invoked this tool"}
+   :tool-call/tool-name   {:db/valueType :db.type/string :db/doc "SCI symbol name of the tool called"}
+   :tool-call/input-edn   {:db/valueType :db.type/string :db/doc "EDN-encoded input parameters"}
+   :tool-call/output-edn  {:db/valueType :db.type/string :db/doc "EDN-encoded output (truncated)"}
+   :tool-call/error       {:db/valueType :db.type/string :db/doc "Error message if call failed"}
+   :tool-call/duration-ms {:db/valueType :db.type/long   :db/doc "Execution time in ms"}
+   :tool-call/iteration   {:db/valueType :db.type/long   :db/doc "Which iteration this call happened in"}
+   :tool-call/timestamp   {:db/valueType :db.type/instant}
 
    ;; Documents
    :document/id         {:db/valueType :db.type/string :db/unique :db.unique/identity}
@@ -610,12 +622,13 @@
      - :iteration - Integer. Which iteration this message is from.
      - :tokens - Integer. Pre-computed token count (computed if not provided).
      - :model - String. Model for token counting (default: gpt-4o).
+     - :env-id - String. RLM environment ID (distinguishes parent vs sub-RLM).
 
    Returns:
    Map with :id, :role, :content, :tokens, :timestamp."
   ([db-info role content]
    (store-message! db-info role content {}))
-  ([{:keys [conn]} role content {:keys [iteration tokens model] :or {model "gpt-4o"}}]
+  ([{:keys [conn]} role content {:keys [iteration tokens model env-id] :or {model "gpt-4o"}}]
    (when (and conn (not (str/blank? content)))
      (let [msg-id (UUID/randomUUID)
            token-count (or tokens
@@ -623,14 +636,45 @@
                              (tokens/count-tokens model content)
                              (catch Exception _ (quot (count content) 4))))
            timestamp (java.util.Date.)
-           msg {:message/id msg-id
-                :message/role role
-                :message/content content
-                :message/tokens token-count
-                :message/timestamp timestamp
-                :message/iteration (or iteration 0)}]
+           msg (cond-> {:message/id msg-id
+                        :message/role role
+                        :message/content content
+                        :message/tokens token-count
+                        :message/timestamp timestamp
+                        :message/iteration (or iteration 0)}
+                 env-id (assoc :message/env-id env-id))]
        (d/transact! conn [msg])
        {:id msg-id :role role :content content :tokens token-count :timestamp timestamp}))))
+
+(defn- store-tool-call!
+  "Records a tool invocation in the RLM database.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `env-id` - String. RLM environment ID.
+   `tool-name` - String. SCI symbol name of the tool.
+   `input` - Any. Tool input (will be pr-str'd).
+   `output` - Any. Tool output (will be pr-str'd, truncated to 2000 chars).
+   `error` - String or nil. Error message if call failed.
+   `duration-ms` - Long. Execution time.
+   `iteration` - Long. Which iteration this call happened in.
+
+   Returns:
+   UUID of the stored tool call."
+  [{:keys [conn]} env-id tool-name input output error duration-ms iteration]
+  (when conn
+    (let [call-id (UUID/randomUUID)
+          entity (cond-> {:tool-call/id call-id
+                          :tool-call/tool-name (str tool-name)
+                          :tool-call/input-edn (str-truncate (pr-str input) 2000)
+                          :tool-call/iteration (or iteration 0)
+                          :tool-call/timestamp (java.util.Date.)}
+                   env-id (assoc :tool-call/env-id env-id)
+                   output (assoc :tool-call/output-edn (str-truncate (pr-str output) 2000))
+                   error (assoc :tool-call/error (str error))
+                   duration-ms (assoc :tool-call/duration-ms (long duration-ms)))]
+      (d/transact! conn [entity])
+      call-id)))
 
 (defn- get-recent-messages
   "Gets the most recent messages by timestamp.
@@ -1007,6 +1051,64 @@
           (d/transact! conn [{:learning/id learning-id :learning/applied-count new-count}])
           new-count)))))
 
+;; =============================================================================
+;; Query Helpers — small, named, documented query functions
+;; =============================================================================
+
+(defn- fulltext-learnings
+  "Search learnings via Datalevin fulltext index."
+  [conn query]
+  (d/q '[:find [(pull ?e [:learning/id :learning/insight :learning/context
+                           :learning/timestamp :learning/useful-count
+                           :learning/not-useful-count :learning/applied-count]) ...]
+         :in $ ?q
+         :where [(fulltext $ ?q) [[?e]]]]
+       (d/db conn) query))
+
+(defn- scan-learnings
+  "Search learnings via in-memory substring scan (fallback)."
+  [conn query]
+  (let [q (str-lower query)
+        all (d/q '[:find [(pull ?e [:learning/id :learning/insight :learning/context
+                                     :learning/timestamp :learning/useful-count
+                                     :learning/not-useful-count :learning/applied-count]) ...]
+                   :where [?e :learning/id _]]
+                 (d/db conn))]
+    (filter (fn [l]
+              (or (str-includes? (str-lower (str (:learning/insight l))) q)
+                  (str-includes? (str-lower (str (:learning/context l))) q)))
+            all)))
+
+(defn- all-learnings
+  "Get all learnings from DB."
+  [conn]
+  (d/q '[:find [(pull ?e [:learning/id :learning/insight :learning/context
+                           :learning/timestamp :learning/useful-count
+                           :learning/not-useful-count :learning/applied-count]) ...]
+         :where [?e :learning/id _]]
+       (d/db conn)))
+
+(defn- search-or-list-learnings
+  "Search learnings with fulltext, falling back to scan. Nil query lists all."
+  [conn query]
+  (if query
+    (try (fulltext-learnings conn query)
+         (catch Exception _ (scan-learnings conn query)))
+    (all-learnings conn)))
+
+(defn- normalize-learning
+  "Normalize a raw learning entity into a clean result map with decay status."
+  [l]
+  (let [useful (or (:learning/useful-count l) 0)
+        not-useful (or (:learning/not-useful-count l) 0)]
+    {:learning/id (:learning/id l)
+     :insight (:learning/insight l)
+     :context (:learning/context l)
+     :timestamp (:learning/timestamp l)
+     :useful-count useful
+     :not-useful-count not-useful
+     :decayed? (learning-decayed? useful not-useful)}))
+
 (defn- db-get-learnings
   "Searches learnings by insight and context text, sorted by recency.
 
@@ -1028,28 +1130,10 @@
   ([{:keys [conn] :as db-info} query {:keys [top-k include-decayed? track-usage?]
                                       :or {top-k 5 include-decayed? false track-usage? true}}]
    (when conn
-     (let [all (d/q '[:find [(pull ?e [:learning/id :learning/insight :learning/context
-                                       :learning/timestamp :learning/useful-count
-                                       :learning/not-useful-count :learning/applied-count]) ...]
-                     :where [?e :learning/id _]]
-                    (d/db conn))
-           q (when-not (str/blank? (str query)) (str-lower query))
-           filtered (->> all
-                         (map (fn [l]
-                                {:learning/id (:learning/id l)
-                                 :insight (:learning/insight l)
-                                 :context (:learning/context l)
-                                 :timestamp (:learning/timestamp l)
-                                 :useful-count (or (:learning/useful-count l) 0)
-                                 :not-useful-count (or (:learning/not-useful-count l) 0)
-                                 :decayed? (learning-decayed? (or (:learning/useful-count l) 0)
-                                                              (or (:learning/not-useful-count l) 0))}))
+     (let [q (when-not (str/blank? (str query)) query)
+           filtered (->> (search-or-list-learnings conn q)
+                         (mapv normalize-learning)
                          (filter #(or include-decayed? (not (:decayed? %))))
-                         (filter (fn [l]
-                                   (if q
-                                     (or (str-includes? (str-lower (str (:insight l))) q)
-                                         (str-includes? (str-lower (str (:context l))) q))
-                                     true)))
                          (sort-by :timestamp #(compare %2 %1))
                          (take top-k)
                          vec)]
@@ -1315,6 +1399,36 @@
       (d/transact! conn [entity])
       node-id)))
 
+(defn- fulltext-page-nodes
+  "Search page nodes via Datalevin fulltext index."
+  [conn query]
+  (d/q '[:find [(pull ?e [:page.node/id :page.node/page-id :page.node/document-id
+                           :page.node/type :page.node/level :page.node/local-id
+                           :page.node/content :page.node/description]) ...]
+         :in $ ?q
+         :where [(fulltext $ ?q) [[?e]]]]
+       (d/db conn) query))
+
+(defn- scan-page-nodes
+  "Search page nodes via in-memory substring scan (fallback)."
+  [conn query]
+  (let [q (str-lower query)
+        all (d/q '[:find [(pull ?e [:page.node/id :page.node/page-id :page.node/document-id
+                                     :page.node/type :page.node/level :page.node/local-id
+                                     :page.node/content :page.node/description]) ...]
+                   :where [?e :page.node/id _]]
+                 (d/db conn))]
+    (filter (fn [n]
+              (or (str-includes? (str-lower (str (:page.node/content n))) q)
+                  (str-includes? (str-lower (str (:page.node/description n))) q)))
+            all)))
+
+(defn- search-page-nodes-raw
+  "Search page nodes with fulltext, falling back to scan."
+  [conn query]
+  (try (fulltext-page-nodes conn query)
+       (catch Exception _ (scan-page-nodes conn query))))
+
 (defn- db-search-page-nodes
   "Searches page nodes by text content, optionally filtered by document and type.
    
@@ -1334,20 +1448,11 @@
    (if (str/blank? (str query))
      (db-list-page-nodes db-info {:document-id document-id :type type :limit top-k})
      (when conn
-       (let [q (str-lower query)
-             all (d/q '[:find [(pull ?e [:page.node/id :page.node/page-id :page.node/document-id
-                                         :page.node/type :page.node/level :page.node/local-id
-                                         :page.node/content :page.node/description]) ...]
-                       :where [?e :page.node/id _]]
-                      (d/db conn))]
-         (->> all
-              (filter (fn [n]
-                        (or (str-includes? (str-lower (str (:page.node/content n))) q)
-                            (str-includes? (str-lower (str (:page.node/description n))) q))))
-              (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
-              (filter #(or (nil? type) (= type (:page.node/type %))))
-              (take top-k)
-              vec))))))
+       (->> (search-page-nodes-raw conn query)
+            (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
+            (filter #(or (nil? type) (= type (:page.node/type %))))
+            (take top-k)
+            vec)))))
 
 (defn- db-get-page-node
   "Gets a page node by ID with full details.
@@ -1425,6 +1530,44 @@
        (d/transact! conn [entry-data])
        entry-data))))
 
+(defn- fulltext-toc-entries
+  "Search TOC entries via Datalevin fulltext index."
+  [conn query]
+  (d/q '[:find [(pull ?e [:document.toc/id :document.toc/title :document.toc/level
+                           :document.toc/description :document.toc/target-page]) ...]
+         :in $ ?q
+         :where [(fulltext $ ?q) [[?e]]]]
+       (d/db conn) query))
+
+(defn- scan-toc-entries
+  "Search TOC entries via in-memory substring scan (fallback)."
+  [conn query]
+  (let [q (str-lower query)
+        all (d/q '[:find [(pull ?e [:document.toc/id :document.toc/title :document.toc/level
+                                     :document.toc/description :document.toc/target-page]) ...]
+                   :where [?e :document.toc/id _]]
+                 (d/db conn))]
+    (filter (fn [e]
+              (or (str-includes? (str-lower (str (:document.toc/title e))) q)
+                  (str-includes? (str-lower (str (:document.toc/description e))) q)))
+            all)))
+
+(defn- search-toc-entries-raw
+  "Search TOC entries with fulltext, falling back to scan."
+  [conn query]
+  (try (fulltext-toc-entries conn query)
+       (catch Exception _ (scan-toc-entries conn query))))
+
+(defn- normalize-toc-entry
+  "Normalize a raw TOC entry into a clean result map."
+  [e]
+  {:document.toc/id (:document.toc/id e)
+   :document.toc/title (:document.toc/title e)
+   :document.toc/level (:document.toc/level e)
+   :document.toc/description (when-not (= "" (str (:document.toc/description e)))
+                               (:document.toc/description e))
+   :document.toc/target-page (:document.toc/target-page e)})
+
 (defn- db-search-toc-entries
   "Searches TOC entries by title and description text.
 
@@ -1441,23 +1584,9 @@
    (if (str/blank? (str query))
      (db-list-toc-entries db-info {:limit top-k})
      (when conn
-       (let [q (str-lower query)
-             all (d/q '[:find [(pull ?e [:document.toc/id :document.toc/title :document.toc/level
-                                         :document.toc/description :document.toc/target-page]) ...]
-                       :where [?e :document.toc/id _]]
-                      (d/db conn))]
-         (->> all
-              (filter (fn [e]
-                        (or (str-includes? (str-lower (str (:document.toc/title e))) q)
-                            (str-includes? (str-lower (str (:document.toc/description e))) q))))
-              (take top-k)
-              (mapv (fn [e]
-                      {:document.toc/id (:document.toc/id e)
-                       :document.toc/title (:document.toc/title e)
-                       :document.toc/level (:document.toc/level e)
-                       :document.toc/description (when-not (= "" (str (:document.toc/description e)))
-                                                   (:document.toc/description e))
-                       :document.toc/target-page (:document.toc/target-page e)}))))))))
+       (->> (search-toc-entries-raw conn query)
+            (take top-k)
+            (mapv normalize-toc-entry))))))
 
 (defn- db-get-toc-entry
   "Gets a TOC entry by ID with full details.
@@ -1995,14 +2124,21 @@
                              'learning-stats (make-learning-stats-fn db-info-atom)}
                             {})
         ;; Raw text access (RLM paper §3: symbolic handle to P)
+        ;; Uses atoms so P auto-refreshes when docs are ingested mid-query
         raw-text-bindings (when db-info-atom
                             (let [conn (:conn @db-info-atom)
-                                  raw-text (build-raw-text conn)
-                                  page-texts (build-page-texts conn)]
-                              {'P raw-text
-                               'P-len (count raw-text)
-                               'get-page (fn [n] (get page-texts n))
-                               'page-count (fn [] (count page-texts))}))
+                                  p-atom (atom (build-raw-text conn))
+                                  pages-atom (atom (build-page-texts conn))
+                                  refresh! (fn []
+                                             (let [c (:conn @db-info-atom)]
+                                               (reset! p-atom (build-raw-text c))
+                                               (reset! pages-atom (build-page-texts c))
+                                               (count @p-atom)))]
+                              {'P @p-atom
+                               'P-len (count @p-atom)
+                               'get-page (fn [n] (get @pages-atom n))
+                               'page-count (fn [] (count @pages-atom))
+                               'refresh-P! refresh!}))
         all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
                             example-bindings learning-bindings raw-text-bindings
                             (or custom-bindings {}))]
@@ -2265,7 +2401,7 @@
                           {:role "user" :content initial-user-content}]
         ;; Store to shared history
         db-info @db-info-atom
-        _ (store-message! db-info :user initial-user-content {:iteration 0 :use-case use-case})]
+        _ (store-message! db-info :user initial-user-content {:iteration 0 :env-id sub-env-id})]
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-env-id sub-env-id :rlm-type :sub :rlm-parent-id parent-env-id :rlm-phase :sub-iteration-loop})]
       (rlm-debug! {:query query :max-iterations max-iterations :parent-env-id parent-env-id} "Sub-RLM started")
       (loop [iteration 0 messages initial-messages]
@@ -2274,7 +2410,7 @@
               {:status :max-iterations :iterations iteration})
           (let [{:keys [response thinking executions final-result]}
                 (run-iteration sub-env messages nil nil nil)]
-            (store-message! db-info :assistant response {:iteration iteration :use-case use-case})
+            (store-message! db-info :assistant response {:iteration iteration :env-id sub-env-id})
             (if final-result
               (do (rlm-debug! {:iteration iteration} "Sub-RLM FINAL detected")
                   {:answer (:result (:answer final-result) (:answer final-result)) :iterations iteration})
@@ -2284,7 +2420,7 @@
                                     (str iteration-header "\nNo code was executed. You MUST include Clojure expressions in the \"code\" JSON array. Respond with valid JSON: {\"thinking\": \"...\", \"code\": [\"...\"]}")
                                     (str iteration-header "\n" exec-feedback))]
                 (rlm-debug! {:iteration iteration :code-blocks (count executions) :has-thinking? (some? thinking)} "Sub-RLM iteration feedback")
-                (store-message! db-info :user user-feedback {:iteration (inc iteration) :use-case use-case})
+                (store-message! db-info :user user-feedback {:iteration (inc iteration) :env-id sub-env-id})
                 (recur (inc iteration)
                        (conj messages
                              {:role "assistant" :content response}
@@ -2336,9 +2472,50 @@
          (str/join "\n" (map format-tool-doc custom-docs))
          "\n</custom_tools>\n")))
 
+(defn- detect-model-family
+  "Detect model family from model name for prompt tuning.
+
+   Params:
+   `model` - String or nil. Model name (e.g. \"gpt-4o\", \"claude-opus-4-6\", \"gemini-2.5-pro\").
+
+   Returns:
+   Keyword. One of :openai, :anthropic, :google, :unknown."
+  [model]
+  (let [m (some-> model str/lower-case)]
+    (cond
+      (nil? m)                                          :unknown
+      (or (str/includes? m "gpt") (str/includes? m "o1")
+          (str/includes? m "o3") (str/includes? m "o4")) :openai
+      (or (str/includes? m "claude") (str/includes? m "anthropic")) :anthropic
+      (or (str/includes? m "gemini") (str/includes? m "gemma")) :google
+      :else :unknown)))
+
+(defn- format-active-learnings
+  "Format pre-fetched learnings for injection into the system prompt.
+
+   These are automatically retrieved at query start — the LLM doesn't need
+   to call search-learnings manually for these. Includes model-specific
+   learnings when they match the current model.
+
+   Params:
+   `learnings` - Vector of normalized learning maps.
+
+   Returns:
+   String with formatted learnings section, or nil if empty."
+  [learnings]
+  (when (seq learnings)
+    (str "\n<active_learnings>\n"
+         "These are validated insights from prior sessions. Apply them.\n"
+         (str/join "\n" (map-indexed
+                          (fn [i l]
+                            (str "  " (inc i) ". " (:insight l)
+                                 (when (:context l) (str " [context: " (:context l) "]"))))
+                          learnings))
+         "\n</active_learnings>\n")))
+
 (defn- build-system-prompt
   "Builds the system prompt. Optionally includes spec schema, examples, history tools, and custom docs."
-  [{:keys [output-spec examples history-enabled? custom-docs]}]
+  [{:keys [output-spec examples history-enabled? custom-docs has-documents? learnings]}]
   (str "<rlm_environment>
 <role>You are an expert Clojure programmer analyzing data in a sandboxed environment.</role>
 
@@ -2352,7 +2529,8 @@
   <tool name=\"list-locals\">(list-locals) - see all variables you've defined (functions show as &lt;fn&gt;, large collections summarized)</tool>
   <tool name=\"get-local\">(get-local 'var-name) - get full value of a specific variable you defined</tool>
 </available_tools>
-
+"
+       (when has-documents? "
 <raw_text_tools>
   <description>Direct programmatic access to the full document text. Use for exhaustive iteration, regex across entire content, or arbitrary slicing.</description>
   <tool name=\"P\">P - The full concatenated text of all ingested documents as a single string. Use (subs P start end) for slicing, (count P) for length, (re-seq pattern P) for regex.</tool>
@@ -2461,7 +2639,8 @@
     - Entities complement page-node search: entities give STRUCTURE, page-nodes give CONTENT
   </usage_tips>
 </entity_tools>
-
+")
+       "
 <date_tools>
   <description>Date manipulation functions for ISO-8601 date strings (YYYY-MM-DD format).</description>
   <tool name=\"parse-date\">(parse-date date-str) - Parse and validate ISO-8601 date. Returns string or nil.</tool>
@@ -2635,6 +2814,10 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
          "\n- Use get-history to check recent conversation and avoid repeating earlier work")
        "
 </critical>
+"
+       ;; Inject pre-fetched learnings (model-specific + query-relevant)
+       (format-active-learnings learnings)
+       "
 </rlm_environment>"))
 
 ;; =============================================================================
@@ -2709,15 +2892,20 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
       model)))
 
 (defn- iteration-loop [rlm-env query model api-key base-url max-iterations
-                       {:keys [output-spec examples max-context-tokens custom-docs pre-fetched-context
-                               on-iteration]}]
+                       {:keys [output-spec examples learnings max-context-tokens custom-docs
+                               pre-fetched-context on-iteration]}]
   (let [;; Resolve effective model name for token counting
         effective-model (or (when-let [r (:router rlm-env)] (resolve-root-model r)) model "gpt-4o")
         history-enabled? (:history-enabled? rlm-env)
+        has-docs? (when-let [db-atom (:db-info-atom rlm-env)]
+                    (when-let [db @db-atom]
+                      (pos? (count (db-list-documents db {:limit 1 :include-toc? false})))))
         system-prompt (build-system-prompt {:output-spec output-spec
                                             :examples examples
                                             :history-enabled? history-enabled?
-                                            :custom-docs custom-docs})
+                                            :custom-docs custom-docs
+                                            :has-documents? has-docs?
+                                            :learnings learnings})
         context-data (:context rlm-env)
         context-str (pr-str context-data)
         context-preview (if (> (count context-str) 2000)
@@ -2729,14 +2917,15 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                           {:role "user" :content initial-user-content}]
         ;; Store initial messages if history tracking is enabled
         db-info (when-let [atom (:db-info-atom rlm-env)] @atom)
+        env-id (:env-id rlm-env)
         _ (when history-enabled?
-            (store-message! db-info :system system-prompt {:iteration 0 :model effective-model})
-            (store-message! db-info :user initial-user-content {:iteration 0 :model effective-model}))]
+            (store-message! db-info :system system-prompt {:iteration 0 :model effective-model :env-id env-id})
+            (store-message! db-info :user initial-user-content {:iteration 0 :model effective-model :env-id env-id}))]
     (rlm-debug! {:query query :max-iterations max-iterations :model effective-model
                  :has-output-spec? (some? output-spec) :has-pre-fetched? (some? pre-fetched-context)
                  :msg-count (count initial-messages)} "Iteration loop started")
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :iteration-loop})]
-      (loop [iteration 0 messages initial-messages trace []]
+      (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0]
         (if (>= iteration max-iterations)
           (let [locals (get-locals rlm-env)
                 useful-value (some->> locals vals (filter #(and (some? %) (not (fn? %)))) last)]
@@ -2746,6 +2935,9 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
              :locals locals
              :trace trace
              :iterations iteration})
+          (if (>= consecutive-errors 5)
+            (do (trove/log! {:level :warn :data {:iteration iteration :consecutive-errors consecutive-errors} :msg "Error budget exhausted"})
+                {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration})
           (let [_ (rlm-debug! {:iteration iteration :msg-count (count messages)} "Iteration start")
               ;; Smart context management: use semantic selection when history enabled, else simple truncation
                 effective-messages (cond
@@ -2780,10 +2972,11 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                 (when on-iteration
                   (try (on-iteration trace-entry) (catch Exception _)))
                 (when history-enabled?
-                  (store-message! db-info :user error-feedback {:iteration (inc iteration) :model effective-model}))
+                  (store-message! db-info :user error-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
                 (recur (inc iteration)
                        (conj messages {:role "user" :content error-feedback})
-                       (conj trace trace-entry)))
+                       (conj trace trace-entry)
+                       (inc consecutive-errors)))
               ;; Normal path
               (let [{:keys [response thinking executions final-result]} iteration-result
                     trace-entry {:iteration iteration
@@ -2796,7 +2989,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
               (try (on-iteration trace-entry) (catch Exception _)))
           ;; Store assistant response if tracking
             (when history-enabled?
-              (store-message! db-info :assistant response {:iteration iteration :model effective-model}))
+              (store-message! db-info :assistant response {:iteration iteration :model effective-model :env-id env-id}))
             (if final-result
               (do (trove/log! {:level :info :data {:iteration iteration :answer (str-truncate (answer-str (:answer final-result)) 200)} :msg "FINAL detected"})
                   {:answer (:answer final-result)
@@ -2815,12 +3008,13 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                              :feedback-len (count user-feedback)} "Iteration feedback")
               ;; Store user feedback if tracking
                 (when history-enabled?
-                  (store-message! db-info :user user-feedback {:iteration (inc iteration) :model effective-model}))
+                  (store-message! db-info :user user-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
                 (recur (inc iteration)
                        (conj messages
-                             {:role "assistant" :content response}
+                             {:role "assistant" :content (truncate-for-history response 1500)}
                              {:role "user" :content user-feedback})
-                       (conj trace trace-entry))))))))))))
+                       (conj trace trace-entry)
+                       0))))))))))))
 
 ;; =============================================================================
 ;; Entity Extraction Functions
@@ -2982,6 +3176,35 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
 ;; Public API - Component-Based Architecture
 ;; =============================================================================
 
+(defn- make-default-persistence
+  "Build the default Datalevin-backed persistence callbacks.
+
+   Callers can override any of these by passing a :persistence map to create-env.
+
+   Params:
+   `db-info-atom` - Atom holding {:conn datalevin-conn}.
+
+   Returns:
+   Map of persistence callbacks."
+  [db-info-atom]
+  {:store-message!       (fn [role content opts] (store-message! @db-info-atom role content opts))
+   :get-recent-messages  (fn [limit] (get-recent-messages @db-info-atom limit))
+   :count-history-tokens (fn [] (count-history-tokens @db-info-atom))
+   :store-learning!      (fn
+                           ([insight] (db-store-learning! @db-info-atom insight))
+                           ([insight ctx] (db-store-learning! @db-info-atom insight ctx)))
+   :search-learnings     (fn [query opts] (db-get-learnings @db-info-atom query opts))
+   :vote-learning!       (fn [id vote] (db-vote-learning! @db-info-atom id vote))
+   :learning-stats       (fn [] (db-learning-stats @db-info-atom))
+   :list-documents       (fn [opts] (db-list-documents @db-info-atom opts))
+   :get-document         (fn [doc-id] (db-get-document @db-info-atom doc-id))
+   :search-page-nodes    (fn [query opts] (db-search-page-nodes @db-info-atom query opts))
+   :get-page-node        (fn [node-id] (db-get-page-node @db-info-atom node-id))
+   :list-page-nodes      (fn [opts] (db-list-page-nodes @db-info-atom opts))
+   :search-toc-entries   (fn [query opts] (db-search-toc-entries @db-info-atom query opts))
+   :get-toc-entry        (fn [entry-id] (db-get-toc-entry @db-info-atom entry-id))
+   :list-toc-entries     (fn [opts] (db-list-toc-entries @db-info-atom opts))})
+
 (defn create-env
   "Creates an RLM environment (component) for document ingestion and querying.
    
@@ -3006,11 +3229,13 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
    
    Params:
    - :config - Required. LLM config with :providers (vector of provider maps) and :default-model.
-    - :path - Optional. Path for persistent DB. If provided, data survives across sessions.
+   - :path - Optional. Path for persistent DB. If provided, data survives across sessions.
+   - :persistence - Optional. Map of persistence callbacks to override defaults. Keys match
+       make-default-persistence output (:store-message!, :get-recent-messages, etc.).
 
     Returns:
     RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
-  [{:keys [config path]}]
+  [{:keys [config path persistence]}]
   (when-not config
     (anomaly/incorrect! "Missing :config" {:type :rlm/missing-config}))
   (when-not (seq (:providers config))
@@ -3023,6 +3248,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
         custom-docs-atom (atom [])
         db-info (create-rlm-conn path)
         db-info-atom (atom db-info)
+        store (merge (make-default-persistence db-info-atom) persistence)
         hooks-atom (atom {})
         on-query-fn #(when-let [f (:on-query @hooks-atom)] (f %))
         llm-query-fn (make-routed-llm-query-fn :root depth-atom rlm-router {:on-query on-query-fn})
@@ -3037,6 +3263,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
+     :persistence store
      :router rlm-router
      :llm-query-fn llm-query-fn
      :sub-llm-query-fn sub-llm-query-fn
@@ -3294,6 +3521,14 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
           (let [start-time (System/nanoTime)
                 examples (get-examples query-str {})
                 db-info @db-info-atom
+                ;; Auto-fetch relevant learnings: query-relevant + model-specific
+                active-learnings (when (:conn db-info)
+                                   (let [model-ctx (str "model:" (or root-model "unknown"))
+                                         by-query (db-get-learnings db-info query-str
+                                                    {:top-k 3 :track-usage? true})
+                                         by-model (db-get-learnings db-info model-ctx
+                                                    {:top-k 2 :track-usage? true})]
+                                     (vec (distinct (concat by-query by-model)))))
                 ;; Optional planning phase — LLM outlines approach before code execution
                 plan-context (when plan?
                                (let [plan-result (router/routed-ask! rlm-router
@@ -3306,6 +3541,7 @@ EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown
                 iteration-result (iteration-loop rlm-env query-str nil nil nil max-iterations
                                                  {:output-spec spec
                                                   :examples examples
+                                                  :learnings active-learnings
                                                   :max-context-tokens max-context-tokens
                                                   :custom-docs (into (or custom-docs []) cite-docs)
                                                   :pre-fetched-context plan-context
