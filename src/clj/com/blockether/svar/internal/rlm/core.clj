@@ -3,6 +3,7 @@
    [clojure.core.async :as async]
    [clojure.string :as str]
    [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.providers :as providers]
    [com.blockether.svar.internal.rlm.db
     :refer [create-rlm-conn dispose-rlm-conn! store-message! store-executions!
             get-recent-messages db-list-documents
@@ -891,6 +892,10 @@
         ;; Resolve effective model name for token counting
         effective-model (resolve-root-model (:router rlm-env))
         _ (assert effective-model "Router must resolve a root model — check provider config")
+        ;; Default max-context-tokens to 60% of model's context window.
+        ;; Prevents unbounded history accumulation (quadratic token growth over iterations).
+        max-context-tokens (or max-context-tokens
+                               (long (* 0.6 (providers/context-limit effective-model))))
         history-enabled? (:history-enabled? rlm-env)
         ;; Check if root provider has native reasoning (thinking tokens)
         has-reasoning? (boolean (provider-has-reasoning? (:router rlm-env)))

@@ -81,13 +81,11 @@ All `query-env!` cost sources now tracked:
 
 ---
 
-### 7. History accumulates unbounded by default
+### ~~7. History accumulates unbounded by default~~ — FIXED
 
-If `max-context-tokens` is not explicitly set, ALL messages are sent to the LLM on every iteration. After 50 iterations with code + results, that's 100+ messages. Semantic context selection (`select-rlm-iteration-context`) only activates when `max-context-tokens` is provided.
+**Status: FIXED** (March 2026)
 
-**Fix**: Default `max-context-tokens` to a reasonable value (e.g., model's context window * 0.6). Never send unbounded history.
-
-**Location**: `rlm/core.clj` lines 987-999 (message selection logic).
+`max-context-tokens` now defaults to 60% of the model's context window (from `providers/context-limit`). Semantic context selection always activates after 4+ messages. No more unbounded history accumulation.
 
 ---
 
