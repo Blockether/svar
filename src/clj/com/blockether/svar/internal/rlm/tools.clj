@@ -366,12 +366,70 @@
        (db-search-page-nodes db-info query (merge {:top-k top-k} opts))
        []))))
 
+(def ^:private P_ADD_PAGE_SIZE
+  "Characters per chunk when P-add! returns a document as a vector of pages."
+  4000)
+
+(defn- chunk-text
+  "Splits text into ~4000 char pages at paragraph boundaries."
+  [text]
+  (let [page-size P_ADD_PAGE_SIZE]
+    (loop [remaining (str/split text #"\n\n+")
+           current [] current-size 0 result []]
+      (if (empty? remaining)
+        (if (seq current)
+          (conj result (str/join "\n\n" current))
+          result)
+        (let [para (first remaining)
+              para-size (count para)]
+          (if (and (> current-size 0) (> (+ current-size para-size) page-size))
+            (recur remaining [] 0 (conj result (str/join "\n\n" current)))
+            (recur (rest remaining) (conj current para)
+                   (+ current-size para-size) result)))))))
+
 (defn make-get-page-node-fn
-  "Creates get-document-page — get a document page node by ID."
+  "Creates P-add! — fetches content using Datalevin lookup ref syntax.
+
+   Returns:
+     [:page.node/id id]    → content string (single node)
+     [:document/id id]     → vector of ~4000 char page strings (chunked)
+     [:document.toc/id id] → TOC entry title/description string
+
+   The LLM stores results in variables:
+     (def clause (P-add! [:page.node/id \"abc\"]))
+     (def doc (P-add! [:document/id \"doc-1\"]))
+     (count doc)      ;; number of pages
+     (nth doc 5)      ;; page 5 content"
   [db-info-atom]
-  (fn get-document-page [node-id]
-    (when-let [db-info @db-info-atom]
-      (db-get-page-node db-info node-id))))
+  (fn P-add! [lookup-ref]
+    (when-let [{:keys [conn] :as db-info} @db-info-atom]
+      (when (and (vector? lookup-ref) (= 2 (count lookup-ref)))
+        (let [[attr id] lookup-ref]
+          (case attr
+            :page.node/id
+            (when-let [node (db-get-page-node db-info id)]
+              (or (:page.node/content node) (:page.node/description node) ""))
+
+            :document/id
+            (let [nodes (d/q '[:find [(pull ?e [:page.node/content :page.node/page-id]) ...]
+                               :in $ ?doc-id
+                               :where [?e :page.node/document-id ?doc-id]]
+                             (d/db conn) id)]
+              (when (seq nodes)
+                (let [full-text (->> nodes
+                                     (sort-by :page.node/page-id)
+                                     (keep :page.node/content)
+                                     (str/join "\n"))]
+                  (chunk-text full-text))))
+
+            :document.toc/id
+            (when-let [toc (db-get-toc-entry db-info id)]
+              (or (:document.toc/description toc) (:document.toc/title toc) ""))
+
+            ;; Unknown attribute
+            (throw (ex-info (str "P-add! unknown lookup attribute: " attr
+                                 ". Use :page.node/id, :document/id, or :document.toc/id")
+                            {:type :svar/invalid-lookup-ref :attr attr :id id}))))))))
 
 (defn make-list-page-nodes-fn
   "Creates list-document-pages — list/filter document page nodes."
@@ -596,9 +654,9 @@
                        ;; Document functions - list/get stored documents
                        'list-documents (make-list-documents-fn db-info-atom)
                        'get-document (make-get-document-fn db-info-atom)
-                       ;; Document page functions - search/get actual page content
+                       ;; Document page functions - search returns brief metadata, P-add! fetches full content
                        'search-document-pages (make-search-page-nodes-fn db-info-atom)
-                       'get-document-page (make-get-page-node-fn db-info-atom)
+                       'P-add! (make-get-page-node-fn db-info-atom)
                        'list-document-pages (make-list-page-nodes-fn db-info-atom)
                        ;; Document TOC functions - table of contents
                        'store-document-toc! (make-store-toc-entry-fn db-info-atom)
@@ -625,7 +683,7 @@
         ;;
         ;; P is ONLY built from string :context (the paper's model).
         ;; Ingested documents (via ingest-to-env!) are accessed through structured tools
-        ;; (search-document-pages, get-document-page, list-documents) — no duplication.
+        ;; (search-document-pages, P-add!, list-documents) — no duplication.
         raw-text-bindings (when (string? context-data)
                             (let [page-size 4000
                                   pages (loop [remaining (str/split context-data #"\n\n+")

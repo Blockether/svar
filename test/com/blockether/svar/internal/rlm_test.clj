@@ -2547,7 +2547,7 @@
 
 (defdescribe search-page-nodes-test
   (describe "db-search-page-nodes"
-            (it "finds nodes matching content text"
+            (it "finds nodes matching content text (returns brief with preview)"
                 (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (#'rlm-db/db-store-page-node! db-info
@@ -2560,11 +2560,13 @@
                                                   "page-2" "doc-1")
                     (let [results (#'rlm-db/db-search-page-nodes db-info "comply")]
                       (expect (= 1 (count results)))
-                      (expect (str/includes? (:page.node/content (first results)) "comply")))
+                      (expect (str/includes? (:preview (first results)) "comply"))
+                      (expect (nil? (:page.node/content (first results))))
+                      (expect (some? (:content-length (first results)))))
                     (finally
                       (#'rlm-db/dispose-rlm-conn! db-info)))))
 
-            (it "finds nodes matching description text"
+            (it "finds nodes matching description text (returns brief with preview)"
                 (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (#'rlm-db/db-store-page-node! db-info
@@ -2573,7 +2575,8 @@
                                                   "page-1" "doc-1")
                     (let [results (#'rlm-db/db-search-page-nodes db-info "revenue")]
                       (expect (= 1 (count results)))
-                      (expect (str/includes? (:page.node/description (first results)) "revenue")))
+                      (expect (str/includes? (:preview (first results)) "revenue"))
+                      (expect (nil? (:page.node/description (first results)))))
                     (finally
                       (#'rlm-db/dispose-rlm-conn! db-info)))))
 
@@ -2640,7 +2643,7 @@
                     (finally
                       (#'rlm-db/dispose-rlm-conn! db-info)))))
 
-            (it "includes content and description in results"
+            (it "returns brief format with preview and content-length"
                 (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (#'rlm-db/db-store-page-node! db-info
@@ -2651,8 +2654,11 @@
                     (let [results (#'rlm-db/db-search-page-nodes db-info "full content")
                           node (first results)]
                       (expect (= 1 (count results)))
-                      (expect (= "The full content is here." (:page.node/content node)))
-                      (expect (= "A brief description." (:page.node/description node))))
+                      ;; Brief format: no full content, has preview + length
+                      (expect (nil? (:page.node/content node)))
+                      (expect (nil? (:page.node/description node)))
+                      (expect (str/includes? (:preview node) "The full content"))
+                      (expect (= 25 (:content-length node))))
                     (finally
                       (#'rlm-db/dispose-rlm-conn! db-info)))))))
 

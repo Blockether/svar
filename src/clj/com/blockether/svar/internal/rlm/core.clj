@@ -496,9 +496,12 @@
                      {:title \"Section 1.1\" :level \"l2\" :page 3}
                      ...]}]</tool>
   <tool name=\"get-document\">(get-document doc-id) - Get document with abstract and full TOC.</tool>
-  <tool name=\"search-document-pages\">(search-document-pages query) or (search-document-pages query top-k) or (search-document-pages query top-k {:document-id id :type :paragraph}) - Fulltext search across document page content (case-insensitive). Returns [{:page.node/id :page.node/type :page.node/content :page.node/description :page.node/page-id :page.node/document-id}...]. Pass nil/blank query for list mode.</tool>
-  <tool name=\"get-document-page\">(get-document-page node-id) - Get full page node by ID. Returns node map with all content.</tool>
-  <tool name=\"list-document-pages\">(list-document-pages) or (list-document-pages {:page-id id :document-id id :type :heading :limit n}) - List document page nodes with filters.</tool>
+  <tool name=\"search-document-pages\">(search-document-pages query) or (search-document-pages query top-k) or (search-document-pages query top-k {:document-id id :type :paragraph}) - Fulltext search across document pages. Returns BRIEF metadata: [{:page.node/id :page.node/type :page.node/page-id :page.node/document-id :preview \"first 150 chars...\" :content-length N}...]. Use P-add! to fetch full content.</tool>
+  <tool name=\"P-add!\">(P-add! [:page.node/id id]) or (P-add! [:document/id id]) or (P-add! [:document.toc/id id]) - Fetches content using Datalevin lookup ref.
+    :page.node/id → content string. Store: (def clause (P-add! [:page.node/id \"abc\"]))
+    :document/id → vector of ~4000 char page strings (chunked). Store: (def doc (P-add! [:document/id \"doc-1\"])). Access: (count doc), (nth doc 5), (mapv #(re-seq #\"pattern\" %) doc)
+    :document.toc/id → TOC title/description string.</tool>
+  <tool name=\"list-document-pages\">(list-document-pages) or (list-document-pages {:page-id id :document-id id :type :heading :limit n}) - List document page nodes with brief metadata.</tool>
   <tool name=\"search-document-toc\">(search-document-toc query) or (search-document-toc query top-k) - Search table of contents by title/description (case-insensitive). Returns [{:document.toc/id :document.toc/title :document.toc/description :document.toc/level :document.toc/target-page}...].</tool>
   <tool name=\"get-document-toc-entry\">(get-document-toc-entry entry-id) - Get full TOC entry by ID.</tool>
   <tool name=\"list-document-toc\">(list-document-toc) or (list-document-toc {:parent-id id :limit n}) - List TOC entries.</tool>
@@ -522,8 +525,10 @@
   </document_toc_schema>
   <usage_tips>
     - START HERE: Call (list-documents) to see available documents with abstracts and TOC
-    - Use (search-document-pages \"penalty\") to find content across all documents
-    - Use (list-document-toc) to understand document structure, then (get-document-page node-id) for content
+    - Use (search-document-pages \"penalty\") to find relevant nodes (returns brief metadata + preview)
+    - Use (P-add! [:page.node/id id]) to fetch full content: (def clause (P-add! [:page.node/id \"abc-123\"]))
+    - Use (P-add! [:document/id id]) to fetch entire document as text
+    - Use (list-document-toc) to understand document structure
     - Filter by :type to find specific content (e.g., :paragraph for text, :heading for titles)
     - Filter by :document-id to search within a specific document
   </usage_tips>
@@ -668,7 +673,7 @@
     Use when looking for SPECIFIC information (clauses, entities, definitions):
 
     (def hits (search-document-pages \"penalty clause\"))
-    (def relevant-content (mapv #(get-document-page (:page.node/id %)) hits))
+    (def relevant-content (mapv #(P-add! [:page.node/id (:page.node/id %)]) hits))
     (FINAL {:answer \"...\" :sources (mapv :page.node/page-id relevant-content)})
   </pattern>
 
@@ -684,7 +689,7 @@
 0. FIRST: Check <context> - if it directly answers the query, call (FINAL answer) immediately without searching
 1. If more info needed, check available documents: (list-documents)
 2. Browse TOC to understand document structure: (list-document-toc)
-3. Pick sections from TOC, get content: (get-document-page node-id) or (list-document-pages {:document-id id})
+3. Pick sections from TOC, fetch content: (def section (P-add! [:page.node/id node-id]))
 4. For exhaustive analysis over P: iterate (P-page 0), (P-page 1), ... or use llm-query-batch
 5. Check entities if relevant: (document-entity-stats), then (list-document-entities {:type :party})
 6. Write code to analyze data, store intermediate results with (def my-var ...)"

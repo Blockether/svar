@@ -968,8 +968,24 @@
   (try (fulltext-page-nodes conn query)
        (catch Exception _ (scan-page-nodes conn query))))
 
+(defn- brevify-node
+  "Strips full content from a page node, replacing with a 150-char preview.
+   The LLM uses P-add! to load full content into P when needed."
+  [node]
+  (let [content (or (:page.node/content node) (:page.node/description node) "")
+        preview (if (> (count content) 150)
+                  (str (subs content 0 150) "...")
+                  content)]
+    (-> node
+        (dissoc :page.node/content :page.node/description)
+        (assoc :preview preview
+               :content-length (count content)))))
+
 (defn db-search-page-nodes
   "Searches page nodes by text content, optionally filtered by document and type.
+   
+   Returns BRIEF results by default — metadata + 150-char preview.
+   Use P-add! to fetch full content into a variable.
    
    Params:
    `db-info` - Map with :store key.
@@ -981,17 +997,18 @@
      - :type - Keyword. Filter by node type (:paragraph, :heading, etc.).
    
    Returns:
-   Vector of page node maps with content included."
+   Vector of brief page node maps: {:page.node/id :page.node/type :page.node/page-id
+                                     :page.node/document-id :preview :content-length}"
   ([db-info query] (db-search-page-nodes db-info query {}))
   ([{:keys [conn] :as db-info} query {:keys [top-k document-id type] :or {top-k 10}}]
    (if (str/blank? (str query))
-     (db-list-page-nodes db-info {:document-id document-id :type type :limit top-k})
+     (mapv brevify-node (db-list-page-nodes db-info {:document-id document-id :type type :limit top-k}))
      (when conn
        (->> (search-page-nodes-raw conn query)
             (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
             (filter #(or (nil? type) (= type (:page.node/type %))))
             (take top-k)
-            vec)))))
+            (mapv brevify-node))))))
 
 (defn db-get-page-node
   "Gets a page node by ID with full details.

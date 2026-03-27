@@ -67,13 +67,17 @@ All `query-env!` cost sources now tracked:
 
 ---
 
-### 6. Document search returns full content — massive token waste
+### ~~6. Document search returns full content — massive token waste~~ — FIXED
 
-`search-document-pages` returns full `:page.node/content` for each result. Default `top-k=10` means ~5,000 tokens per search. If the LLM does 3 searches per iteration across 10 iterations, that's 150,000 tokens of search results alone.
+**Status: FIXED** (March 2026)
 
-**Fix**: Add `:include-content? false` mode that returns metadata-only results (id, type, page-id, description preview). The LLM then calls `get-document-page` for specific nodes it needs.
-
-**Location**: `rlm/tools.clj` make-search-page-nodes-fn, `rlm/db.clj` db-search-page-nodes.
+- `search-document-pages` now returns **brief metadata** only: `{:page.node/id :page.node/type :page.node/page-id :preview "first 150 chars..." :content-length N}`
+- Full content fetched via `P-add!` using Datalevin lookup ref syntax:
+  - `(P-add! [:page.node/id "abc"])` → content string
+  - `(P-add! [:document/id "doc-1"])` → vector of ~4000 char chunked pages
+  - `(P-add! [:document.toc/id "toc"])` → TOC description
+- Per the RLM paper: LLM manages working data via `def` variables, P stays immutable
+- Token savings: ~5,000 tokens per search → ~500 tokens (metadata only), 10x reduction
 
 ---
 
