@@ -1234,120 +1234,111 @@
        :visual-nodes-scanned @vision-count-atom})))
 
 ;; =============================================================================
+;; Auto-Learn: Vote + Extract
+;; =============================================================================
+;;
+;; Post-query reflection pipeline:
+;;   1. reflect-vote!    — cheap LLM evaluates which injected learnings helped
+;;   2. reflect-extract! — cheap LLM extracts reusable insights (async)
+
+(defn- cheap-ask!
+  "Fires a cheap, non-critical LLM call. Returns response or nil on error."
+  [rlm-router spec prompt log-id]
+  (try
+    (llm/ask! {:spec spec
+               :messages [(llm/user prompt)]
+               :router rlm-router
+               :prefer :cost :capabilities #{:chat}})
+    (catch Exception e
+      (trove/log! {:level :warn :data {:error (ex-message e)} :msg (str log-id " failed, skipping")})
+      nil)))
+
+(defn- summarize-trace
+  "Builds a human-readable summary of the last N trace entries (code + results)."
+  [trace n]
+  (->> trace
+       (take-last n)
+       (map (fn [t]
+              (let [code-preview (when (seq (:executions t))
+                                   (->> (:executions t)
+                                        (map (fn [e]
+                                               (str "  " (str-truncate (:code e) 80)
+                                                    " => " (str-truncate (pr-str (:result e)) 60))))
+                                        (str/join "\n")))]
+                (str "Iteration " (:iteration t) ":"
+                     (when (:thinking t) (str " " (str-truncate (:thinking t) 80)))
+                     (when code-preview (str "\n" code-preview))))))
+       (str/join "\n")))
+
+;; =============================================================================
 ;; Public API - Component-Based Architecture
 ;; =============================================================================
 
-(defn auto-vote-learnings!
-  "Uses a cheap LLM call to evaluate which active learnings were actually useful
-   for the given query + outcome, then auto-votes accordingly.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `rlm-router` - Router for LLM calls.
-   `active-learnings` - Vector of learning maps that were injected.
-   `query` - String. The user query.
-   `outcome` - :success or :failure
-   `answer-preview` - String. Brief preview of the answer (or nil on failure)."
+(defn reflect-vote!
+  "Evaluates which injected learnings were useful. Votes drive decay.
+   Returns {:tokens :cost} for cost tracking, or nil."
   [db-info rlm-router active-learnings query outcome answer-preview]
   (when (and (:conn db-info) rlm-router (seq active-learnings))
-    (try
-      (let [learnings-summary (str/join "\n"
-                                        (map-indexed
-                                         (fn [i l]
-                                           (str (inc i) ". [" (:learning/id l) "] " (:insight l)
-                                                (when (:context l) (str " (context: " (:context l) ")"))))
-                                         active-learnings))
-            prompt (str "You are evaluating whether learnings/insights were useful for a query.\n\n"
-                        "Query: " query "\n"
-                        "Outcome: " (name outcome) "\n"
-                        (when answer-preview (str "Answer preview: " answer-preview "\n"))
-                        "\nLearnings that were injected:\n" learnings-summary "\n\n"
-                        "For EACH learning, vote 'useful' if it directly helped answer the query, "
-                        "or 'not-useful' if it was irrelevant or unhelpful. Be honest — a successful "
-                        "query doesn't mean every learning helped.")
-            response (llm/ask! {:spec LEARNING_VOTE_SPEC
-                                :messages [(llm/user prompt)]
-                                :router rlm-router
-                                :prefer :cost :capabilities #{:chat}})
-            votes (:votes (:result response))]
+    (let [learnings-summary (str/join "\n"
+                                      (map-indexed
+                                       (fn [i l]
+                                         (str (inc i) ". [" (:learning/id l) "] " (:insight l)
+                                              (when (:context l) (str " (context: " (:context l) ")"))))
+                                       active-learnings))
+          prompt (str "You are evaluating whether learnings/insights were useful for a query.\n\n"
+                      "Query: " query "\n"
+                      "Outcome: " (name outcome) "\n"
+                      (when answer-preview (str "Answer preview: " answer-preview "\n"))
+                      "\nLearnings that were injected:\n" learnings-summary "\n\n"
+                      "For EACH learning, vote 'useful' if it directly helped answer the query, "
+                      "or 'not-useful' if it was irrelevant or unhelpful.")
+          response (cheap-ask! rlm-router LEARNING_VOTE_SPEC prompt "reflect-vote!")]
+      (when-let [votes (:votes (:result response))]
         (when (sequential? votes)
           (doseq [{:keys [id vote reason]} votes]
-            (let [vote-kw (case vote
-                            :useful     :useful
-                            :not_useful :not-useful
-                            nil)]
+            (let [vote-kw (case vote :useful :useful :not_useful :not-useful nil)]
               (when vote-kw
                 (when-let [uuid (util/parse-uuid (str id))]
-                  (rlm-debug! {:learning-id uuid :vote vote-kw :reason reason} "Auto-vote learning")
-                  (db-vote-learning! db-info uuid vote-kw))))))
-        ;; Return cost for caller to merge
-        {:tokens (:tokens response) :cost (:cost response)})
-      (catch Exception e
-        (trove/log! {:level :warn :data {:error (ex-message e)}
-                     :msg "Auto-vote learnings failed, skipping"})
-        nil))))
+                  (rlm-debug! {:learning-id uuid :vote vote-kw :reason reason} "reflect-vote!")
+                  (db-vote-learning! db-info uuid vote-kw)))))))
+      (when response
+        {:tokens (:tokens response) :cost (:cost response)}))))
 
-(defn auto-extract-learnings!
-  "Auto-extracts reusable insights from successful multi-iteration queries.
-   Only fires when iterations exceed AUTOLEARN_ITERATION_THRESHOLD (3).
-   Extracts 1-3 learnings with tags and scope.
-
-   Returns {:ids [...] :tokens ... :cost ...}, or nil."
+(defn reflect-extract!
+  "Extracts reusable insights from successful multi-iteration queries.
+   Only fires when: iterations > threshold AND query succeeded.
+   Returns {:ids [...] :tokens :cost}, or nil."
   [db-info rlm-router query answer-preview iterations trace scope status]
   (when (and (:conn db-info) rlm-router
              (> iterations AUTOLEARN_ITERATION_THRESHOLD)
              (not= status :max-iterations)
              (not= status :error-budget-exhausted))
-    (try
-      (let [trace-summary (->> trace
-                               (take-last 5)
-                               (map (fn [t]
-                                      (let [code-preview (when (seq (:executions t))
-                                                           (->> (:executions t)
-                                                                (map (fn [e]
-                                                                       (str "  " (str-truncate (:code e) 80)
-                                                                            " => " (str-truncate (pr-str (:result e)) 60))))
-                                                                (str/join "\n")))]
-                                        (str "Iteration " (:iteration t) ":"
-                                             (when (:thinking t) (str " " (str-truncate (:thinking t) 80)))
-                                             (when code-preview (str "\n" code-preview))))))
-                               (str/join "\n"))
-            prompt (str "You just completed a " iterations "-iteration query. "
-                        "Extract 1-3 REUSABLE insights about strategies that worked.\n\n"
-                        "Query: " query "\n"
-                        "Answer preview: " answer-preview "\n"
-                        "Approach summary:\n" trace-summary "\n\n"
-                        "For each insight:\n"
-                        "- insight: A concrete, reusable strategy (not query-specific)\n"
-                        "- context: When this strategy applies\n"
-                        "- tags: 1-3 lowercase category tags\n\n"
-                        "Only extract insights that would help with FUTURE similar queries. "
-                        "Skip obvious or query-specific observations.")
-            response (llm/ask! {:spec AUTOLEARN_SPEC
-                                :messages [(llm/user prompt)]
-                                :router rlm-router
-                                :prefer :cost :capabilities #{:chat}})
-            extracted-learnings (:learnings (:result response))
-            learning-ids (when (sequential? extracted-learnings)
-                           (->> extracted-learnings
-                                (keep (fn [{:keys [insight context tags]}]
-                                        (when (and insight (not (str/blank? insight)))
-                                          (let [stored (db-store-learning! db-info insight
-                                                                           {:context context
-                                                                            :tags (when (sequential? tags) (vec tags))
-                                                                            :scope scope
-                                                                            :source :auto})]
-                                            (rlm-debug! {:learning-id (:learning/id stored)
-                                                         :insight (str-truncate insight 100)
-                                                         :scope scope}
-                                                        "Auto-extracted learning")
-                                            (:learning/id stored)))))
-                                vec))]
-        (when (seq learning-ids)
-          {:ids learning-ids
-           :tokens (:tokens response)
-           :cost (:cost response)}))
-      (catch Exception e
-        (trove/log! {:level :warn :data {:error (ex-message e)}
-                     :msg "Auto-extract learnings failed, skipping"})
-        nil))))
+    (let [prompt (str "You just completed a " iterations "-iteration query. "
+                      "Extract 1-3 REUSABLE insights about strategies that worked.\n\n"
+                      "Query: " query "\n"
+                      "Answer preview: " answer-preview "\n"
+                      "Approach summary:\n" (summarize-trace trace 5) "\n\n"
+                      "For each insight:\n"
+                      "- insight: A concrete, reusable strategy (not query-specific)\n"
+                      "- context: When this strategy applies\n"
+                      "- tags: 1-3 lowercase category tags\n\n"
+                      "Only extract insights that would help with FUTURE similar queries. "
+                      "Skip obvious or query-specific observations.")
+          response (cheap-ask! rlm-router AUTOLEARN_SPEC prompt "reflect-extract!")]
+      (when-let [extracted (:learnings (:result response))]
+        (let [ids (->> (when (sequential? extracted) extracted)
+                       (keep (fn [{:keys [insight context tags]}]
+                               (when (and insight (not (str/blank? insight)))
+                                 (let [stored (db-store-learning! db-info insight
+                                                                  {:context context
+                                                                   :tags (when (sequential? tags) (vec tags))
+                                                                   :scope scope
+                                                                   :source :auto})]
+                                   (rlm-debug! {:learning-id (:learning/id stored)
+                                                :insight (str-truncate insight 100)
+                                                :scope scope}
+                                               "reflect-extract!")
+                                   (:learning/id stored)))))
+                       vec)]
+          (when (seq ids)
+            {:ids ids :tokens (:tokens response) :cost (:cost response)}))))))

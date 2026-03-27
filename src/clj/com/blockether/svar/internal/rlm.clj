@@ -508,7 +508,7 @@
                ;; Execution hit max iterations - return with trace
                (let [duration-ms (util/elapsed-since start-time)]
                   ;; Auto-vote via LLM: evaluate which learnings were relevant (even in failure)
-                 (when-let [{:keys [tokens cost]} (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :failure nil)]
+                 (when-let [{:keys [tokens cost]} (rlm-core/reflect-vote! db-info rlm-router active-learnings query-str :failure nil)]
                    (merge-cost! tokens cost))
                  (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms
                                        :auto-voted (count active-learnings)} "RLM query-env! finished (max iterations)")
@@ -639,8 +639,8 @@
                  ;; Final answer is already stored as structured assistant message in iteration-loop
                  ;; (with :thinking and linked :execution/* entities)
                  ;; Auto-vote via LLM: evaluate which learnings actually helped
-                 (when-let [{:keys [tokens cost]} (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :success
-                                                                                 (rlm-db/str-truncate (pr-str final-answer) 300))]
+                 (when-let [{:keys [tokens cost]} (rlm-core/reflect-vote! db-info rlm-router active-learnings query-str :success
+                                                                          (rlm-db/str-truncate (pr-str final-answer) 300))]
                    (merge-cost! tokens cost))
                    ;; Auto-extract new learnings from successful multi-iteration queries
                  (when autolearn?
@@ -650,9 +650,9 @@
                                               (str "*" (first exts)))))]
                      (async/thread
                        (try
-                         (rlm-core/auto-extract-learnings! db-info rlm-router query-str
-                                                           (rlm-db/str-truncate (pr-str final-answer) 300)
-                                                           iterations trace inferred-scope nil)
+                         (rlm-core/reflect-extract! db-info rlm-router query-str
+                                                    (rlm-db/str-truncate (pr-str final-answer) 300)
+                                                    iterations trace inferred-scope nil)
                          (catch Exception e
                            (trove/log! {:level :warn :data {:error (ex-message e)}
                                         :msg "Auto-extract failed (async)"}))))))

@@ -733,16 +733,16 @@
                              (expect (some? (:error store-result)))
                              (expect (some? (:error vote-result))))))))
 
-(defdescribe auto-extract-learnings-test
+(defdescribe reflect-extract-test
   (it "does not extract for low-iteration queries"
-      (expect (nil? (#'rlm-core/auto-extract-learnings! {:conn :fake}
-                                                        :router
-                                                        "query"
-                                                        "answer"
-                                                        rlm-schema/AUTOLEARN_ITERATION_THRESHOLD
-                                                        []
-                                                        nil
-                                                        nil)))))
+      (expect (nil? (#'rlm-core/reflect-extract! {:conn :fake}
+                                                 :router
+                                                 "query"
+                                                 "answer"
+                                                 rlm-schema/AUTOLEARN_ITERATION_THRESHOLD
+                                                 []
+                                                 nil
+                                                 nil)))))
 
 ;; =============================================================================
 ;; Build System Prompt Tests
