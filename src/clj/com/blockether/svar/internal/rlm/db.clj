@@ -282,6 +282,7 @@
 
 (defn db-upsert-tag!
   "Creates or updates a learning tag with a definition. Upserts by name.
+   Only sets :created-at on first creation, preserves it on updates.
 
    Params:
    `db-info` - Map with :conn key.
@@ -293,27 +294,37 @@
   [{:keys [conn]} tag-name definition]
   (when (and conn (not (str/blank? tag-name)))
     (let [clean-name (str/lower-case (str/trim tag-name))
-          entity (cond-> {:learning-tag/name clean-name
-                          :learning-tag/created-at (java.util.Date.)}
+          existing (d/pull (d/db conn) '[:learning-tag/name] [:learning-tag/name clean-name])
+          entity (cond-> {:learning-tag/name clean-name}
+                   ;; Only set created-at on first creation
+                   (not (:learning-tag/name existing)) (assoc :learning-tag/created-at (java.util.Date.))
                    definition (assoc :learning-tag/definition definition))]
       (d/transact! conn [entity])
       {:learning-tag/name clean-name
        :learning-tag/definition definition})))
 
 (defn- db-ensure-tags!
-  "Ensures all tag names exist in the DB. Creates missing ones with nil definition.
+  "Ensures all tag names exist in the DB. Creates missing ones in a single transaction.
 
    Params:
    `db-info` - Map with :conn key.
    `tag-names` - Collection of strings."
-  [{:keys [conn] :as db-info} tag-names]
+  [{:keys [conn]} tag-names]
   (when (and conn (seq tag-names))
-    (doseq [t tag-names]
-      (let [clean (str/lower-case (str/trim (str t)))]
-        (when-not (str/blank? clean)
-          (let [existing (d/pull (d/db conn) '[:learning-tag/name] [:learning-tag/name clean])]
-            (when-not (:learning-tag/name existing)
-              (db-upsert-tag! db-info clean nil))))))))
+    (let [clean-names (->> tag-names
+                           (map #(str/lower-case (str/trim (str %))))
+                           (remove str/blank?)
+                           distinct)
+          existing (->> (d/q '[:find [?n ...]
+                               :where [?e :learning-tag/name ?n]]
+                             (d/db conn))
+                        set)
+          new-tags (->> clean-names
+                        (remove existing)
+                        (mapv (fn [n] {:learning-tag/name n
+                                       :learning-tag/created-at (java.util.Date.)})))]
+      (when (seq new-tags)
+        (d/transact! conn new-tags)))))
 
 (defn db-list-tags
   "Lists all learning tags with definitions.
@@ -351,6 +362,65 @@
         {:name (:learning-tag/name e)
          :definition (:learning-tag/definition e)}))))
 
+;; Forward declarations for dedup check
+(declare scan-learnings)
+
+;; -----------------------------------------------------------------------------
+;; Learning Deduplication
+;; -----------------------------------------------------------------------------
+
+(defn- find-duplicate-learning
+  "Checks if a semantically similar learning already exists.
+   Returns the first matching learning entity, or nil.
+   Uses case-insensitive substring containment in both directions."
+  [conn insight]
+  (let [insight-lower (str/lower-case (str/trim insight))]
+    (->> (try (scan-learnings conn insight)
+              (catch Exception _ []))
+         (filter (fn [l]
+                   (let [existing-lower (str/lower-case (str (:learning/insight l)))]
+                     (or (= existing-lower insight-lower)
+                         (str/includes? existing-lower insight-lower)
+                         (str/includes? insight-lower existing-lower)))))
+         first)))
+
+(defn- create-learning-entity!
+  "Creates a new learning entity in the DB. Returns the stored learning map."
+  [conn db-info insight {:keys [context tags scope source]}]
+  (let [clean-tags (when (seq tags)
+                     (->> tags (map #(str/lower-case (str/trim (str %)))) (remove str/blank?) vec))
+        _ (when (seq clean-tags) (db-ensure-tags! db-info clean-tags))
+        learning-id (util/uuid)
+        timestamp (java.util.Date.)
+        learning (cond-> {:learning/id learning-id
+                          :learning/insight insight
+                          :learning/timestamp timestamp
+                          :learning/useful-count 0
+                          :learning/not-useful-count 0
+                          :learning/applied-count 0
+                          :learning/source (or source :manual)}
+                   context (assoc :learning/context context)
+                   scope (assoc :learning/scope scope)
+                   (seq clean-tags) (assoc :learning/tags clean-tags))]
+    (d/transact! conn [learning])
+    {:learning/id learning-id
+     :learning/insight insight
+     :learning/context context
+     :learning/tags (or clean-tags [])
+     :learning/scope scope
+     :learning/timestamp timestamp}))
+
+(defn- existing-learning->result
+  "Converts an existing learning entity to a store result with :duplicate? true."
+  [entity]
+  {:learning/id (:learning/id entity)
+   :learning/insight (:learning/insight entity)
+   :learning/context (:learning/context entity)
+   :learning/tags (or (:learning/tags entity) [])
+   :learning/scope (:learning/scope entity)
+   :learning/timestamp (:learning/timestamp entity)
+   :duplicate? true})
+
 ;; -----------------------------------------------------------------------------
 ;; Learning CRUD
 ;; -----------------------------------------------------------------------------
@@ -371,30 +441,11 @@
    Returns:
    Map with :learning/id, :learning/insight, :learning/context, :learning/tags, :learning/scope, :learning/timestamp."
   ([db-info insight] (db-store-learning! db-info insight {}))
-  ([{:keys [conn] :as db-info} insight {:keys [context tags scope source]}]
+  ([{:keys [conn] :as db-info} insight {:keys [context tags scope source] :as opts}]
    (when conn
-     (let [clean-tags (when (seq tags)
-                        (->> tags (map #(str/lower-case (str/trim (str %)))) (remove str/blank?) vec))
-           _ (when (seq clean-tags) (db-ensure-tags! db-info clean-tags))
-           learning-id (util/uuid)
-           timestamp (java.util.Date.)
-           learning (cond-> {:learning/id learning-id
-                             :learning/insight insight
-                             :learning/timestamp timestamp
-                             :learning/useful-count 0
-                             :learning/not-useful-count 0
-                             :learning/applied-count 0
-                             :learning/source (or source :manual)}
-                      context (assoc :learning/context context)
-                      scope (assoc :learning/scope scope)
-                      (seq clean-tags) (assoc :learning/tags clean-tags))]
-       (d/transact! conn [learning])
-       {:learning/id learning-id
-        :learning/insight insight
-        :learning/context context
-        :learning/tags (or clean-tags [])
-        :learning/scope scope
-        :learning/timestamp timestamp}))))
+     (if-let [existing (find-duplicate-learning conn insight)]
+       (existing-learning->result existing)
+       (create-learning-entity! conn db-info insight opts)))))
 
 (defn learning-decayed?
   "Returns true if a learning has decayed (>70% negative votes after 5+ total votes)."
@@ -458,18 +509,30 @@
   '[:learning/id :learning/insight :learning/context :learning/tags :learning/scope :learning/source
     :learning/timestamp :learning/useful-count :learning/not-useful-count :learning/applied-count])
 
+(def ^:private glob-regex-cache
+  "Cache compiled regexes for glob patterns. Avoids recompilation on every match."
+  (atom {}))
+
+(defn- glob->regex
+  "Compiles a glob pattern to a regex, with memoization."
+  [pattern]
+  (if-let [cached (get @glob-regex-cache pattern)]
+    cached
+    (let [regex-str (-> pattern
+                        (str/replace "." "\\.")
+                        (str/replace "*" ".*")
+                        (str/replace "?" "."))
+          regex (re-pattern (str "(?i)^" regex-str "$"))]
+      (swap! glob-regex-cache assoc pattern regex)
+      regex)))
+
 (defn- glob-matches?
   "Returns true if `name` matches the glob `pattern`.
    Supports * (any chars) and ? (single char). Nil pattern matches everything."
   [pattern name]
   (if (nil? pattern)
     true
-    (let [regex-str (-> pattern
-                        (str/replace "." "\\.")
-                        (str/replace "*" ".*")
-                        (str/replace "?" "."))
-          regex (re-pattern (str "(?i)^" regex-str "$"))]
-      (boolean (re-matches regex (str name))))))
+    (boolean (re-matches (glob->regex pattern) (str name)))))
 
 (defn- scope-matches-documents?
   "Returns true if a learning's scope matches any of the given document names/extensions.
@@ -500,11 +563,14 @@
             all)))
 
 (defn- all-learnings
-  "Get all learnings from DB."
+  "Get recent learnings from DB (capped at 500 to prevent full table scan)."
   [conn]
-  (d/q `[:find [(~'pull ~'?e ~learning-pull-pattern) ...]
-         :where [~'?e :learning/id ~'_]]
-       (d/db conn)))
+  (->> (d/q `[:find [(~'pull ~'?e ~learning-pull-pattern) ...]
+              :where [~'?e :learning/id ~'_]]
+            (d/db conn))
+       (sort-by :learning/timestamp #(compare %2 %1))
+       (take 500)
+       vec))
 
 (defn- search-or-list-learnings
   "Search learnings with fulltext, falling back to scan. Nil query lists all."
@@ -531,16 +597,17 @@
              :timestamp (:learning/timestamp l)
              :useful-count useful
              :not-useful-count not-useful
+             :applied-count (or (:learning/applied-count l) 0)
              :decayed? (learning-decayed? useful not-useful)}
       (:learning/scope l) (assoc :scope (:learning/scope l))
       (:learning/source l) (assoc :source (:learning/source l)))))
 
 (defn db-get-learnings
-  "Searches learnings by insight and context text, sorted by recency.
+  "Searches learnings by insight and context text.
 
    Filters out decayed learnings (>70% negative votes after 5+ total votes).
    Automatically increments applied-count for returned learnings.
-   When query is nil/blank, returns all non-decayed learnings by recency.
+   Sorted by relevance: applied-count (proven useful) + recency.
 
    Params:
    `db-info` - Map with :conn key.
@@ -549,25 +616,33 @@
      - :top-k - Integer. Max learnings to return (default: 5).
      - :include-decayed? - Boolean. Include decayed learnings (default: false).
      - :track-usage? - Boolean. Increment applied-count (default: true).
-     - :tags - Vector of strings. Filter to learnings that have ALL specified tags.
+     - :tags - Vector of strings. Filter to learnings that have ANY of the specified tags (OR logic).
+     - :all-tags - Vector of strings. Filter to learnings that have ALL specified tags (AND logic).
      - :doc-names - Vector of strings. Document names/extensions to match against :learning/scope.
-                    Learnings with nil scope (global) always match.
 
    Returns:
-   Vector of learning maps with :learning/id, :insight, :context, :tags, :scope, :useful-count, :not-useful-count."
+   Vector of learning maps."
   ([db-info query] (db-get-learnings db-info query {}))
-  ([{:keys [conn] :as db-info} query {:keys [top-k include-decayed? track-usage? tags doc-names]
+  ([{:keys [conn] :as db-info} query {:keys [top-k include-decayed? track-usage? tags all-tags doc-names]
                                       :or {top-k 5 include-decayed? false track-usage? true}}]
    (when conn
      (let [q (when-not (str/blank? (str query)) query)
-           tag-set (when (seq tags) (set (map str tags)))
+           or-tag-set (when (seq tags) (set (map str tags)))
+           and-tag-set (when (seq all-tags) (set (map str all-tags)))
            filtered (->> (search-or-list-learnings conn q)
                          (mapv normalize-learning)
                          (filter #(or include-decayed? (not (:decayed? %))))
-                         (filter #(or (nil? tag-set)
-                                      (every? (set (:tags %)) tag-set)))
+                         ;; OR tags: learning has ANY of the specified tags
+                         (filter #(or (nil? or-tag-set)
+                                      (some or-tag-set (:tags %))))
+                         ;; AND tags: learning has ALL of the specified tags
+                         (filter #(or (nil? and-tag-set)
+                                      (every? (set (:tags %)) and-tag-set)))
                          (filter #(scope-matches-documents? (:scope %) doc-names))
-                         (sort-by :timestamp #(compare %2 %1))
+                         ;; Sort by applied-count (proven useful) then recency
+                         (sort-by (fn [l] [(- (or (:applied-count l) 0))
+                                           (- (or (.getTime (:timestamp l)) 0))])
+                                  compare)
                          (take top-k)
                          vec)]
        (when track-usage?
