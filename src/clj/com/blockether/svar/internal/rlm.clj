@@ -405,11 +405,16 @@
          max-iterations-atom (atom max-iterations)
          budget-bindings {'request-more-iterations
                           (fn [n]
-                            (let [requested (max 1 (min (long n) (long schema/MAX_ITERATION_CAP)))
+                            (let [requested (max 1 (min (long n) (long schema/MAX_EXTENSION_PER_REQUEST)))
                                   current @max-iterations-atom
                                   new-budget (min (+ current requested) (long schema/MAX_ITERATION_CAP))]
                               (reset! max-iterations-atom new-budget)
-                              {:granted (- new-budget current) :new-budget new-budget :cap schema/MAX_ITERATION_CAP}))}
+                              (let [granted (- new-budget current)]
+                                (trove/log! {:level :info :id ::iteration-budget
+                                             :data {:requested (long n) :granted granted
+                                                    :new-budget new-budget :cap schema/MAX_ITERATION_CAP}
+                                             :msg "LLM requested more iterations"})
+                                {:granted granted :new-budget new-budget :cap schema/MAX_ITERATION_CAP})))}
          llm-query-overrides {'llm-query sub-llm-fn
                               'llm-query-batch (fn [prompts]
                                                  (let [chs (mapv (fn [p]
@@ -513,7 +518,8 @@
                ;; Execution hit max iterations - return with trace
                (let [duration-ms (util/elapsed-since start-time)]
                   ;; Auto-vote via LLM: evaluate which learnings were relevant (even in failure)
-                 (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :failure nil)
+                 (when-let [{:keys [tokens cost]} (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :failure nil)]
+                   (merge-cost! tokens cost))
                  (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms
                                        :auto-voted (count active-learnings)} "RLM query-env! finished (max iterations)")
                  (try
@@ -607,11 +613,13 @@
                                         (try
                                           (spec/str->data-with-spec refined-str spec)
                                           (catch Exception _
-                                            (:result (llm/ask! {:spec spec
-                                                                :messages [(llm/system "Extract structured data.")
-                                                                           (llm/user (str "From:\n" refined-str))]
-                                                                :router rlm-router
-                                                                :prefer :cost :capabilities #{:chat}}))))
+                                            (let [fallback (llm/ask! {:spec spec
+                                                                      :messages [(llm/system "Extract structured data.")
+                                                                                 (llm/user (str "From:\n" refined-str))]
+                                                                      :router rlm-router
+                                                                      :prefer :cost :capabilities #{:chat}})]
+                                              (merge-cost! (:tokens fallback) (:cost fallback))
+                                              (:result fallback))))
                                         refined-str))]
                          {:answer parsed
                           :eval-scores (:final-score raw-refine)
@@ -641,8 +649,9 @@
                  ;; Final answer is already stored as structured assistant message in iteration-loop
                  ;; (with :thinking and linked :execution/* entities)
                  ;; Auto-vote via LLM: evaluate which learnings actually helped
-                 (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :success
-                                                (rlm-db/str-truncate (pr-str final-answer) 300))
+                 (when-let [{:keys [tokens cost]} (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :success
+                                                                                 (rlm-db/str-truncate (pr-str final-answer) 300))]
+                   (merge-cost! tokens cost))
                  (when (seq learn-items)
                    (let [model-scope (str "model:" root-model)
                          inferred-scope (when (seq doc-names)

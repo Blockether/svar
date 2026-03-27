@@ -15,6 +15,11 @@
    can exceed this. Safety valve against runaway loops."
   500)
 
+(def MAX_EXTENSION_PER_REQUEST
+  "Maximum iterations that can be granted per single request-more-iterations call.
+   Prevents the LLM from requesting 500 iterations in one shot."
+  50)
+
 (def DEFAULT_RECURSION_DEPTH
   "Default maximum depth of nested rlm-query calls. Can be overridden via :max-recursion-depth."
   5)

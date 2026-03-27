@@ -1283,7 +1283,10 @@
               (when vote-kw
                 (when-let [uuid (util/parse-uuid (str id))]
                   (rlm-debug! {:learning-id uuid :vote vote-kw :reason reason} "Auto-vote learning")
-                  (db-vote-learning! db-info uuid vote-kw)))))))
+                  (db-vote-learning! db-info uuid vote-kw))))))
+        ;; Return cost for caller to merge
+        {:tokens (:tokens response) :cost (:cost response)})
       (catch Exception e
         (trove/log! {:level :warn :data {:error (ex-message e)}
-                     :msg "Auto-vote learnings failed, skipping"})))))
+                     :msg "Auto-vote learnings failed, skipping"})
+        nil))))

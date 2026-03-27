@@ -39,24 +39,31 @@ The `:deny` list (`[require import ns eval load-string read-string]`) is an addi
 
 ## HIGH — Fix soon
 
-### ~~4. Cost tracking is incomplete and inaccurate~~ — PARTIALLY FIXED
+### ~~4. Cost tracking is incomplete and inaccurate~~ — FIXED
 
 **Status: FIXED** (March 2026)
 
-- `refine!*` now returns actual `:tokens` and `:cost` (accumulated from internal `ask!*` calls) instead of the wildly inaccurate estimation (was 2-6x off)
-- Planning phase `ask!` cost is now captured and merged into query totals
+All `query-env!` cost sources now tracked:
+- Iteration loop (exact via `:api-usage`) ✓
+- Refinement (actual from `refine!*` return, was 2-6x off with estimation) ✓
+- Planning phase `ask!` ✓
+- Refinement fallback `ask!` (spec re-parse) ✓
+- Auto-vote learnings ✓
 
-**Still not tracked**: Sub-RLM query costs, entity extraction during ingest, deduplication/revision in `generate-qa-env!`. These are less critical since they're separate operations, not part of the main query cost.
+**Separate operations** (return their own cost independently):
+- `generate-qa-env!` (dedup, revision, passage selection) — not merged into query cost, tracked separately
+- `ingest-to-env!` (entity extraction) — separate operation
+- `index!` (vision calls) — separate operation
 
 ---
 
-### 5. `request-more-iterations` has no rate limiting
+### ~~5. `request-more-iterations` has no rate limiting~~ — FIXED
 
-The LLM can call `(request-more-iterations 500)` and immediately get 500 iterations. `MAX_ITERATION_CAP` is 500. No per-query budget, no logging, no human-in-the-loop confirmation. A single query can run for 500 x 30s = 4+ hours.
+**Status: FIXED** (March 2026)
 
-**Fix**: Cap extensions at 50 per request. Log all extension requests. Add optional `:max-total-iterations` hard cap on `query-env!`.
-
-**Location**: `rlm.clj` lines 406-412 (request-more-iterations binding), `rlm/schema.clj` MAX_ITERATION_CAP.
+- Per-request cap: `MAX_EXTENSION_PER_REQUEST = 50` (LLM can't request 500 in one shot)
+- All extension requests are logged with `:requested`, `:granted`, `:new-budget`, `:cap`
+- `MAX_ITERATION_CAP = 500` remains as absolute ceiling
 
 ---
 
