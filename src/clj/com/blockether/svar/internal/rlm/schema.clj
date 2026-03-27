@@ -23,14 +23,6 @@
   "Timeout in milliseconds for code evaluation in SCI sandbox."
   30000)
 
-(def STDOUT_TRUNCATION_LIMIT
-  "Maximum characters of stdout/result to include in iteration feedback.
-   Per the RLM paper: 'Only (constant-size) metadata about stdout, like a short
-   prefix and length, is appended to the model's history for the next iteration.
-   This is key: it forces the model to rely on variables and sub-calls to manage
-   long strings instead of polluting its window.'"
-  300)
-
 (def INLINE_RESULT_THRESHOLD
   "Results with string representation shorter than this are shown inline.
    Larger results are auto-stored in _rN variables and only metadata
