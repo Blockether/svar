@@ -15,11 +15,19 @@
    [java.io File IOException]
    [java.util Calendar]
    [org.apache.pdfbox Loader]
-   [org.apache.pdfbox.rendering ImageType PDFRenderer]
    [org.apache.pdfbox.text PDFTextStripper TextPosition]))
 
-;; NOTE: Do NOT set java.awt.headless globally — it breaks Swing-based TUIs.
-;; Callers that need headless PDF rendering should set it themselves.
+;; Suppress macOS Dock icon / Preview app when AWT initializes for PDF rendering.
+;; PDFRenderer uses java.awt.Graphics2D internally — importing it may trigger
+;; Cocoa Toolkit init, which creates a Dock icon and can open Preview.
+;; Setting this BEFORE the import ensures macOS treats the JVM as a background
+;; utility. Harmless no-op on non-macOS. Clojure's ns processes :require before
+;; :import, so any namespace that requires this one gets the property set before
+;; its own AWT imports run (e.g., vision.clj's java.awt.* imports).
+;; See: https://issues.apache.org/jira/browse/PDFBOX-2682
+(System/setProperty "apple.awt.UIElement" "true")
+
+(import '(org.apache.pdfbox.rendering ImageType PDFRenderer))
 
 ;; =============================================================================
 ;; Constants
