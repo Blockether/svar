@@ -452,14 +452,10 @@
                                        (mapv (fn [n] (let [ext (when-let [i (str/last-index-of n ".")] (subs n i))]
                                                        (or ext n)))))
                                   (catch Exception _ [])))
-                ;; Auto-fetch relevant learnings: query-relevant + model-specific (scope-filtered)
+                 ;; Auto-fetch query-relevant learnings only (scope-filtered)
                  active-learnings (when (:conn db-info)
-                                    (let [model-ctx (str "model:" (or root-model "unknown"))
-                                          by-query (rlm-db/db-get-learnings db-info query-str
-                                                                            {:top-k 3 :track-usage? true :doc-names doc-names})
-                                          by-model (rlm-db/db-get-learnings db-info model-ctx
-                                                                            {:top-k 2 :track-usage? true :doc-names doc-names})]
-                                      (vec (distinct (concat by-query by-model)))))
+                                    (rlm-db/db-get-learnings db-info query-str
+                                                             {:top-k 5 :track-usage? true :doc-names doc-names}))
                  ;; Auto-fetch all tag definitions for context injection
                  tag-definitions (when (:conn db-info)
                                    (rlm-db/db-list-tags db-info))
@@ -491,7 +487,7 @@
                   confidence :confidence
                   learn-items :learn} iteration-result
                 ;; Mutable cost accumulator — iteration costs are the baseline,
-                ;; refinement + auto-vote + auto-extract costs get merged in
+                ;; refinement + auto-vote costs get merged in
                  total-tokens-atom (atom (or tokens {}))
                  total-cost-atom (atom (or cost {}))
                  merge-cost! (fn [extra-tokens extra-cost]
@@ -646,16 +642,20 @@
                  (when-let [{:keys [tokens cost]} (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :success
                                                                                  (rlm-db/str-truncate (pr-str final-answer) 300))]
                    (merge-cost! tokens cost))
-                  ;; Auto-extract new learnings from successful multi-iteration queries
+                   ;; Auto-extract new learnings from successful multi-iteration queries
                  (when autolearn?
                    (let [inferred-scope (when (seq doc-names)
                                           (let [exts (distinct (filter #(str/starts-with? % ".") doc-names))]
                                             (when (= 1 (count exts))
                                               (str "*" (first exts)))))]
-                     (when-let [{:keys [tokens cost]} (rlm-core/auto-extract-learnings! db-info rlm-router query-str
-                                                                                        (rlm-db/str-truncate (pr-str final-answer) 300)
-                                                                                        iterations trace inferred-scope)]
-                       (merge-cost! tokens cost))))
+                     (async/thread
+                       (try
+                         (rlm-core/auto-extract-learnings! db-info rlm-router query-str
+                                                           (rlm-db/str-truncate (pr-str final-answer) 300)
+                                                           iterations trace inferred-scope nil)
+                         (catch Exception e
+                           (trove/log! {:level :warn :data {:error (ex-message e)}
+                                        :msg "Auto-extract failed (async)"}))))))
                  (when (seq learn-items)
                    (let [model-scope (str "model:" root-model)
                          inferred-scope (when (seq doc-names)

@@ -105,13 +105,18 @@ Removed (no evidence of value): auto-define-tags!, auto-link-learnings!, auto-vo
 
 ---
 
-### 9. Active learnings injection is unbounded
+### ~~9. Active learnings injection is unbounded~~ — FIXED
 
-Pre-fetched learnings (5 active + up to 25 neighbors via 1-hop graph traversal) are injected into the system prompt with no token cap. With verbose learning insights, this can add 2000+ tokens to every iteration.
+**Status: FIXED** (March 2026)
 
-**Fix**: Cap at 5 active + 3 neighbors. Truncate insight text to 80 chars. Enforce a token budget for the learnings section.
-
-**Location**: `rlm.clj` lines 451-465 (pre-fetch), `rlm/core.clj` format-active-learnings.
+- Capped at 5 learnings max
+- Insights truncated to 100 chars, context to 60 chars
+- Tag glossary filtered to only tags on injected learnings (was ALL tags)
+- Model-context learnings removed (noise)
+- Single query-relevant fetch (top-k=5) instead of query+model blend
+- auto-extract now async (fire-and-forget, doesn't delay response)
+- auto-extract has quality gate (only fires on successful FINAL, not error-budget-exhausted)
+- auto-extract trace summary includes code+results, not just thinking
 
 ---
 

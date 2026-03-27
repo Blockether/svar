@@ -399,27 +399,28 @@
    String with formatted tag glossary + active learnings, or nil if empty."
   [learnings tag-definitions]
   (let [has-learnings? (seq learnings)
-        ;; Only include tags that have definitions
-        defined-tags (when (seq tag-definitions)
-                       (filterv :definition tag-definitions))]
-    (when (or has-learnings? (seq defined-tags))
+        capped-learnings (take 5 learnings)
+        active-tag-names (set (mapcat :tags capped-learnings))
+        relevant-tags (when (seq tag-definitions)
+                        (filterv #(and (:definition %) (active-tag-names (:name %))) tag-definitions))]
+    (when (or has-learnings? (seq relevant-tags))
       (str
-       (when (seq defined-tags)
+       (when (seq relevant-tags)
          (str "\n<learning_tag_glossary>\n"
               "Tag definitions for categorizing learnings:\n"
               (str/join "\n" (map (fn [{:keys [name definition]}]
                                     (str "  - " name ": " definition))
-                                  defined-tags))
+                                  relevant-tags))
               "\n</learning_tag_glossary>\n"))
        (when has-learnings?
          (str "\n<active_learnings>\n"
               "These are validated insights from prior sessions. Apply them.\n"
               (str/join "\n" (map-indexed
                               (fn [i l]
-                                (str "  " (inc i) ". " (:insight l)
+                                (str "  " (inc i) ". " (str-truncate (:insight l) 100)
                                      (when (seq (:tags l)) (str " [tags: " (str/join ", " (:tags l)) "]"))
-                                     (when (:context l) (str " [context: " (:context l) "]"))))
-                              learnings))
+                                     (when (:context l) (str " [context: " (str-truncate (:context l) 60) "]"))))
+                              capped-learnings))
               "\n</active_learnings>\n"))))))
 
 (defn build-system-prompt
@@ -1292,14 +1293,24 @@
    Extracts 1-3 learnings with tags and scope.
 
    Returns {:ids [...] :tokens ... :cost ...}, or nil."
-  [db-info rlm-router query answer-preview iterations trace scope]
-  (when (and (:conn db-info) rlm-router (> iterations AUTOLEARN_ITERATION_THRESHOLD))
+  [db-info rlm-router query answer-preview iterations trace scope status]
+  (when (and (:conn db-info) rlm-router
+             (> iterations AUTOLEARN_ITERATION_THRESHOLD)
+             (not= status :max-iterations)
+             (not= status :error-budget-exhausted))
     (try
       (let [trace-summary (->> trace
                                (take-last 5)
                                (map (fn [t]
-                                      (str "Iteration " (:iteration t) ": "
-                                           (when (:thinking t) (str-truncate (:thinking t) 100)))))
+                                      (let [code-preview (when (seq (:executions t))
+                                                           (->> (:executions t)
+                                                                (map (fn [e]
+                                                                       (str "  " (str-truncate (:code e) 80)
+                                                                            " => " (str-truncate (pr-str (:result e)) 60))))
+                                                                (str/join "\n")))]
+                                        (str "Iteration " (:iteration t) ":"
+                                             (when (:thinking t) (str " " (str-truncate (:thinking t) 80)))
+                                             (when code-preview (str "\n" code-preview))))))
                                (str/join "\n"))
             prompt (str "You just completed a " iterations "-iteration query. "
                         "Extract 1-3 REUSABLE insights about strategies that worked.\n\n"
