@@ -2068,6 +2068,8 @@
      :converged? converged?
      :iterations-count iterations-count
      :total-duration-ms total-duration-ms
+     :tokens (:total-tokens final-state)
+     :cost (:total-cost final-state)
      :gradient gradient
      :prompt-evolution (:prompt-evolution final-state)
      :window {:size window-size

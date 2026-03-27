@@ -29,27 +29,24 @@ The `:deny` list (`[require import ns eval load-string read-string]`) is an addi
 
 ---
 
-### 3. Missing SCI bindings documented in the prompt
+### ~~3. Missing SCI bindings documented in the prompt~~ — FALSE ALARM
 
-The system prompt references `str-lower`, `str-includes?`, and `str-truncate` as available helper functions, but they are NOT in `SAFE_BINDINGS`. The LLM calls them, gets a NameError, wastes an iteration.
+**Status: VERIFIED CORRECT** (March 2026)
 
-**Fix**: Add them to SAFE_BINDINGS or remove them from the prompt.
-
-**Location**: `rlm/tools.clj` SAFE_BINDINGS (line 11-48), `rlm/core.clj` system prompt string helper section.
+`str-lower`, `str-includes?`, `str-truncate` ARE available. Defined in `db.clj`, imported to `tools.clj` via `:refer :all`, registered as SCI bindings (lines 580-583). The audit was wrong.
 
 ---
 
 ## HIGH — Fix soon
 
-### 4. Cost tracking is incomplete and inaccurate
+### ~~4. Cost tracking is incomplete and inaccurate~~ — PARTIALLY FIXED
 
-**What's tracked**: Iteration loop LLM calls (exact via `:api-usage`), refinement (estimated), auto-vote (not tracked).
+**Status: FIXED** (March 2026)
 
-**What's NOT tracked**: Planning phase `ask!` call, sub-RLM query costs, entity extraction during ingest, deduplication/revision in `generate-qa-env!`.
+- `refine!*` now returns actual `:tokens` and `:cost` (accumulated from internal `ask!*` calls) instead of the wildly inaccurate estimation (was 2-6x off)
+- Planning phase `ask!` cost is now captured and merged into query totals
 
-**Refinement estimation is wildly off**: Multiplies total message tokens by estimated call count. A 3-iteration refinement with 2000-token messages estimates 22,000 input tokens when actual is ~3,500. Error factor: 2-6x.
-
-**Location**: `rlm.clj` lines 596-606 (refinement estimation), lines 467-473 (planning, no cost capture).
+**Still not tracked**: Sub-RLM query costs, entity extraction during ingest, deduplication/revision in `generate-qa-env!`. These are less critical since they're separate operations, not part of the main query cost.
 
 ---
 

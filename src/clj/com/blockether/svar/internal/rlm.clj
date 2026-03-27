@@ -464,13 +464,13 @@
                  tag-definitions (when (:conn db-info)
                                    (rlm-db/db-list-tags db-info))
                ;; Optional planning phase — LLM outlines approach before code execution
-                 plan-context (when plan?
-                                (let [plan-result (llm/ask! {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
-                                                                        (llm/user (str "Query: " query-str))]
-                                                             :router rlm-router
-                                                             :prefer :intelligence :capabilities #{:chat}})]
-                                  (when-let [plan (:result plan-result)]
-                                    (str "<plan>\n" plan "\n</plan>"))))
+                 plan-result (when plan?
+                               (llm/ask! {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
+                                                     (llm/user (str "Query: " query-str))]
+                                          :router rlm-router
+                                          :prefer :intelligence :capabilities #{:chat}}))
+                 plan-context (when-let [plan (:result plan-result)]
+                                (str "<plan>\n" plan "\n</plan>"))
                 ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
                  iteration-result (rlm-core/iteration-loop rlm-env query-str
                                                            {:max-iterations max-iterations
@@ -505,7 +505,10 @@
                                  (swap! total-cost-atom
                                         (fn [acc]
                                           (merge-with + (select-keys acc [:input-cost :output-cost :total-cost])
-                                                      (select-keys extra-cost [:input-cost :output-cost :total-cost]))))))]
+                                                      (select-keys extra-cost [:input-cost :output-cost :total-cost]))))))
+                 ;; Merge planning cost if planning phase ran
+                 _ (when plan-result
+                     (merge-cost! (:tokens plan-result) (:cost plan-result)))]
              (if status
                ;; Execution hit max iterations - return with trace
                (let [duration-ms (util/elapsed-since start-time)]
@@ -590,20 +593,8 @@
                                                   :iterations max-refinements :threshold threshold}
                                            (seq stored-docs) (assoc :documents stored-docs))
                              raw-refine (llm/refine! refine-opts)
-                            ;; Estimate refinement cost from iterations × ask! calls
-                            ;; Each refine iteration = ~3 ask! calls (decompose, verify, eval)
-                            ;; Plus 1 initial ask! and 1 final eval
-                             _ (let [refine-iters (or (:iterations-count raw-refine) 0)
-                                    ;; Approximate: (2 + 3 * iters) calls, each ~= initial messages size
-                                     estimated-calls (long (+ 2 (* 3 refine-iters)))
-                                     msg-tokens (long (tokens/count-messages root-model (:messages refine-opts)))
-                                     output-estimate (long (* 500 estimated-calls)) ;; ~500 output tokens per call
-                                     input-estimate (long (* msg-tokens estimated-calls))
-                                     refine-cost (tokens/estimate-cost root-model input-estimate output-estimate)]
-                                 (merge-cost! {:input input-estimate :output output-estimate
-                                               :reasoning 0 :cached 0
-                                               :total (+ input-estimate output-estimate)}
-                                              refine-cost))
+                            ;; Merge actual refinement cost (refine!* now returns :tokens and :cost)
+                             _ (merge-cost! (:tokens raw-refine) (:cost raw-refine))
                              refined-str (:result raw-refine)
                            ;; If refinement didn't change the answer (converged or identical text),
                            ;; keep the original Clojure value from FINAL — no re-parse needed.
