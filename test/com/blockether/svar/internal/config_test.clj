@@ -10,10 +10,11 @@
   (describe "with explicit params"
             (it "creates config with api-key and base-url"
                 (let [cfg (config/make-config {:api-key "sk-test-key"
-                                               :base-url "https://api.openai.com/v1"})]
+                                               :base-url "https://api.openai.com/v1"
+                                               :model "test-model"})]
                   (expect (= "sk-test-key" (:api-key cfg)))
                   (expect (= "https://api.openai.com/v1" (:base-url cfg)))
-                  (expect (= config/DEFAULT_MODEL (:model cfg)))))
+                  (expect (= "test-model" (:model cfg)))))
 
             (it "allows custom model"
                 (let [cfg (config/make-config {:api-key "sk-test"
@@ -77,12 +78,13 @@
             (it "falls back to env var for base-url"
                 (let [cfg (config/make-config {:api-key "sk-test"})
                       expected-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
+                                       (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
                                        (System/getenv "OPENAI_BASE_URL")
                                        config/DEFAULT_BASE_URL)]
                   (expect (= expected-url (:base-url cfg)))))))
 
 (defdescribe default-model-test
-  "Tests for DEFAULT_MODEL constant"
+  "Tests for DEFAULT_MODEL — reads from env var, no hardcoded fallback"
 
-  (it "DEFAULT_MODEL is gpt-4o"
-      (expect (= "gpt-4o" config/DEFAULT_MODEL))))
+  (it "DEFAULT_MODEL is nil (no hardcoded fallback)"
+      (expect (nil? config/DEFAULT_MODEL))))

@@ -33,13 +33,11 @@
      `make-config` so users can require only this namespace.
    
    Configuration:
-   Config MUST be passed explicitly to all LLM functions via the :config parameter.
-   No global state. No dependency injection.
+   LLM calls route automatically by default. You can still pass :config for backward compatibility,
+   but explicit config wiring is optional.
    
     Example:
-    (def config (make-config {:api-key \"sk-...\" :base-url \"https://api.openai.com/v1\"}))
-     (ask! {:config config
-            :spec my-spec
+     (ask! {:spec my-spec
             :messages [(system \"Help the user.\")
                        (user \"What is 2+2?\")]
             :model \"gpt-4o\"})
@@ -55,7 +53,6 @@
    [com.blockether.svar.internal.humanize :as humanize]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm :as rlm]
-   [com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex]
    [com.blockether.svar.internal.spec :as spec]))
 
 ;; =============================================================================
@@ -403,6 +400,16 @@
    See internal.rlm for details."
   rlm/query-env!)
 
+(def list-trajectories
+  "Lists trajectory records from an RLM environment.
+   See internal.rlm for details."
+  rlm/list-trajectories)
+
+(def export-trajectories!
+  "Exports filtered trajectories as JSONL for fine-tuning.
+   See internal.rlm for details."
+  rlm/export-trajectories!)
+
 (def pprint-trace
   "Pretty-prints an RLM trace to a string.
    See internal.rlm for details."
@@ -462,8 +469,8 @@
                                        :refine-model \"gpt-4o-mini\"
                                        :parallel-refine 3})
    
-   See internal.rlm.internal.pageindex.core for full options."
-  pageindex/index!)
+   See internal.rlm for full options."
+  rlm/index!)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def load-index
@@ -475,5 +482,5 @@
    Example:
      (svar/load-index \"docs/manual.pageindex\")
    
-   See internal.rlm.internal.pageindex.core for details."
-  pageindex/load-index)
+   See internal.rlm for details."
+  rlm/load-index)

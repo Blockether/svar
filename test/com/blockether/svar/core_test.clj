@@ -111,11 +111,11 @@
 (defdescribe refine!-baseline-test
   (describe "return shape"
             (it "returns map with required keys: :result, :final-score, :converged?, :iterations-count"
-                (with-redefs [llm/ask! (make-dispatching-ask-fn {:answer "Paris"} {:answer "Paris"})
-                              llm/eval! (fn [_opts] (make-mock-eval-response 0.95))]
+                (with-redefs [llm/ask!* (make-dispatching-ask-fn {:answer "Paris"} {:answer "Paris"})
+                              llm/eval!* (fn [_opts] (make-mock-eval-response 0.95))]
                   (let [result (svar/refine! {:spec test-spec
-                                               :messages [(svar/system "Answer geography questions.")
-                                                          (svar/user "What is the capital of France?")]
+                                              :messages [(svar/system "Answer geography questions.")
+                                                         (svar/user "What is the capital of France?")]
                                               :model "gpt-4o"
                                               :iterations 1
                                               :threshold 0.9})]
@@ -134,15 +134,15 @@
   (describe "iteration control"
             (it "runs up to max iterations with default settings (3)"
                 (let [eval-call-count (atom 0)]
-                  (with-redefs [llm/ask! (make-dispatching-ask-fn {:answer "v1"} {:answer "v2"})
-                                llm/eval! (fn [_opts]
+                  (with-redefs [llm/ask!* (make-dispatching-ask-fn {:answer "v1"} {:answer "v2"})
+                                llm/eval!* (fn [_opts]
                                              (swap! eval-call-count inc)
                                    ;; Return low score so it never converges
                                              (make-mock-eval-response 0.3))]
                     (let [result (svar/refine! {:spec test-spec
-                                                 :messages [(svar/system "Test objective.")
-                                                            (svar/user "Test task.")]
-                                                 :model "gpt-4o"
+                                                :messages [(svar/system "Test objective.")
+                                                           (svar/user "Test task.")]
+                                                :model "gpt-4o"
                                        ;; Use defaults: iterations=3, threshold=0.9
                                                 })]
             ;; Default is 3 iterations
@@ -151,17 +151,17 @@
 
             (it "early-stops when score >= threshold (0.9)"
                 (let [eval-scores (atom [0.95])] ;; First eval returns high score
-                  (with-redefs [llm/ask! (make-dispatching-ask-fn {:answer "perfect"} {:answer "perfect"})
-                                llm/eval! (fn [_opts]
+                  (with-redefs [llm/ask!* (make-dispatching-ask-fn {:answer "perfect"} {:answer "perfect"})
+                                llm/eval!* (fn [_opts]
                                              (let [score (or (first @eval-scores) 0.95)]
                                                (swap! eval-scores rest)
                                                (make-mock-eval-response score)))]
                     (let [result (svar/refine! {:spec test-spec
-                                                 :messages [(svar/system "Test objective.")
-                                                            (svar/user "Test task.")]
-                                                 :model "gpt-4o"
-                                                 :iterations 5
-                                                 :threshold 0.9})]
+                                                :messages [(svar/system "Test objective.")
+                                                           (svar/user "Test task.")]
+                                                :model "gpt-4o"
+                                                :iterations 5
+                                                :threshold 0.9})]
             ;; Should converge after 0 refinement iterations because
             ;; the initial eval score (0.95) already meets threshold.
             ;; After initial ask!, the loop checks should-stop? with score=0 first,
@@ -172,13 +172,13 @@
 
   (describe "backward compatibility"
             (it "works without :documents key (baseline for future extension)"
-                (with-redefs [llm/ask! (make-dispatching-ask-fn {:answer "42"} {:answer "42"})
-                              llm/eval! (fn [_opts] (make-mock-eval-response 0.85))]
-                   (let [result (svar/refine! {:spec test-spec
-                                               :messages [(svar/system "Answer math questions.")
-                                                          (svar/user "What is 6 * 7?")]
-                                               :model "gpt-4o"
-                                               :iterations 1})]
+                (with-redefs [llm/ask!* (make-dispatching-ask-fn {:answer "42"} {:answer "42"})
+                              llm/eval!* (fn [_opts] (make-mock-eval-response 0.85))]
+                  (let [result (svar/refine! {:spec test-spec
+                                              :messages [(svar/system "Answer math questions.")
+                                                         (svar/user "What is 6 * 7?")]
+                                              :model "gpt-4o"
+                                              :iterations 1})]
           ;; refine! should work without :documents parameter
                     (expect (map? result))
                     (expect (some? (:result result)))
@@ -188,36 +188,36 @@
 
   (describe "result content"
             (it "final result is the last refined output"
-                (with-redefs [llm/ask! (make-dispatching-ask-fn {:answer "initial"} {:answer "refined"})
-                              llm/eval! (fn [_opts] (make-mock-eval-response 0.5))]
-                   (let [result (svar/refine! {:spec test-spec
-                                               :messages [(svar/system "Test.")
-                                                          (svar/user "Test.")]
-                                               :model "gpt-4o"
-                                               :iterations 1})]
+                (with-redefs [llm/ask!* (make-dispatching-ask-fn {:answer "initial"} {:answer "refined"})
+                              llm/eval!* (fn [_opts] (make-mock-eval-response 0.5))]
+                  (let [result (svar/refine! {:spec test-spec
+                                              :messages [(svar/system "Test.")
+                                                         (svar/user "Test.")]
+                                              :model "gpt-4o"
+                                              :iterations 1})]
           ;; The result should be the refined version, not the initial
                     (expect (= {:answer "refined"} (:result result))))))
 
             (it "final-score is a number between 0 and 1"
-                (with-redefs [llm/ask! (make-dispatching-ask-fn {:answer "test"} {:answer "test"})
-                              llm/eval! (fn [_opts] (make-mock-eval-response 0.75))]
-                   (let [result (svar/refine! {:spec test-spec
-                                               :messages [(svar/system "Test.")
-                                                          (svar/user "Test.")]
-                                               :model "gpt-4o"
-                                               :iterations 1})]
+                (with-redefs [llm/ask!* (make-dispatching-ask-fn {:answer "test"} {:answer "test"})
+                              llm/eval!* (fn [_opts] (make-mock-eval-response 0.75))]
+                  (let [result (svar/refine! {:spec test-spec
+                                              :messages [(svar/system "Test.")
+                                                         (svar/user "Test.")]
+                                              :model "gpt-4o"
+                                              :iterations 1})]
                     (expect (number? (:final-score result)))
                     (expect (>= (:final-score result) 0.0))
                     (expect (<= (:final-score result) 1.0)))))
 
             (it "iterations vector tracks refinement history"
-                (with-redefs [llm/ask! (make-dispatching-ask-fn {:answer "v1"} {:answer "v2"})
-                              llm/eval! (fn [_opts] (make-mock-eval-response 0.6))]
-                   (let [result (svar/refine! {:spec test-spec
-                                               :messages [(svar/system "Test.")
-                                                          (svar/user "Test.")]
-                                               :model "gpt-4o"
-                                               :iterations 2})]
+                (with-redefs [llm/ask!* (make-dispatching-ask-fn {:answer "v1"} {:answer "v2"})
+                              llm/eval!* (fn [_opts] (make-mock-eval-response 0.6))]
+                  (let [result (svar/refine! {:spec test-spec
+                                              :messages [(svar/system "Test.")
+                                                         (svar/user "Test.")]
+                                              :model "gpt-4o"
+                                              :iterations 2})]
                     (expect (vector? (:iterations result)))
                     (expect (= (:iterations-count result) (count (:iterations result))))
           ;; Each iteration record should have expected keys
@@ -236,14 +236,14 @@
 (defdescribe abstract!-baseline-test
   (describe "return shape"
             (it "returns a map with :result vector of iteration maps"
-                (with-redefs [llm/ask! (fn [{:keys [_objective]}]
+                (with-redefs [llm/ask!* (fn [{:keys [_objective]}]
                                           (make-mock-ask-response
                                            {:entities [{:entity "Test Entity" :rationale "Central topic" :score 0.9}]
                                             :summary "A test summary."}))]
                   (let [response (svar/abstract! {:text "Some article text for summarization."
-                                                   :model "gpt-4o"
-                                                   :iterations 2
-                                                   :target-length 80})
+                                                  :model "gpt-4o"
+                                                  :iterations 2
+                                                  :target-length 80})
                         result (:result response)]
                     (expect (map? response))
                     (expect (contains? response :tokens))
@@ -252,14 +252,14 @@
                     (expect (= 2 (count result))))))
 
             (it "each iteration has :entities and :summary keys"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:entities [{:entity "Alpha" :rationale "Key concept" :score 0.85}
                                                        {:entity "Beta" :rationale "Supporting concept" :score 0.6}]
                                             :summary "Iteration summary."}))]
                   (let [response (svar/abstract! {:text "Article text."
-                                                   :model "gpt-4o"
-                                                   :iterations 1})
+                                                  :model "gpt-4o"
+                                                  :iterations 1})
                         iter (first (:result response))]
                     (expect (contains? iter :entities))
                     (expect (contains? iter :summary))
@@ -268,31 +268,31 @@
 
   (describe "entity structure"
             (it "entities are maps with :entity, :rationale, and :score"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:entities [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
                                                        {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
                                             :summary "Summary."}))]
                   (let [response (svar/abstract! {:text "ACME Corp reported earnings."
-                                                   :model "gpt-4o"
-                                                   :iterations 1})
+                                                  :model "gpt-4o"
+                                                  :iterations 1})
                         entities (:entities (first (:result response)))]
                     (expect (= [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
                                 {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
                                entities))
                     (expect (every? #(and (contains? % :entity)
-                                         (contains? % :rationale)
-                                         (contains? % :score)) entities))))))
+                                          (contains? % :rationale)
+                                          (contains? % :score)) entities))))))
 
   (describe "iteration progression"
             (it "passes previous summary and accumulated entities to subsequent iterations"
                 (let [call-log (atom [])]
-                  (with-redefs [llm/ask! (fn [{:keys [messages]}]
-                                             (let [user-content (->> messages (filter #(= "user" (:role %))) first :content)]
-                                               (swap! call-log conj user-content))
-                                             (make-mock-ask-response
-                                              {:entities [{:entity "Entity A" :rationale "Salient" :score 0.8}]
-                                               :summary "Dense summary."}))]
+                  (with-redefs [llm/ask!* (fn [{:keys [messages]}]
+                                            (let [user-content (->> messages (filter #(= "user" (:role %))) first :content)]
+                                              (swap! call-log conj user-content))
+                                            (make-mock-ask-response
+                                             {:entities [{:entity "Entity A" :rationale "Salient" :score 0.8}]
+                                              :summary "Dense summary."}))]
                     (svar/abstract! {:text "Source text."
                                      :model "gpt-4o"
                                      :iterations 2})
@@ -310,7 +310,7 @@
 (defdescribe eval!-baseline-test
   (describe "return shape"
             (it "returns map with required keys"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:correct? true
                                             :overall-score 0.92
@@ -321,8 +321,8 @@
                                                         :reasoning "Correct."}]
                                             :issues []}))]
                   (let [result (llm/eval! {:task "What is 2+2?"
-                                            :output "4"
-                                            :model "gpt-4o"})]
+                                           :output "4"
+                                           :model "gpt-4o"})]
                     (expect (boolean? (:correct? result)))
                     (expect (number? (:overall-score result)))
                     (expect (string? (:summary result)))
@@ -331,7 +331,7 @@
                     (expect (number? (:duration-ms result))))))
 
             (it "builds scores map from criteria"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:correct? true
                                             :overall-score 0.88
@@ -347,7 +347,7 @@
   (describe "custom criteria"
             (it "passes custom criteria through to objective"
                 (let [ask-args (atom nil)]
-                  (with-redefs [llm/ask! (fn [opts]
+                  (with-redefs [llm/ask!* (fn [opts]
                                             (reset! ask-args opts)
                                             (make-mock-ask-response
                                              {:correct? true
@@ -356,16 +356,16 @@
                                               :criteria [{:name "tone" :score 0.9 :confidence 0.8 :reasoning "OK"}]
                                               :issues []}))]
                     (llm/eval! {:task "Summarize report."
-                                 :output "Revenue grew 15%."
-                                 :model "gpt-4o"
-                                 :criteria {:tone "Is the tone appropriate?"}})
+                                :output "Revenue grew 15%."
+                                :model "gpt-4o"
+                                :criteria {:tone "Is the tone appropriate?"}})
                     ;; System message should mention the custom criterion
-                     (expect (some? (re-find #"tone" (extract-system-content (:messages @ask-args)))))))))
+                    (expect (some? (re-find #"tone" (extract-system-content (:messages @ask-args)))))))))
 
   (describe "ground truths"
             (it "includes ground truths in objective when provided"
                 (let [ask-args (atom nil)]
-                  (with-redefs [llm/ask! (fn [opts]
+                  (with-redefs [llm/ask!* (fn [opts]
                                             (reset! ask-args opts)
                                             (make-mock-ask-response
                                              {:correct? true
@@ -374,17 +374,17 @@
                                               :criteria []
                                               :issues []}))]
                     (llm/eval! {:task "What is 2+2?"
-                                 :output "4"
-                                 :model "gpt-4o"
-                                 :ground-truths ["2+2 equals 4"]})
+                                :output "4"
+                                :model "gpt-4o"
+                                :ground-truths ["2+2 equals 4"]})
                     ;; System message should contain ground_truths section
-                     (let [sys-content (extract-system-content (:messages @ask-args))]
-                       (expect (some? (re-find #"ground_truths" sys-content)))
-                       (expect (some? (re-find #"2\+2 equals 4" sys-content))))))))
+                    (let [sys-content (extract-system-content (:messages @ask-args))]
+                      (expect (some? (re-find #"ground_truths" sys-content)))
+                      (expect (some? (re-find #"2\+2 equals 4" sys-content))))))))
 
   (describe "issues reporting"
             (it "includes issues when present"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:correct? false
                                             :overall-score 0.3
@@ -395,8 +395,8 @@
                                                       :confidence 0.95
                                                       :reasoning "2+2 is not 5"}]}))]
                   (let [result (llm/eval! {:task "What is 2+2?"
-                                            :output "5"
-                                            :model "gpt-4o"})]
+                                           :output "5"
+                                           :model "gpt-4o"})]
                     (expect (false? (:correct? result)))
                     (expect (= 1 (count (:issues result))))
                     (expect (= "high" (:severity (first (:issues result))))))))))
@@ -426,7 +426,7 @@
 (defdescribe ask!-humanizer-test
   (describe "spec-driven humanization"
             (it "applies humanizer to fields marked ::humanize? true"
-                (with-redefs [llm/ask! (let [original llm/ask!]
+                (with-redefs [llm/ask!* (let [original llm/ask!*]
                                           ;; We can't easily mock the full ask! pipeline,
                                           ;; so test apply-spec-humanizer directly via the
                                           ;; public humanizer + spec field metadata.
@@ -481,7 +481,7 @@
   (describe "messages as task source"
             (it "extracts task from user message when :messages provided"
                 (let [ask-args (atom nil)]
-                  (with-redefs [llm/ask! (fn [opts]
+                  (with-redefs [llm/ask!* (fn [opts]
                                             (reset! ask-args opts)
                                             (make-mock-ask-response
                                              {:correct? true
@@ -490,8 +490,8 @@
                                               :criteria []
                                               :issues []}))]
                     (llm/eval! {:messages [(svar/user "What is the capital of France?")]
-                                 :output "Paris"
-                                 :model "gpt-4o"})
+                                :output "Paris"
+                                :model "gpt-4o"})
                     ;; The user message content from eval task should contain the task text
                     (let [user-msg (->> (:messages @ask-args)
                                         (filter #(= "user" (:role %)))
@@ -500,7 +500,7 @@
 
             (it "extracts from system + user messages (non-assistant, joined)"
                 (let [ask-args (atom nil)]
-                  (with-redefs [llm/ask! (fn [opts]
+                  (with-redefs [llm/ask!* (fn [opts]
                                             (reset! ask-args opts)
                                             (make-mock-ask-response
                                              {:correct? true
@@ -509,9 +509,9 @@
                                               :criteria []
                                               :issues []}))]
                     (llm/eval! {:messages [(svar/system "You are a geography expert.")
-                                            (svar/user "What is the capital of France?")]
-                                 :output "Paris"
-                                 :model "gpt-4o"})
+                                           (svar/user "What is the capital of France?")]
+                                :output "Paris"
+                                :model "gpt-4o"})
                     ;; Both system and user content should appear in the eval task
                     (let [user-msg (->> (:messages @ask-args)
                                         (filter #(= "user" (:role %)))
@@ -522,7 +522,7 @@
   (describe "backward compatibility"
             (it ":task still works without :messages"
                 (let [ask-args (atom nil)]
-                  (with-redefs [llm/ask! (fn [opts]
+                  (with-redefs [llm/ask!* (fn [opts]
                                             (reset! ask-args opts)
                                             (make-mock-ask-response
                                              {:correct? true
@@ -531,8 +531,8 @@
                                               :criteria []
                                               :issues []}))]
                     (llm/eval! {:task "What is 2+2?"
-                                 :output "4"
-                                 :model "gpt-4o"})
+                                :output "4"
+                                :model "gpt-4o"})
                     (let [user-msg (->> (:messages @ask-args)
                                         (filter #(= "user" (:role %)))
                                         first :content)]
@@ -540,7 +540,7 @@
 
             (it ":task takes precedence when both :task and :messages provided"
                 (let [ask-args (atom nil)]
-                  (with-redefs [llm/ask! (fn [opts]
+                  (with-redefs [llm/ask!* (fn [opts]
                                             (reset! ask-args opts)
                                             (make-mock-ask-response
                                              {:correct? true
@@ -549,9 +549,9 @@
                                               :criteria []
                                               :issues []}))]
                     (llm/eval! {:task "explicit task text"
-                                 :messages [(svar/user "message task text")]
-                                 :output "some output"
-                                 :model "gpt-4o"})
+                                :messages [(svar/user "message task text")]
+                                :output "some output"
+                                :model "gpt-4o"})
                     (let [user-msg (->> (:messages @ask-args)
                                         (filter #(= "user" (:role %)))
                                         first :content)]
@@ -562,7 +562,7 @@
 
   (describe "return shape preserved"
             (it "returns all expected keys when using :messages"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:correct? true
                                             :overall-score 0.92
@@ -570,8 +570,8 @@
                                             :criteria [{:name "accuracy" :score 0.95 :confidence 0.9 :reasoning "OK"}]
                                             :issues []}))]
                   (let [result (llm/eval! {:messages [(svar/user "Test task")]
-                                            :output "Test output"
-                                            :model "gpt-4o"})]
+                                           :output "Test output"
+                                           :model "gpt-4o"})]
                     (expect (boolean? (:correct? result)))
                     (expect (number? (:overall-score result)))
                     (expect (string? (:summary result)))
@@ -588,8 +588,8 @@
   (describe "zero count edge case"
             (it "returns empty result with zero count"
                 (let [result (svar/sample! {:spec test-spec
-                                             :count 0
-                                             :model "gpt-4o"})]
+                                            :count 0
+                                            :model "gpt-4o"})]
                   (expect (= [] (:samples result)))
                   (expect (= {} (:scores result)))
                   (expect (= 0.0 (:final-score result)))
@@ -599,13 +599,13 @@
 
   (describe "return shape"
             (it "returns map with all expected keys"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:items [{:answer "alpha"} {:answer "beta"}]}))
-                              llm/eval! (fn [_] (make-mock-eval-response 0.95))]
+                              llm/eval!* (fn [_] (make-mock-eval-response 0.95))]
                   (let [result (svar/sample! {:spec test-spec
-                                               :count 2
-                                               :model "gpt-4o"})]
+                                              :count 2
+                                              :model "gpt-4o"})]
                     (expect (contains? result :samples))
                     (expect (contains? result :scores))
                     (expect (contains? result :final-score))
@@ -615,13 +615,13 @@
 
   (describe "basic generation"
             (it "returns generated samples when score meets threshold"
-                (with-redefs [llm/ask! (fn [_]
+                (with-redefs [llm/ask!* (fn [_]
                                           (make-mock-ask-response
                                            {:items [{:answer "one"} {:answer "two"} {:answer "three"}]}))
-                              llm/eval! (fn [_] (make-mock-eval-response 0.95))]
+                              llm/eval!* (fn [_] (make-mock-eval-response 0.95))]
                   (let [result (svar/sample! {:spec test-spec
-                                               :count 3
-                                               :model "gpt-4o"})]
+                                              :count 3
+                                              :model "gpt-4o"})]
                     (expect (= 3 (count (:samples result))))
                     (expect (= "one" (:answer (first (:samples result)))))
                     (expect (true? (:converged? result)))
@@ -631,37 +631,37 @@
             (it "runs multiple iterations when score below threshold"
                 (let [ask-call-count (atom 0)
                       eval-scores (atom [0.3 0.95])]
-                  (with-redefs [llm/ask! (fn [_]
+                  (with-redefs [llm/ask!* (fn [_]
                                             (swap! ask-call-count inc)
                                             (make-mock-ask-response
                                              {:items [{:answer (str "v" @ask-call-count)}]}))
-                                llm/eval! (fn [_]
+                                llm/eval!* (fn [_]
                                              (let [score (first @eval-scores)]
                                                (swap! eval-scores rest)
                                                (make-mock-eval-response (or score 0.95))))]
                     (let [result (svar/sample! {:spec test-spec
-                                                 :count 1
-                                                 :model "gpt-4o"
-                                                 :iterations 3
-                                                 :threshold 0.9})]
+                                                :count 1
+                                                :model "gpt-4o"
+                                                :iterations 3
+                                                :threshold 0.9})]
                       ;; Should have run 2 iterations (first low, second high)
                       (expect (= 2 (:iterations-count result)))
                       (expect (true? (:converged? result)))))))
 
             (it "keeps best samples across iterations"
                 (let [eval-call-count (atom 0)]
-                  (with-redefs [llm/ask! (fn [_]
+                  (with-redefs [llm/ask!* (fn [_]
                                             (make-mock-ask-response
                                              {:items [{:answer "sample"}]}))
-                                llm/eval! (fn [_]
+                                llm/eval!* (fn [_]
                                              (swap! eval-call-count inc)
                                              ;; All low scores — never converges
                                              (make-mock-eval-response 0.3))]
                     (let [result (svar/sample! {:spec test-spec
-                                                 :count 1
-                                                 :model "gpt-4o"
-                                                 :iterations 2
-                                                 :threshold 0.99})]
+                                                :count 1
+                                                :model "gpt-4o"
+                                                :iterations 2
+                                                :threshold 0.99})]
                       (expect (= 2 (:iterations-count result)))
                       (expect (false? (:converged? result)))
                       ;; Should still have samples (best from all iterations)
@@ -670,16 +670,16 @@
   (describe "custom messages"
             (it "passes user messages to ask! with count instruction appended"
                 (let [captured-messages (atom nil)]
-                  (with-redefs [llm/ask! (fn [{:keys [messages]}]
+                  (with-redefs [llm/ask!* (fn [{:keys [messages]}]
                                             (reset! captured-messages messages)
                                             (make-mock-ask-response
                                              {:items [{:answer "x"}]}))
-                                llm/eval! (fn [_] (make-mock-eval-response 0.95))]
+                                llm/eval!* (fn [_] (make-mock-eval-response 0.95))]
                     (svar/sample! {:spec test-spec
-                                    :count 3
-                                    :messages [(svar/system "Generate dating profiles.")
-                                               (svar/user "Make them diverse.")]
-                                    :model "gpt-4o"})
+                                   :count 3
+                                   :messages [(svar/system "Generate dating profiles.")
+                                              (svar/user "Make them diverse.")]
+                                   :model "gpt-4o"})
                     (let [msgs @captured-messages
                           ;; First message is system from user, second is user from user,
                           ;; third is appended count instruction, then schema prompt from ask!
@@ -688,22 +688,22 @@
                       (expect (some? (re-find #"dating profiles" (:content sys-msg))))
                       ;; Count instruction should be present somewhere in messages
                       (expect (some #(and (= "user" (:role %))
-                                         (re-find #"exactly 3" (:content %)))
+                                          (re-find #"exactly 3" (:content %)))
                                     msgs)))))))
 
   (describe "iteration control"
             (it "respects :iterations 1 — runs exactly once"
                 (let [ask-call-count (atom 0)]
-                  (with-redefs [llm/ask! (fn [_]
+                  (with-redefs [llm/ask!* (fn [_]
                                             (swap! ask-call-count inc)
                                             (make-mock-ask-response
                                              {:items [{:answer "only"}]}))
-                                llm/eval! (fn [_] (make-mock-eval-response 0.1))]
+                                llm/eval!* (fn [_] (make-mock-eval-response 0.1))]
                     (let [result (svar/sample! {:spec test-spec
-                                                 :count 1
-                                                 :model "gpt-4o"
-                                                 :iterations 1
-                                                 :threshold 0.99})]
+                                                :count 1
+                                                :model "gpt-4o"
+                                                :iterations 1
+                                                :threshold 0.99})]
                       (expect (= 1 (:iterations-count result)))
                       (expect (= 1 @ask-call-count))))))))
 
@@ -769,58 +769,58 @@
 
 (defdescribe cod-prompt-building-test
   (describe "build-cod-first-iteration-objective"
-    (it "includes entity criteria, target length, and output requirements"
-        (let [build (#'llm/build-cod-first-iteration-objective 80 nil)
-              build-with-instr (#'llm/build-cod-first-iteration-objective 60 "Focus on dates")]
-          (expect (str/includes? build "<chain_of_density_iteration>"))
-          (expect (str/includes? build "~80 words"))
-          (expect (str/includes? build "<entity_criteria>"))
-          (expect (str/includes? build "atomic"))
-          (expect (str/includes? build "<output_requirements>"))
+            (it "includes entity criteria, target length, and output requirements"
+                (let [build (#'llm/build-cod-first-iteration-objective 80 nil)
+                      build-with-instr (#'llm/build-cod-first-iteration-objective 60 "Focus on dates")]
+                  (expect (str/includes? build "<chain_of_density_iteration>"))
+                  (expect (str/includes? build "~80 words"))
+                  (expect (str/includes? build "<entity_criteria>"))
+                  (expect (str/includes? build "atomic"))
+                  (expect (str/includes? build "<output_requirements>"))
           ;; Without special instructions, no special_instructions block
-          (expect (not (str/includes? build "<special_instructions>")))
+                  (expect (not (str/includes? build "<special_instructions>")))
           ;; With special instructions, block is present
-          (expect (str/includes? build-with-instr "<special_instructions>"))
-          (expect (str/includes? build-with-instr "Focus on dates")))))
+                  (expect (str/includes? build-with-instr "<special_instructions>"))
+                  (expect (str/includes? build-with-instr "Focus on dates")))))
 
   (describe "build-cod-subsequent-iteration-objective"
-    (it "includes novel criterion inside entity_criteria and process steps"
-        (let [build (#'llm/build-cod-subsequent-iteration-objective 80 nil)]
-          (expect (str/includes? build "<process>"))
-          (expect (str/includes? build "do NOT re-extract"))
-          (expect (str/includes? build "novel"))
+            (it "includes novel criterion inside entity_criteria and process steps"
+                (let [build (#'llm/build-cod-subsequent-iteration-objective 80 nil)]
+                  (expect (str/includes? build "<process>"))
+                  (expect (str/includes? build "do NOT re-extract"))
+                  (expect (str/includes? build "novel"))
           ;; Novel criterion must be inside entity_criteria (not orphaned)
-          (let [criteria-start (str/index-of build "<entity_criteria>")
-                criteria-end (str/index-of build "</entity_criteria>")
-                novel-pos (str/index-of build "novel")]
-            (expect (some? criteria-start))
-            (expect (some? criteria-end))
-            (expect (< criteria-start novel-pos criteria-end))))))
+                  (let [criteria-start (str/index-of build "<entity_criteria>")
+                        criteria-end (str/index-of build "</entity_criteria>")
+                        novel-pos (str/index-of build "novel")]
+                    (expect (some? criteria-start))
+                    (expect (some? criteria-end))
+                    (expect (< criteria-start novel-pos criteria-end))))))
 
   (describe "build-cod-task"
-    (it "wraps source text in XML and adds context for subsequent iterations"
-        (let [first-iter (#'llm/build-cod-task "Hello world" nil nil)
-              subsequent (#'llm/build-cod-task "Hello world" "Previous summary" ["entity1" "entity2"])]
+            (it "wraps source text in XML and adds context for subsequent iterations"
+                (let [first-iter (#'llm/build-cod-task "Hello world" nil nil)
+                      subsequent (#'llm/build-cod-task "Hello world" "Previous summary" ["entity1" "entity2"])]
           ;; First iteration: only source text
-          (expect (str/includes? first-iter "<source_text>"))
-          (expect (str/includes? first-iter "Hello world"))
-          (expect (not (str/includes? first-iter "<previous_summary>")))
-          (expect (not (str/includes? first-iter "<already_extracted_entities>")))
+                  (expect (str/includes? first-iter "<source_text>"))
+                  (expect (str/includes? first-iter "Hello world"))
+                  (expect (not (str/includes? first-iter "<previous_summary>")))
+                  (expect (not (str/includes? first-iter "<already_extracted_entities>")))
           ;; Subsequent: includes previous summary and accumulated entities
-          (expect (str/includes? subsequent "<previous_summary>"))
-          (expect (str/includes? subsequent "Previous summary"))
-          (expect (str/includes? subsequent "<already_extracted_entities>"))
-          (expect (str/includes? subsequent "entity1, entity2")))))
+                  (expect (str/includes? subsequent "<previous_summary>"))
+                  (expect (str/includes? subsequent "Previous summary"))
+                  (expect (str/includes? subsequent "<already_extracted_entities>"))
+                  (expect (str/includes? subsequent "entity1, entity2")))))
 
   (describe "build-cod-spec"
-    (it "produces a spec with :entities and :summary fields"
-        (let [spec (#'llm/build-cod-spec)
-              prompt (spec/spec->prompt spec)]
-          (expect (str/includes? prompt "entities"))
-          (expect (str/includes? prompt "summary"))
-          (expect (str/includes? prompt "entity"))
-          (expect (str/includes? prompt "rationale"))
-          (expect (str/includes? prompt "score"))))))
+            (it "produces a spec with :entities and :summary fields"
+                (let [spec (#'llm/build-cod-spec)
+                      prompt (spec/spec->prompt spec)]
+                  (expect (str/includes? prompt "entities"))
+                  (expect (str/includes? prompt "summary"))
+                  (expect (str/includes? prompt "entity"))
+                  (expect (str/includes? prompt "rationale"))
+                  (expect (str/includes? prompt "score"))))))
 
 ;; Rich factual text about the Voyager missions — dense with entities, dates,
 ;; distances, organizations, and scientific concepts. Perfect for CoD testing.
@@ -851,8 +851,8 @@
                       (expect (string? (:summary iter)))
                       ;; Entities are maps with :entity, :rationale, and :score
                       (expect (every? #(and (contains? % :entity)
-                                           (contains? % :rationale)
-                                           (contains? % :score)) (:entities iter))))
+                                            (contains? % :rationale)
+                                            (contains? % :score)) (:entities iter))))
 
                     ;; First iteration should have some entities
                     (expect (pos? (count (:entities (first result)))))
@@ -874,8 +874,8 @@
                       (let [key-entities #{"nasa" "golden record" "jupiter" "saturn" "heliopause"
                                            "carl sagan" "titan" "voyager 2" "interstellar space"}
                             found (count (filter (fn [key-ent]
-                                                  (some #(str/includes? % key-ent) all-entity-names))
-                                                key-entities))]
+                                                   (some #(str/includes? % key-ent) all-entity-names))
+                                                 key-entities))]
                         (expect (>= found 2))))
 
                     ;; Scores should be in 0.0-1.0 range
@@ -893,12 +893,12 @@
                                                 :target-length 80})
                         ;; Total entity count should grow across iterations
                         cumulative-entities (reductions
-                                            (fn [acc iter] (into acc (map :entity (:entities iter))))
-                                            #{}
-                                            result)]
+                                             (fn [acc iter] (into acc (map :entity (:entities iter))))
+                                             #{}
+                                             result)]
                     ;; By iteration 3 we should have more total entities than iteration 1
                     (expect (> (count (last cumulative-entities))
-                              (count (second cumulative-entities))))
+                               (count (second cumulative-entities))))
 
                     ;; Entities from later iterations should be genuinely new (no re-extraction)
                     (let [iter1-names (set (map :entity (:entities (first result))))
@@ -923,19 +923,19 @@
                       (expect (pos? (count all-entities)))
                       ;; Each entity has :entity, :rationale, and :score
                       (expect (every? #(and (contains? % :entity)
-                                           (contains? % :rationale)
-                                           (contains? % :score)) all-entities))
+                                            (contains? % :rationale)
+                                            (contains? % :score)) all-entities))
                       ;; Must find CRISPR-Cas9 (central subject, always score ~1.0)
                       (expect (some #(str/includes? % "crispr") lower-names))
                       ;; Must find at least one of the developers
                       (expect (some #(or (str/includes? % "doudna")
-                                        (str/includes? % "charpentier")) lower-names))
+                                         (str/includes? % "charpentier")) lower-names))
                       ;; Must find at least one disease/treatment entity
                       (expect (some #(or (str/includes? % "sickle")
-                                        (str/includes? % "beta-thalassemia")
-                                        (str/includes? % "cancer")
-                                        (str/includes? % "casgevy")
-                                        (str/includes? % "fda")) lower-names))
+                                         (str/includes? % "beta-thalassemia")
+                                         (str/includes? % "cancer")
+                                         (str/includes? % "casgevy")
+                                         (str/includes? % "fda")) lower-names))
                       ;; Scores are all within valid range
                       (expect (every? #(<= 0.0 (:score %) 1.0) all-entities))
                       ;; Rationales should be non-empty strings
@@ -1031,8 +1031,8 @@
                       (expect (string? (:summary iter)))
                       (expect (vector? (:entities iter)))
                       (expect (every? #(and (contains? % :entity)
-                                           (contains? % :rationale)
-                                           (contains? % :score)) (:entities iter))))
+                                            (contains? % :rationale)
+                                            (contains? % :score)) (:entities iter))))
                     ;; First iteration should have at least one date/temporal entity
                     ;; (The text has: 1977, 1979, 1980, 2012, 2024, 2025)
                     (expect (some #(re-find #"\d{4}" (:entity %)) iter1-entities))))))
@@ -1051,4 +1051,3 @@
                       (let [wc (word-count (:summary iter))]
                         (expect (>= wc 25))
                         (expect (<= wc 100)))))))))
-

@@ -18,7 +18,7 @@
    - resources-test/chapter-questions/images/*.png"
   (:require
    [com.blockether.svar.core :as svar]
-   [com.blockether.svar.internal.rlm.internal.pageindex.core :as pageindex]))
+   [com.blockether.svar.internal.rlm :as pageindex]))
 
 ;; =============================================================================
 ;; Constants
@@ -96,7 +96,7 @@
          q-opts (dissoc
                  (merge {:count 10}
                         (select-keys opts [:count :difficulty :categories :model
-                                            :verify? :debug? :max-iterations]))
+                                           :verify? :debug? :max-iterations]))
                  :save-path)
          _ (println (str "[4/5] Running generate-qa-env! (target: " (:count q-opts) " questions)..."))
          q-result (svar/generate-qa-env! env q-opts)

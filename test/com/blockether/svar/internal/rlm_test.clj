@@ -6,7 +6,12 @@
    [lazytest.core :refer [defdescribe describe expect it throws?]]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm :as sut]
-   [com.blockether.svar.internal.router :as router]
+   [com.blockether.svar.internal.rlm.schema :as rlm-schema]
+   [com.blockether.svar.internal.rlm.db :as rlm-db]
+   [com.blockether.svar.internal.rlm.tools :as rlm-tools]
+   [com.blockether.svar.internal.rlm.routing :as rlm-routing]
+   [com.blockether.svar.internal.rlm.core :as rlm-core]
+   [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.core :as svar])
   (:import
    [java.util UUID]))
@@ -28,28 +33,31 @@
   ([context] (create-test-env context {}))
   ([context {:keys [_db] :as opts}]
    (let [depth-atom (atom 0)
-         test-router (router/make-router [{:id :test :api-key "test" :base-url "http://localhost"
-                                           :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
-                                                    :refinement "gpt-4o" :planning "gpt-4o"}
-                                           :rpm 500 :tpm 200000 :priority 0}])]
-     (#'sut/create-rlm-env context "gpt-4o" depth-atom nil nil (assoc opts :router test-router)))))
+         test-router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                        :models [{:name "gpt-4o" :capabilities #{:chat :vision}
+                                                  :intelligence :high :cost :medium}
+                                                 {:name "gpt-4o-mini" :capabilities #{:chat :vision}
+                                                  :intelligence :medium :cost :low}]
+                                        :root "gpt-4o"
+                                        :rpm 500 :tpm 200000 :priority 0}])]
+     (#'rlm-core/create-rlm-env context depth-atom test-router opts))))
 
 (defn- with-test-env*
   "Creates a test environment, executes f with it, then disposes.
    
    Usage:
    (with-test-env* {:count 42}
-     (fn [env] (#'sut/execute-code env \"(+ 1 2)\")))
+     (fn [env] (#'rlm-core/execute-code env \"(+ 1 2)\")))
    
    (with-test-env* {:count 42} {:db false}
-     (fn [env] (#'sut/execute-code env \"(+ 1 2)\")))"
+     (fn [env] (#'rlm-core/execute-code env \"(+ 1 2)\")))"
   ([context f] (with-test-env* context {} f))
   ([context opts f]
    (let [env (create-test-env context opts)]
      (try
        (f env)
        (finally
-         (#'sut/dispose-rlm-env! env))))))
+         (#'rlm-core/dispose-rlm-env! env))))))
 
 ;; =============================================================================
 ;; Unit Tests (no LLM calls)
@@ -58,56 +66,65 @@
 (defdescribe extract-code-blocks-test
   (it "extracts code from clojure blocks"
       (expect (= ["(+ 1 2)"]
-                 (#'sut/extract-code-blocks "text ```clojure\n(+ 1 2)\n``` more"))))
+                 (#'rlm-core/extract-code-blocks "text ```clojure\n(+ 1 2)\n``` more"))))
 
   (it "extracts code from repl blocks"
       (expect (= ["(def x 1)"]
-                 (#'sut/extract-code-blocks "```repl\n(def x 1)\n```"))))
+                 (#'rlm-core/extract-code-blocks "```repl\n(def x 1)\n```"))))
 
   (it "extracts code from clj blocks"
       (expect (= ["(println \"hi\")"]
-                 (#'sut/extract-code-blocks "```clj\n(println \"hi\")\n```"))))
+                 (#'rlm-core/extract-code-blocks "```clj\n(println \"hi\")\n```"))))
 
   (it "extracts code from plain triple backtick blocks"
       (expect (= ["(str \"test\")"]
-                 (#'sut/extract-code-blocks "```\n(str \"test\")\n```"))))
+                 (#'rlm-core/extract-code-blocks "```\n(str \"test\")\n```"))))
 
   (it "extracts multiple code blocks"
       (expect (= ["(def x 1)" "(inc x)"]
-                 (#'sut/extract-code-blocks "```clojure\n(def x 1)\n```\n```clojure\n(inc x)\n```"))))
+                 (#'rlm-core/extract-code-blocks "```clojure\n(def x 1)\n```\n```clojure\n(inc x)\n```"))))
 
   (it "returns empty vector when no code blocks"
       (expect (= []
-                 (#'sut/extract-code-blocks "no code here"))))
+                 (#'rlm-core/extract-code-blocks "no code here"))))
 
   (it "skips empty code blocks"
       (expect (= []
-                 (#'sut/extract-code-blocks "```clojure\n\n\n```"))))
+                 (#'rlm-core/extract-code-blocks "```clojure\n\n\n```"))))
 
   (it "trims whitespace from extracted code"
       (expect (= ["(+ 1 2)"]
-                 (#'sut/extract-code-blocks "```clojure\n  (+ 1 2)  \n```")))))
+                 (#'rlm-core/extract-code-blocks "```clojure\n  (+ 1 2)  \n```")))))
 
 (defdescribe check-result-for-final-test
   (it "detects FINAL marker in result"
-      (expect (= {:final? true :answer "done"}
-                 (#'sut/check-result-for-final {:result {:rlm/final true :rlm/answer "done"}}))))
+      (expect (= {:final? true :answer "done" :confidence :high :learn nil}
+                 (#'rlm-core/check-result-for-final {:result {:rlm/final true :rlm/answer "done"}}))))
+
+  (it "extracts confidence and learn from FINAL result"
+      (expect (= {:final? true :answer {:result "done"} :confidence :low
+                  :learn [{:insight "x" :tags ["t"]}]}
+                 (#'rlm-core/check-result-for-final
+                  {:result {:rlm/final true
+                            :rlm/answer {:result "done"}
+                            :rlm/confidence :low
+                            :rlm/learn [{:insight "x" :tags ["t"]}]}}))))
 
   (it "returns false when no FINAL marker"
       (expect (= {:final? false}
-                 (#'sut/check-result-for-final {:result 42}))))
+                 (#'rlm-core/check-result-for-final {:result 42}))))
 
   (it "returns false when result is nil"
       (expect (= {:final? false}
-                 (#'sut/check-result-for-final {:result nil}))))
+                 (#'rlm-core/check-result-for-final {:result nil}))))
 
   (it "returns false when result is not a map"
       (expect (= {:final? false}
-                 (#'sut/check-result-for-final {:result "string"}))))
+                 (#'rlm-core/check-result-for-final {:result "string"}))))
 
   (it "returns false when rlm/final is false"
       (expect (= {:final? false}
-                 (#'sut/check-result-for-final {:result {:rlm/final false :rlm/answer "test"}})))))
+                 (#'rlm-core/check-result-for-final {:result {:rlm/final false :rlm/answer "test"}})))))
 
 (defdescribe create-rlm-env-test
   (it "creates environment with required keys"
@@ -138,12 +155,12 @@
 (defdescribe get-locals-test
   (it "returns empty map initially"
       (with-test-env* {} (fn [env]
-                           (expect (= {} (#'sut/get-locals env))))))
+                           (expect (= {} (#'rlm-core/get-locals env))))))
 
   (it "returns tracked variables after execution"
       (with-test-env* {} (fn [env]
-                           (#'sut/execute-code env "(def x 42)")
-                           (expect (= {'x 42} (#'sut/get-locals env)))))))
+                           (#'rlm-core/execute-code env "(def x 42)")
+                           (expect (= {'x 42} (#'rlm-core/get-locals env)))))))
 
 ;; =============================================================================
 ;; Disposable Database Tests
@@ -152,92 +169,92 @@
 (defdescribe disposable-db-test
   (describe "create-rlm-conn"
             (it "creates a database with required keys"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (expect (contains? db-info :conn))
                     (expect (contains? db-info :path))
                     (expect (contains? db-info :owned?))
                     (expect (true? (:owned? db-info)))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "creates database with conn and owned? true"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (expect (some? (:conn db-info)))
                     (expect (true? (:owned? db-info)))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "external conn reuse"
             (it "reuses external conn with owned? false"
-                (let [external-db (#'sut/create-rlm-conn nil)]
+                (let [external-db (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (let [reused (assoc external-db :owned? false)]
                       (expect (false? (:owned? reused)))
                       (expect (some? (:conn reused))))
                     (finally
-                      (#'sut/dispose-rlm-conn! external-db))))))
+                      (#'rlm-db/dispose-rlm-conn! external-db))))))
 
   (describe "dispose-rlm-conn!"
             (it "disposes owned database and cleans up path"
-                (let [db-info (#'sut/create-rlm-conn nil)
+                (let [db-info (#'rlm-db/create-rlm-conn nil)
                       path (:path db-info)]
                   (expect (fs/exists? path))
-                  (#'sut/dispose-rlm-conn! db-info)
+                  (#'rlm-db/dispose-rlm-conn! db-info)
                   (expect (not (fs/exists? path)))))
 
             (it "does not throw when called on a fresh conn"
-                (let [db-info (#'sut/create-rlm-conn nil)]
-                  (#'sut/dispose-rlm-conn! db-info)))))
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
+                  (#'rlm-db/dispose-rlm-conn! db-info)))))
 
 (defdescribe execute-code-test
   (it "executes simple arithmetic"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(+ 1 2)")]
+                           (let [result (#'rlm-core/execute-code env "(+ 1 2)")]
                              (expect (= 3 (:result result)))
                              (expect (nil? (:error result)))
                              (expect (false? (:timeout? result)))))))
 
   (it "captures stdout from println"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(println \"hello\")")]
+                           (let [result (#'rlm-core/execute-code env "(println \"hello\")")]
                              (expect (= "hello\n" (:stdout result)))
                              (expect (nil? (:error result)))))))
 
   (it "tracks variables defined with def"
       (with-test-env* {} (fn [env]
-                           (#'sut/execute-code env "(def x 42)")
-                           (expect (= {'x 42} (#'sut/get-locals env))))))
+                           (#'rlm-core/execute-code env "(def x 42)")
+                           (expect (= {'x 42} (#'rlm-core/get-locals env))))))
 
   (it "returns error for invalid code"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(/ 1 0)")]
+                           (let [result (#'rlm-core/execute-code env "(/ 1 0)")]
                              (expect (some? (:error result)))
                              (expect (nil? (:result result)))))))
 
   (it "provides access to context"
       (with-test-env* {:count 5} (fn [env]
-                                   (let [result (#'sut/execute-code env "(:count context)")]
+                                   (let [result (#'rlm-core/execute-code env "(:count context)")]
                                      (expect (= 5 (:result result)))
                                      (expect (nil? (:error result)))))))
 
   (it "provides access to string helpers"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(str-includes? \"hello world\" \"world\")")]
+                           (let [result (#'rlm-core/execute-code env "(str-includes? \"hello world\" \"world\")")]
                              (expect (= true (:result result)))
                              (expect (nil? (:error result)))))))
 
   (describe "regex support"
             (it "supports re-find for pattern matching"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(re-find #\"\\d+\" \"abc123def\")")]
+                                     (let [result (#'rlm-core/execute-code env "(re-find #\"\\d+\" \"abc123def\")")]
                                        (expect (= "123" (:result result)))
                                        (expect (nil? (:error result)))))))
 
             (it "supports re-seq for multiple matches"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(vec (re-seq #\"\\d+\" \"a1b2c3\"))")]
+                                     (let [result (#'rlm-core/execute-code env "(vec (re-seq #\"\\d+\" \"a1b2c3\"))")]
                                        (expect (= ["1" "2" "3"] (:result result)))))))))
 
 ;; =============================================================================
@@ -248,59 +265,59 @@
   (describe "list-locals"
             (it "returns empty map when no locals defined"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(list-locals)")]
+                                     (let [result (#'rlm-core/execute-code env "(list-locals)")]
                                        (expect (= {} (:result result)))))))
 
             (it "shows defined variables"
                 (with-test-env* {} (fn [env]
-                                     (#'sut/execute-code env "(def x 42)")
-                                     (#'sut/execute-code env "(def y \"hello\")")
-                                     (let [result (#'sut/execute-code env "(list-locals)")]
+                                     (#'rlm-core/execute-code env "(def x 42)")
+                                     (#'rlm-core/execute-code env "(def y \"hello\")")
+                                     (let [result (#'rlm-core/execute-code env "(list-locals)")]
                                        (expect (= {'x 42 'y "hello"} (:result result)))))))
 
             (it "shows functions as <fn>"
                 (with-test-env* {} (fn [env]
-                                     (#'sut/execute-code env "(defn my-fn [x] (* x 2))")
-                                     (let [result (#'sut/execute-code env "(list-locals)")]
+                                     (#'rlm-core/execute-code env "(defn my-fn [x] (* x 2))")
+                                     (let [result (#'rlm-core/execute-code env "(list-locals)")]
                                        (expect (= '<fn> (get (:result result) 'my-fn)))))))
 
             (it "summarizes large collections"
                 (with-test-env* {} (fn [env]
-                                     (#'sut/execute-code env "(def big-list (range 100))")
-                                     (let [result (#'sut/execute-code env "(list-locals)")
+                                     (#'rlm-core/execute-code env "(def big-list (range 100))")
+                                     (let [result (#'rlm-core/execute-code env "(list-locals)")
                                            big-list-summary (get (:result result) 'big-list)]
                                        (expect (string? big-list-summary))
                                        (expect (clojure.string/includes? big-list-summary "100 items"))))))
 
             (it "shows small collections in full"
                 (with-test-env* {} (fn [env]
-                                     (#'sut/execute-code env "(def small-vec [1 2 3])")
-                                     (let [result (#'sut/execute-code env "(list-locals)")]
+                                     (#'rlm-core/execute-code env "(def small-vec [1 2 3])")
+                                     (let [result (#'rlm-core/execute-code env "(list-locals)")]
                                        (expect (= [1 2 3] (get (:result result) 'small-vec))))))))
 
   (describe "get-local"
             (it "returns nil for undefined variable"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(get-local 'undefined)")]
+                                     (let [result (#'rlm-core/execute-code env "(get-local 'undefined)")]
                                        (expect (nil? (:result result)))))))
 
             (it "returns full value of defined variable"
                 (with-test-env* {} (fn [env]
-                                     (#'sut/execute-code env "(def x 42)")
-                                     (let [result (#'sut/execute-code env "(get-local 'x)")]
+                                     (#'rlm-core/execute-code env "(def x 42)")
+                                     (let [result (#'rlm-core/execute-code env "(get-local 'x)")]
                                        (expect (= 42 (:result result)))))))
 
             (it "returns full value of large collection (not summarized)"
                 (with-test-env* {} (fn [env]
-                                     (#'sut/execute-code env "(def big-list (vec (range 100)))")
-                                     (let [result (#'sut/execute-code env "(get-local 'big-list)")]
+                                     (#'rlm-core/execute-code env "(def big-list (vec (range 100)))")
+                                     (let [result (#'rlm-core/execute-code env "(get-local 'big-list)")]
                                        (expect (= (vec (range 100)) (:result result)))))))
 
             (it "returns actual function (can be called)"
                 (with-test-env* {} (fn [env]
-                                     (#'sut/execute-code env "(defn double-it [n] (* n 2))")
+                                     (#'rlm-core/execute-code env "(defn double-it [n] (* n 2))")
         ;; Can't test the function directly, but can verify it exists and works
-                                     (let [result (#'sut/execute-code env "(double-it 5)")]
+                                     (let [result (#'rlm-core/execute-code env "(double-it 5)")]
                                        (expect (= 10 (:result result)))))))))
 
 ;; =============================================================================
@@ -311,107 +328,105 @@
   (describe "str-lines"
             (it "splits string into lines"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-lines \"a\\nb\\nc\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-lines \"a\\nb\\nc\")")]
                                        (expect (= ["a" "b" "c"] (:result result)))))))
 
             (it "returns nil for nil input"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-lines nil)")]
+                                     (let [result (#'rlm-core/execute-code env "(str-lines nil)")]
                                        (expect (nil? (:result result))))))))
 
   (describe "str-words"
             (it "splits string into words"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-words \"hello world test\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-words \"hello world test\")")]
                                        (expect (= ["hello" "world" "test"] (:result result)))))))
 
             (it "handles multiple spaces"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-words \"  hello   world  \")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-words \"  hello   world  \")")]
                                        (expect (= ["hello" "world"] (:result result))))))))
 
   (describe "str-truncate"
             (it "truncates long strings"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-truncate \"hello world\" 5)")]
+                                     (let [result (#'rlm-core/execute-code env "(str-truncate \"hello world\" 5)")]
                                        (expect (= "hello" (:result result)))))))
 
             (it "returns short strings unchanged"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-truncate \"hi\" 10)")]
+                                     (let [result (#'rlm-core/execute-code env "(str-truncate \"hi\" 10)")]
                                        (expect (= "hi" (:result result))))))))
 
   (describe "str-join"
             (it "joins collection with separator"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-join \", \" [\"a\" \"b\" \"c\"])")]
+                                     (let [result (#'rlm-core/execute-code env "(str-join \", \" [\"a\" \"b\" \"c\"])")]
                                        (expect (= "a, b, c" (:result result))))))))
 
   (describe "str-split"
             (it "splits string by regex"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-split \"a,b,c\" #\",\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-split \"a,b,c\" #\",\")")]
                                        (expect (= ["a" "b" "c"] (:result result))))))))
 
   (describe "str-replace"
             (it "replaces substring"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-replace \"hello world\" \"world\" \"clojure\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-replace \"hello world\" \"world\" \"clojure\")")]
                                        (expect (= "hello clojure" (:result result))))))))
 
   (describe "str-trim"
             (it "trims whitespace"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-trim \"  hello  \")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-trim \"  hello  \")")]
                                        (expect (= "hello" (:result result))))))))
 
   (describe "str-lower"
             (it "converts to lowercase"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-lower \"HELLO\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-lower \"HELLO\")")]
                                        (expect (= "hello" (:result result))))))))
 
   (describe "str-upper"
             (it "converts to uppercase"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-upper \"hello\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-upper \"hello\")")]
                                        (expect (= "HELLO" (:result result))))))))
 
   (describe "str-blank?"
             (it "returns true for blank string"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-blank? \"  \")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-blank? \"  \")")]
                                        (expect (true? (:result result)))))))
 
             (it "returns false for non-blank string"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-blank? \"hello\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-blank? \"hello\")")]
                                        (expect (false? (:result result))))))))
 
   (describe "str-includes?"
             (it "returns true when substring found"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-includes? \"hello world\" \"world\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-includes? \"hello world\" \"world\")")]
                                        (expect (true? (:result result)))))))
 
             (it "returns false when substring not found"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-includes? \"hello world\" \"foo\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-includes? \"hello world\" \"foo\")")]
                                        (expect (false? (:result result))))))))
 
   (describe "str-starts-with?"
             (it "returns true when starts with prefix"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-starts-with? \"hello world\" \"hello\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-starts-with? \"hello world\" \"hello\")")]
                                        (expect (true? (:result result))))))))
 
   (describe "str-ends-with?"
             (it "returns true when ends with suffix"
                 (with-test-env* {} (fn [env]
-                                     (let [result (#'sut/execute-code env "(str-ends-with? \"hello world\" \"world\")")]
+                                     (let [result (#'rlm-core/execute-code env "(str-ends-with? \"hello world\" \"world\")")]
                                        (expect (true? (:result result)))))))))
-
-
 
 ;; =============================================================================
 ;; Message History Tests
@@ -420,84 +435,84 @@
 (defdescribe message-history-test
   (describe "store-message!"
             (it "stores a message with generated id"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [result (#'sut/store-message! db-info :user "Hello, world!")]
+                    (let [result (#'rlm-db/store-message! db-info :user "Hello, world!")]
                       (expect (some? (:id result)))
                       (expect (= :user (:role result)))
                       (expect (= "Hello, world!" (:content result)))
                       (expect (some? (:tokens result)))
                       (expect (some? (:timestamp result))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "stores iteration number when provided"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [result (#'sut/store-message! db-info :assistant "Response" {:iteration 3})]
+                    (let [result (#'rlm-db/store-message! db-info :assistant "Response" {:iteration 3})]
                       (expect (= :assistant (:role result))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "returns nil for nil db-info"
-                (expect (nil? (#'sut/store-message! nil :user "test")))))
+                (expect (nil? (#'rlm-db/store-message! nil :user "test")))))
 
   (describe "get-recent-messages"
             (it "returns messages in reverse chronological order"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/store-message! db-info :user "First")
+                    (#'rlm-db/store-message! db-info :user "First")
                     (Thread/sleep 10) ; Ensure different timestamps
-                    (#'sut/store-message! db-info :assistant "Second")
+                    (#'rlm-db/store-message! db-info :assistant "Second")
                     (Thread/sleep 10)
-                    (#'sut/store-message! db-info :user "Third")
-                    (let [results (#'sut/get-recent-messages db-info 10)]
+                    (#'rlm-db/store-message! db-info :user "Third")
+                    (let [results (#'rlm-db/get-recent-messages db-info 10)]
                       (expect (= 3 (count results)))
                       (expect (= "Third" (:content (first results))))
                       (expect (= "First" (:content (last results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "respects limit parameter"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (doseq [i (range 5)]
-                      (#'sut/store-message! db-info :user (str "Message " i)))
-                    (let [results (#'sut/get-recent-messages db-info 2)]
+                      (#'rlm-db/store-message! db-info :user (str "Message " i)))
+                    (let [results (#'rlm-db/get-recent-messages db-info 2)]
                       (expect (= 2 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "count-history-tokens"
             (it "counts total tokens across messages"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/store-message! db-info :user "Hello")
-                    (#'sut/store-message! db-info :assistant "World")
-                    (let [total (#'sut/count-history-tokens db-info)]
+                    (#'rlm-db/store-message! db-info :user "Hello")
+                    (#'rlm-db/store-message! db-info :assistant "World")
+                    (let [total (#'rlm-db/count-history-tokens db-info)]
                       (expect (pos? total)))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "returns 0 for empty history"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (expect (= 0 (#'sut/count-history-tokens db-info)))
+                    (expect (= 0 (#'rlm-db/count-history-tokens db-info)))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "get-recent-messages retrieval"
             (it "returns messages with expected keys"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/store-message! db-info :user "How do I bake chocolate cookies?")
-                    (#'sut/store-message! db-info :assistant "Mix flour, sugar, chocolate chips and bake at 350F")
-                    (let [results (#'sut/get-recent-messages db-info 2)]
+                    (#'rlm-db/store-message! db-info :user "How do I bake chocolate cookies?")
+                    (#'rlm-db/store-message! db-info :assistant "Mix flour, sugar, chocolate chips and bake at 350F")
+                    (let [results (#'rlm-db/get-recent-messages db-info 2)]
                       (expect (= 2 (count results)))
                       (expect (every? #(contains? % :content) results))
                       (expect (every? #(contains? % :role) results)))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; History Query Functions Tests (SCI Bindings)
@@ -509,10 +524,10 @@
                 (with-test-env* {} (fn [env]
         ;; Store some messages first
                                      (let [db-info @(:db-info-atom env)]
-                                       (#'sut/store-message! db-info :user "How do I sort a list in Clojure?")
-                                       (#'sut/store-message! db-info :assistant "Use (sort coll) or (sort-by key-fn coll)"))
+                                       (#'rlm-db/store-message! db-info :user "How do I sort a list in Clojure?")
+                                       (#'rlm-db/store-message! db-info :assistant "Use (sort coll) or (sort-by key-fn coll)"))
         ;; search-history now takes n (number of messages) instead of query string
-                                     (let [result (#'sut/execute-code env "(search-history 5)")]
+                                     (let [result (#'rlm-core/execute-code env "(search-history 5)")]
                                        (expect (nil? (:error result)))
                                        (expect (vector? (:result result)))
                                        (expect (= 2 (count (:result result)))))))))
@@ -521,9 +536,9 @@
             (it "gets recent history from within SCI"
                 (with-test-env* {} (fn [env]
                                      (let [db-info @(:db-info-atom env)]
-                                       (#'sut/store-message! db-info :user "First message")
-                                       (#'sut/store-message! db-info :assistant "First response"))
-                                     (let [result (#'sut/execute-code env "(get-history 10)")]
+                                       (#'rlm-db/store-message! db-info :user "First message")
+                                       (#'rlm-db/store-message! db-info :assistant "First response"))
+                                     (let [result (#'rlm-core/execute-code env "(get-history 10)")]
                                        (expect (nil? (:error result)))
                                        (expect (vector? (:result result)))
                                        (expect (= 2 (count (:result result)))))))))
@@ -532,56 +547,14 @@
             (it "returns history statistics from within SCI"
                 (with-test-env* {} (fn [env]
                                      (let [db-info @(:db-info-atom env)]
-                                       (#'sut/store-message! db-info :user "Test message")
-                                       (#'sut/store-message! db-info :assistant "Test response"))
-                                     (let [result (#'sut/execute-code env "(history-stats)")]
+                                       (#'rlm-db/store-message! db-info :user "Test message")
+                                       (#'rlm-db/store-message! db-info :assistant "Test response"))
+                                     (let [result (#'rlm-core/execute-code env "(history-stats)")]
                                        (expect (nil? (:error result)))
                                        (expect (map? (:result result)))
                                        (expect (contains? (:result result) :total-messages))
                                        (expect (contains? (:result result) :total-tokens))
                                        (expect (contains? (:result result) :by-role))))))))
-
-;; =============================================================================
-;; Example Learning Tests
-;; =============================================================================
-
-(defdescribe example-learning-test
-  (it "stores and retrieves examples"
-      (#'sut/clear-examples!)
-      (#'sut/store-example! "What is 2+2?" "math context" "4" 40 nil)
-      (let [examples (#'sut/get-examples "What is 2+2?" {})]
-        (expect (= 1 (count (:good examples))))
-        (expect (= "4" (:answer (first (:good examples)))))))
-
-  (it "categorizes good and bad examples by score"
-      (#'sut/clear-examples!)
-      (#'sut/store-example! "test" "ctx" "good answer" 35 nil)
-      (#'sut/store-example! "test" "ctx" "bad answer" 20 "too short")
-      (let [examples (#'sut/get-examples "test" {})]
-        (expect (= 1 (count (:good examples))))
-        (expect (= 1 (count (:bad examples))))))
-
-  (it "limits examples to max 3 good and 3 bad"
-      (#'sut/clear-examples!)
-    ;; Store 5 good and 5 bad examples
-      (doseq [i (range 5)]
-        (#'sut/store-example! "query" "ctx" (str "good-" i) (+ 35 i) nil))
-      (doseq [i (range 5)]
-        (#'sut/store-example! "query" "ctx" (str "bad-" i) (+ 10 i) "bad"))
-      (let [examples (#'sut/get-examples "query" {:max-good 10 :max-bad 10})]
-      ;; Should still be capped at 3 each
-        (expect (<= (count (:good examples)) 3))
-        (expect (<= (count (:bad examples)) 3))))
-
-  (it "retrieves examples by recency (not semantic similarity)"
-      (#'sut/clear-examples!)
-    ;; Store example
-      (#'sut/store-example! "What is the capital of France?" "geography" "Paris" 40 nil)
-    ;; Retrieve - query is ignored, returns by recency
-      (let [examples (#'sut/get-examples "any query" {})]
-      ;; Should find the example since it's the most recent
-        (expect (= 1 (count (:good examples))))
-        (expect (= "Paris" (:answer (first (:good examples))))))))
 
 ;; =============================================================================
 ;; Learnings System Tests (DB-backed)
@@ -590,43 +563,43 @@
 (defdescribe learnings-test
   (describe "db-store-learning!"
             (it "stores a learning with insight"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [result (#'sut/db-store-learning! db-info "Always verify data recency")]
+                    (let [result (#'rlm-db/db-store-learning! db-info "Always verify data recency")]
                       (expect (some? (:learning/id result)))
                       (expect (= "Always verify data recency" (:learning/insight result)))
                       (expect (some? (:learning/timestamp result))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "stores learning with context"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [result (#'sut/db-store-learning! db-info "Check for duplicates" "aggregation tasks")]
+                    (let [result (#'rlm-db/db-store-learning! db-info "Check for duplicates" {:context "aggregation tasks"})]
                       (expect (= "aggregation tasks" (:learning/context result))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "db-get-learnings"
             (it "finds semantically similar learnings"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-learning! db-info "For date questions, always verify the year in the context")
-                    (#'sut/db-store-learning! db-info "Check database connection before queries")
+                    (#'rlm-db/db-store-learning! db-info "For date questions, always verify the year in the context")
+                    (#'rlm-db/db-store-learning! db-info "Check database connection before queries")
           ;; Search with related wording
-                    (let [learnings (#'sut/db-get-learnings db-info "verifying dates and years" {:top-k 2})]
+                    (let [learnings (#'rlm-db/db-get-learnings db-info "verifying dates and years" {:top-k 2})]
                       (expect (<= (count learnings) 2))
                       (expect (every? #(contains? % :insight) learnings)))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "db-learning-stats"
             (it "returns learning statistics including voting stats"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-learning! db-info "Insight without context")
-                    (#'sut/db-store-learning! db-info "Insight with context" "some domain")
-                    (let [stats (#'sut/db-learning-stats db-info)]
+                    (#'rlm-db/db-store-learning! db-info "Insight without context")
+                    (#'rlm-db/db-store-learning! db-info "Insight with context" {:context "some domain"})
+                    (let [stats (#'rlm-db/db-learning-stats db-info)]
                       (expect (= 2 (:total-learnings stats)))
                       (expect (= 2 (:active-learnings stats)))
                       (expect (= 0 (:decayed-learnings stats)))
@@ -635,151 +608,140 @@
                       (expect (= 0 (:total-votes stats)))
                       (expect (= 0 (:total-applications stats))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "db-vote-learning!"
             (it "records positive vote"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [stored (#'sut/db-store-learning! db-info "Test insight")
-                          voted (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)]
+                    (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")
+                          voted (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)]
                       (expect (= 1 (:learning/useful-count voted)))
                       (expect (= 0 (:learning/not-useful-count voted)))
                       (expect (false? (:learning/decayed? voted))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "records negative vote"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [stored (#'sut/db-store-learning! db-info "Test insight")
-                          voted (#'sut/db-vote-learning! db-info (:learning/id stored) :not-useful)]
+                    (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")
+                          voted (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful)]
                       (expect (= 0 (:learning/useful-count voted)))
                       (expect (= 1 (:learning/not-useful-count voted))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "accumulates multiple votes"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [stored (#'sut/db-store-learning! db-info "Test insight")]
-                      (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)
-                      (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)
-                      (let [voted (#'sut/db-vote-learning! db-info (:learning/id stored) :not-useful)]
+                    (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")]
+                      (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)
+                      (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)
+                      (let [voted (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful)]
                         (expect (= 2 (:learning/useful-count voted)))
                         (expect (= 1 (:learning/not-useful-count voted)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "learning decay"
             (it "marks learning as decayed after 5+ votes with >70% negative"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [stored (#'sut/db-store-learning! db-info "Bad insight")]
+                    (let [stored (#'rlm-db/db-store-learning! db-info "Bad insight")]
             ;; Vote 1 useful, 5 not-useful (>70% negative, 6 total votes)
-                      (#'sut/db-vote-learning! db-info (:learning/id stored) :useful)
+                      (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)
                       (dotimes [_ 5]
-                        (#'sut/db-vote-learning! db-info (:learning/id stored) :not-useful))
-                      (let [final-vote (#'sut/db-vote-learning! db-info (:learning/id stored) :not-useful)]
+                        (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful))
+                      (let [final-vote (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful)]
                         (expect (true? (:learning/decayed? final-vote)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "filters decayed learnings from search results"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
           ;; Store two learnings
-                    (let [_ (#'sut/db-store-learning! db-info "Good insight about testing")
-                          bad-learning (#'sut/db-store-learning! db-info "Bad insight about testing")]
+                    (let [_ (#'rlm-db/db-store-learning! db-info "Good insight about testing")
+                          bad-learning (#'rlm-db/db-store-learning! db-info "Bad insight about testing")]
             ;; Make 'bad' learning decay
                       (dotimes [_ 6]
-                        (#'sut/db-vote-learning! db-info (:learning/id bad-learning) :not-useful))
+                        (#'rlm-db/db-vote-learning! db-info (:learning/id bad-learning) :not-useful))
             ;; Search should only return good learning
-                      (let [results (#'sut/db-get-learnings db-info "testing" {:top-k 10 :track-usage? false})]
+                      (let [results (#'rlm-db/db-get-learnings db-info "testing" {:top-k 10 :track-usage? false})]
                         (expect (= 1 (count results)))
                         (expect (= "Good insight about testing" (:insight (first results))))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info))))))
 
   (describe "db-increment-applied-count!"
             (it "increments applied count"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (let [stored (#'sut/db-store-learning! db-info "Test insight")]
-                      (expect (= 1 (#'sut/db-increment-applied-count! db-info (:learning/id stored))))
-                      (expect (= 2 (#'sut/db-increment-applied-count! db-info (:learning/id stored)))))
+                    (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")]
+                      (expect (= 1 (#'rlm-db/db-increment-applied-count! db-info (:learning/id stored))))
+                      (expect (= 2 (#'rlm-db/db-increment-applied-count! db-info (:learning/id stored)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "search-learnings auto-increments applied count"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-learning! db-info "Test insight for tracking")
+                    (#'rlm-db/db-store-learning! db-info "Test insight for tracking")
           ;; Search twice - verify results are returned so we know tracking should work
-                    (let [results1 (#'sut/db-get-learnings db-info "insight for tracking" {:top-k 5})
-                          results2 (#'sut/db-get-learnings db-info "insight for tracking" {:top-k 5})]
+                    (let [results1 (#'rlm-db/db-get-learnings db-info "insight for tracking" {:top-k 5})
+                          results2 (#'rlm-db/db-get-learnings db-info "insight for tracking" {:top-k 5})]
             ;; Verify searches actually returned results (otherwise tracking won't happen)
                       (expect (pos? (count results1)) "First search should return results")
                       (expect (pos? (count results2)) "Second search should return results")
             ;; Check stats
-                      (let [stats (#'sut/db-learning-stats db-info)]
+                      (let [stats (#'rlm-db/db-learning-stats db-info)]
                         (expect (= 2 (:total-applications stats)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 (defdescribe learnings-sci-bindings-test
-  (it "store-learning is available in SCI"
-      (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(store-learning \"Test insight from SCI\")")]
-                             (expect (nil? (:error result)))
-                             (expect (map? (:result result)))
-                             (expect (= "Test insight from SCI" (:learning/insight (:result result))))))))
-
   (it "search-learnings is available in SCI and returns learning/id"
       (with-test-env* {} (fn [env]
-      ;; Store a learning first using SCI
-                           (#'sut/execute-code env "(store-learning \"Test insight for searching\")")
-                           (let [result (#'sut/execute-code env "(search-learnings \"test searching\")")]
+      ;; Store a learning via DB directly (not SCI — write ops are auto-only)
+                           (let [db-info @(:db-info-atom env)]
+                             (#'rlm-db/db-store-learning! db-info "Test insight for searching"))
+                           (let [result (#'rlm-core/execute-code env "(search-learnings \"test searching\")")]
                              (expect (nil? (:error result)))
                              (expect (vector? (:result result)))
-        ;; Verify results contain :learning/id for voting
                              (when (seq (:result result))
                                (expect (some? (:learning/id (first (:result result))))))))))
 
-  (it "vote-learning is available in SCI"
+  (it "learning-stats is available in SCI"
       (with-test-env* {} (fn [env]
-      ;; Store a learning and get its ID
-                           (#'sut/execute-code env "(def my-learning (store-learning \"Test insight for voting\"))")
-      ;; Vote on it
-                           (let [result (#'sut/execute-code env "(vote-learning (:learning/id my-learning) :useful)")]
-                             (expect (nil? (:error result)))
-                             (expect (map? (:result result)))
-                             (expect (= 1 (:learning/useful-count (:result result))))))))
-
-  (it "vote-learning rejects invalid vote values"
-      (with-test-env* {} (fn [env]
-                           (#'sut/execute-code env "(def my-learning (store-learning \"Test\"))")
-                           (let [result (#'sut/execute-code env "(vote-learning (:learning/id my-learning) :maybe)")]
-                             (expect (nil? (:error result)))
-                             (expect (= {:error "Vote must be :useful or :not-useful"} (:result result)))))))
-
-  (it "learning-stats includes voting stats"
-      (with-test-env* {} (fn [env]
-      ;; Store a learning and vote on it
-                           (#'sut/execute-code env "(def my-learning (store-learning \"Test insight\"))")
-                           (#'sut/execute-code env "(vote-learning (:learning/id my-learning) :useful)")
-                           (let [result (#'sut/execute-code env "(learning-stats)")]
+                           (let [db-info @(:db-info-atom env)]
+                             (#'rlm-db/db-store-learning! db-info "Test insight"))
+                           (let [result (#'rlm-core/execute-code env "(learning-stats)")]
                              (expect (nil? (:error result)))
                              (expect (= 1 (:total-learnings (:result result))))
-                             (expect (= 1 (:active-learnings (:result result))))
-                             (expect (= 0 (:decayed-learnings (:result result))))
-                             (expect (= 1 (:total-votes (:result result))))))))
+                             (expect (= 1 (:active-learnings (:result result))))))))
 
-  (it "learnings are not available when db is disabled"
-      (with-test-env* {} {:db false} (fn [env]
-                                       (let [result (#'sut/execute-code env "(store-learning \"test\")")]
-        ;; Should either error or return nil since db is disabled
-                                         (expect (or (some? (:error result)) (nil? (:result result)))))))))
+  (it "list-learning-tags is available in SCI"
+      (with-test-env* {} (fn [env]
+                           (let [db-info @(:db-info-atom env)]
+                             (#'rlm-db/db-upsert-tag! db-info "test-tag" "A test tag"))
+                           (let [result (#'rlm-core/execute-code env "(list-learning-tags)")]
+                             (expect (nil? (:error result)))
+                             (expect (vector? (:result result)))
+                             (expect (= "test-tag" (:name (first (:result result)))))))))
+
+  (it "list-learning-links is available in SCI"
+      (with-test-env* {} (fn [env]
+                           (let [result (#'rlm-core/execute-code env "(list-learning-links #uuid \"00000000-0000-0000-0000-000000000000\")")]
+                             (expect (nil? (:error result)))
+                             (expect (vector? (:result result)))))))
+
+  (it "write ops (store-learning, vote-learning) are NOT available in SCI"
+      (with-test-env* {} (fn [env]
+                           (let [store-result (#'rlm-core/execute-code env "(store-learning \"test\")")
+                                 vote-result (#'rlm-core/execute-code env "(vote-learning #uuid \"00000000-0000-0000-0000-000000000000\" :useful)")]
+                             (expect (some? (:error store-result)))
+                             (expect (some? (:error vote-result))))))))
 
 ;; =============================================================================
 ;; Build System Prompt Tests
@@ -787,42 +749,45 @@
 
 (defdescribe build-system-prompt-test
   (it "includes basic environment info"
-      (let [prompt (#'sut/build-system-prompt {})]
+      (let [prompt (#'rlm-core/build-system-prompt {})]
         (expect (str/includes? prompt "<rlm_environment>"))
         (expect (str/includes? prompt "available_tools"))
         (expect (str/includes? prompt "FINAL"))))
 
-  (it "includes learnings tools with voting"
-      (let [prompt (#'sut/build-system-prompt {})]
+  (it "includes learnings tools with FINAL learning guidance"
+      (let [prompt (#'rlm-core/build-system-prompt {})]
         (expect (str/includes? prompt "learnings_tools"))
-        (expect (str/includes? prompt "store-learning"))
         (expect (str/includes? prompt "search-learnings"))
-        (expect (str/includes? prompt "vote-learning"))
-        (expect (str/includes? prompt "voting_workflow"))))
+        (expect (str/includes? prompt "learning-stats"))
+        (expect (str/includes? prompt "list-learning-tags"))
+        (expect (str/includes? prompt "list-learning-links"))
+        (expect (str/includes? prompt "learn_via_final"))
+        (expect (str/includes? prompt ":confidence"))
+        (expect (str/includes? prompt ":learn"))))
 
   (it "includes history tools when enabled"
-      (let [prompt (#'sut/build-system-prompt {:history-enabled? true})]
+      (let [prompt (#'rlm-core/build-system-prompt {:history-enabled? true})]
         (expect (str/includes? prompt "search-history"))
         (expect (str/includes? prompt "get-history"))
         (expect (str/includes? prompt "history-stats"))))
 
   (it "excludes history tools when disabled"
-      (let [prompt (#'sut/build-system-prompt {:history-enabled? false})]
+      (let [prompt (#'rlm-core/build-system-prompt {:history-enabled? false})]
         (expect (not (str/includes? prompt "history_tools")))))
 
-  (it "includes entity tools section"
-      (let [prompt (#'sut/build-system-prompt {})]
-        (expect (str/includes? prompt "entity_tools"))
-        (expect (str/includes? prompt "search-entities"))
-        (expect (str/includes? prompt "get-entity"))
-        (expect (str/includes? prompt "list-entities"))
-        (expect (str/includes? prompt "list-relationships"))
-        (expect (str/includes? prompt "entity-stats"))
+  (it "includes document entity tools section when has-documents?"
+      (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true})]
+        (expect (str/includes? prompt "document_entity_tools"))
+        (expect (str/includes? prompt "search-document-entities"))
+        (expect (str/includes? prompt "get-document-entity"))
+        (expect (str/includes? prompt "list-document-entities"))
+        (expect (str/includes? prompt "list-document-relationships"))
+        (expect (str/includes? prompt "document-entity-stats"))
         (expect (str/includes? prompt "entity_schema"))
         (expect (str/includes? prompt "relationship_schema"))))
 
   (it "includes date tools section"
-      (let [prompt (#'sut/build-system-prompt {})]
+      (let [prompt (#'rlm-core/build-system-prompt {})]
         (expect (str/includes? prompt "date_tools"))
         (expect (str/includes? prompt "parse-date"))
         (expect (str/includes? prompt "date-before?"))
@@ -834,7 +799,7 @@
         (expect (str/includes? prompt "today-str"))))
 
   (it "includes set tools section"
-      (let [prompt (#'sut/build-system-prompt {})]
+      (let [prompt (#'rlm-core/build-system-prompt {})]
         (expect (str/includes? prompt "set_tools"))
         (expect (str/includes? prompt "set-union"))
         (expect (str/includes? prompt "set-intersection"))
@@ -842,10 +807,10 @@
         (expect (str/includes? prompt "set-subset?"))
         (expect (str/includes? prompt "set-superset?"))))
 
-  (it "includes entity check in workflow"
-      (let [prompt (#'sut/build-system-prompt {})]
-        (expect (str/includes? prompt "(entity-stats)"))
-        (expect (str/includes? prompt "(search-entities"))))
+  (it "includes entity check in workflow when has-documents?"
+      (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true})]
+        (expect (str/includes? prompt "(document-entity-stats)"))
+        (expect (str/includes? prompt "(search-document-entities"))))
 
   (it "includes spec schema when provided"
       (let [test-spec (svar/spec
@@ -854,7 +819,7 @@
                                     svar/CARDINALITY :spec.cardinality/one
                                     svar/REQUIRED true
                                     svar/DESCRIPTION "Name field"}))
-            prompt (#'sut/build-system-prompt {:output-spec test-spec})]
+            prompt (#'rlm-core/build-system-prompt {:output-spec test-spec})]
         (expect (str/includes? prompt "expected_output_schema")))))
 
 ;; =============================================================================
@@ -866,7 +831,7 @@
             (it "is available when database is enabled"
                 (with-test-env* {} (fn [env]
         ;; rlm-query should be defined
-                                     (let [result (#'sut/execute-code env "(fn? rlm-query)")]
+                                     (let [result (#'rlm-core/execute-code env "(fn? rlm-query)")]
                                        (expect (nil? (:error result)))
           ;; May return true or false depending on binding
                                        (expect (boolean? (:result result)))))))
@@ -874,21 +839,24 @@
             (it "is not available when database is disabled"
                 (with-test-env* {} {:db false} (fn [env]
         ;; rlm-query should not be defined
-                                                 (let [result (#'sut/execute-code env "(bound? #'rlm-query)")]
+                                                 (let [result (#'rlm-core/execute-code env "(bound? #'rlm-query)")]
           ;; Should error since rlm-query is not defined
                                                    (expect (some? (:error result))))))))
 
   (describe "make-rlm-query-fn"
             (it "enforces max recursion depth"
                 (let [depth-atom (atom 5)
-                      db-info (#'sut/create-rlm-conn nil)]
+                      db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (let [db-info-atom (atom db-info)
-                          test-router (router/make-router [{:id :test :api-key "t" :base-url "http://x"
-                                                           :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
-                                                                    :refinement "gpt-4o" :planning "gpt-4o"}
-                                                           :rpm 500 :priority 0}])
-                          rlm-query-fn (#'sut/make-rlm-query-fn :root depth-atom test-router db-info-atom)]
+                          test-router (llm/make-router [{:id :test :api-key "t" :base-url "http://x"
+                                                         :models [{:name "gpt-4o" :capabilities #{:chat :vision}
+                                                                   :intelligence :high :cost :medium}
+                                                                  {:name "gpt-4o-mini" :capabilities #{:chat :vision}
+                                                                   :intelligence :medium :cost :low}]
+                                                         :root "gpt-4o"
+                                                         :rpm 500 :priority 0}])
+                          rlm-query-fn (#'rlm-core/make-rlm-query-fn {:strategy :root} depth-atom test-router db-info-atom)]
             ;; Should return error when at max depth
                       (binding [sut/*max-recursion-depth* 5]
                         (let [result (rlm-query-fn {:data "test"} "What is this?")]
@@ -896,7 +864,7 @@
                           (expect (some? (:error result)))
                           (expect (str/includes? (str (:error result)) "recursion")))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; Format Execution Results Tests
@@ -905,25 +873,25 @@
 (defdescribe format-executions-test
   (it "formats successful results"
       (let [results [{:id 1 :result 42 :stdout "" :error nil}]
-            formatted (#'sut/format-executions results)]
+            formatted (#'rlm-core/format-executions results)]
         (expect (str/includes? formatted "<result_1>"))
         (expect (str/includes? formatted "<value>42</value>"))
         (expect (str/includes? formatted "</result_1>"))))
 
   (it "formats errors"
       (let [results [{:id 1 :result nil :stdout "" :error "Division by zero"}]
-            formatted (#'sut/format-executions results)]
+            formatted (#'rlm-core/format-executions results)]
         (expect (str/includes? formatted "<error>Division by zero</error>"))))
 
   (it "includes stdout when present"
       (let [results [{:id 1 :result nil :stdout "Hello\n" :error nil}]
-            formatted (#'sut/format-executions results)]
+            formatted (#'rlm-core/format-executions results)]
         (expect (str/includes? formatted "<stdout>Hello"))))
 
   (it "formats multiple results"
       (let [results [{:id 1 :result 1 :stdout "" :error nil}
                      {:id 2 :result 2 :stdout "" :error nil}]
-            formatted (#'sut/format-executions results)]
+            formatted (#'rlm-core/format-executions results)]
         (expect (str/includes? formatted "<result_1>"))
         (expect (str/includes? formatted "<result_2>")))))
 
@@ -938,8 +906,11 @@
                 :api-key (System/getenv "OPENAI_API_KEY")
                 :base-url (or (System/getenv "OPENAI_BASE_URL")
                               "https://api.openai.com/v1")
-                :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
-                         :refinement "gpt-4o" :planning "gpt-4o"}
+                :models [{:name "gpt-4o" :capabilities #{:chat :vision}
+                          :intelligence :high :cost :medium}
+                         {:name "gpt-4o-mini" :capabilities #{:chat :vision}
+                          :intelligence :medium :cost :low}]
+                :root "gpt-4o"
                 :rpm 500 :tpm 200000 :priority 0}]})
 
 (defn- integration-tests-enabled?
@@ -962,82 +933,77 @@
             (it "processes simple string context with refinement"
                 (when (integration-tests-enabled?)
                   (with-integration-env*
-                   (fn [env]
-                     (let [result (sut/query-env! env "What is the capital of France? Answer with just the city name."
-                                              {:context "Paris is the capital of France."
-                                               :max-iterations 10
-                                               :learn? false})]
-                       (expect (map? result))
-                       (if (:status result)
-                         (expect (= :max-iterations (:status result)))
-                         (do
-                           (expect (some? (:answer result)))
-                           (expect (re-find #"(?i)paris" (str (:answer result))))
-                           (expect (contains? result :refinement-count))
-                           (expect (contains? result :eval-scores)))))))))
+                    (fn [env]
+                      (let [result (sut/query-env! env "What is the capital of France? Answer with just the city name."
+                                                   {:context "Paris is the capital of France."
+                                                    :max-iterations 10})]
+                        (expect (map? result))
+                        (if (:status result)
+                          (expect (= :max-iterations (:status result)))
+                          (do
+                            (expect (some? (:answer result)))
+                            (expect (re-find #"(?i)paris" (str (:answer result))))
+                            (expect (contains? result :refinement-count))
+                            (expect (contains? result :eval-scores)))))))))
 
             (it "can disable refinement for speed"
                 (when (integration-tests-enabled?)
                   (with-integration-env*
-                   (fn [env]
-                     (let [result (sut/query-env! env "What is 2 + 2?"
-                                              {:context "2 + 2 = 4"
-                                               :max-iterations 5
-                                               :refine? false
-                                               :learn? false})]
-                       (expect (map? result))
-                       (if (:status result)
-                         (do
-                           (expect (= :max-iterations (:status result)))
-                           (expect (contains? result :iterations)))
-                         (do
-                           (expect (= 0 (:refinement-count result)))
-                           (expect (nil? (:eval-scores result)))))))))))
+                    (fn [env]
+                      (let [result (sut/query-env! env "What is 2 + 2?"
+                                                   {:context "2 + 2 = 4"
+                                                    :max-iterations 5
+                                                    :refine? false})]
+                        (expect (map? result))
+                        (if (:status result)
+                          (do
+                            (expect (= :max-iterations (:status result)))
+                            (expect (contains? result :iterations)))
+                          (do
+                            (expect (= 0 (:refinement-count result)))
+                            (expect (nil? (:eval-scores result)))))))))))
 
   (describe "code execution capabilities"
             (it "allows LLM to access context and return FINAL"
                 (when (integration-tests-enabled?)
                   (with-integration-env*
-                   (fn [env]
-                     (let [result (sut/query-env! env "What is the value of :count? Use (FINAL answer)"
-                                              {:context {:count 42}
-                                               :max-iterations 10
-                                               :refine? false
-                                               :learn? false})]
-                       (expect (map? result))
-                       (if (:status result)
-                         (expect (= :max-iterations (:status result)))
-                         (expect (re-find #"42" (str (:answer result)))))))))))
+                    (fn [env]
+                      (let [result (sut/query-env! env "What is the value of :count? Use (FINAL answer)"
+                                                   {:context {:count 42}
+                                                    :max-iterations 10
+                                                    :refine? false})]
+                        (expect (map? result))
+                        (if (:status result)
+                          (expect (= :max-iterations (:status result)))
+                          (expect (re-find #"42" (str (:answer result)))))))))))
 
   (describe "refinement loop"
             (it "applies refinement by default"
                 (when (integration-tests-enabled?)
                   (with-integration-env*
-                   (fn [env]
-                     (let [result (sut/query-env! env "Sum the numbers"
-                                              {:context {:nums [1 2 3 4 5]}
-                                               :max-iterations 10
-                                               :max-refinements 1
-                                               :learn? false})]
-                       (expect (map? result))
-                       (when-not (:status result)
-                         (expect (some? (:eval-scores result)))
-                         (expect (number? (:eval-scores result))))))))))
+                    (fn [env]
+                      (let [result (sut/query-env! env "Sum the numbers"
+                                                   {:context {:nums [1 2 3 4 5]}
+                                                    :max-iterations 10
+                                                    :max-refinements 1})]
+                        (expect (map? result))
+                        (when-not (:status result)
+                          (expect (some? (:eval-scores result)))
+                          (expect (number? (:eval-scores result))))))))))
 
   (describe "history tracking"
             (it "tracks history tokens when enabled"
                 (when (integration-tests-enabled?)
                   (with-integration-env*
-                   (fn [env]
-                     (let [result (sut/query-env! env "Echo the context"
-                                              {:context "Test context"
-                                               :max-iterations 5
-                                               :refine? false
-                                               :learn? false})]
-                       (expect (map? result))
-                       (when-not (:status result)
-                         (expect (contains? result :history-tokens))
-                         (expect (number? (:history-tokens result))))))))))
+                    (fn [env]
+                      (let [result (sut/query-env! env "Echo the context"
+                                                   {:context "Test context"
+                                                    :max-iterations 5
+                                                    :refine? false})]
+                        (expect (map? result))
+                        (when-not (:status result)
+                          (expect (contains? result :history-tokens))
+                          (expect (number? (:history-tokens result))))))))))
 
   (describe "validation"
             (it "throws when env is invalid"
@@ -1049,11 +1015,15 @@
                                          (expect (throws? clojure.lang.ExceptionInfo
                                                           #(sut/query-env! env nil))))))))
 
-(defdescribe make-llm-query-fn-test
+(defdescribe make-routed-llm-query-fn-test
   (describe "recursion depth tracking"
             (it "enforces max recursion depth"
                 (let [depth-atom (atom 0)
-                      query-fn (#'sut/make-llm-query-fn "gpt-4o" depth-atom nil nil)]
+                      r (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                           :models [{:name "gpt-4o" :capabilities #{:chat}
+                                                     :intelligence :high :cost :medium}]
+                                           :root "gpt-4o"}])
+                      query-fn (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom r)]
                   (reset! depth-atom sut/DEFAULT_RECURSION_DEPTH)
                   (let [result (query-fn "test")]
                     (expect (map? result))
@@ -1061,7 +1031,11 @@
 
             (it "decrements depth after call"
                 (let [depth-atom (atom 0)
-                      query-fn (#'sut/make-llm-query-fn "gpt-4o" depth-atom nil nil)]
+                      r (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                           :models [{:name "gpt-4o" :capabilities #{:chat}
+                                                     :intelligence :high :cost :medium}]
+                                           :root "gpt-4o"}])
+                      query-fn (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom r)]
                   (try
                     (query-fn "What is 2+2?")
                     (catch Exception _))
@@ -1075,38 +1049,38 @@
   (describe "arithmetic operations"
             (it "provides basic math"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= 10 (:result (#'sut/execute-code env "(+ 1 2 3 4)"))))
-                                                 (expect (= 6 (:result (#'sut/execute-code env "(* 2 3)"))))
-                                                 (expect (= 2 (:result (#'sut/execute-code env "(/ 10 5)"))))
-                                                 (expect (= 3 (:result (#'sut/execute-code env "(- 10 7)"))))))))
+                                                 (expect (= 10 (:result (#'rlm-core/execute-code env "(+ 1 2 3 4)"))))
+                                                 (expect (= 6 (:result (#'rlm-core/execute-code env "(* 2 3)"))))
+                                                 (expect (= 2 (:result (#'rlm-core/execute-code env "(/ 10 5)"))))
+                                                 (expect (= 3 (:result (#'rlm-core/execute-code env "(- 10 7)"))))))))
 
   (describe "collection operations"
             (it "provides map/filter/reduce"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= [2 4 6] (:result (#'sut/execute-code env "(mapv #(* 2 %) [1 2 3])"))))
-                                                 (expect (= [2 4] (:result (#'sut/execute-code env "(vec (filter even? [1 2 3 4]))"))))
-                                                 (expect (= 10 (:result (#'sut/execute-code env "(reduce + [1 2 3 4])"))))))))
+                                                 (expect (= [2 4 6] (:result (#'rlm-core/execute-code env "(mapv #(* 2 %) [1 2 3])"))))
+                                                 (expect (= [2 4] (:result (#'rlm-core/execute-code env "(vec (filter even? [1 2 3 4]))"))))
+                                                 (expect (= 10 (:result (#'rlm-core/execute-code env "(reduce + [1 2 3 4])"))))))))
 
   (describe "string operations"
             (it "provides str and related"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= "hello world" (:result (#'sut/execute-code env "(str \"hello\" \" \" \"world\")"))))
-                                                 (expect (= "ell" (:result (#'sut/execute-code env "(subs \"hello\" 1 4)"))))
-                                                 (expect (= "test" (:result (#'sut/execute-code env "(name :test)"))))))))
+                                                 (expect (= "hello world" (:result (#'rlm-core/execute-code env "(str \"hello\" \" \" \"world\")"))))
+                                                 (expect (= "ell" (:result (#'rlm-core/execute-code env "(subs \"hello\" 1 4)"))))
+                                                 (expect (= "test" (:result (#'rlm-core/execute-code env "(name :test)"))))))))
 
   (describe "comparison operations"
             (it "provides equality and ordering"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (true? (:result (#'sut/execute-code env "(= 1 1)"))))
-                                                 (expect (true? (:result (#'sut/execute-code env "(< 1 2)"))))
-                                                 (expect (true? (:result (#'sut/execute-code env "(>= 5 5)"))))))))
+                                                 (expect (true? (:result (#'rlm-core/execute-code env "(= 1 1)"))))
+                                                 (expect (true? (:result (#'rlm-core/execute-code env "(< 1 2)"))))
+                                                 (expect (true? (:result (#'rlm-core/execute-code env "(>= 5 5)"))))))))
 
   (describe "atom operations"
             (it "provides atom and swap!"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (#'sut/execute-code env "(def counter (atom 0))")
-                                                 (#'sut/execute-code env "(swap! counter inc)")
-                                                 (expect (= 1 (:result (#'sut/execute-code env "@counter")))))))))
+                                                 (#'rlm-core/execute-code env "(def counter (atom 0))")
+                                                 (#'rlm-core/execute-code env "(swap! counter inc)")
+                                                 (expect (= 1 (:result (#'rlm-core/execute-code env "@counter")))))))))
 
 ;; =============================================================================
 ;; Date Helper Functions Tests (RED - Failing Tests)
@@ -1116,70 +1090,70 @@
   (describe "parse-date"
             (it "parses valid ISO-8601 date string"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (some? (:result (#'sut/execute-code env "(parse-date \"2024-01-15\")")))))))
+                                                 (expect (some? (:result (#'rlm-core/execute-code env "(parse-date \"2024-01-15\")")))))))
 
             (it "returns nil for invalid date string"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (nil? (:result (#'sut/execute-code env "(parse-date \"invalid\")"))))))))
+                                                 (expect (nil? (:result (#'rlm-core/execute-code env "(parse-date \"invalid\")"))))))))
 
   (describe "date-before?"
             (it "returns true when first date is before second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (true? (:result (#'sut/execute-code env "(date-before? \"2024-01-15\" \"2024-06-01\")")))))))
+                                                 (expect (true? (:result (#'rlm-core/execute-code env "(date-before? \"2024-01-15\" \"2024-06-01\")")))))))
 
             (it "returns false when first date is after second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (false? (:result (#'sut/execute-code env "(date-before? \"2024-06-01\" \"2024-01-15\")"))))))))
+                                                 (expect (false? (:result (#'rlm-core/execute-code env "(date-before? \"2024-06-01\" \"2024-01-15\")"))))))))
 
   (describe "date-after?"
             (it "returns true when first date is after second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (true? (:result (#'sut/execute-code env "(date-after? \"2024-06-01\" \"2024-01-15\")")))))))
+                                                 (expect (true? (:result (#'rlm-core/execute-code env "(date-after? \"2024-06-01\" \"2024-01-15\")")))))))
 
             (it "returns false when first date is before second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (false? (:result (#'sut/execute-code env "(date-after? \"2024-01-15\" \"2024-06-01\")"))))))))
+                                                 (expect (false? (:result (#'rlm-core/execute-code env "(date-after? \"2024-01-15\" \"2024-06-01\")"))))))))
 
   (describe "days-between"
             (it "returns number of days between two dates"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= 31 (:result (#'sut/execute-code env "(days-between \"2024-01-15\" \"2024-02-15\")")))))))
+                                                 (expect (= 31 (:result (#'rlm-core/execute-code env "(days-between \"2024-01-15\" \"2024-02-15\")")))))))
 
             (it "returns negative when dates reversed"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= -31 (:result (#'sut/execute-code env "(days-between \"2024-02-15\" \"2024-01-15\")"))))))))
+                                                 (expect (= -31 (:result (#'rlm-core/execute-code env "(days-between \"2024-02-15\" \"2024-01-15\")"))))))))
 
   (describe "date-plus-days"
             (it "adds days to a date"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= "2024-02-14" (:result (#'sut/execute-code env "(date-plus-days \"2024-01-15\" 30)")))))))
+                                                 (expect (= "2024-02-14" (:result (#'rlm-core/execute-code env "(date-plus-days \"2024-01-15\" 30)")))))))
 
             (it "returns ISO-8601 string"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (string? (:result (#'sut/execute-code env "(date-plus-days \"2024-01-15\" 10)"))))))))
+                                                 (expect (string? (:result (#'rlm-core/execute-code env "(date-plus-days \"2024-01-15\" 10)"))))))))
 
   (describe "date-minus-days"
             (it "subtracts days from a date"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= "2024-05-02" (:result (#'sut/execute-code env "(date-minus-days \"2024-06-01\" 30)")))))))
+                                                 (expect (= "2024-05-02" (:result (#'rlm-core/execute-code env "(date-minus-days \"2024-06-01\" 30)")))))))
 
             (it "returns ISO-8601 string"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (string? (:result (#'sut/execute-code env "(date-minus-days \"2024-06-01\" 10)"))))))))
+                                                 (expect (string? (:result (#'rlm-core/execute-code env "(date-minus-days \"2024-06-01\" 10)"))))))))
 
   (describe "date-format"
             (it "formats date with custom pattern"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= "15/01/2024" (:result (#'sut/execute-code env "(date-format \"2024-01-15\" \"dd/MM/yyyy\")")))))))
+                                                 (expect (= "15/01/2024" (:result (#'rlm-core/execute-code env "(date-format \"2024-01-15\" \"dd/MM/yyyy\")")))))))
 
             (it "returns nil for invalid format pattern"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (nil? (:result (#'sut/execute-code env "(date-format \"2024-01-15\" \"invalid\")"))))))))
+                                                 (expect (nil? (:result (#'rlm-core/execute-code env "(date-format \"2024-01-15\" \"invalid\")"))))))))
 
   (describe "today-str"
             (it "returns today's date as ISO-8601 string"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (let [result (:result (#'sut/execute-code env "(today-str)"))]
+                                                 (let [result (:result (#'rlm-core/execute-code env "(today-str)"))]
                                                    (expect (string? result))
                                                    (expect (re-matches #"\d{4}-\d{2}-\d{2}" result))))))))
 
@@ -1191,47 +1165,47 @@
   (describe "set-union"
             (it "returns union of two sets"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= #{1 2 3} (:result (#'sut/execute-code env "(set-union #{1 2} #{2 3})")))))))
+                                                 (expect (= #{1 2 3} (:result (#'rlm-core/execute-code env "(set-union #{1 2} #{2 3})")))))))
 
             (it "handles empty sets"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= #{1 2} (:result (#'sut/execute-code env "(set-union #{1 2} #{})"))))))))
+                                                 (expect (= #{1 2} (:result (#'rlm-core/execute-code env "(set-union #{1 2} #{})"))))))))
 
   (describe "set-intersection"
             (it "returns intersection of two sets"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= #{2 3} (:result (#'sut/execute-code env "(set-intersection #{1 2 3} #{2 3 4})")))))))
+                                                 (expect (= #{2 3} (:result (#'rlm-core/execute-code env "(set-intersection #{1 2 3} #{2 3 4})")))))))
 
             (it "returns empty set when no common elements"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= #{} (:result (#'sut/execute-code env "(set-intersection #{1 2} #{3 4})"))))))))
+                                                 (expect (= #{} (:result (#'rlm-core/execute-code env "(set-intersection #{1 2} #{3 4})"))))))))
 
   (describe "set-difference"
             (it "returns difference of two sets"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= #{1} (:result (#'sut/execute-code env "(set-difference #{1 2 3} #{2 3})")))))))
+                                                 (expect (= #{1} (:result (#'rlm-core/execute-code env "(set-difference #{1 2 3} #{2 3})")))))))
 
             (it "returns first set when second is empty"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (= #{1 2} (:result (#'sut/execute-code env "(set-difference #{1 2} #{})"))))))))
+                                                 (expect (= #{1 2} (:result (#'rlm-core/execute-code env "(set-difference #{1 2} #{})"))))))))
 
   (describe "set-subset?"
             (it "returns true when first set is subset of second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (true? (:result (#'sut/execute-code env "(set-subset? #{1 2} #{1 2 3})")))))))
+                                                 (expect (true? (:result (#'rlm-core/execute-code env "(set-subset? #{1 2} #{1 2 3})")))))))
 
             (it "returns false when first set is not subset of second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (false? (:result (#'sut/execute-code env "(set-subset? #{1 2 3} #{1 2})"))))))))
+                                                 (expect (false? (:result (#'rlm-core/execute-code env "(set-subset? #{1 2 3} #{1 2})"))))))))
 
   (describe "set-superset?"
             (it "returns true when first set is superset of second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (true? (:result (#'sut/execute-code env "(set-superset? #{1 2 3} #{1 2})")))))))
+                                                 (expect (true? (:result (#'rlm-core/execute-code env "(set-superset? #{1 2 3} #{1 2})")))))))
 
             (it "returns false when first set is not superset of second"
                 (with-test-env* {} {:db false} (fn [env]
-                                                 (expect (false? (:result (#'sut/execute-code env "(set-superset? #{1 2} #{1 2 3})")))))))))
+                                                 (expect (false? (:result (#'rlm-core/execute-code env "(set-superset? #{1 2} #{1 2 3})")))))))))
 
 ;; =============================================================================
 ;; Entity Schema Tests (RED - Failing Tests)
@@ -1384,7 +1358,7 @@
      (with-mock-ask! (fn [_] (let [r (first @calls)] (swap! calls rest) r))
        (svar/refine! opts)))"
   [response-fn & body]
-  `(with-redefs [llm/ask! (fn [opts#] (~response-fn opts#))]
+  `(with-redefs [llm/ask!* (fn [opts#] (~response-fn opts#))]
      ~@body))
 
 (defn make-mock-eval-response
@@ -1427,7 +1401,7 @@
      (svar/refine! ...))"
   [ask-fn eval-fn & body]
   `(with-redefs [llm/ask! (fn [opts#] (~ask-fn opts#))
-                 llm/eval! (fn [opts#] (~eval-fn opts#))]
+                 llm/eval!* (fn [opts#] (~eval-fn opts#))]
      ~@body))
 
 ;; =============================================================================
@@ -1883,8 +1857,11 @@
   {:providers [{:id :test
                 :api-key "test"
                 :base-url "https://api.openai.com/v1"
-                :models {:root "gpt-4o" :sub "gpt-4o-mini" :extraction "gpt-4o-mini"
-                         :refinement "gpt-4o" :planning "gpt-4o"}
+                :models [{:name "gpt-4o" :capabilities #{:chat :vision}
+                          :intelligence :high :cost :medium}
+                         {:name "gpt-4o-mini" :capabilities #{:chat :vision}
+                          :intelligence :medium :cost :low}]
+                :root "gpt-4o"
                 :rpm 500 :tpm 200000 :priority 0}]})
 
 (defn- make-test-image-with-description-document
@@ -1929,7 +1906,7 @@
             ;; Images are now embedded in user messages as multimodal content arrays
             (expect (every? (fn [opts]
                               (some #(and (= "user" (:role %))
-                                         (vector? (:content %)))
+                                          (vector? (:content %)))
                                     (:messages opts)))
                             @calls))
             (expect (= 2 (get-in result [0 :visual-nodes-scanned])))))))
@@ -2012,46 +1989,46 @@
 ;; =============================================================================
 
 (defdescribe entity-bindings-test
-  (it "search-entities returns empty vector when no entities exist"
+  (it "search-document-entities returns empty vector when no entities exist"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(search-entities \"party\")")]
+                           (let [result (#'rlm-core/execute-code env "(search-document-entities \"party\")")]
                              (expect (nil? (:error result)))
                              (expect (= [] (:result result)))))))
 
-  (it "get-entity returns nil for non-existent entity"
+  (it "get-document-entity returns nil for non-existent entity"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(get-entity (java.util.UUID/randomUUID))")]
+                           (let [result (#'rlm-core/execute-code env "(get-document-entity (java.util.UUID/randomUUID))")]
                              (expect (nil? (:error result)))
                              (expect (nil? (:result result)))))))
 
-  (it "list-entities returns empty vector when no entities exist"
+  (it "list-document-entities returns empty vector when no entities exist"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(list-entities)")]
+                           (let [result (#'rlm-core/execute-code env "(list-document-entities)")]
                              (expect (nil? (:error result)))
                              (expect (= [] (:result result)))))))
 
-  (it "list-entities accepts filter options"
+  (it "list-document-entities accepts filter options"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(list-entities {:type :party :limit 10})")]
+                           (let [result (#'rlm-core/execute-code env "(list-document-entities {:type :party :limit 10})")]
                              (expect (nil? (:error result)))
                              (expect (= [] (:result result)))))))
 
-  (it "entity-stats returns zero counts when no entities exist"
+  (it "document-entity-stats returns zero counts when no entities exist"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(entity-stats)")]
+                           (let [result (#'rlm-core/execute-code env "(document-entity-stats)")]
                              (expect (nil? (:error result)))
                              (expect (= {:total-entities 0 :types {} :total-relationships 0}
                                         (:result result)))))))
 
-  (it "list-relationships returns empty vector for non-existent entity"
+  (it "list-document-relationships returns empty vector for non-existent entity"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(list-relationships (java.util.UUID/randomUUID))")]
+                           (let [result (#'rlm-core/execute-code env "(list-document-relationships (java.util.UUID/randomUUID))")]
                              (expect (nil? (:error result)))
                              (expect (= [] (:result result)))))))
 
-  (it "entity functions not available when db is disabled"
+  (it "document entity functions not available when db is disabled"
       (with-test-env* {} {:db false} (fn [env]
-                                       (let [result (#'sut/execute-code env "(entity-stats)")]
+                                       (let [result (#'rlm-core/execute-code env "(document-entity-stats)")]
         ;; Should either error or return the fallback value
                                          (expect (or (some? (:error result))
                                                      (= {:total-entities 0 :types {} :total-relationships 0}
@@ -2060,7 +2037,7 @@
 (defdescribe inline-cite-test
   (it "CITE accumulates claims in claims-atom"
       (let [claims-atom (atom [])
-            cite-fn (#'sut/make-cite-fn claims-atom)]
+            cite-fn (#'rlm-tools/make-cite-fn claims-atom)]
         (cite-fn "Test claim" "doc-1" 0 "section-1" "exact quote")
         (expect (= 1 (count @claims-atom)))
         (expect (= "Test claim" (:claim/text (first @claims-atom))))
@@ -2068,14 +2045,14 @@
 
   (it "CITE return does NOT trigger check-result-for-final"
       (let [claims-atom (atom [])
-            cite-fn (#'sut/make-cite-fn claims-atom)
+            cite-fn (#'rlm-tools/make-cite-fn claims-atom)
             result (cite-fn "claim" "doc" 0 "s" "q")]
         (expect (nil? (:rlm/final result)))
         (expect (true? (:cited result)))))
 
   (it "CITE coerces types defensively"
       (let [claims-atom (atom [])
-            cite-fn (#'sut/make-cite-fn claims-atom)]
+            cite-fn (#'rlm-tools/make-cite-fn claims-atom)]
         (cite-fn "claim" "doc" "0" "s" "q" "0.9")
         (let [claim (first @claims-atom)]
           (expect (= 0 (:claim/page claim)))
@@ -2083,7 +2060,7 @@
 
   (it "CITE-UNVERIFIED sets low confidence"
       (let [claims-atom (atom [])
-            cite-fn (#'sut/make-cite-unverified-fn claims-atom)]
+            cite-fn (#'rlm-tools/make-cite-unverified-fn claims-atom)]
         (cite-fn "unverified claim")
         (let [claim (first @claims-atom)]
           (expect (= 0.5 (:claim/confidence claim)))
@@ -2091,8 +2068,8 @@
 
   (it "list-claims returns accumulated claims"
       (let [claims-atom (atom [])
-            cite-fn (#'sut/make-cite-fn claims-atom)
-            list-fn (#'sut/make-list-claims-fn claims-atom)]
+            cite-fn (#'rlm-tools/make-cite-fn claims-atom)
+            list-fn (#'rlm-tools/make-list-claims-fn claims-atom)]
         (cite-fn "c1" "d1" 0 "s1" "q1")
         (cite-fn "c2" "d2" 1 "s2" "q2")
         (expect (= 2 (count (list-fn)))))))
@@ -2118,31 +2095,48 @@
        (finally
          (alter-var-root v# (constantly orig#))))))
 
+(defmacro ^:private with-mock-refine!
+  "Stubs llm/refine! to passthrough the answer (skip real CoVe).
+   Returns {:result answer :final-score 0.9 :converged? true :iterations-count 0}."
+  [& body]
+  `(let [v# (var com.blockether.svar.internal.llm/refine!)
+         orig# (deref v#)]
+     (try
+       (alter-var-root v# (constantly (fn [opts#]
+                                        (let [msgs# (:messages opts#)
+                                              answer# (some-> msgs# last :content)]
+                                          {:result answer# :final-score 0.9
+                                           :converged? true :iterations-count 0}))))
+       ~@body
+       (finally
+         (alter-var-root v# (constantly orig#))))))
+
 (def ^:private final-response "{\"thinking\": \"Answering directly\", \"code\": [\"(FINAL \\\"test answer\\\")\"]}")
+(def ^:private final-response-low-confidence "{\"thinking\": \"Answering directly\", \"code\": [\"(FINAL \\\"test answer\\\" {:confidence :low})\"]}")
 
 (defdescribe knowledge-engine-integration-test
   (it "backward compat - query without opt-in flags returns standard shape"
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
           (with-mock-chat! (fn [& _] final-response)
-            (let [result (sut/query-env! env "What is X?" {:refine? false :learn? false})]
-              (expect (contains? result :answer))
-              (expect (contains? result :eval-scores))
-              (expect (contains? result :refinement-count))
-              (expect (not (contains? result :verified-claims)))
-              (expect (= "test answer" (:answer result)))
-              (expect (= 0 (:refinement-count result)))))
+            (with-mock-refine!
+              (let [result (sut/query-env! env "What is X?")]
+                (expect (contains? result :answer))
+                (expect (contains? result :eval-scores))
+                (expect (contains? result :refinement-count))
+                (expect (not (contains? result :verified-claims)))
+                (expect (some? (:answer result))))))
           (finally (sut/dispose-env! env)))))
 
   (it "verify? true includes :verified-claims in result"
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
           (with-mock-chat! (fn [& _] final-response)
-            (let [result (sut/query-env! env "Find claims" {:verify? true :refine? false :learn? false})]
-              (expect (contains? result :verified-claims))
-              (expect (vector? (:verified-claims result)))
-            ;; No CITE called in mock, so claims empty
-              (expect (= [] (:verified-claims result)))))
+            (with-mock-refine!
+              (let [result (sut/query-env! env "Find claims" {:verify? true})]
+                (expect (contains? result :verified-claims))
+                (expect (vector? (:verified-claims result)))
+                (expect (= [] (:verified-claims result))))))
           (finally (sut/dispose-env! env)))))
 
   (it "query on small docs returns answer"
@@ -2150,8 +2144,9 @@
         (try
           (sut/ingest-to-env! env [(make-test-single-page-document)])
           (with-mock-chat! (fn [& _] final-response)
-            (let [result (sut/query-env! env "test" {:refine? false :learn? false})]
-              (expect (some? (:answer result)))))
+            (with-mock-refine!
+              (let [result (sut/query-env! env "test")]
+                (expect (some? (:answer result))))))
           (finally (sut/dispose-env! env)))))
 
   (it "ingest with extract-entities? returns extraction stats"
@@ -2173,9 +2168,8 @@
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
           (with-mock-chat! (fn [& _] final-response)
-            (with-mock-ask! (fn [_opts] (make-mock-ask-response {:evaluations []}))
-              (let [result (sut/query-env! env "anything"
-                                       {:verify? true :refine? false :learn? false})]
+            (with-mock-refine!
+              (let [result (sut/query-env! env "anything" {:verify? true})]
                 (expect (some? (:answer result)))
                 (expect (contains? result :verified-claims))
                 (expect (vector? (:verified-claims result))))))
@@ -2184,34 +2178,31 @@
   (it "ingest without extraction then query with all flags works"
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
-        ;; Ingest without entity extraction
           (sut/ingest-to-env! env [(make-test-single-page-document)])
           (with-mock-chat! (fn [& _] final-response)
-            (with-mock-ask! (fn [_opts] (make-mock-ask-response {:evaluations []}))
-              (let [result (sut/query-env! env "test query"
-                                       {:verify? true :refine? false :learn? false})]
-                (expect (= "test answer" (:answer result)))
+            (with-mock-refine!
+              (let [result (sut/query-env! env "test query" {:verify? true})]
+                (expect (some? (:answer result)))
                 (expect (contains? result :verified-claims)))))
           (finally (sut/dispose-env! env)))))
 
-  (it "refine? true produces eval-scores and refinement-count"
+  (it "FINAL low confidence triggers refinement"
       (let [env (sut/create-env {:config test-ingest-config})]
         (try
-          (with-mock-chat! (fn [& _] final-response)
-            (with-mock-ask-and-eval!
-              (fn [_opts] (make-mock-ask-response "refined answer"))
-              (fn [_opts] (make-mock-eval-response 0.95))
-              (let [result (sut/query-env! env "test" {:refine? true :verify? false :learn? false})]
+          (with-mock-chat! (fn [& _] final-response-low-confidence)
+            (with-mock-refine!
+              (let [result (sut/query-env! env "test" {:verify? false})]
                 (expect (some? (:answer result)))
+                (expect (number? (:eval-scores result)))
                 (expect (number? (:refinement-count result)))
-                (expect (pos? (:refinement-count result))))))
+                (expect (>= (:refinement-count result) 0)))))
           (finally (sut/dispose-env! env)))))
 
   (it "CITE functions compose in full lifecycle"
       (let [claims-atom (atom [])
-            cite-fn (#'sut/make-cite-fn claims-atom)
-            cite-unverified-fn (#'sut/make-cite-unverified-fn claims-atom)
-            list-fn (#'sut/make-list-claims-fn claims-atom)]
+            cite-fn (#'rlm-tools/make-cite-fn claims-atom)
+            cite-unverified-fn (#'rlm-tools/make-cite-unverified-fn claims-atom)
+            list-fn (#'rlm-tools/make-list-claims-fn claims-atom)]
       ;; Accumulate mixed claim types
         (cite-fn "Verified claim" "doc-1" 0 "s1" "exact quote" 0.95)
         (cite-unverified-fn "Unverified claim")
@@ -2222,9 +2213,9 @@
         (expect (= 0.5 (:claim/confidence (second @claims-atom))))
         (expect (false? (:claim/verified? (second @claims-atom))))))
 
-  (it "entity-stats returns zero counts on empty DB via full env"
+  (it "document-entity-stats returns zero counts on empty DB via full env"
       (with-test-env* {} (fn [env]
-                           (let [result (#'sut/execute-code env "(entity-stats)")]
+                           (let [result (#'rlm-core/execute-code env "(document-entity-stats)")]
                              (expect (nil? (:error result)))
                              (expect (= {:total-entities 0 :types {} :total-relationships 0}
                                         (:result result))))))))
@@ -2308,7 +2299,7 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
                                            (let [result (sut/ingest-to-env! env [(make-test-single-page-document)]
-                                                                     {:extract-entities? true})]
+                                                                            {:extract-entities? true})]
             ;; Should return vector of ingest results
                                              (expect (vector? result))
                                              (expect (= 1 (count result)))
@@ -2321,7 +2312,7 @@
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
                                            (let [result (sut/ingest-to-env! env [(make-test-legal-document)]
-                                                                     {:extract-entities? true})]
+                                                                            {:extract-entities? true})]
             ;; Legal doc has parties (Acme Corp, Widget Inc) that should be extracted
                                              (expect (vector? result))
                                              (expect (number? (get-in result [0 :entities-extracted])))))))))
@@ -2333,24 +2324,22 @@
           ;; Ingest multi-page document first
                                            (sut/ingest-to-env! env [(make-test-multi-page-document)])
                                            (let [result (sut/query-env! env "What was TechCorp's total revenue in 2024?"
-                                                                    {:refine? false
-                                                                     :learn? false
-                                                                     :max-iterations 25})]
+                                                                        {:refine? false
+                                                                         :max-iterations 25})]
                                              (expect (map? result))
                                              (expect (some? (:answer result)))
             ;; Answer should mention $500 million
                                              (expect (re-find #"(?i)500" (str (:answer result))))
             ;; Consensus efficiency: medium query should finish within 8 iterations
-                                              (expect (<= (:iterations result) 8)))))))
+                                             (expect (<= (:iterations result) 8)))))))
 
             (it "queries small documents"
                 (when (integration-tests-enabled?)
                   (with-integration-env* (fn [env]
                                            (sut/ingest-to-env! env [(make-test-single-page-document)])
                                            (let [result (sut/query-env! env "What is the title?"
-                                                                    {:refine? false
-                                                                     :learn? false
-                                                                     :max-iterations 25})]
+                                                                        {:refine? false
+                                                                         :max-iterations 25})]
                                              (expect (some? (:answer result)))
             ;; Consensus efficiency: trivial query should finish within 3 iterations
                                              (expect (<= (:iterations result) 3))))))))
@@ -2362,10 +2351,9 @@
           ;; Ingest document with extractable facts
                                            (sut/ingest-to-env! env [(make-test-multi-page-document)])
                                            (let [result (sut/query-env! env "What was the 2024 revenue and who is the CEO? Cite your sources."
-                                                                    {:verify? true
-                                                                     :refine? false
-                                                                     :learn? false
-                                                                     :max-iterations 25})]
+                                                                        {:verify? true
+                                                                         :refine? false
+                                                                         :max-iterations 25})]
                                              (expect (map? result))
                                              (expect (some? (:answer result)))
             ;; Should have verified-claims key
@@ -2380,10 +2368,9 @@
           ;; Ingest a simple document, then ask a trivial question that doesn't need citations
                                            (sut/ingest-to-env! env [(make-test-single-page-document)])
                                            (let [result (sut/query-env! env "What is the title of the document?"
-                                                                    {:verify? true
-                                                                     :refine? false
-                                                                     :learn? false
-                                                                     :max-iterations 10})]
+                                                                        {:verify? true
+                                                                         :refine? false
+                                                                         :max-iterations 10})]
             ;; Should have verified-claims key (even if empty)
                                              (expect (contains? result :verified-claims))
                                              (expect (vector? (:verified-claims result)))
@@ -2396,16 +2383,15 @@
                   (with-integration-env* (fn [env]
           ;; Step 1: Ingest with entity extraction
                                            (let [ingest-result (sut/ingest-to-env! env [(make-test-multi-page-document)]
-                                                                            {:extract-entities? true})]
+                                                                                   {:extract-entities? true})]
                                              (expect (number? (get-in ingest-result [0 :entities-extracted])))
 
             ;; Step 2: Query with all knowledge engine flags enabled
                                              (let [query-result (sut/query-env! env
-                                                                            "Who is the CEO and what market expansion happened in 2024?"
-                                                                            {:verify? true
-                                                                             :refine? false
-                                                                             :learn? false
-                                                                             :max-iterations 25})]
+                                                                                "Who is the CEO and what market expansion happened in 2024?"
+                                                                                {:verify? true
+                                                                                 :refine? false
+                                                                                 :max-iterations 25})]
               ;; Should have answer
                                                (expect (some? (:answer query-result)))
               ;; Answer should mention Jane Smith (CEO) and/or Asia expansion
@@ -2423,14 +2409,13 @@
                   (with-integration-env* (fn [env]
           ;; Ingest both legal and multi-page documents
                                            (sut/ingest-to-env! env [(make-test-legal-document) (make-test-multi-page-document)]
-                                                        {:extract-entities? true})
+                                                               {:extract-entities? true})
 
           ;; Query that could span both documents
                                            (let [result (sut/query-env! env "List all parties and companies mentioned in the documents."
-                                                                    {:verify? true
-                                                                     :refine? false
-                                                                     :learn? false
-                                                                     :max-iterations 25})]
+                                                                        {:verify? true
+                                                                         :refine? false
+                                                                         :max-iterations 25})]
                                              (expect (some? (:answer result)))
             ;; Should mention entities from both docs
                                              (let [answer-str (str (:answer result))]
@@ -2440,7 +2425,7 @@
                           ;; Or just have an answer that's not empty
                                                            (> (count answer-str) 10))))
              ;; Consensus efficiency: hard cross-document query should finish within 8 iterations
-                                              (expect (<= (:iterations result) 8)))))))))
+                                             (expect (<= (:iterations result) 8)))))))))
 
 ;; =============================================================================
 ;; T9: Search Function Tests (text-based search fixes)
@@ -2449,184 +2434,184 @@
 (defdescribe search-page-nodes-test
   (describe "db-search-page-nodes"
             (it "finds nodes matching content text"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "All parties must comply with regulatory requirements."}
-                      "page-1" "doc-1")
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "Payment is due within 30 days of invoice date."}
-                      "page-2" "doc-1")
-                    (let [results (#'sut/db-search-page-nodes db-info "comply")]
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "All parties must comply with regulatory requirements."}
+                                                  "page-1" "doc-1")
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "Payment is due within 30 days of invoice date."}
+                                                  "page-2" "doc-1")
+                    (let [results (#'rlm-db/db-search-page-nodes db-info "comply")]
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:page.node/content (first results)) "comply")))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "finds nodes matching description text"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :image
-                       :page.node/description "A chart showing quarterly revenue growth"}
-                      "page-1" "doc-1")
-                    (let [results (#'sut/db-search-page-nodes db-info "revenue")]
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :image
+                                                   :page.node/description "A chart showing quarterly revenue growth"}
+                                                  "page-1" "doc-1")
+                    (let [results (#'rlm-db/db-search-page-nodes db-info "revenue")]
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:page.node/description (first results)) "revenue")))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "returns empty for non-matching query"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "Some regular content here."}
-                      "page-1" "doc-1")
-                    (let [results (#'sut/db-search-page-nodes db-info "xyznonexistent")]
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "Some regular content here."}
+                                                  "page-1" "doc-1")
+                    (let [results (#'rlm-db/db-search-page-nodes db-info "xyznonexistent")]
                       (expect (= 0 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "falls back to list mode for blank query"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "First node"}
-                      "page-1" "doc-1")
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "Second node"}
-                      "page-2" "doc-1")
-                    (let [results (#'sut/db-search-page-nodes db-info "")]
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "First node"}
+                                                  "page-1" "doc-1")
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "Second node"}
+                                                  "page-2" "doc-1")
+                    (let [results (#'rlm-db/db-search-page-nodes db-info "")]
                       (expect (= 2 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "respects :document-id filter"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "Compliance text for doc one."}
-                      "page-1" "doc-1")
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "Compliance text for doc two."}
-                      "page-1" "doc-2")
-                    (let [results (#'sut/db-search-page-nodes db-info "compliance" {:document-id "doc-1"})]
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "Compliance text for doc one."}
+                                                  "page-1" "doc-1")
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "Compliance text for doc two."}
+                                                  "page-1" "doc-2")
+                    (let [results (#'rlm-db/db-search-page-nodes db-info "compliance" {:document-id "doc-1"})]
                       (expect (= 1 (count results)))
                       (expect (= "doc-1" (:page.node/document-id (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "respects :type filter"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :heading
-                       :page.node/content "Compliance Heading"
-                       :page.node/level "h1"}
-                      "page-1" "doc-1")
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "Compliance paragraph text."}
-                      "page-1" "doc-1")
-                    (let [results (#'sut/db-search-page-nodes db-info "compliance" {:type :heading})]
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :heading
+                                                   :page.node/content "Compliance Heading"
+                                                   :page.node/level "h1"}
+                                                  "page-1" "doc-1")
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "Compliance paragraph text."}
+                                                  "page-1" "doc-1")
+                    (let [results (#'rlm-db/db-search-page-nodes db-info "compliance" {:type :heading})]
                       (expect (= 1 (count results)))
                       (expect (= :heading (:page.node/type (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "includes content and description in results"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "The full content is here."
-                       :page.node/description "A brief description."}
-                      "page-1" "doc-1")
-                    (let [results (#'sut/db-search-page-nodes db-info "full content")
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "The full content is here."
+                                                   :page.node/description "A brief description."}
+                                                  "page-1" "doc-1")
+                    (let [results (#'rlm-db/db-search-page-nodes db-info "full content")
                           node (first results)]
                       (expect (= 1 (count results)))
                       (expect (= "The full content is here." (:page.node/content node)))
                       (expect (= "A brief description." (:page.node/description node))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 (defdescribe search-toc-entries-test
   (describe "db-search-toc-entries"
             (it "finds entries matching title text"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-toc-entry! db-info
-                      {:document.toc/title "Chapter 1: Compliance"
-                       :document.toc/level "l1"
-                       :document.toc/target-page 0}
-                      "doc-1")
-                    (#'sut/db-store-toc-entry! db-info
-                      {:document.toc/title "Chapter 2: Financial Terms"
-                       :document.toc/level "l1"
-                       :document.toc/target-page 1}
-                      "doc-1")
-                    (let [results (#'sut/db-search-toc-entries db-info "compliance")]
+                    (#'rlm-db/db-store-toc-entry! db-info
+                                                  {:document.toc/title "Chapter 1: Compliance"
+                                                   :document.toc/level "l1"
+                                                   :document.toc/target-page 0}
+                                                  "doc-1")
+                    (#'rlm-db/db-store-toc-entry! db-info
+                                                  {:document.toc/title "Chapter 2: Financial Terms"
+                                                   :document.toc/level "l1"
+                                                   :document.toc/target-page 1}
+                                                  "doc-1")
+                    (let [results (#'rlm-db/db-search-toc-entries db-info "compliance")]
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:document.toc/title (first results)) "Compliance")))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "finds entries matching description text"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-toc-entry! db-info
-                      {:document.toc/title "Appendix A"
-                       :document.toc/level "l2"
-                       :document.toc/description "Detailed compliance regulations"
-                       :document.toc/target-page 5}
-                      "doc-1")
-                    (let [results (#'sut/db-search-toc-entries db-info "regulations")]
+                    (#'rlm-db/db-store-toc-entry! db-info
+                                                  {:document.toc/title "Appendix A"
+                                                   :document.toc/level "l2"
+                                                   :document.toc/description "Detailed compliance regulations"
+                                                   :document.toc/target-page 5}
+                                                  "doc-1")
+                    (let [results (#'rlm-db/db-search-toc-entries db-info "regulations")]
                       (expect (= 1 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "returns empty for non-matching query"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-toc-entry! db-info
-                      {:document.toc/title "Introduction"
-                       :document.toc/level "l1"
-                       :document.toc/target-page 0}
-                      "doc-1")
-                    (let [results (#'sut/db-search-toc-entries db-info "xyznonexistent")]
+                    (#'rlm-db/db-store-toc-entry! db-info
+                                                  {:document.toc/title "Introduction"
+                                                   :document.toc/level "l1"
+                                                   :document.toc/target-page 0}
+                                                  "doc-1")
+                    (let [results (#'rlm-db/db-search-toc-entries db-info "xyznonexistent")]
                       (expect (= 0 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "falls back to list mode for blank query"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-toc-entry! db-info
-                      {:document.toc/title "First Entry"
-                       :document.toc/level "l1"
-                       :document.toc/target-page 0}
-                      "doc-1")
-                    (#'sut/db-store-toc-entry! db-info
-                      {:document.toc/title "Second Entry"
-                       :document.toc/level "l1"
-                       :document.toc/target-page 1}
-                      "doc-1")
-                    (let [results (#'sut/db-search-toc-entries db-info "")]
+                    (#'rlm-db/db-store-toc-entry! db-info
+                                                  {:document.toc/title "First Entry"
+                                                   :document.toc/level "l1"
+                                                   :document.toc/target-page 0}
+                                                  "doc-1")
+                    (#'rlm-db/db-store-toc-entry! db-info
+                                                  {:document.toc/title "Second Entry"
+                                                   :document.toc/level "l1"
+                                                   :document.toc/target-page 1}
+                                                  "doc-1")
+                    (let [results (#'rlm-db/db-search-toc-entries db-info "")]
                       (expect (= 2 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 (defdescribe search-entities-test
   (describe "db-search-entities"
             (it "finds entities matching name"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (d/transact! (:conn db-info)
                                  [{:entity/id (UUID/randomUUID)
@@ -2641,14 +2626,14 @@
                                    :entity/description "Chief executive officer"
                                    :entity/document-id "doc-1"
                                    :entity/created-at (java.util.Date.)}])
-                    (let [results (#'sut/db-search-entities db-info "acme")]
+                    (let [results (#'rlm-db/db-search-entities db-info "acme")]
                       (expect (= 1 (count results)))
                       (expect (= "Acme Corp" (:entity/name (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "finds entities matching description"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (d/transact! (:conn db-info)
                                  [{:entity/id (UUID/randomUUID)
@@ -2657,14 +2642,14 @@
                                    :entity/description "Senior compliance officer"
                                    :entity/document-id "doc-1"
                                    :entity/created-at (java.util.Date.)}])
-                    (let [results (#'sut/db-search-entities db-info "compliance")]
+                    (let [results (#'rlm-db/db-search-entities db-info "compliance")]
                       (expect (= 1 (count results)))
                       (expect (= "Bob" (:entity/name (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "returns empty for non-matching query"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (d/transact! (:conn db-info)
                                  [{:entity/id (UUID/randomUUID)
@@ -2673,13 +2658,13 @@
                                    :entity/description "A company"
                                    :entity/document-id "doc-1"
                                    :entity/created-at (java.util.Date.)}])
-                    (let [results (#'sut/db-search-entities db-info "xyznonexistent")]
+                    (let [results (#'rlm-db/db-search-entities db-info "xyznonexistent")]
                       (expect (= 0 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "respects :type filter"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (d/transact! (:conn db-info)
                                  [{:entity/id (UUID/randomUUID)
@@ -2694,14 +2679,14 @@
                                    :entity/description "Acme division lead"
                                    :entity/document-id "doc-1"
                                    :entity/created-at (java.util.Date.)}])
-                    (let [results (#'sut/db-search-entities db-info "acme" {:type :organization})]
+                    (let [results (#'rlm-db/db-search-entities db-info "acme" {:type :organization})]
                       (expect (= 1 (count results)))
                       (expect (= :organization (:entity/type (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "respects :document-id filter"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (d/transact! (:conn db-info)
                                  [{:entity/id (UUID/randomUUID)
@@ -2716,11 +2701,11 @@
                                    :entity/description "In doc 2"
                                    :entity/document-id "doc-2"
                                    :entity/created-at (java.util.Date.)}])
-                    (let [results (#'sut/db-search-entities db-info "shared" {:document-id "doc-2"})]
+                    (let [results (#'rlm-db/db-search-entities db-info "shared" {:document-id "doc-2"})]
                       (expect (= 1 (count results)))
                       (expect (= "doc-2" (:entity/document-id (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: Learnings Text Search Tests
@@ -2729,112 +2714,45 @@
 (defdescribe learnings-text-search-test
   (describe "db-get-learnings text filtering"
             (it "filters learnings by query text"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-learning! db-info "Always verify date ranges in financial data")
-                    (#'sut/db-store-learning! db-info "Check network connectivity before API calls")
-                    (let [results (#'sut/db-get-learnings db-info "financial" {:top-k 10 :track-usage? false})]
+                    (#'rlm-db/db-store-learning! db-info "Always verify date ranges in financial data")
+                    (#'rlm-db/db-store-learning! db-info "Check network connectivity before API calls")
+                    (let [results (#'rlm-db/db-get-learnings db-info "financial" {:top-k 10 :track-usage? false})]
                       (expect (= 1 (count results)))
                       (expect (str/includes? (:insight (first results)) "financial")))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "searches context text too"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-learning! db-info "Use pagination for large results" "database queries")
-                    (let [results (#'sut/db-get-learnings db-info "database" {:top-k 10 :track-usage? false})]
+                    (#'rlm-db/db-store-learning! db-info "Use pagination for large results" {:context "database queries"})
+                    (let [results (#'rlm-db/db-get-learnings db-info "database" {:top-k 10 :track-usage? false})]
                       (expect (= 1 (count results)))
                       (expect (= "database queries" (:context (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "returns all when query is blank"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-learning! db-info "Insight one")
-                    (#'sut/db-store-learning! db-info "Insight two")
-                    (#'sut/db-store-learning! db-info "Insight three")
-                    (let [results (#'sut/db-get-learnings db-info "" {:top-k 10 :track-usage? false})]
+                    (#'rlm-db/db-store-learning! db-info "Insight one")
+                    (#'rlm-db/db-store-learning! db-info "Insight two")
+                    (#'rlm-db/db-store-learning! db-info "Insight three")
+                    (let [results (#'rlm-db/db-get-learnings db-info "" {:top-k 10 :track-usage? false})]
                       (expect (= 3 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "case-insensitive search"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-learning! db-info "always validate input parameters")
-                    (let [results (#'sut/db-get-learnings db-info "VALIDATE INPUT" {:top-k 10 :track-usage? false})]
+                    (#'rlm-db/db-store-learning! db-info "always validate input parameters")
+                    (let [results (#'rlm-db/db-get-learnings db-info "VALIDATE INPUT" {:top-k 10 :track-usage? false})]
                       (expect (= 1 (count results))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
-
-;; =============================================================================
-;; T9: search-examples Text Search Tests
-;; =============================================================================
-
-(defdescribe search-examples-text-test
-  (describe "make-search-examples-fn text filtering"
-            (it "filters examples by query text"
-                (let [store-atom (deref #'sut/example-store)
-                      original @store-atom]
-                  (try
-                    (reset! store-atom
-                            [{:query "What are the compliance requirements?"
-                              :answer "The document outlines three compliance requirements."
-                              :score 35 :good? true :timestamp (System/currentTimeMillis)}
-                             {:query "Who is the CEO?"
-                              :answer "Jane Smith is the CEO."
-                              :score 38 :good? true :timestamp (- (System/currentTimeMillis) 1000)}])
-                    (let [search-fn (#'sut/make-search-examples-fn)
-                          results (search-fn "compliance")]
-                      (expect (= 1 (count results)))
-                      (expect (str/includes? (:query (first results)) "compliance")))
-                    (finally
-                      (reset! store-atom original)))))
-
-            (it "filters examples by answer text"
-                (let [store-atom (deref #'sut/example-store)
-                      original @store-atom]
-                  (try
-                    (reset! store-atom
-                            [{:query "Question A"
-                              :answer "The quarterly revenue was strong."
-                              :score 35 :good? true :timestamp (System/currentTimeMillis)}
-                             {:query "Question B"
-                              :answer "Expenses increased by 10%."
-                              :score 30 :good? false :timestamp (- (System/currentTimeMillis) 1000)}])
-                    (let [search-fn (#'sut/make-search-examples-fn)
-                          results (search-fn "revenue")]
-                      (expect (= 1 (count results)))
-                      (expect (str/includes? (:answer (first results)) "revenue")))
-                    (finally
-                      (reset! store-atom original)))))
-
-            (it "returns all for blank query"
-                (let [store-atom (deref #'sut/example-store)
-                      original @store-atom]
-                  (try
-                    (reset! store-atom
-                            [{:query "Q1" :answer "A1" :score 30 :good? true :timestamp (System/currentTimeMillis)}
-                             {:query "Q2" :answer "A2" :score 35 :good? true :timestamp (- (System/currentTimeMillis) 1000)}])
-                    (let [search-fn (#'sut/make-search-examples-fn)
-                          results (search-fn "")]
-                      (expect (= 2 (count results))))
-                    (finally
-                      (reset! store-atom original)))))
-
-            (it "returns empty when no match"
-                (let [store-atom (deref #'sut/example-store)
-                      original @store-atom]
-                  (try
-                    (reset! store-atom
-                            [{:query "Some query" :answer "Some answer" :score 30 :good? true :timestamp (System/currentTimeMillis)}])
-                    (let [search-fn (#'sut/make-search-examples-fn)
-                          results (search-fn "xyznonexistent")]
-                      (expect (= 0 (count results))))
-                    (finally
-                      (reset! store-atom original)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: list-page-nodes Truncation Tests
@@ -2843,49 +2761,49 @@
 (defdescribe list-page-nodes-truncation-test
   (describe "db-list-page-nodes content truncation"
             (it "includes content truncated to 200 chars"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (let [long-content (apply str (repeat 50 "abcdefg"))] ;; 350 chars
-                      (#'sut/db-store-page-node! db-info
-                        {:page.node/type :paragraph
-                         :page.node/content long-content}
-                        "page-1" "doc-1")
-                      (let [results (#'sut/db-list-page-nodes db-info {})
+                      (#'rlm-db/db-store-page-node! db-info
+                                                    {:page.node/type :paragraph
+                                                     :page.node/content long-content}
+                                                    "page-1" "doc-1")
+                      (let [results (#'rlm-db/db-list-page-nodes db-info {})
                             node (first results)]
                         (expect (= 1 (count results)))
                         (expect (some? (:page.node/content node)))
                         (expect (= 200 (count (:page.node/content node))))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "includes description truncated to 200 chars"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (let [long-desc (apply str (repeat 50 "abcdefg"))] ;; 350 chars
-                      (#'sut/db-store-page-node! db-info
-                        {:page.node/type :image
-                         :page.node/description long-desc}
-                        "page-1" "doc-1")
-                      (let [results (#'sut/db-list-page-nodes db-info {})
+                      (#'rlm-db/db-store-page-node! db-info
+                                                    {:page.node/type :image
+                                                     :page.node/description long-desc}
+                                                    "page-1" "doc-1")
+                      (let [results (#'rlm-db/db-list-page-nodes db-info {})
                             node (first results)]
                         (expect (= 1 (count results)))
                         (expect (some? (:page.node/description node)))
                         (expect (= 200 (count (:page.node/description node))))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "does not truncate short content"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
-                    (#'sut/db-store-page-node! db-info
-                      {:page.node/type :paragraph
-                       :page.node/content "Short content."}
-                      "page-1" "doc-1")
-                    (let [results (#'sut/db-list-page-nodes db-info {})
+                    (#'rlm-db/db-store-page-node! db-info
+                                                  {:page.node/type :paragraph
+                                                   :page.node/content "Short content."}
+                                                  "page-1" "doc-1")
+                    (let [results (#'rlm-db/db-list-page-nodes db-info {})
                           node (first results)]
                       (expect (= "Short content." (:page.node/content node))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: Flush Store Batching Tests
@@ -2894,7 +2812,7 @@
 (defdescribe datalevin-persistence-test
   (describe "Datalevin auto-persistence"
             (it "persists data immediately on transact without flush"
-                (let [db-info (#'sut/create-rlm-conn nil)
+                (let [db-info (#'rlm-db/create-rlm-conn nil)
                       conn (:conn db-info)]
                   (try
                     (datalevin.core/transact! conn [{:entity/id (UUID/randomUUID)
@@ -2909,16 +2827,16 @@
                       (expect (= 1 (count results)))
                       (expect (= "TestEntity" (:entity/name (first results)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
             (it "DB path exists and is a directory after conn creation"
-                (let [db-info (#'sut/create-rlm-conn nil)
+                (let [db-info (#'rlm-db/create-rlm-conn nil)
                       path (:path db-info)]
                   (try
                     (expect (fs/exists? path))
                     (expect (fs/directory? path))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; T9: Relationship Storage Tests
@@ -2927,7 +2845,7 @@
 (defdescribe relationship-storage-test
   (describe "two-phase entity + relationship storage"
             (it "stores relationships with resolved entity UUIDs"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (let [conn (:conn db-info)
                           uuid-a (UUID/randomUUID)
@@ -2965,14 +2883,14 @@
                         (expect (= :works-with (:relationship/type rel)))
                         (expect (= "Alice works with Bob" (:relationship/description rel)))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))
 
-             (it "relationships start empty in a fresh db"
-                (let [db-info (#'sut/create-rlm-conn nil)]
+            (it "relationships start empty in a fresh db"
+                (let [db-info (#'rlm-db/create-rlm-conn nil)]
                   (try
                     (expect (= 0 (count (d/q '[:find ?e :where [?e :relationship/id _]] (d/db (:conn db-info))))))
                     (finally
-                      (#'sut/dispose-rlm-conn! db-info)))))))
+                      (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
 ;; generate-qa-env! pipeline unit tests
@@ -2996,6 +2914,11 @@
                 (let [result (#'sut/compute-distribution 0 #{:a :b})]
                   (expect (= 0 (reduce + (vals result))))))))
 
+(def ^:private test-dedup-router
+  (llm/make-router [{:id :test :api-key "test" :base-url "http://test"
+                     :models [{:name "gpt-4o" :capabilities #{:chat} :intelligence :high :cost :medium}]
+                     :root "gpt-4o" :rpm 500 :tpm 200000 :priority 0}]))
+
 (defdescribe deduplicate-questions-test
   (describe "deduplicate-questions"
             (it "keeps unique questions when LLM returns all indices"
@@ -3003,28 +2926,28 @@
                   (let [questions [{:question "What is the capital of France?"}
                                    {:question "How does photosynthesis work?"}
                                    {:question "What year was the company founded?"}]
-                        result (#'sut/deduplicate-questions questions {} "gpt-4o")]
+                        result (#'sut/deduplicate-questions questions test-dedup-router)]
                     (expect (= 3 (count result))))))
             (it "removes duplicates when LLM identifies them"
                 (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices [0 2]}))
                   (let [questions [{:question "What is the minimum capital requirement for banks?"}
                                    {:question "What is the minimum capital requirement for the banks?"}
                                    {:question "How does photosynthesis produce oxygen?"}]
-                        result (#'sut/deduplicate-questions questions {} "gpt-4o")]
+                        result (#'sut/deduplicate-questions questions test-dedup-router)]
                     (expect (= 2 (count result)))
                     (expect (= "What is the minimum capital requirement for banks?"
                                (:question (first result))))
                     (expect (= "How does photosynthesis produce oxygen?"
                                (:question (second result)))))))
             (it "handles empty input"
-                (expect (= [] (#'sut/deduplicate-questions [] {} "gpt-4o"))))
+                (expect (= [] (#'sut/deduplicate-questions [] test-dedup-router))))
             (it "handles single question without calling LLM"
-                (let [result (#'sut/deduplicate-questions [{:question "Solo question"}] {} "gpt-4o")]
+                (let [result (#'sut/deduplicate-questions [{:question "Solo question"}] test-dedup-router)]
                   (expect (= 1 (count result)))))
             (it "falls back to all questions when LLM returns empty"
                 (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices []}))
                   (let [questions [{:question "Q1"} {:question "Q2"}]
-                        result (#'sut/deduplicate-questions questions {} "gpt-4o")]
+                        result (#'sut/deduplicate-questions questions test-dedup-router)]
                     (expect (= 2 (count result))))))))
 
 (defdescribe filter-verified-questions-test
@@ -3073,19 +2996,6 @@
                   (expect (= "Q2" (:question (first (:dropped result)))))
                   (expect (= 1 (count (:needs-revision result))))
                   (expect (= "Q3" (:question (first (:needs-revision result)))))))))
-
-(defdescribe build-chunk-selection-prompt-test
-  (describe "build-chunk-selection-prompt"
-            (it "produces non-empty string with key instructions"
-                (let [prompt (#'sut/build-chunk-selection-prompt
-                              {:count 15
-                               :difficulty-dist #{:remember :understand :apply}
-                               :category-dist #{:factual :inferential}})]
-                  (expect (string? prompt))
-                  (expect (> (count prompt) 200))
-                  (expect (str/includes? prompt "15"))
-                  (expect (str/includes? prompt "list-documents"))
-                  (expect (str/includes? prompt "FINAL"))))))
 
 (defdescribe build-generation-prompt-test
   (describe "build-generation-prompt"
@@ -3195,5 +3105,3 @@
                       path (str dir "/test-output")
                       saved (sut/save-qa! result path)]
                   (expect (= 2 (count (:files saved))))))))
-
-

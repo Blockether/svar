@@ -29,6 +29,7 @@ resources-test/diarization.json
 .cloudflared*.log
 .cloudflared*.pid
 models 
+schema-therapy.pdf
 lancedb
 
 /data/

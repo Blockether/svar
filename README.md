@@ -828,7 +828,6 @@ Inject custom functions and constants into the RLM's sandboxed SCI environment. 
      :max-refinements 2            ;; max refine loops (default: 1)
      :threshold 0.85               ;; min eval score 0.0-1.0 (default: 0.8)
      :refine? true                 ;; enable self-critique refinement (default: true)
-     :learn? true                  ;; store as example for future queries (default: true)
      :plan? true                   ;; LLM outlines a strategy before executing code (default: false)
      :verify? true                 ;; CoVe fact-checking: LLM cites sources, verified post-query (default: false)
      :max-context-tokens 8000      ;; token budget for context window
@@ -874,7 +873,6 @@ substring matches over content, titles, names, and descriptions.
 | `(search-toc-entries query)` | TOC entry titles and descriptions |
 | `(search-entities query)` | Entity names and descriptions |
 | `(search-learnings query)` | Learning insights and context |
-| `(search-examples query)` | Past query/answer pairs |
 | `(search-history n)` | Recent conversation messages |
 
 ### Debugging RLM Traces

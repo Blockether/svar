@@ -18,17 +18,17 @@
        (svar/ask! ...))"
   (:require
    [clojure.string :as str]
-    [com.blockether.svar.internal.util :as util]
-    [com.blockether.svar.internal.spec :as spec]
-    [taoensso.trove :as trove]))
+   [com.blockether.svar.internal.util :as util]
+   [com.blockether.svar.internal.spec :as spec]
+   [taoensso.trove :as trove]))
 
 ;; =============================================================================
 ;; Constants
 ;; =============================================================================
 
 (def ^:private DEFAULT_MODERATION_MODEL
-  "Default model for LLM-based moderation."
-  "gpt-4o")
+  "Default model for LLM-based moderation. Falls back to BLOCKETHER_LLM_DEFAULT_MODEL env var."
+  (or (System/getenv "BLOCKETHER_LLM_DEFAULT_MODEL") nil))
 
 (def DEFAULT_INJECTION_PATTERNS
   "Default patterns for detecting prompt injection attempts.
@@ -255,10 +255,10 @@
                             {:pattern pattern
                              :message (:message config)
                              :type (:type config)}))
-              duration-ms (util/elapsed-since start-time)]
-          (cond
+             duration-ms (util/elapsed-since start-time)]
+         (cond
             ;; No matches - pass through
-            (empty? matches)
+           (empty? matches)
            (do
              (trove/log! {:level :debug :data {:input-length (count text) :duration-ms duration-ms}
                           :msg "Static guard passed"})
@@ -274,9 +274,9 @@
                                               :duration-ms duration-ms}
                           :msg "Static guard detected prompt injection"})
              (throw (ex-info error-message
-                              {:type (or type :svar.guard/prompt-injection)
-                               :pattern pattern
-                               :input input})))
+                             {:type (or type :svar.guard/prompt-injection)
+                              :pattern pattern
+                              :input input})))
 
            ;; Multiple matches - aggregate
            :else
@@ -289,9 +289,9 @@
                                               :duration-ms duration-ms}
                           :msg "Static guard detected multiple violations"})
              (throw (ex-info error-message
-                              {:type :svar.guard/multiple-violations
-                               :violations matches
-                               :input input})))))))))
+                             {:type :svar.guard/multiple-violations
+                              :violations matches
+                              :input input})))))))))
 
 ;; =============================================================================
 ;; Moderation Guard Factory
@@ -361,9 +361,9 @@
         (if (empty? violations)
           (do
             (trove/log! {:level :debug :data {:input-length (count text)
-                                               :flagged? (:flagged result)
-                                               :duration-ms duration-ms}
-                          :msg "Moderation guard passed"})
+                                              :flagged? (:flagged result)
+                                              :duration-ms duration-ms}
+                         :msg "Moderation guard passed"})
             input)
           (do
             (trove/log! {:level :warn :data {:input-length (count text)
@@ -372,10 +372,9 @@
                          :msg "Moderation guard detected policy violation"})
             (throw (ex-info (str "Content violates moderation policies: "
                                  (str/join ", " (map #(name (:policy %)) violations)))
-                             {:type :svar.guard/moderation-violation
-                              :violations violations
-                              :input input}))))))))
-
+                            {:type :svar.guard/moderation-violation
+                             :violations violations
+                             :input input}))))))))
 
 ;; =============================================================================
 ;; Combined Guard

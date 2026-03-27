@@ -1,4 +1,4 @@
-(ns com.blockether.svar.internal.rlm.internal.pageindex.vision
+(ns com.blockether.svar.internal.rlm.pageindex.vision
   "Vision/LLM-based text extraction from documents.
    
    Provides:
@@ -23,7 +23,7 @@
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.spec :as spec]
-   [com.blockether.svar.internal.rlm.internal.pageindex.pdf :as pdf]
+   [com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
    [taoensso.trove :as trove])
   (:import
    [java.awt Color Graphics2D]
@@ -243,15 +243,14 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
    `image` - BufferedImage. The page image to check.
    `page-index` - Integer. The page index (for logging).
    `opts` - Map with:
-     `:model` - String. Vision model to use.
-     `:config` - Map. LLM config with :api-key, :base-url.
+     `:rlm-router` - Router instance (from llm/config->router or create-env).
      `:timeout-ms` - Integer, optional. HTTP timeout (default: 60000ms / 1 min).
    
    Returns:
    Integer. Rotation in degrees (0, 90, 180, or 270)."
-  [^BufferedImage image page-index {:keys [model config timeout-ms]
+  [^BufferedImage image page-index {:keys [rlm-router timeout-ms]
                                     :or {timeout-ms 60000}}]
-  (trove/log! {:level :debug :data {:page page-index :model model}
+  (trove/log! {:level :debug :data {:page page-index}
                :msg "Detecting page rotation"})
   (let [base64-image (image->base64 image)
         response (llm/ask! {:spec rotation-detection-spec
@@ -271,10 +270,10 @@ Pay special attention to:
 DO NOT assume 0. Actually examine the character orientation carefully.")
                                        (llm/user "Look at the characters and text in this image. Are the letters upright (normal) or are they rotated sideways/upside down? Return the rotation needed to make text readable in normal left-to-right orientation."
                                                  (llm/image base64-image "image/png"))]
-                            :model model
-                            :config config
                             :check-context? false
-                            :timeout-ms timeout-ms})
+                            :timeout-ms timeout-ms
+                            :router rlm-router
+                            :strategy :root})
         rotation (get-in response [:result :rotation] 0)
         ;; Clamp to valid values
         valid-rotation (if (contains? #{0 90 180 270} rotation) rotation 0)]
@@ -905,10 +904,6 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 ;; Quality Refinement — Eval + Refine Extracted Pages
 ;; =============================================================================
 
-(def ^:private DEFAULT_REFINE_MODEL
-  "Default model for quality evaluation and refinement."
-  "gpt-4o")
-
 (def ^:private DEFAULT_REFINE_SAMPLE_SIZE
   "Default number of pages to sample for quality evaluation."
   3)
@@ -970,11 +965,10 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    
    Returns:
    Map with :page-index, :score, :correct?, :summary, :issues."
-  [page {:keys [refine-model config]
-         :or {refine-model DEFAULT_REFINE_MODEL}}]
+  [page {:keys [rlm-router]}]
   (let [serialized (serialize-page-for-eval page)
         page-index (:page/index page)]
-    (trove/log! {:level :info :data {:page page-index :model refine-model}
+    (trove/log! {:level :info :data {:page page-index}
                  :msg "Evaluating page extraction quality"})
     (let [result (llm/eval! {:task (str "Extract all visible content from document page " page-index
                                         " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
@@ -982,8 +976,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                                         "text should be captured. Section descriptions should be meaningful "
                                         "2-3 sentence summaries.")
                              :output serialized
-                             :model refine-model
-                             :config config
+                             :router rlm-router
+                             :strategy :root
                              :criteria PAGE_EVAL_CRITERIA})]
       (trove/log! {:level :info :data {:page page-index
                                        :score (:overall-score result)
@@ -1013,15 +1007,13 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    
    Returns:
    Map with :page/index and :page/nodes (enriched with image data)."
-  [^BufferedImage image page-index {:keys [refine-model objective config
-                                           refine-iterations refine-threshold timeout-ms]
-                                    :or {refine-model DEFAULT_REFINE_MODEL
-                                         refine-iterations DEFAULT_REFINE_ITERATIONS
-                                         refine-threshold DEFAULT_REFINE_THRESHOLD
-                                         timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
+  [^BufferedImage image page-index {:keys [rlm-router objective
+                                           refine-iterations refine-threshold]
+                                    :or {refine-iterations DEFAULT_REFINE_ITERATIONS
+                                         refine-threshold DEFAULT_REFINE_THRESHOLD}}]
   (let [img-width (.getWidth image)
         img-height (.getHeight image)]
-    (trove/log! {:level :info :data {:page page-index :model refine-model
+    (trove/log! {:level :info :data {:page page-index
                                      :iterations refine-iterations :threshold refine-threshold}
                  :msg "Refining page extraction (image)"})
     (let [base64-image (image->base64 image)
@@ -1030,14 +1022,15 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
           refine-result (llm/refine! {:spec vision-response-spec
                                       :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
                                                  (llm/user task (llm/image base64-image "image/png"))]
-                                      :model refine-model
-                                      :config config
+                                      :router rlm-router
+                                      :strategy :root
                                       :iterations refine-iterations
                                       :threshold refine-threshold
                                       :criteria PAGE_EVAL_CRITERIA})
           raw-nodes (get-in refine-result [:result :nodes] [])
-          ;; Use refine-model for bbox scale since it generated the coordinates
-          nodes (enrich-visual-nodes raw-nodes image refine-model page-index)]
+          root-model (or (some-> (llm/select-provider rlm-router {:strategy :root}) second :name)
+                         (throw (ex-info "No model in router" {:type :svar/missing-model})))
+          nodes (enrich-visual-nodes raw-nodes image root-model page-index)]
       (trove/log! {:level :info :data {:page page-index
                                        :nodes (count nodes)
                                        :final-score (:final-score refine-result)
@@ -1057,11 +1050,10 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    
    Returns:
    Map with :page/index and :page/nodes."
-  [content page-index {:keys [refine-model objective config refine-iterations refine-threshold]
-                       :or {refine-model DEFAULT_REFINE_MODEL
-                            refine-iterations DEFAULT_REFINE_ITERATIONS
+  [content page-index {:keys [rlm-router objective refine-iterations refine-threshold]
+                       :or {refine-iterations DEFAULT_REFINE_ITERATIONS
                             refine-threshold DEFAULT_REFINE_THRESHOLD}}]
-  (trove/log! {:level :info :data {:page page-index :model refine-model
+  (trove/log! {:level :info :data {:page page-index
                                    :content-length (count content)}
                :msg "Refining page extraction (text)"})
   (let [refine-result (llm/refine! {:spec vision-response-spec
@@ -1069,8 +1061,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                                                (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
                                                               "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
                                                               "<document_content>\n" content "\n</document_content>"))]
-                                    :model refine-model
-                                    :config config
+                                    :router rlm-router
+                                    :strategy :root
                                     :iterations refine-iterations
                                     :threshold refine-threshold
                                     :criteria PAGE_EVAL_CRITERIA})
@@ -1240,33 +1232,18 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    Sections are logical groupings with AI-generated descriptions.
    Headings are separate nodes that belong to their Section.
    
-    Params:
-    `image` - BufferedImage. The image to extract from.
-    `page-index` - Integer. The page index (0-based).
-    `opts` - Map with:
-      `:model` - String. Vision model to use.
-      `:objective` - String. System prompt for OCR.
-      `:config` - Map. LLM config with :api-key, :base-url (from llm-config-component).
-      `:timeout-ms` - Integer, optional. HTTP timeout (default: 360000ms / 6 min).
-   
-    Returns:
-    Map with:
-      `:page/index` - Integer. The page index.
-      `:page/nodes` - Vector of typed document nodes (all fields namespaced as :page.node/X):
-        - Section: :page.node/type, :page.node/id, :page.node/parent-id, :page.node/description
-        - Heading: :page.node/type, :page.node/id, :page.node/parent-id, :page.node/level, :page.node/content
-        - Paragraph: :page.node/type, :page.node/id, :page.node/parent-id, :page.node/level, :page.node/content, :page.node/continuation?
-        - ListItem: :page.node/type, :page.node/id, :page.node/parent-id, :page.node/level, :page.node/content, :page.node/continuation?
-        - Image: :page.node/type, :page.node/id, :page.node/parent-id, :page.node/kind, :page.node/bbox, :page.node/caption, :page.node/description, :page.node/image-data (bytes)
-        - Table: :page.node/type, :page.node/id, :page.node/parent-id, :page.node/kind, :page.node/bbox, :page.node/caption, :page.node/description, :page.node/content (ASCII), :page.node/image-data (bytes)
-        - Header: :page.node/type, :page.node/id, :page.node/content
-        - Footer: :page.node/type, :page.node/id, :page.node/content
-        - Metadata: :page.node/type, :page.node/id, :page.node/content"
-  [^BufferedImage image page-index {:keys [model objective timeout-ms config]
+     Params:
+     `image` - BufferedImage. The image to extract from.
+     `page-index` - Integer. The page index (0-based).
+     `opts` - Map with:
+       `:rlm-router` - Router instance for LLM calls.
+       `:objective` - String. System prompt for OCR.
+       `:timeout-ms` - Integer, optional. HTTP timeout (default: 360000ms / 6 min)."
+  [^BufferedImage image page-index {:keys [rlm-router objective timeout-ms]
                                     :or {timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
   (let [img-width (.getWidth image)
         img-height (.getHeight image)]
-    (trove/log! {:level :info :data {:page page-index :model model :timeout-ms timeout-ms
+    (trove/log! {:level :info :data {:page page-index :timeout-ms timeout-ms
                                      :image-width img-width :image-height img-height}
                  :msg "Extracting content from page"})
     (let [base64-image (image->base64 image)
@@ -1277,13 +1254,17 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
           response (llm/ask! {:spec vision-response-spec
                               :messages [(llm/system objective)
                                          (llm/user task (llm/image base64-image "image/png"))]
-                              :model model
-                              :config config
                               :check-context? false
-                              :timeout-ms timeout-ms})
+                              :timeout-ms timeout-ms
+                              :router rlm-router
+                              :strategy :root})
           raw-nodes (get-in response [:result :nodes] [])
+          ;; Resolve model name from router for bbox scale lookup
+          root-model (or (some-> (llm/select-provider rlm-router {:strategy :root}) second :name)
+                         (throw (ex-info "No model available in router — cannot determine bbox scale"
+                                         {:type :svar/missing-model})))
           ;; Enrich visual nodes with extracted image data + rotation correction
-          nodes (enrich-visual-nodes raw-nodes image model page-index)
+          nodes (enrich-visual-nodes raw-nodes image root-model page-index)
         ;; Count elements for logging
           section-count (count (filter :page.node/description nodes))
           heading-count (count (filter :page.node/level nodes))
@@ -1324,10 +1305,10 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    
    Throws:
    Anomaly (fault) if any page fails to extract."
-  [pdf-path {:keys [model objective parallel timeout-ms config refine? page-set]
+  [pdf-path {:keys [rlm-router objective parallel timeout-ms refine? page-set]
              :or {parallel 3 timeout-ms DEFAULT_VISION_TIMEOUT_MS}
              :as opts}]
-  (trove/log! {:level :info :data {:pdf pdf-path :model model :parallel parallel :timeout-ms timeout-ms}
+  (trove/log! {:level :info :data {:pdf pdf-path :parallel parallel :timeout-ms timeout-ms}
                :msg "Starting PDF text extraction"})
   (let [pdf-page-opts (when page-set {:page-set page-set})
         ;; Only render selected pages (skips CPU-expensive image rendering for excluded pages)
@@ -1367,7 +1348,7 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
                                :rotation rotation})
                             images page-indices page-rotations)
             result-chan (async/chan (max 1 page-count))
-            extract-opts {:model model :objective objective :timeout-ms timeout-ms :config config}]
+            extract-opts {:rlm-router rlm-router :objective objective :timeout-ms timeout-ms}]
 
         ;; Start parallel workers - capture errors as data since pipeline-blocking catches exceptions
         ;; Page rotation is detected via PDFBox text position heuristics (no LLM cost).
@@ -1396,9 +1377,7 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
                            ;; Extract full LLM request from exception (includes sanitized messages)
                           llm-request (:llm-request ex-data-map)
                            ;; Build basic request info as fallback
-                          basic-info {:model model
-                                      :timeout-ms timeout-ms
-                                      :base-url (get config :base-url)
+                          basic-info {:timeout-ms timeout-ms
                                       :objective-length (count objective)
                                       :image-width (.getWidth image)
                                       :image-height (.getHeight image)}
@@ -1466,17 +1445,17 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    
    Returns:
    Map with :page/index and :page/nodes."
-  [content page-index {:keys [model objective timeout-ms config]
+  [content page-index {:keys [rlm-router objective timeout-ms]
                        :or {timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
-  (trove/log! {:level :info :data {:page page-index :model model :content-length (count content)}
+  (trove/log! {:level :info :data {:page page-index :content-length (count content)}
                :msg "Extracting nodes from text content"})
   (let [response (llm/ask! {:spec vision-response-spec
                             :messages [(llm/system objective)
                                        (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
                                                       "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
                                                       "<document_content>\n" content "\n</document_content>"))]
-                            :model model
-                            :config config
+                            :router rlm-router
+                            :strategy :root
                             :check-context? false
                             :timeout-ms timeout-ms})
         nodes (get-in response [:result :nodes] [])
@@ -1538,11 +1517,11 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    Vector with single map:
      `:page/index` - Integer. Always 0.
      `:page/nodes` - Vector of document nodes."
-  [file-path {:keys [model refine?] :as opts}]
+  [file-path {:keys [rlm-router refine?] :as opts}]
   (let [file (File. ^String file-path)]
     (when-not (.exists file)
       (anomaly/not-found! "File not found" {:type :svar.vision/file-not-found :path file-path}))
-    (trove/log! {:level :info :data {:file file-path :model model}
+    (trove/log! {:level :info :data {:file file-path :has-router (some? rlm-router)}
                  :msg "Extracting content from text file"})
     (let [content (slurp file)
           result (extract-nodes-from-text content 0 opts)
@@ -1572,8 +1551,8 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    Vector with single map:
      `:page/index` - Integer. Always 0.
      `:page/nodes` - Vector of document nodes."
-  [file-path {:keys [model refine?] :as opts}]
-  (trove/log! {:level :info :data {:file file-path :model model}
+  [file-path {:keys [rlm-router refine?] :as opts}]
+  (trove/log! {:level :info :data {:file file-path :has-router (some? rlm-router)}
                :msg "Extracting text from image file"})
   (let [image (load-image-file file-path)
         result (extract-text-from-image image 0 opts)
@@ -1604,8 +1583,8 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    Vector with single map:
      `:page/index` - Integer. Always 0.
      `:page/nodes` - Vector of document nodes."
-  [content {:keys [model refine?] :as opts}]
-  (trove/log! {:level :info :data {:content-length (count content) :model model}
+  [content {:keys [rlm-router refine?] :as opts}]
+  (trove/log! {:level :info :data {:content-length (count content) :has-router (some? rlm-router)}
                :msg "Extracting content from string"})
   (let [result (extract-nodes-from-text content 0 opts)
         pages [result]]
@@ -1642,7 +1621,7 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
    
    Returns:
    String. The inferred document title, or nil if cannot be inferred."
-  [pages {:keys [model config timeout-ms]
+  [pages {:keys [rlm-router timeout-ms]
           :or {timeout-ms 30000}}]
   (let [;; Collect relevant content for title inference
         all-nodes (mapcat :page/nodes pages)
@@ -1685,8 +1664,9 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
                                            (llm/user (str "Based on the following document content, infer the document's title. "
                                                           "Return the most likely title - it should be concise and descriptive.\n\n"
                                                           context))]
-                                :model model
-                                :config config
+                                :router rlm-router
+                                :prefer :cost
+                                :capabilities #{:chat}
                                 :check-context? false
                                 :timeout-ms timeout-ms})]
         (get-in response [:result :title])))))

@@ -14,7 +14,7 @@
    (def config (make-config {:api-key \"sk-...\"
                               :base-url \"https://api.openai.com/v1\"
                               :model \"gpt-4o\"}))
-    (ask! {:config config :spec my-spec :messages [(system \"...\") (user \"...\")]})"
+(ask! {:spec my-spec :messages [(system \"...\") (user \"...\")]})"
   (:require
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.tokens :as tokens]))
@@ -24,8 +24,8 @@
 ;; =============================================================================
 
 (def DEFAULT_MODEL
-  "Default LLM model when not specified."
-  "gpt-4o")
+  "Default LLM model. Reads from BLOCKETHER_LLM_DEFAULT_MODEL env var. No hardcoded fallback."
+  nil)
 
 (def DEFAULT_BASE_URL
   "Default OpenAI API base URL."
@@ -96,23 +96,30 @@
   ([] (make-config {}))
   ([{:keys [api-key base-url model network tokens]}]
    (let [api-key (or api-key
-                       (get-env "BLOCKETHER_LLM_API_KEY")
-                       (get-env "BLOCKETHER_OPENAI_API_KEY")
-                       (get-env "OPENAI_API_KEY"))
-           base-url (or base-url
-                        (get-env "BLOCKETHER_LLM_API_BASE_URL")
-                        (get-env "OPENAI_BASE_URL")
-                        DEFAULT_BASE_URL)]
-       (when-not api-key
-         (anomaly/incorrect! "LLM API key required. Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY env var, or pass :api-key."
-                            {:type :svar/missing-api-key}))
-      {:api-key api-key
-       :base-url base-url
-       :model (or model DEFAULT_MODEL)
-       :network (merge DEFAULT_RETRY
-                       {:timeout-ms DEFAULT_TIMEOUT_MS}
-                       network)
-       :tokens {:check-context? (if (some? (:check-context? tokens)) (:check-context? tokens) true)
-                :pricing (merge tokens/DEFAULT_MODEL_PRICING (:pricing tokens))
-                :context-limits (merge tokens/DEFAULT_CONTEXT_LIMITS (:context-limits tokens))
-                :output-reserve (:output-reserve tokens)}})))
+                     (get-env "BLOCKETHER_LLM_API_KEY")
+                     (get-env "BLOCKETHER_OPENAI_API_KEY")
+                     (get-env "OPENAI_API_KEY"))
+         base-url (or base-url
+                      (get-env "BLOCKETHER_LLM_API_BASE_URL")
+                      (get-env "BLOCKETHER_OPENAI_BASE_URL")
+                      (get-env "OPENAI_BASE_URL")
+                      DEFAULT_BASE_URL)]
+     (when-not api-key
+       (anomaly/incorrect! "LLM API key required. Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY env var, or pass :api-key."
+                           {:type :svar/missing-api-key}))
+     (let [resolved-model (or model
+                              (get-env "BLOCKETHER_LLM_DEFAULT_MODEL")
+                              DEFAULT_MODEL)]
+       (when-not resolved-model
+         (anomaly/incorrect! "LLM model required. Set BLOCKETHER_LLM_DEFAULT_MODEL env var, or pass :model."
+                             {:type :svar/missing-model}))
+       {:api-key api-key
+        :base-url base-url
+        :model resolved-model
+        :network (merge DEFAULT_RETRY
+                        {:timeout-ms DEFAULT_TIMEOUT_MS}
+                        network)
+        :tokens {:check-context? (if (some? (:check-context? tokens)) (:check-context? tokens) true)
+                 :pricing (merge tokens/DEFAULT_MODEL_PRICING (:pricing tokens))
+                 :context-limits (merge tokens/DEFAULT_CONTEXT_LIMITS (:context-limits tokens))
+                 :output-reserve (:output-reserve tokens)}}))))
