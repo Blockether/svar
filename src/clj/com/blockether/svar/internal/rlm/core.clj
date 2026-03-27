@@ -1068,13 +1068,18 @@
                       ;; Store user feedback if tracking
                       (when history-enabled?
                         (store-message! db-info :user user-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
-                      (recur (inc iteration)
-                             (conj messages
-                                   {:role "assistant" :content (truncate-for-history response 800)}
-                                   {:role "user" :content user-feedback})
-                             (conj trace trace-entry)
-                             0
-                             restarts))))))))))))
+                      ;; Only reset consecutive-errors when code actually ran successfully.
+                      ;; Empty responses and all-error executions keep the counter climbing.
+                      (let [had-successful-execution? (and (seq executions)
+                                                           (some #(nil? (:error %)) executions))
+                            next-errors (if had-successful-execution? 0 (inc consecutive-errors))]
+                        (recur (inc iteration)
+                               (conj messages
+                                     {:role "assistant" :content (truncate-for-history response 800)}
+                                     {:role "user" :content user-feedback})
+                               (conj trace trace-entry)
+                               next-errors
+                               restarts)))))))))))))
 
 ;; =============================================================================
 ;; Entity Extraction Functions

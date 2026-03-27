@@ -21,21 +21,11 @@ The `:deny` list (`[require import ns eval load-string read-string]`) is an addi
 
 ---
 
-### 2. Consecutive error handling is broken — strategy restart is unreachable
+### ~~2. Consecutive error handling is broken — strategy restart is unreachable~~ — FIXED
 
-The error budget mechanism (5 consecutive errors triggers a strategy restart) never activates because `consecutive-errors` resets to 0 on every iteration that produces ANY response — including empty responses with no code blocks.
+**Status: FIXED** (March 2026)
 
-```clojure
-;; core.clj iteration loop
-;; An iteration with {"code": []} is treated as "success" and resets consecutive-errors to 0
-;; The LLM can spam 50 empty responses and never trigger error budget
-```
-
-The strategy restart (anti-knowledge injection after 5 consecutive errors, up to 3 restarts) is effectively dead code. The iteration loop always exhausts `max-iterations` instead.
-
-**Fix**: Only reset `consecutive-errors` when code was actually executed successfully (non-empty code array, no execution errors). Empty responses and parse failures should increment the counter.
-
-**Location**: `rlm/core.clj` line 1076 (error counter reset), lines 956-978 (strategy restart).
+`consecutive-errors` now only resets to 0 when at least one code execution succeeds. Empty responses, all-error executions, and parse failures all increment the counter. Strategy restart (5 consecutive errors → anti-knowledge injection, up to 3 restarts) is now reachable.
 
 ---
 
