@@ -385,43 +385,52 @@
          (str/join "\n" (map format-tool-doc custom-docs))
          "\n</custom_tools>\n")))
 
+(def ^:private TOKENS_PER_LEARNING
+  "Approximate tokens per formatted learning line (insight + tags + context)."
+  30)
+
 (defn format-active-learnings
   "Format pre-fetched learnings and tag definitions for injection into the system prompt.
-
-   These are automatically retrieved at query start — the LLM doesn't need
-   to call search-learnings manually for these.
 
    Params:
    `learnings` - Vector of normalized learning maps (direct matches).
    `tag-definitions` - Vector of {:name :definition} maps for all known tags.
+   `max-context-tokens` - Integer, optional. Context budget — learnings get 5% of this.
+                          Defaults to 15 learnings max if not provided.
 
    Returns:
    String with formatted tag glossary + active learnings, or nil if empty."
-  [learnings tag-definitions]
-  (let [has-learnings? (seq learnings)
-        capped-learnings (take 5 learnings)
-        active-tag-names (set (mapcat :tags capped-learnings))
-        relevant-tags (when (seq tag-definitions)
-                        (filterv #(and (:definition %) (active-tag-names (:name %))) tag-definitions))]
-    (when (or has-learnings? (seq relevant-tags))
-      (str
-       (when (seq relevant-tags)
-         (str "\n<learning_tag_glossary>\n"
-              "Tag definitions for categorizing learnings:\n"
-              (str/join "\n" (map (fn [{:keys [name definition]}]
-                                    (str "  - " name ": " definition))
-                                  relevant-tags))
-              "\n</learning_tag_glossary>\n"))
-       (when has-learnings?
-         (str "\n<active_learnings>\n"
-              "These are validated insights from prior sessions. Apply them.\n"
-              (str/join "\n" (map-indexed
-                              (fn [i l]
-                                (str "  " (inc i) ". " (str-truncate (:insight l) 100)
-                                     (when (seq (:tags l)) (str " [tags: " (str/join ", " (:tags l)) "]"))
-                                     (when (:context l) (str " [context: " (str-truncate (:context l) 60) "]"))))
-                              capped-learnings))
-              "\n</active_learnings>\n"))))))
+  ([learnings tag-definitions] (format-active-learnings learnings tag-definitions nil))
+  ([learnings tag-definitions max-context-tokens]
+   (let [has-learnings? (seq learnings)
+         ;; Dynamic cap: 5% of context budget / ~30 tokens per learning. Min 3, max 15.
+         max-learnings (if max-context-tokens
+                         (-> (quot (* max-context-tokens 5) (* 100 TOKENS_PER_LEARNING))
+                             (max 3) (min 15))
+                         15)
+         capped-learnings (take max-learnings learnings)
+         active-tag-names (set (mapcat :tags capped-learnings))
+         relevant-tags (when (seq tag-definitions)
+                         (filterv #(and (:definition %) (active-tag-names (:name %))) tag-definitions))]
+     (when (or has-learnings? (seq relevant-tags))
+       (str
+        (when (seq relevant-tags)
+          (str "\n<learning_tag_glossary>\n"
+               "Tag definitions for categorizing learnings:\n"
+               (str/join "\n" (map (fn [{:keys [name definition]}]
+                                     (str "  - " name ": " definition))
+                                   relevant-tags))
+               "\n</learning_tag_glossary>\n"))
+        (when has-learnings?
+          (str "\n<active_learnings>\n"
+               "These are validated insights from prior sessions. Apply them.\n"
+               (str/join "\n" (map-indexed
+                               (fn [i l]
+                                 (str "  " (inc i) ". " (str-truncate (:insight l) 100)
+                                      (when (seq (:tags l)) (str " [tags: " (str/join ", " (:tags l)) "]"))
+                                      (when (:context l) (str " [context: " (str-truncate (:context l) 60) "]"))))
+                               capped-learnings))
+               "\n</active_learnings>\n")))))))
 
 (defn build-system-prompt
   "Builds the system prompt. Optionally includes spec schema, history tools, and custom docs.
@@ -429,7 +438,7 @@
    When :has-reasoning? is true, uses ITERATION_SPEC_CODE_ONLY (no thinking field)
    because the provider emits native reasoning tokens — no need to duplicate in JSON."
   [{:keys [output-spec history-enabled? custom-docs has-documents? learnings tag-definitions
-           has-reasoning? system-prompt]}]
+           has-reasoning? system-prompt max-context-tokens]}]
   (str "<rlm_environment>
 <role>You are an expert Clojure programmer analyzing data in a sandboxed environment.</role>
 "
@@ -708,7 +717,7 @@
 </critical>
 "
        ;; Inject pre-fetched learnings (model-specific + query-relevant)
-       (format-active-learnings learnings tag-definitions)
+       (format-active-learnings learnings tag-definitions max-context-tokens)
        "
 </rlm_environment>"))
 
@@ -896,7 +905,8 @@
                                             :learnings learnings
                                             :tag-definitions tag-definitions
                                             :has-reasoning? has-reasoning?
-                                            :system-prompt system-prompt})
+                                            :system-prompt system-prompt
+                                            :max-context-tokens max-context-tokens})
         context-data (:context rlm-env)
         context-str (pr-str context-data)
         context-preview (if (> (count context-str) 2000)
@@ -1049,12 +1059,15 @@
                                (finalize-cost)))
                     (let [exec-feedback (format-executions executions)
                           iteration-header (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]")
+                          ;; Periodic learning nudge: every 10 iterations, remind the LLM to check learnings
+                          learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
+                                           "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
                           user-feedback (if (empty? executions)
                                           (str iteration-header "\nNo code was executed. You MUST include Clojure expressions in the \"code\" JSON array. Respond with valid JSON: "
                                                (if has-reasoning?
                                                  "{\"code\": [\"...\"]}"
                                                  "{\"thinking\": \"...\", \"code\": [\"...\"]}"))
-                                          (str iteration-header "\n" exec-feedback))]
+                                          (str iteration-header "\n" exec-feedback learning-nudge))]
                       (rlm-debug! {:iteration iteration
                                    :code-blocks (count executions)
                                    :errors (count (filter :error executions))
