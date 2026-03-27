@@ -361,11 +361,11 @@
   "Datalevin schema for RLM data. Merge into your app's schema for unified DB."
   rlm/RLM_SCHEMA)
 
-(def make-default-persistence
-  "Build Datalevin-backed persistence callbacks from a db-info atom.
-   Use to create persistence backed by your own DB for unified storage.
-   Pass the result as :persistence to create-env."
-  rlm/make-default-persistence)
+(def make-default-hooks
+  "Build Datalevin-backed hook/data callbacks from a db-info atom.
+   Use to create hooks backed by your own DB for unified storage.
+   Pass the result as :hooks to create-env."
+  rlm/make-default-hooks)
 
 (def create-env
   "Creates an RLM environment for processing large contexts via iterative code execution.

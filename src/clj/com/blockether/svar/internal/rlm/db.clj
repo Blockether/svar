@@ -27,7 +27,7 @@
    - path: persistent DB at given path. Svar owns and closes it.
    - neither: temp DB (deleted on dispose).
 
-   For unified storage, pass :conn AND :persistence callbacks to create-env."
+   For unified storage, pass :conn AND :hooks callbacks to create-env."
   [{:keys [conn path]}]
   (if conn
     {:conn conn :path nil :owned? false}
@@ -1332,7 +1332,7 @@
    Map with :document-id and counts of stored entities."
   [db-info doc]
   (let [doc-id (str (util/uuid))
-        ;; Store raw document for persistence
+        ;; Store raw document for replay/debugging
         _ (d/transact! (:conn db-info) [{:raw-document/id doc-id
                                          :raw-document/content (pr-str doc)}])
         ;; Store document metadata

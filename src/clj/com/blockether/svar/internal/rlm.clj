@@ -47,17 +47,17 @@
 (def QUESTIONIFY_SPEC schema/QUESTIONIFY_SPEC)
 (def VERIFICATION_SPEC schema/VERIFICATION_SPEC)
 
-(defn make-default-persistence
-  "Build Datalevin-backed persistence callbacks from a db-info atom.
+(defn make-default-hooks
+  "Build Datalevin-backed hook/data callbacks from a db-info atom.
 
-   Use this to create persistence backed by YOUR database (unified DB).
-   Pass the result as :persistence to create-env.
+   Use this to create hooks/data callbacks backed by YOUR database (unified DB).
+   Pass the result as :hooks to create-env.
 
    Params:
    `db-info-atom` - Atom holding {:conn datalevin-conn}.
 
    Returns:
-   Map of persistence callbacks."
+   Map of hooks/data callbacks."
   [db-info-atom]
   {;; === Read operations — consumers (vis, etc.) use these ===
     ;; Messages: full entities with thinking + executions embedded
@@ -76,6 +76,26 @@
    :search-toc-entries   (fn [query opts] (rlm-db/db-search-toc-entries @db-info-atom query opts))
    :get-toc-entry        (fn [entry-id] (rlm-db/db-get-toc-entry @db-info-atom entry-id))
    :list-toc-entries     (fn [opts] (rlm-db/db-list-toc-entries @db-info-atom opts))})
+
+(defn call-hook!
+  "Safely invoke a hook. Returns nil. Exceptions are caught and ignored."
+  [hooks-atom hook-name phase data]
+  (when-let [hooks (some-> hooks-atom deref)]
+    (when-let [hook-fn (get-in hooks [hook-name phase])]
+      (try
+        (hook-fn data)
+        (catch Exception _ nil)))))
+
+(defn- deep-merge
+  "Recursively merges maps. Non-map values are replaced by right-most value."
+  [& maps]
+  (letfn [(m [a b]
+            (merge-with (fn [x y]
+                          (if (and (map? x) (map? y))
+                            (m x y)
+                            y))
+                        a b))]
+    (reduce m {} maps)))
 
 (defn create-env
   "Creates an RLM environment (component) for document ingestion and querying.
@@ -102,12 +122,12 @@
    Params:
    - :config - Required. LLM config with :providers (vector of provider maps) and :default-model.
    - :path - Optional. Path for persistent DB. If provided, data survives across sessions.
-   - :persistence - Optional. Map of persistence callbacks to override defaults. Keys match
-        make-default-persistence output (:get-recent-messages, :count-history-tokens, etc.).
+   - :hooks - Optional. Map of hooks/data callbacks to override defaults. Keys match
+        make-default-hooks output (:get-recent-messages, :count-history-tokens, etc.).
 
     Returns:
     RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
-  [{:keys [config path conn persistence]}]
+  [{:keys [config path conn hooks]}]
   (when-not config
     (anomaly/incorrect! "Missing :config" {:type :rlm/missing-config}))
   (when-not (seq (:providers config))
@@ -120,11 +140,10 @@
         custom-docs-atom (atom [])
         db-info (rlm-db/create-rlm-conn {:conn conn :path path})
         db-info-atom (atom db-info)
-        store (merge (make-default-persistence db-info-atom) persistence)
-        hooks-atom (atom {})
-        on-query-fn #(when-let [f (:on-query @hooks-atom)] (f %))
-        llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom rlm-router {:on-query on-query-fn})
-        sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:on-query on-query-fn})
+        merged-hooks (deep-merge (make-default-hooks db-info-atom) (or hooks {}))
+        hooks-atom (atom merged-hooks)
+        llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom rlm-router {:hooks-atom hooks-atom})
+        sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:hooks-atom hooks-atom})
         rlm-query-fn (rlm-core/make-rlm-query-fn {:strategy :root} depth-atom rlm-router db-info-atom)
         env-id (str (util/uuid))]
     {:env-id env-id
@@ -135,7 +154,7 @@
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
-     :persistence store
+     :hooks merged-hooks
      :router rlm-router
      :llm-query-fn llm-query-fn
      :sub-llm-query-fn sub-llm-query-fn
@@ -189,7 +208,16 @@
     (anomaly/incorrect! "f must be a function" {:type :rlm/invalid-fn}))
   (when-not (map? tool-def)
     (anomaly/incorrect! "tool-def must be a map" {:type :rlm/invalid-tool-def}))
-  (swap! (:custom-bindings-atom env) assoc sym f)
+  (let [wrapped-fn (fn [& args]
+                     (call-hook! (:hooks-atom env) :tool-call :pre {:sym sym :args args})
+                     (try
+                       (let [result (apply f args)]
+                         (call-hook! (:hooks-atom env) :tool-call :post {:sym sym :args args :result result})
+                         result)
+                       (catch Exception e
+                         (call-hook! (:hooks-atom env) :tool-call :post {:sym sym :args args :error (ex-message e)})
+                         (throw e))))]
+    (swap! (:custom-bindings-atom env) assoc sym wrapped-fn))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :fn :sym sym))
   env)
 
@@ -315,6 +343,7 @@
       - :threshold - Min eval score 0.0-1.0 for refinement early stop (default: 0.8).
       - :verify? - Enable claim verification with citations (default: false).
       - :max-context-tokens - Token budget for context.
+      - :hooks - Per-query hook/data callback overrides merged for this query only.
       - :debug? - Enable verbose debug logging (default: false). Logs iteration details,
         code execution, LLM responses at :info level with :rlm-phase context.
     
@@ -340,7 +369,7 @@
    (query-env! env query-str {}))
   ([env query-str {:keys [context spec model max-iterations max-refinements threshold
                           max-context-tokens max-recursion-depth verify?
-                          plan? debug? on-iteration]
+                          system-prompt plan? debug? hooks]
                    :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
                         max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
                         plan? false debug? false}}]
@@ -357,6 +386,8 @@
          llm-query-fn (:llm-query-fn env)
          rlm-query-fn (:rlm-query-fn env)
          sub-llm-fn (or (:sub-llm-query-fn env) (:llm-query-fn env))
+         hooks-atom (:hooks-atom env)
+         original-hooks (when hooks-atom @hooks-atom)
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
          claims-atom (when verify? (atom []))
@@ -395,265 +426,289 @@
          env-id (:env-id env)]
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
        (binding [*max-recursion-depth* max-recursion-depth]
-         (rlm-core/rlm-debug! {:query query-str :root-model root-model :max-iterations max-iterations
-                               :verify? verify? :plan? plan?
-                               :refine-mode :final-confidence} "RLM query-env! started")
-         ;; Set hooks for this query
-         (when-let [ha (:hooks-atom env)]
-           (reset! ha {:on-query on-iteration}))
-         (let [start-time (System/nanoTime)
-               db-info @db-info-atom
+         (try
+           (when hooks-atom
+             (reset! hooks-atom (deep-merge (or original-hooks {}) (or hooks {}))))
+           (rlm-core/rlm-debug! {:query query-str :root-model root-model :max-iterations max-iterations
+                                 :verify? verify? :plan? plan?
+                                 :refine-mode :final-confidence} "RLM query-env! started")
+           (call-hook! hooks-atom :query :pre {:query query-str
+                                               :context context
+                                               :opts {:model model
+                                                      :max-iterations max-iterations
+                                                      :verify? verify?
+                                                      :plan? plan?}})
+           (let [start-time (System/nanoTime)
+                 db-info @db-info-atom
                 ;; Infer document names for scope-aware learning retrieval
-               doc-names (when (:conn db-info)
-                           (try (->> (d/q '[:find [?n ...]
-                                            :where [?e :document/name ?n]]
-                                          (d/db (:conn db-info)))
-                                     (mapv (fn [n] (let [ext (when-let [i (str/last-index-of n ".")] (subs n i))]
-                                                     (or ext n)))))
-                                (catch Exception _ [])))
+                 doc-names (when (:conn db-info)
+                             (try (->> (d/q '[:find [?n ...]
+                                              :where [?e :document/name ?n]]
+                                            (d/db (:conn db-info)))
+                                       (mapv (fn [n] (let [ext (when-let [i (str/last-index-of n ".")] (subs n i))]
+                                                       (or ext n)))))
+                                  (catch Exception _ [])))
                 ;; Auto-fetch relevant learnings: query-relevant + model-specific (scope-filtered)
-               active-learnings (when (:conn db-info)
-                                  (let [model-ctx (str "model:" (or root-model "unknown"))
-                                        by-query (rlm-db/db-get-learnings db-info query-str
-                                                                          {:top-k 3 :track-usage? true :doc-names doc-names})
-                                        by-model (rlm-db/db-get-learnings db-info model-ctx
-                                                                          {:top-k 2 :track-usage? true :doc-names doc-names})]
-                                    (vec (distinct (concat by-query by-model)))))
+                 active-learnings (when (:conn db-info)
+                                    (let [model-ctx (str "model:" (or root-model "unknown"))
+                                          by-query (rlm-db/db-get-learnings db-info query-str
+                                                                            {:top-k 3 :track-usage? true :doc-names doc-names})
+                                          by-model (rlm-db/db-get-learnings db-info model-ctx
+                                                                            {:top-k 2 :track-usage? true :doc-names doc-names})]
+                                      (vec (distinct (concat by-query by-model)))))
                ;; Auto-fetch neighbors: 1-hop linked learnings for richer context
-               seed-ids (set (keep :learning/id active-learnings))
-               neighbor-learnings (when (and (:conn db-info) (seq seed-ids))
-                                    (db-get-neighbors db-info seed-ids 5))
+                 seed-ids (set (keep :learning/id active-learnings))
+                 neighbor-learnings (when (and (:conn db-info) (seq seed-ids))
+                                      (db-get-neighbors db-info seed-ids 5))
                 ;; Auto-fetch all tag definitions for context injection
-               tag-definitions (when (:conn db-info)
-                                 (rlm-db/db-list-tags db-info))
+                 tag-definitions (when (:conn db-info)
+                                   (rlm-db/db-list-tags db-info))
                ;; Optional planning phase — LLM outlines approach before code execution
-               plan-context (when plan?
-                              (let [plan-result (llm/ask! {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
-                                                                      (llm/user (str "Query: " query-str))]
-                                                           :router rlm-router
-                                                           :prefer :intelligence :capabilities #{:chat}})]
-                                (when-let [plan (:result plan-result)]
-                                  (str "<plan>\n" plan "\n</plan>"))))
+                 plan-context (when plan?
+                                (let [plan-result (llm/ask! {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
+                                                                        (llm/user (str "Query: " query-str))]
+                                                             :router rlm-router
+                                                             :prefer :intelligence :capabilities #{:chat}})]
+                                  (when-let [plan (:result plan-result)]
+                                    (str "<plan>\n" plan "\n</plan>"))))
                 ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
-               iteration-result (rlm-core/iteration-loop rlm-env query-str
-                                                         {:max-iterations max-iterations
-                                                          :output-spec spec
-                                                          :learnings active-learnings
-                                                          :neighbor-learnings neighbor-learnings
-                                                          :tag-definitions tag-definitions
-                                                          :max-context-tokens max-context-tokens
-                                                          :custom-docs (into (or custom-docs []) cite-docs)
-                                                          :pre-fetched-context plan-context
-                                                          :on-iteration on-iteration})
-               {answer :answer
-                trace :trace
-                iterations :iterations
-                status :status
-                tokens :tokens
-                cost :cost
-                confidence :confidence
-                learn-items :learn} iteration-result
+                 iteration-result (rlm-core/iteration-loop rlm-env query-str
+                                                           {:max-iterations max-iterations
+                                                            :output-spec spec
+                                                            :learnings active-learnings
+                                                            :neighbor-learnings neighbor-learnings
+                                                            :tag-definitions tag-definitions
+                                                            :max-context-tokens max-context-tokens
+                                                            :custom-docs (into (or custom-docs []) cite-docs)
+                                                            :system-prompt system-prompt
+                                                            :pre-fetched-context plan-context
+                                                            :hooks-atom hooks-atom})
+                 {answer :answer
+                  trace :trace
+                  iterations :iterations
+                  status :status
+                  tokens :tokens
+                  cost :cost
+                  confidence :confidence
+                  learn-items :learn} iteration-result
                 ;; Mutable cost accumulator — iteration costs are the baseline,
                 ;; refinement + auto-vote + auto-extract costs get merged in
-               total-tokens-atom (atom (or tokens {}))
-               total-cost-atom (atom (or cost {}))
-               merge-cost! (fn [extra-tokens extra-cost]
-                             (when extra-tokens
-                               (swap! total-tokens-atom
-                                      (fn [acc]
-                                        (merge-with + acc
-                                                    (select-keys extra-tokens [:input :output :reasoning :cached :total])))))
-                             (when extra-cost
-                               (swap! total-cost-atom
-                                      (fn [acc]
-                                        (merge-with + (select-keys acc [:input-cost :output-cost :total-cost])
-                                                    (select-keys extra-cost [:input-cost :output-cost :total-cost]))))))]
-           (if status
+                 total-tokens-atom (atom (or tokens {}))
+                 total-cost-atom (atom (or cost {}))
+                 merge-cost! (fn [extra-tokens extra-cost]
+                               (when extra-tokens
+                                 (swap! total-tokens-atom
+                                        (fn [acc]
+                                          (merge-with + acc
+                                                      (select-keys extra-tokens [:input :output :reasoning :cached :total])))))
+                               (when extra-cost
+                                 (swap! total-cost-atom
+                                        (fn [acc]
+                                          (merge-with + (select-keys acc [:input-cost :output-cost :total-cost])
+                                                      (select-keys extra-cost [:input-cost :output-cost :total-cost]))))))]
+             (if status
                ;; Execution hit max iterations - return with trace
-             (let [duration-ms (util/elapsed-since start-time)]
+               (let [duration-ms (util/elapsed-since start-time)]
                   ;; Auto-vote via LLM: evaluate which learnings were relevant (even in failure)
-               (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :failure nil)
-               (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms
-                                     :auto-voted (count active-learnings)} "RLM query-env! finished (max iterations)")
-               (try
-                 (rlm-db/store-trajectory! @db-info-atom
-                                           {:env-id env-id :query query-str :status status
-                                            :answer (:result answer answer) :iterations iterations
-                                            :duration-ms duration-ms :model root-model
-                                            :doc-pages (try (when-let [c (:conn @db-info-atom)]
-                                                              (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
-                                                            (catch Exception _ 0))})
-                 (catch Exception e
-                   (trove/log! {:level :warn :data {:error (ex-message e)}
-                                :msg "Failed to store trajectory (max iterations)"})))
-               (cond-> {:answer nil
-                        :raw-answer (:result answer answer)
-                        :status status
-                        :trace trace
-                        :iterations iterations
-                        :duration-ms duration-ms
-                        :tokens @total-tokens-atom
-                        :cost @total-cost-atom}
-                 verify? (assoc :verified-claims (vec @claims-atom))))
+                 (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :failure nil)
+                 (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms
+                                       :auto-voted (count active-learnings)} "RLM query-env! finished (max iterations)")
+                 (try
+                   (rlm-db/store-trajectory! @db-info-atom
+                                             {:env-id env-id :query query-str :status status
+                                              :answer (:result answer answer) :iterations iterations
+                                              :duration-ms duration-ms :model root-model
+                                              :doc-pages (try (when-let [c (:conn @db-info-atom)]
+                                                                (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
+                                                              (catch Exception _ 0))})
+                   (catch Exception e
+                     (trove/log! {:level :warn :data {:error (ex-message e)}
+                                  :msg "Failed to store trajectory (max iterations)"})))
+                 (let [result-map (cond-> {:answer nil
+                                           :raw-answer (:result answer answer)
+                                           :status status
+                                           :trace trace
+                                           :iterations iterations
+                                           :duration-ms duration-ms
+                                           :tokens @total-tokens-atom
+                                           :cost @total-cost-atom}
+                                    verify? (assoc :verified-claims (vec @claims-atom)))]
+                   (call-hook! hooks-atom :query :post {:query query-str
+                                                        :answer nil
+                                                        :trace trace
+                                                        :iterations iterations
+                                                        :duration-ms duration-ms
+                                                        :status status})
+                   result-map))
               ;; Normal completion - refine and finalize
-             (let [answer-value (:result answer answer)
-                   refine? (= confidence :low)
+               (let [answer-value (:result answer answer)
+                     refine? (= confidence :low)
                      ;; Refinement path: stringify for LLM round-trip.
                     ;; No-refine path: keep the native Clojure value from FINAL.
-                   {final-answer :answer
-                    eval-scores  :eval-scores
-                    refinement-count :refinement-count}
-                   (if refine?
-                     (let [answer-as-str (rlm-core/answer-str answer)
-                           conn (:conn db-info)
-                           stored-docs (when conn
-                                         (let [docs (d/q '[:find [(pull ?e [*]) ...]
-                                                           :where [?e :document/id _]]
-                                                         (d/db conn))]
-                                           (when (seq docs)
-                                             (mapv (fn [doc]
-                                                     (let [doc-id (or (:document/id doc) (:document/name doc))
-                                                           nodes (d/q '[:find [(pull ?e [:page.node/page-id :page.node/content]) ...]
-                                                                        :in $ ?doc-id
-                                                                        :where [?e :page.node/document-id ?doc-id]]
-                                                                      (d/db conn) doc-id)]
-                                                       {:id doc-id
-                                                        :pages (mapv (fn [pn]
-                                                                       {:page (or (:page.node/page-id pn) "0")
-                                                                        :text (or (:page.node/content pn) "")})
-                                                                     nodes)}))
-                                                   docs))))
+                     {final-answer :answer
+                      eval-scores  :eval-scores
+                      refinement-count :refinement-count}
+                     (if refine?
+                       (let [answer-as-str (rlm-core/answer-str answer)
+                             conn (:conn db-info)
+                             stored-docs (when conn
+                                           (let [docs (d/q '[:find [(pull ?e [*]) ...]
+                                                             :where [?e :document/id _]]
+                                                           (d/db conn))]
+                                             (when (seq docs)
+                                               (mapv (fn [doc]
+                                                       (let [doc-id (or (:document/id doc) (:document/name doc))
+                                                             nodes (d/q '[:find [(pull ?e [:page.node/page-id :page.node/content]) ...]
+                                                                          :in $ ?doc-id
+                                                                          :where [?e :page.node/document-id ?doc-id]]
+                                                                        (d/db conn) doc-id)]
+                                                         {:id doc-id
+                                                          :pages (mapv (fn [pn]
+                                                                         {:page (or (:page.node/page-id pn) "0")
+                                                                          :text (or (:page.node/content pn) "")})
+                                                                       nodes)}))
+                                                     docs))))
                             ;; Build refine config from a DIFFERENT model than root (cross-verification).
                             ;; If only one model available, falls back to same model (better than nothing).
-                           [refine-provider refine-model-map]
-                           (or (llm/select-provider rlm-router
-                                                    {:prefer :intelligence :capabilities #{:chat}
-                                                     :exclude-model root-model})
-                               (llm/select-provider rlm-router
-                                                    {:prefer :intelligence :capabilities #{:chat}}))
-                           refine-config (when refine-provider
-                                           {:api-key (:api-key refine-provider)
-                                            :base-url (:base-url refine-provider)
-                                            :default-model (:name refine-model-map)})
-                           refine-model (or (:name refine-model-map) root-model)
-                           refine-opts (cond-> {:spec spec
-                                                :messages [(llm/system (str "You are verifying and refining an answer to a specific query. "
-                                                                            "Check the answer for accuracy, completeness, and correctness."))
-                                                           (llm/user (str "<query>\n" query-str "\n</query>\n\n"
-                                                                          "<answer>\n" answer-as-str "\n</answer>"))]
-                                                :config refine-config :model refine-model
-                                                :iterations max-refinements :threshold threshold}
-                                         (seq stored-docs) (assoc :documents stored-docs))
-                           raw-refine (llm/refine! refine-opts)
+                             [refine-provider refine-model-map]
+                             (or (llm/select-provider rlm-router
+                                                      {:prefer :intelligence :capabilities #{:chat}
+                                                       :exclude-model root-model})
+                                 (llm/select-provider rlm-router
+                                                      {:prefer :intelligence :capabilities #{:chat}}))
+                             refine-config (when refine-provider
+                                             {:api-key (:api-key refine-provider)
+                                              :base-url (:base-url refine-provider)
+                                              :default-model (:name refine-model-map)})
+                             refine-model (or (:name refine-model-map) root-model)
+                             refine-opts (cond-> {:spec spec
+                                                  :messages [(llm/system (str "You are verifying and refining an answer to a specific query. "
+                                                                              "Check the answer for accuracy, completeness, and correctness."))
+                                                             (llm/user (str "<query>\n" query-str "\n</query>\n\n"
+                                                                            "<answer>\n" answer-as-str "\n</answer>"))]
+                                                  :config refine-config :model refine-model
+                                                  :iterations max-refinements :threshold threshold}
+                                           (seq stored-docs) (assoc :documents stored-docs))
+                             raw-refine (llm/refine! refine-opts)
                             ;; Estimate refinement cost from iterations × ask! calls
                             ;; Each refine iteration = ~3 ask! calls (decompose, verify, eval)
                             ;; Plus 1 initial ask! and 1 final eval
-                           _ (let [refine-iters (or (:iterations-count raw-refine) 0)
+                             _ (let [refine-iters (or (:iterations-count raw-refine) 0)
                                     ;; Approximate: (2 + 3 * iters) calls, each ~= initial messages size
-                                   estimated-calls (long (+ 2 (* 3 refine-iters)))
-                                   msg-tokens (long (tokens/count-messages root-model (:messages refine-opts)))
-                                   output-estimate (long (* 500 estimated-calls)) ;; ~500 output tokens per call
-                                   input-estimate (long (* msg-tokens estimated-calls))
-                                   refine-cost (tokens/estimate-cost root-model input-estimate output-estimate)]
-                               (merge-cost! {:input input-estimate :output output-estimate
-                                             :reasoning 0 :cached 0
-                                             :total (+ input-estimate output-estimate)}
-                                            refine-cost))
-                           refined-str (:result raw-refine)
+                                     estimated-calls (long (+ 2 (* 3 refine-iters)))
+                                     msg-tokens (long (tokens/count-messages root-model (:messages refine-opts)))
+                                     output-estimate (long (* 500 estimated-calls)) ;; ~500 output tokens per call
+                                     input-estimate (long (* msg-tokens estimated-calls))
+                                     refine-cost (tokens/estimate-cost root-model input-estimate output-estimate)]
+                                 (merge-cost! {:input input-estimate :output output-estimate
+                                               :reasoning 0 :cached 0
+                                               :total (+ input-estimate output-estimate)}
+                                              refine-cost))
+                             refined-str (:result raw-refine)
                            ;; If refinement didn't change the answer (converged or identical text),
                            ;; keep the original Clojure value from FINAL — no re-parse needed.
-                           answer-unchanged? (or (:converged? raw-refine)
-                                                 (= (str refined-str) answer-as-str))
-                           parsed (if answer-unchanged?
-                                    answer-value
+                             answer-unchanged? (or (:converged? raw-refine)
+                                                   (= (str refined-str) answer-as-str))
+                             parsed (if answer-unchanged?
+                                      answer-value
                                     ;; Refinement modified the answer — parse the new text through spec.
-                                    (if (and spec (string? refined-str))
-                                      (try
-                                        (spec/str->data-with-spec refined-str spec)
-                                        (catch Exception _
-                                          (:result (llm/ask! {:spec spec
-                                                              :messages [(llm/system "Extract structured data.")
-                                                                         (llm/user (str "From:\n" refined-str))]
-                                                              :router rlm-router
-                                                              :prefer :cost :capabilities #{:chat}}))))
-                                      refined-str))]
-                       {:answer parsed
-                        :eval-scores (:final-score raw-refine)
-                        :refinement-count (:iterations-count raw-refine)})
+                                      (if (and spec (string? refined-str))
+                                        (try
+                                          (spec/str->data-with-spec refined-str spec)
+                                          (catch Exception _
+                                            (:result (llm/ask! {:spec spec
+                                                                :messages [(llm/system "Extract structured data.")
+                                                                           (llm/user (str "From:\n" refined-str))]
+                                                                :router rlm-router
+                                                                :prefer :cost :capabilities #{:chat}}))))
+                                        refined-str))]
+                         {:answer parsed
+                          :eval-scores (:final-score raw-refine)
+                          :refinement-count (:iterations-count raw-refine)})
                      ;; No refinement — value is Clojure from FINAL.
                      ;; When spec is provided, coerce through SAP for type correctness
                      ;; (e.g., string "pass" → keyword :pass for :spec.type/keyword fields).
-                     {:answer (if spec
-                                (try (spec/coerce-data-with-spec answer-value spec)
-                                     (catch Exception _ answer-value))
-                                answer-value)
-                      :eval-scores nil
-                      :refinement-count 0})
-                   duration-ms (util/elapsed-since start-time)
-                   history-tokens (rlm-db/count-history-tokens @db-info-atom)]
-               (when (and verify? (seq @claims-atom))
-                 (let [db-info @db-info-atom
-                       conn (:conn db-info)
-                       query-id (util/uuid)]
-                   (doseq [claim @claims-atom]
-                     (try
-                       (d/transact! conn [(merge claim {:claim/id (util/uuid)
-                                                        :claim/query-id query-id
-                                                        :claim/verified? (boolean (get claim :claim/verified? true))})])
-                       (catch Exception e
-                         (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
+                       {:answer (if spec
+                                  (try (spec/coerce-data-with-spec answer-value spec)
+                                       (catch Exception _ answer-value))
+                                  answer-value)
+                        :eval-scores nil
+                        :refinement-count 0})
+                     duration-ms (util/elapsed-since start-time)
+                     history-tokens (rlm-db/count-history-tokens @db-info-atom)]
+                 (when (and verify? (seq @claims-atom))
+                   (let [db-info @db-info-atom
+                         conn (:conn db-info)
+                         query-id (util/uuid)]
+                     (doseq [claim @claims-atom]
+                       (try
+                         (d/transact! conn [(merge claim {:claim/id (util/uuid)
+                                                          :claim/query-id query-id
+                                                          :claim/verified? (boolean (get claim :claim/verified? true))})])
+                         (catch Exception e
+                           (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
                  ;; Final answer is already stored as structured assistant message in iteration-loop
                  ;; (with :thinking and linked :execution/* entities)
                  ;; Auto-vote via LLM: evaluate which learnings actually helped
-               (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :success
-                                              (rlm-db/str-truncate (pr-str final-answer) 300))
-               (when (seq learn-items)
-                 (let [model-scope (str "model:" root-model)
-                       inferred-scope (when (seq doc-names)
-                                        (let [exts (distinct (filter #(str/starts-with? % ".") doc-names))]
-                                          (when (= 1 (count exts))
-                                            (str "*" (first exts)))))]
-                   (doseq [{:keys [insight tags]} learn-items]
-                     (when (and insight (not (str/blank? insight)))
-                       (when (seq tags)
-                         (doseq [tag-name tags]
-                           (rlm-db/db-upsert-tag! db-info tag-name nil)))
-                       (rlm-db/db-store-learning! db-info
-                                                  {:learning/insight insight
-                                                   :learning/context (str "Query: " (rlm-db/str-truncate query-str 200))
-                                                   :learning/tags (vec tags)
-                                                   :learning/scope (or inferred-scope model-scope)})))))
-               (rlm-core/rlm-debug! {:iterations iterations :duration-ms duration-ms
-                                     :refinement-count refinement-count
-                                     :confidence confidence
-                                     :learn-count (count learn-items)
-                                     :auto-voted (count active-learnings)
-                                     :answer-preview (rlm-db/str-truncate (pr-str final-answer) 200)} "RLM query-env! finished (success)")
-               (try
-                 (rlm-db/store-trajectory! @db-info-atom
-                                           {:env-id env-id :query query-str :status :success
-                                            :answer final-answer :iterations iterations
-                                            :duration-ms duration-ms :model root-model
-                                            :eval-score eval-scores
-                                            :doc-pages (try (when-let [c (:conn @db-info-atom)]
-                                                              (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
-                                                            (catch Exception _ 0))})
-                 (catch Exception e
-                   (trove/log! {:level :warn :data {:error (ex-message e)}
-                                :msg "Failed to store trajectory (success)"})))
-               (cond-> {:answer final-answer
-                        :raw-answer answer-value
-                        :eval-scores eval-scores
-                        :refinement-count refinement-count
-                        :trace trace
-                        :iterations iterations
-                        :duration-ms duration-ms
-                        :history-tokens history-tokens
-                        :tokens @total-tokens-atom
-                        :cost @total-cost-atom}
-                 (some? confidence) (assoc :confidence confidence)
-                 (seq learn-items) (assoc :learn learn-items)
-                 verify? (assoc :verified-claims (vec @claims-atom)))))))))))
+                 (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :success
+                                                (rlm-db/str-truncate (pr-str final-answer) 300))
+                 (when (seq learn-items)
+                   (let [model-scope (str "model:" root-model)
+                         inferred-scope (when (seq doc-names)
+                                          (let [exts (distinct (filter #(str/starts-with? % ".") doc-names))]
+                                            (when (= 1 (count exts))
+                                              (str "*" (first exts)))))]
+                     (doseq [{:keys [insight tags]} learn-items]
+                       (when (and insight (not (str/blank? insight)))
+                         (when (seq tags)
+                           (doseq [tag-name tags]
+                             (rlm-db/db-upsert-tag! db-info tag-name nil)))
+                         (rlm-db/db-store-learning! db-info
+                                                    {:learning/insight insight
+                                                     :learning/context (str "Query: " (rlm-db/str-truncate query-str 200))
+                                                     :learning/tags (vec tags)
+                                                     :learning/scope (or inferred-scope model-scope)})))))
+                 (rlm-core/rlm-debug! {:iterations iterations :duration-ms duration-ms
+                                       :refinement-count refinement-count
+                                       :confidence confidence
+                                       :learn-count (count learn-items)
+                                       :auto-voted (count active-learnings)
+                                       :answer-preview (rlm-db/str-truncate (pr-str final-answer) 200)} "RLM query-env! finished (success)")
+                 (try
+                   (rlm-db/store-trajectory! @db-info-atom
+                                             {:env-id env-id :query query-str :status :success
+                                              :answer final-answer :iterations iterations
+                                              :duration-ms duration-ms :model root-model
+                                              :eval-score eval-scores
+                                              :doc-pages (try (when-let [c (:conn @db-info-atom)]
+                                                                (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
+                                                              (catch Exception _ 0))})
+                   (catch Exception e
+                     (trove/log! {:level :warn :data {:error (ex-message e)}
+                                  :msg "Failed to store trajectory (success)"})))
+                 (let [result-map (cond-> {:answer final-answer
+                                           :raw-answer answer-value
+                                           :eval-scores eval-scores
+                                           :refinement-count refinement-count
+                                           :trace trace
+                                           :iterations iterations
+                                           :duration-ms duration-ms
+                                           :history-tokens history-tokens
+                                           :tokens @total-tokens-atom
+                                           :cost @total-cost-atom}
+                                    (some? confidence) (assoc :confidence confidence)
+                                    (seq learn-items) (assoc :learn learn-items)
+                                    verify? (assoc :verified-claims (vec @claims-atom)))]
+                   (call-hook! hooks-atom :query :post {:query query-str
+                                                        :answer final-answer
+                                                        :trace trace
+                                                        :iterations iterations
+                                                        :duration-ms duration-ms
+                                                        :status :success})
+                   result-map))))
+           (finally
+             (when hooks-atom
+               (reset! hooks-atom (or original-hooks {}))))))))))
 
 (defn list-trajectories
   "Lists trajectory records from an RLM environment.

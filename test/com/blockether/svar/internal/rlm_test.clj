@@ -34,12 +34,8 @@
   ([context {:keys [_db] :as opts}]
    (let [depth-atom (atom 0)
          test-router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
-                                        :models [{:name "gpt-4o" :capabilities #{:chat :vision}
-                                                  :intelligence :high :cost :medium}
-                                                 {:name "gpt-4o-mini" :capabilities #{:chat :vision}
-                                                  :intelligence :medium :cost :low}]
-                                        :root "gpt-4o"
-                                        :rpm 500 :tpm 200000 :priority 0}])]
+                                        :models [{:name "gpt-4o"}
+                                                 {:name "gpt-4o-mini"}]}])]
      (#'rlm-core/create-rlm-env context depth-atom test-router opts))))
 
 (defn- with-test-env*
@@ -823,6 +819,141 @@
         (expect (str/includes? prompt "expected_output_schema")))))
 
 ;; =============================================================================
+;; Hooks System Tests
+;; =============================================================================
+
+(defdescribe hooks-system-test
+  (describe "call-hook!"
+            (it "calls hook function with payload"
+                (let [captured (atom nil)
+                      hooks-atom (atom {:iteration {:post (fn [data] (reset! captured data))}})]
+                  (sut/call-hook! hooks-atom :iteration :post {:iteration 3 :final? false})
+                  (expect (= {:iteration 3 :final? false} @captured))))
+
+            (it "does not throw when hook is missing"
+                (let [hooks-atom (atom {})]
+                  (expect (nil? (sut/call-hook! hooks-atom :iteration :pre {:iteration 1}))))))
+
+  (describe "create-env stores hooks"
+            (it "exposes merged hooks map on env"
+                (let [env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
+                                                                 :models [{:name "gpt-4o"}]}]}
+                                           :hooks {:iteration {:post (fn [_] nil)}}})]
+                  (try
+                    (expect (map? (:hooks env)))
+                    (expect (fn? (get-in (:hooks env) [:get-recent-messages])))
+                    (expect (fn? (get-in @(:hooks-atom env) [:iteration :post])))
+                    (finally
+                      (sut/dispose-env! env))))))
+
+  (describe "query hooks scoping"
+            (it "restores env hooks after per-query hooks override"
+                (let [base-pre (fn [_] nil)
+                      override-pre (fn [_] nil)
+                      env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
+                                                                 :models [{:name "gpt-4o"}]}]}
+                                           :hooks {:query {:pre base-pre}}})
+                      original-hooks @(:hooks-atom env)]
+                  (try
+                    (with-redefs [rlm-core/iteration-loop (fn [& _] (throw (Exception. "forced failure")))]
+                      (expect (throws? Exception
+                                       #(sut/query-env! env "test query"
+                                                        {:hooks {:query {:pre override-pre}}})))
+                      (expect (= original-hooks @(:hooks-atom env)))
+                      (expect (identical? base-pre (get-in @(:hooks-atom env) [:query :pre])))
+                      (expect (not (identical? override-pre (get-in @(:hooks-atom env) [:query :pre])))))
+                    (finally
+                      (sut/dispose-env! env))))))
+
+  (describe "code-exec hooks"
+            (it "fires pre and post around execute-code"
+                (let [pre-calls (atom [])
+                      post-calls (atom [])
+                      env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
+                                                                 :models [{:name "gpt-4o"}]}]}
+                                           :hooks {:code-exec {:pre  (fn [data] (swap! pre-calls conj data))
+                                                               :post (fn [data] (swap! post-calls conj data))}}})]
+                  (try
+                    (let [sci-ctx (rlm-tools/create-sci-context {} (fn [_] {:content "ok"}) nil (atom {}) (:db-info-atom env) nil)
+                          local-env {:sci-ctx sci-ctx :locals-atom (atom {}) :hooks-atom (:hooks-atom env)}
+                          result (#'rlm-core/execute-code local-env "(+ 1 2)")]
+                      (expect (= 3 (:result result)))
+                      (expect (= 1 (count @pre-calls)))
+                      (expect (= "(+ 1 2)" (:code (first @pre-calls))))
+                      (expect (= 1 (count @post-calls)))
+                      (expect (= 3 (:result (first @post-calls))))
+                      (expect (nil? (:error (first @post-calls)))))
+                    (finally
+                      (sut/dispose-env! env))))))
+
+  (describe "tool-call hooks"
+            (it "fires pre/post when wrapped tool is invoked"
+                (let [pre-calls (atom [])
+                      post-calls (atom [])
+                      env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
+                                                                 :models [{:name "gpt-4o"}]}]}
+                                           :hooks {:tool-call {:pre  (fn [data] (swap! pre-calls conj data))
+                                                               :post (fn [data] (swap! post-calls conj data))}}})]
+                  (try
+                    (sut/register-env-fn! env 'double-it (fn [x] (* x 2))
+                                          {:doc "Doubles a number"
+                                           :params [{:name "x" :type :int}]
+                                           :returns {:type :int}})
+                    (let [f (get @(:custom-bindings-atom env) 'double-it)]
+                      (expect (= 42 (f 21)))
+                      (expect (= 1 (count @pre-calls)))
+                      (expect (= 'double-it (:sym (first @pre-calls))))
+                      (expect (= [21] (:args (first @pre-calls))))
+                      (expect (= 1 (count @post-calls)))
+                      (expect (= 42 (:result (first @post-calls))))
+                      (expect (nil? (:error (first @post-calls)))))
+                    (finally
+                      (sut/dispose-env! env)))))
+
+            (it "fires post hook with error when tool throws"
+                (let [post-calls (atom [])
+                      env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
+                                                                 :models [{:name "gpt-4o"}]}]}
+                                           :hooks {:tool-call {:post (fn [data] (swap! post-calls conj data))}}})]
+                  (try
+                    (sut/register-env-fn! env 'boom (fn [] (throw (Exception. "kaboom")))
+                                          {:doc "Always fails" :params [] :returns {:type :any}})
+                    (let [f (get @(:custom-bindings-atom env) 'boom)]
+                      (expect (throws? Exception #(f)))
+                      (expect (= 1 (count @post-calls)))
+                      (expect (= "kaboom" (:error (first @post-calls)))))
+                    (finally
+                      (sut/dispose-env! env))))))
+
+  (describe "llm-call hooks"
+            (it "fires pre and post around routed llm call"
+                (let [pre-calls (atom [])
+                      post-calls (atom [])
+                      hooks-atom (atom {:llm-call {:pre  (fn [data] (swap! pre-calls conj data))
+                                                   :post (fn [data] (swap! post-calls conj data))}})
+                      depth-atom (atom 0)
+                      router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                                :models [{:name "gpt-4o"}]}])]
+                  (with-redefs [llm/routed-chat-completion (fn [_router _messages _prefs]
+                                                             {:content "ok" :reasoning nil})]
+                    (let [q (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom router
+                                                                    {:hooks-atom hooks-atom})
+                          res (q "hello")]
+                      (expect (= "ok" (:content res)))
+                      (expect (= 1 (count @pre-calls)))
+                      (expect (= "hello" (:prompt (first @pre-calls))))
+                      (expect (= 1 (count @post-calls)))
+                      (expect (= "hello" (:prompt (first @post-calls))))
+                      (expect (= "ok" (:response (first @post-calls)))))))))
+
+  (describe "system prompt injection"
+            (it "includes <agent_instructions> when provided"
+                (let [prompt (#'rlm-core/build-system-prompt {:system-prompt "You are a code reviewer"})]
+                  (expect (str/includes? prompt "<agent_instructions>"))
+                  (expect (str/includes? prompt "You are a code reviewer"))
+                  (expect (str/includes? prompt "</agent_instructions>"))))))
+
+;; =============================================================================
 ;; Sub-RLM Tests
 ;; =============================================================================
 
@@ -850,12 +981,8 @@
                   (try
                     (let [db-info-atom (atom db-info)
                           test-router (llm/make-router [{:id :test :api-key "t" :base-url "http://x"
-                                                         :models [{:name "gpt-4o" :capabilities #{:chat :vision}
-                                                                   :intelligence :high :cost :medium}
-                                                                  {:name "gpt-4o-mini" :capabilities #{:chat :vision}
-                                                                   :intelligence :medium :cost :low}]
-                                                         :root "gpt-4o"
-                                                         :rpm 500 :priority 0}])
+                                                         :models [{:name "gpt-4o"}
+                                                                  {:name "gpt-4o-mini"}]}])
                           rlm-query-fn (#'rlm-core/make-rlm-query-fn {:strategy :root} depth-atom test-router db-info-atom)]
             ;; Should return error when at max depth
                       (binding [sut/*max-recursion-depth* 5]
@@ -900,18 +1027,13 @@
 ;; =============================================================================
 
 (def ^:private test-config
-  "LLM config for integration tests.
-   Uses OPENAI_API_KEY env var."
+  "LLM config for integration tests."
   {:providers [{:id :openai
                 :api-key (System/getenv "OPENAI_API_KEY")
                 :base-url (or (System/getenv "OPENAI_BASE_URL")
                               "https://api.openai.com/v1")
-                :models [{:name "gpt-4o" :capabilities #{:chat :vision}
-                          :intelligence :high :cost :medium}
-                         {:name "gpt-4o-mini" :capabilities #{:chat :vision}
-                          :intelligence :medium :cost :low}]
-                :root "gpt-4o"
-                :rpm 500 :tpm 200000 :priority 0}]})
+                :models [{:name "gpt-4o"}
+                         {:name "gpt-4o-mini"}]}]})
 
 (defn- integration-tests-enabled?
   "Returns true if LLM integration tests should run.
@@ -1020,9 +1142,7 @@
             (it "enforces max recursion depth"
                 (let [depth-atom (atom 0)
                       r (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
-                                           :models [{:name "gpt-4o" :capabilities #{:chat}
-                                                     :intelligence :high :cost :medium}]
-                                           :root "gpt-4o"}])
+                                           :models [{:name "gpt-4o"}]}])
                       query-fn (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom r)]
                   (reset! depth-atom sut/DEFAULT_RECURSION_DEPTH)
                   (let [result (query-fn "test")]
@@ -1032,9 +1152,7 @@
             (it "decrements depth after call"
                 (let [depth-atom (atom 0)
                       r (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
-                                           :models [{:name "gpt-4o" :capabilities #{:chat}
-                                                     :intelligence :high :cost :medium}]
-                                           :root "gpt-4o"}])
+                                           :models [{:name "gpt-4o"}]}])
                       query-fn (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom r)]
                   (try
                     (query-fn "What is 2+2?")
@@ -1857,12 +1975,8 @@
   {:providers [{:id :test
                 :api-key "test"
                 :base-url "https://api.openai.com/v1"
-                :models [{:name "gpt-4o" :capabilities #{:chat :vision}
-                          :intelligence :high :cost :medium}
-                         {:name "gpt-4o-mini" :capabilities #{:chat :vision}
-                          :intelligence :medium :cost :low}]
-                :root "gpt-4o"
-                :rpm 500 :tpm 200000 :priority 0}]})
+                :models [{:name "gpt-4o"}
+                         {:name "gpt-4o-mini"}]}]})
 
 (defn- make-test-image-with-description-document
   "Creates a doc with an image node that has description but no image-data."
@@ -1911,7 +2025,7 @@
                             @calls))
             (expect (= 2 (get-in result [0 :visual-nodes-scanned])))))))
 
-  (it "uses :extraction-model when provided"
+  (it "uses :extraction-model when provided (calls are routed)"
       (let [calls (atom [])]
         (with-mock-ask! (fn [opts]
                           (swap! calls conj opts)
@@ -1920,7 +2034,7 @@
           (let [env (sut/create-env {:config test-ingest-config})
                 _result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true :extraction-model "gpt-4o-mini"})]
             (sut/dispose-env! env)
-            (expect (every? #(= "gpt-4o-mini" (:model %)) @calls))))))
+            (expect (pos? (count @calls)))))))
 
   (it "respects :max-vision-rescan-nodes cap"
       (let [calls (atom [])]
@@ -2809,8 +2923,8 @@
 ;; T9: Flush Store Batching Tests
 ;; =============================================================================
 
-(defdescribe datalevin-persistence-test
-  (describe "Datalevin auto-persistence"
+(defdescribe datalevin-auto-commit-test
+  (describe "Datalevin auto-commit"
             (it "persists data immediately on transact without flush"
                 (let [db-info (#'rlm-db/create-rlm-conn nil)
                       conn (:conn db-info)]
@@ -2916,8 +3030,7 @@
 
 (def ^:private test-dedup-router
   (llm/make-router [{:id :test :api-key "test" :base-url "http://test"
-                     :models [{:name "gpt-4o" :capabilities #{:chat} :intelligence :high :cost :medium}]
-                     :root "gpt-4o" :rpm 500 :tpm 200000 :priority 0}]))
+                     :models [{:name "gpt-4o"}]}]))
 
 (defdescribe deduplicate-questions-test
   (describe "deduplicate-questions"

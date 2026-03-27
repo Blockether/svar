@@ -11,6 +11,7 @@
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.config :as config]
+   [com.blockether.svar.internal.providers :as providers]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.tokens :as tokens]
    [com.blockether.svar.internal.util :as util]
@@ -366,21 +367,32 @@
 
 (defn- resolve-opts
   "Extracts effective config values from opts, falling back to config defaults.
-   If no :config provided, creates one from env vars.
-   Direct :api-key and :base-url params override config values (used by router)."
-  [{:keys [config model timeout-ms check-context? output-reserve api-key base-url]}]
-  (let [config (or config (config/make-config))
-        {:keys [network tokens]} config]
+   When router already injected :api-key/:base-url/:model, skips config creation.
+   If :provider-id is present, uses provider-scoped pricing/context overlays."
+  [{:keys [config model timeout-ms check-context? output-reserve api-key base-url provider-id]}]
+  (let [config (if (and api-key base-url model)
+                 (or config {})
+                 (or config (config/make-config)))
+        {:keys [network tokens]} config
+        default-pricing (or (:pricing tokens) tokens/DEFAULT_MODEL_PRICING)
+        default-context-limits (or (:context-limits tokens) tokens/DEFAULT_CONTEXT_LIMITS)
+        pricing (if provider-id
+                  (assoc default-pricing model (providers/provider-model-pricing provider-id model))
+                  default-pricing)
+        context-limits (if provider-id
+                         (assoc default-context-limits model (providers/provider-model-context provider-id model))
+                         default-context-limits)]
     {:config config
      :model (or model (:model config))
-     :timeout-ms (or timeout-ms (:timeout-ms network))
-     :check-context? (if (some? check-context?) check-context? (:check-context? tokens))
+     :timeout-ms (or timeout-ms (:timeout-ms network) config/DEFAULT_TIMEOUT_MS)
+     :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
      :output-reserve (or output-reserve (:output-reserve tokens))
      :api-key (or api-key (:api-key config))
      :base-url (or base-url (:base-url config))
+     :provider-id provider-id
      :network network
-     :pricing (:pricing tokens)
-     :context-limits (:context-limits tokens)}))
+     :pricing pricing
+     :context-limits context-limits}))
 
 ;; =============================================================================
 ;; Provider Router (fallback, rate limiting, provider selection)
@@ -560,13 +572,34 @@
                              :prefs prefs :tried @tried}))))))))
 
 (defn make-router
-  "Creates a router from a seq of provider maps."
+  "Creates a router from a vector of provider maps.
+
+   Vector order = priority (first provider is highest priority).
+   First model in provider vector = root model.
+   Provider :base-url auto-resolved from providers/KNOWN_PROVIDERS for known IDs.
+   Model metadata auto-inferred from :name and merged with provider-scoped pricing/context.
+   Duplicate provider :id values are a hard error.
+
+   Example:
+     (make-router [{:id :blockether :api-key <key>
+                    :models [{:name <model-a>} {:name <model-b>}]}
+                   {:id :openai :api-key <key>
+                    :models [{:name <model-a>} {:name <model-b>}]}])"
   ([providers] (make-router providers {}))
   ([providers opts]
-   (let [merged (merge router-default-opts opts)]
-     {:providers              (vec providers)
-      :state                  (atom (zipmap (map :id providers)
-                                            (repeat {:requests [] :tokens [] :cooldown-until nil})))
+   (when-not (sequential? providers)
+     (throw (ex-info "make-router expects a vector of provider maps" {:type :svar/invalid-providers :got (type providers)})))
+   (when (empty? providers)
+     (throw (ex-info "make-router requires at least one provider" {:type :svar/no-providers})))
+   (let [normalized (vec (map-indexed providers/normalize-provider providers))
+         ids (map :id normalized)
+         dupes (keys (filter (fn [[_ n]] (> n 1)) (frequencies ids)))
+         merged (merge router-default-opts opts)]
+     (when (seq dupes)
+       (throw (ex-info (str "Duplicate provider IDs: " (str/join ", " (map name dupes)))
+                       {:type :svar/duplicate-provider-ids :ids dupes})))
+     {:providers              normalized
+      :state                  (atom (zipmap ids (repeat {:requests [] :tokens [] :cooldown-until nil})))
       :clock                  (get opts :clock #(System/currentTimeMillis))
       :window-ms              (:window-ms merged)
       :cooldown-ms            (:cooldown-ms merged)
@@ -574,8 +607,9 @@
       :transient-status-codes (:transient-status-codes merged)})))
 
 (defn config->router
-  "Creates a router from a config map. Handles both full provider configs
-   and simple api-key/base-url configs. Falls back to env vars when nil."
+  "Creates a router from a config map.
+   - Config with :providers -> make-router
+   - Simple config or nil -> wraps as single-provider router from env vars"
   ([] (config->router nil))
   ([config]
    (let [config (if (and config (seq (:providers config)))
@@ -589,15 +623,7 @@
          (make-router [{:id :default
                         :api-key (:api-key config)
                         :base-url (:base-url config)
-                        :priority 0
-                        :rpm 500
-                        :tpm 2000000
-                        :root model-name
-                        :models [{:name model-name
-                                  :cost :medium
-                                  :intelligence :high
-                                  :speed :medium
-                                  :capabilities #{:chat :vision}}]}]))))))
+                        :models [{:name model-name}]}]))))))
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback."
@@ -645,12 +671,15 @@
                 (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                 :else {:strategy :root})]
-    (with-provider-fallback router prefs
+    (with-provider-fallback
+      router prefs
       (fn [provider model-map]
-        (ask!* (assoc opts
-                      :model (:name model-map)
-                      :api-key (:api-key provider)
-                      :base-url (:base-url provider)))))))
+        (ask!*
+         (assoc opts
+                :model (:name model-map)
+                :api-key (:api-key provider)
+                :base-url (:base-url provider)
+                :provider-id (:id provider)))))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
@@ -778,9 +807,15 @@
         prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
-    (with-provider-fallback router prefs
+    (with-provider-fallback
+      router prefs
       (fn [provider model-map]
-        (abstract!* (assoc opts :model (:name model-map) :api-key (:api-key provider) :base-url (:base-url provider)))))))
+        (abstract!*
+         (assoc opts
+                :model (:name model-map)
+                :api-key (:api-key provider)
+                :base-url (:base-url provider)
+                :provider-id (:id provider)))))))
 
 (def ^:private DEFAULT_ITERATIONS
   "Default number of Chain of Density iterations."
@@ -1230,9 +1265,15 @@
         prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
-    (with-provider-fallback router prefs
+    (with-provider-fallback
+      router prefs
       (fn [provider model-map]
-        (eval!* (assoc opts :model (:name model-map) :api-key (:api-key provider) :base-url (:base-url provider)))))))
+        (eval!*
+         (assoc opts
+                :model (:name model-map)
+                :api-key (:api-key provider)
+                :base-url (:base-url provider)
+                :provider-id (:id provider)))))))
 
 (defn eval!*
   "Low-level eval — calls ask!* directly without routing. Use eval! instead."
@@ -2098,9 +2139,15 @@
         prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
-    (with-provider-fallback router prefs
+    (with-provider-fallback
+      router prefs
       (fn [provider model-map]
-        (sample!* (assoc opts :model (:name model-map) :api-key (:api-key provider) :base-url (:base-url provider)))))))
+        (sample!*
+         (assoc opts
+                :model (:name model-map)
+                :api-key (:api-key provider)
+                :base-url (:base-url provider)
+                :provider-id (:id provider)))))))
 
 (defn sample!*
   "Low-level sample — generates test data without routing. Use sample! instead."
@@ -2204,9 +2251,12 @@
                 (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                 :else {:strategy :root})]
-    (with-provider-fallback router prefs
+    (with-provider-fallback
+      router prefs
       (fn [provider model-map]
-        (refine!* (assoc opts
-                         :model (:name model-map)
-                         :api-key (:api-key provider)
-                         :base-url (:base-url provider)))))))
+        (refine!*
+         (assoc opts
+                :model (:name model-map)
+                :api-key (:api-key provider)
+                :base-url (:base-url provider)
+                :provider-id (:id provider)))))))

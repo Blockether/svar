@@ -168,8 +168,10 @@
 ;; Code Execution
 ;; =============================================================================
 
-(defn execute-code [{:keys [sci-ctx locals-atom]} code]
+(defn execute-code [{:keys [sci-ctx locals-atom hooks-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
+    (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
+      (call-hook hooks-atom :code-exec :pre {:code code}))
     (let [_ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
           start-time (System/currentTimeMillis)
           vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
@@ -201,7 +203,15 @@
                        :stdout-preview (when-not (str/blank? stdout) (str-truncate stdout 200))
                        :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))
                        :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
-          {:result result :stdout stdout :stderr stderr :error error :execution-time-ms execution-time :timeout? false})))))
+          (let [result-map {:result result :stdout stdout :stderr stderr :error error :execution-time-ms execution-time :timeout? false}]
+            (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
+              (call-hook hooks-atom :code-exec :post {:code code
+                                                      :result result
+                                                      :stdout stdout
+                                                      :stderr stderr
+                                                      :error error
+                                                      :time-ms execution-time}))
+            result-map))))))
 
 ;; =============================================================================
 ;; FINAL Detection
@@ -430,9 +440,13 @@
    When :has-reasoning? is true, uses ITERATION_SPEC_CODE_ONLY (no thinking field)
    because the provider emits native reasoning tokens — no need to duplicate in JSON."
   [{:keys [output-spec history-enabled? custom-docs has-documents? learnings neighbor-learnings tag-definitions
-           has-reasoning?]}]
+           has-reasoning? system-prompt]}]
   (str "<rlm_environment>
 <role>You are an expert Clojure programmer analyzing data in a sandboxed environment.</role>
+"
+       (when system-prompt
+         (str "\n<agent_instructions>\n" system-prompt "\n</agent_instructions>\n"))
+       "
 
 <available_tools>
   <tool name=\"context\">The data context - access as 'context' variable</tool>
@@ -858,8 +872,8 @@
 
 (defn iteration-loop [rlm-env query
                       {:keys [output-spec learnings neighbor-learnings tag-definitions
-                              max-context-tokens custom-docs
-                              pre-fetched-context on-iteration
+                              max-context-tokens custom-docs system-prompt
+                              pre-fetched-context hooks-atom
                               max-iterations max-consecutive-errors max-restarts]}]
   (let [max-iterations (or max-iterations 50)
         max-consecutive-errors (or max-consecutive-errors 5)
@@ -885,7 +899,8 @@
                                             :learnings learnings
                                             :neighbor-learnings neighbor-learnings
                                             :tag-definitions tag-definitions
-                                            :has-reasoning? has-reasoning?})
+                                            :has-reasoning? has-reasoning?
+                                            :system-prompt system-prompt})
         context-data (:context rlm-env)
         context-str (pr-str context-data)
         context-preview (if (> (count context-str) 2000)
@@ -966,6 +981,8 @@
                   (merge {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration}
                          (finalize-cost))))
             (let [_ (rlm-debug! {:iteration iteration :msg-count (count messages)} "Iteration start")
+                  _ (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
+                      (call-hook hooks-atom :iteration :pre {:iteration iteration :query query}))
                   ;; Smart context management: use semantic selection when history enabled, else simple truncation
                   effective-messages (cond
                                        ;; Semantic context selection when history enabled + budget set + enough messages
@@ -999,8 +1016,8 @@
                                           "<error>LLM call failed: " (:message iter-err) "</error>\n"
                                           "The previous attempt failed. Adjust your approach or call (FINAL answer) with what you have.")
                       trace-entry {:iteration iteration :error iter-err :final? false}]
-                  (when on-iteration
-                    (try (on-iteration trace-entry) (catch Exception _)))
+                  (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
+                    (call-hook hooks-atom :iteration :post trace-entry))
                   (when history-enabled?
                     (store-message! db-info :user error-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
                   (recur (inc iteration)
@@ -1017,8 +1034,8 @@
                                    :executions executions
                                    :final? (boolean final-result)}]
                   ;; Notify caller of iteration progress
-                  (when on-iteration
-                    (try (on-iteration trace-entry) (catch Exception _)))
+                  (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
+                    (call-hook hooks-atom :iteration :post trace-entry))
                   ;; Store structured assistant message + executions
                   (when history-enabled?
                     (let [stored (store-message! db-info :assistant response
