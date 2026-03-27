@@ -91,13 +91,17 @@ All `query-env!` cost sources now tracked:
 
 ## MEDIUM — Should fix
 
-### 8. Auto-learn pipeline may be partially dead
+### ~~8. Auto-learn pipeline partially dead~~ — REDESIGNED
 
-`auto-vote-learnings!` is implemented and called. `auto-extract-learnings!`, `auto-define-tags!`, `auto-link-learnings!`, `auto-vote-links!` were added in this session to `rlm/core.clj` and wired into `rlm.clj` via `async/thread`. However, the split file architecture means the functions in `rlm/core.clj` shadow or complement those in the monolith `rlm.clj`. Needs verification that the full pipeline (extract -> define-tags -> link -> vote-links) actually fires end-to-end.
+**Status: REDESIGNED** (March 2026)
 
-The specs (`AUTOLEARN_SPEC`, `AUTOTAG_SPEC`, `AUTOLINK_SPEC`, `LINK_VOTE_SPEC`) exist in `rlm/schema.clj` but may not be exercised by tests.
+Based on research (Reflexion, ExpeL, Voyager, CoALA, ICLR 2026 MemAgents benchmark): "Retrieval matters 20x more than storage sophistication." Graph-based links replaced with flat learnings + tags + scopes + voting/decay.
 
-**Location**: `rlm.clj` lines 555-575 (async pipeline), `rlm/core.clj` auto-* functions.
+Current pipeline (2 steps, both implemented and wired):
+- `auto-vote-learnings!` ✓ — evaluates injected learnings, drives decay
+- `auto-extract-learnings!` ✓ — extracts 1-3 reusable insights with tags + scope
+
+Removed (no evidence of value): auto-define-tags!, auto-link-learnings!, auto-vote-links!, all learning-link schema/CRUD/neighborhood fetch.
 
 ---
 

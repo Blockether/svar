@@ -38,7 +38,6 @@
 
 (def get-recent-messages rlm-db/get-recent-messages)
 (def db-learning-stats rlm-db/db-learning-stats)
-(def db-get-neighbors rlm-db/db-get-neighbors)
 
 (def GENERATION_PERSONAS schema/GENERATION_PERSONAS)
 (def DEDUP_SPEC schema/DEDUP_SPEC)
@@ -369,10 +368,10 @@
    (query-env! env query-str {}))
   ([env query-str {:keys [context spec model max-iterations max-refinements threshold
                           max-context-tokens max-recursion-depth verify?
-                          system-prompt plan? debug? hooks]
+                          system-prompt plan? autolearn? debug? hooks]
                    :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
                         max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
-                        plan? false debug? false}}]
+                        plan? false autolearn? true debug? false}}]
    (when-not (:db-info-atom env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
    (when-not query-str
@@ -461,11 +460,7 @@
                                           by-model (rlm-db/db-get-learnings db-info model-ctx
                                                                             {:top-k 2 :track-usage? true :doc-names doc-names})]
                                       (vec (distinct (concat by-query by-model)))))
-               ;; Auto-fetch neighbors: 1-hop linked learnings for richer context
-                 seed-ids (set (keep :learning/id active-learnings))
-                 neighbor-learnings (when (and (:conn db-info) (seq seed-ids))
-                                      (db-get-neighbors db-info seed-ids 5))
-                ;; Auto-fetch all tag definitions for context injection
+                 ;; Auto-fetch all tag definitions for context injection
                  tag-definitions (when (:conn db-info)
                                    (rlm-db/db-list-tags db-info))
                ;; Optional planning phase — LLM outlines approach before code execution
@@ -481,7 +476,6 @@
                                                            {:max-iterations max-iterations
                                                             :output-spec spec
                                                             :learnings active-learnings
-                                                            :neighbor-learnings neighbor-learnings
                                                             :tag-definitions tag-definitions
                                                             :max-context-tokens max-context-tokens
                                                             :custom-docs (into (or custom-docs []) cite-docs)
@@ -652,6 +646,16 @@
                  (when-let [{:keys [tokens cost]} (rlm-core/auto-vote-learnings! db-info rlm-router active-learnings query-str :success
                                                                                  (rlm-db/str-truncate (pr-str final-answer) 300))]
                    (merge-cost! tokens cost))
+                  ;; Auto-extract new learnings from successful multi-iteration queries
+                 (when autolearn?
+                   (let [inferred-scope (when (seq doc-names)
+                                          (let [exts (distinct (filter #(str/starts-with? % ".") doc-names))]
+                                            (when (= 1 (count exts))
+                                              (str "*" (first exts)))))]
+                     (when-let [{:keys [tokens cost]} (rlm-core/auto-extract-learnings! db-info rlm-router query-str
+                                                                                        (rlm-db/str-truncate (pr-str final-answer) 300)
+                                                                                        iterations trace inferred-scope)]
+                       (merge-cost! tokens cost))))
                  (when (seq learn-items)
                    (let [model-scope (str "model:" root-model)
                          inferred-scope (when (seq doc-names)

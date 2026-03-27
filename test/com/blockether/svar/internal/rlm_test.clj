@@ -726,18 +726,22 @@
                              (expect (vector? (:result result)))
                              (expect (= "test-tag" (:name (first (:result result)))))))))
 
-  (it "list-learning-links is available in SCI"
-      (with-test-env* {} (fn [env]
-                           (let [result (#'rlm-core/execute-code env "(list-learning-links #uuid \"00000000-0000-0000-0000-000000000000\")")]
-                             (expect (nil? (:error result)))
-                             (expect (vector? (:result result)))))))
-
   (it "write ops (store-learning, vote-learning) are NOT available in SCI"
       (with-test-env* {} (fn [env]
                            (let [store-result (#'rlm-core/execute-code env "(store-learning \"test\")")
                                  vote-result (#'rlm-core/execute-code env "(vote-learning #uuid \"00000000-0000-0000-0000-000000000000\" :useful)")]
                              (expect (some? (:error store-result)))
                              (expect (some? (:error vote-result))))))))
+
+(defdescribe auto-extract-learnings-test
+  (it "does not extract for low-iteration queries"
+      (expect (nil? (#'rlm-core/auto-extract-learnings! {:conn :fake}
+                                                        :router
+                                                        "query"
+                                                        "answer"
+                                                        rlm-schema/AUTOLEARN_ITERATION_THRESHOLD
+                                                        []
+                                                        nil)))))
 
 ;; =============================================================================
 ;; Build System Prompt Tests
@@ -756,7 +760,6 @@
         (expect (str/includes? prompt "search-learnings"))
         (expect (str/includes? prompt "learning-stats"))
         (expect (str/includes? prompt "list-learning-tags"))
-        (expect (str/includes? prompt "list-learning-links"))
         (expect (str/includes? prompt "learn_via_final"))
         (expect (str/includes? prompt ":confidence"))
         (expect (str/includes? prompt ":learn"))))

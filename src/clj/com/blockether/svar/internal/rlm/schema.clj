@@ -258,15 +258,6 @@
    :learning-tag/definition   {:db/valueType :db.type/string :db/fulltext true}
    :learning-tag/created-at   {:db/valueType :db.type/instant}
 
-   ;; Learning Links (graph edges between learnings, with decay via voting)
-   :learning-link/id            {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
-   :learning-link/source-id     {:db/valueType :db.type/uuid :db/doc "Source learning UUID"}
-   :learning-link/target-id     {:db/valueType :db.type/uuid :db/doc "Target learning UUID"}
-   :learning-link/relationship  {:db/valueType :db.type/string :db/doc "e.g. extends, contradicts, prerequisite, related"}
-   :learning-link/useful-count  {:db/valueType :db.type/long :db/doc "Positive votes for this link"}
-   :learning-link/not-useful-count {:db/valueType :db.type/long :db/doc "Negative votes for this link"}
-   :learning-link/created-at    {:db/valueType :db.type/instant}
-
    ;; Learnings
    :learning/id               {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
    :learning/insight          {:db/valueType :db.type/string :db/fulltext true}
@@ -389,92 +380,6 @@
   "Minimum iterations before auto-extracting learnings. Queries with fewer
    iterations are considered trivial — no strategy worth capturing."
   3)
-
-;; --- Auto-define tags spec ---
-
-(def AUTOTAG_ENTRY_SPEC
-  "Spec for a single tag definition."
-  (spec/spec
-   :autotag-entry
-   {::spec/key-ns "tag"}
-   (spec/field {::spec/name :name
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Tag name (lowercase, as-is from the learning)"})
-   (spec/field {::spec/name :definition
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "1-sentence definition of what this tag category means"})))
-
-(def AUTOTAG_SPEC
-  "Spec for auto-defining tag meanings after learning extraction."
-  (spec/spec
-   {:refs [AUTOTAG_ENTRY_SPEC]}
-   (spec/field {::spec/name :definitions
-                ::spec/type :spec.type/ref
-                ::spec/target :autotag-entry
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "One definition per undefined tag"})))
-
-;; --- Auto-link learnings spec ---
-
-(def AUTOLINK_ENTRY_SPEC
-  "Spec for a single learning link."
-  (spec/spec
-   :autolink-entry
-   {::spec/key-ns "link"}
-   (spec/field {::spec/name :source-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "UUID of the source learning"})
-   (spec/field {::spec/name :target-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "UUID of the target learning"})
-   (spec/field {::spec/name :relationship
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Relationship type: extends, contradicts, prerequisite, or related"})))
-
-(def AUTOLINK_SPEC
-  "Spec for auto-linking related learnings after extraction."
-  (spec/spec
-   {:refs [AUTOLINK_ENTRY_SPEC]}
-   (spec/field {::spec/name :links
-                ::spec/type :spec.type/ref
-                ::spec/target :autolink-entry
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Links between related learnings"})))
-
-;; --- Auto-vote links spec ---
-
-(def LINK_VOTE_ENTRY_SPEC
-  "Spec for a single link vote."
-  (spec/spec
-   :link-vote-entry
-   {::spec/key-ns "vote"}
-   (spec/field {::spec/name :link-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "UUID of the learning link"})
-   (spec/field {::spec/name :vote
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Vote: :useful (link is meaningful) or :not_useful (spurious/weak link)"})
-   (spec/field {::spec/name :reason
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Brief reason for the vote"})))
-
-(def LINK_VOTE_SPEC
-  "Spec for auto-voting on link quality."
-  (spec/spec
-   {:refs [LINK_VOTE_ENTRY_SPEC]}
-   (spec/field {::spec/name :votes
-                ::spec/type :spec.type/ref
-                ::spec/target :link-vote-entry
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "One vote per link evaluated"})))
 
 (def BLOOM_DIFFICULTIES
   "Bloom's taxonomy cognitive levels as difficulty progression."
@@ -1018,4 +923,3 @@
   [documents]
   (when-not (valid-documents? documents)
     (s/explain-str ::documents documents)))
-

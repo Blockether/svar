@@ -7,13 +7,13 @@
    [com.blockether.svar.internal.rlm.db
     :refer [create-rlm-conn dispose-rlm-conn! store-message! store-executions!
             get-recent-messages db-list-documents
-            db-store-pageindex-document! db-vote-learning! str-truncate]]
+            db-store-pageindex-document! db-store-learning! db-vote-learning! str-truncate]]
    [com.blockether.svar.internal.rlm.routing
     :refer [make-routed-llm-query-fn resolve-root-model provider-has-reasoning?]]
    [com.blockether.svar.internal.rlm.schema
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
-            LEARNING_VOTE_SPEC
+            LEARNING_VOTE_SPEC AUTOLEARN_SPEC AUTOLEARN_ITERATION_THRESHOLD
             INLINE_RESULT_THRESHOLD EVAL_TIMEOUT_MS
             MAX_ITERATIONS MAX_ITERATION_CAP
             bytes->base64 *max-recursion-depth* *rlm-ctx*]]
@@ -386,26 +386,23 @@
          "\n</custom_tools>\n")))
 
 (defn format-active-learnings
-  "Format pre-fetched learnings, neighbors, and tag definitions for injection into the system prompt.
+  "Format pre-fetched learnings and tag definitions for injection into the system prompt.
 
    These are automatically retrieved at query start — the LLM doesn't need
-   to call search-learnings manually for these. Neighbors are 1-hop linked
-   learnings that provide additional related context.
+   to call search-learnings manually for these.
 
    Params:
    `learnings` - Vector of normalized learning maps (direct matches).
-   `neighbor-learnings` - Vector of normalized learning maps with :link-relationship.
    `tag-definitions` - Vector of {:name :definition} maps for all known tags.
 
    Returns:
-   String with formatted tag glossary + active learnings + linked neighbors, or nil if empty."
-  [learnings neighbor-learnings tag-definitions]
+   String with formatted tag glossary + active learnings, or nil if empty."
+  [learnings tag-definitions]
   (let [has-learnings? (seq learnings)
-        has-neighbors? (seq neighbor-learnings)
         ;; Only include tags that have definitions
         defined-tags (when (seq tag-definitions)
                        (filterv :definition tag-definitions))]
-    (when (or has-learnings? has-neighbors? (seq defined-tags))
+    (when (or has-learnings? (seq defined-tags))
       (str
        (when (seq defined-tags)
          (str "\n<learning_tag_glossary>\n"
@@ -423,24 +420,14 @@
                                      (when (seq (:tags l)) (str " [tags: " (str/join ", " (:tags l)) "]"))
                                      (when (:context l) (str " [context: " (:context l) "]"))))
                               learnings))
-              "\n</active_learnings>\n"))
-       (when has-neighbors?
-         (str "\n<linked_learnings>\n"
-              "Related insights linked to active learnings (auto-fetched via graph neighborhood):\n"
-              (str/join "\n" (map-indexed
-                              (fn [i l]
-                                (str "  " (inc i) ". " (:insight l)
-                                     " [" (or (:link-relationship l) "related") "]"
-                                     (when (seq (:tags l)) (str " [tags: " (str/join ", " (:tags l)) "]"))))
-                              neighbor-learnings))
-              "\n</linked_learnings>\n"))))))
+              "\n</active_learnings>\n"))))))
 
 (defn build-system-prompt
   "Builds the system prompt. Optionally includes spec schema, history tools, and custom docs.
 
    When :has-reasoning? is true, uses ITERATION_SPEC_CODE_ONLY (no thinking field)
    because the provider emits native reasoning tokens — no need to duplicate in JSON."
-  [{:keys [output-spec history-enabled? custom-docs has-documents? learnings neighbor-learnings tag-definitions
+  [{:keys [output-spec history-enabled? custom-docs has-documents? learnings tag-definitions
            has-reasoning? system-prompt]}]
   (str "<rlm_environment>
 <role>You are an expert Clojure programmer analyzing data in a sandboxed environment.</role>
@@ -603,7 +590,6 @@
   <tool name=\"search-learnings\">(search-learnings query) or (search-learnings query top-k) or (search-learnings query top-k [\"tag1\"]) - Search learnings by insight/context text (case-insensitive). Optional tag filter returns only learnings with ALL specified tags. Returns [{:learning/id :insight :context :tags :scope :useful-count :not-useful-count}...]. Pass nil/blank query for recent learnings.</tool>
   <tool name=\"learning-stats\">(learning-stats) - Get learning statistics: {:total-learnings :active-learnings :decayed-learnings :total-votes :total-applications :all-tags}</tool>
   <tool name=\"list-learning-tags\">(list-learning-tags) - List all tags with their definitions. Returns [{:name \"tag\" :definition \"what it means\"}...].</tool>
-  <tool name=\"list-learning-links\">(list-learning-links learning-id) - List all links for a learning (both directions). Returns [{:learning-id UUID :relationship \"extends\" :direction :outgoing/:incoming}...]</tool>
   <learn_via_final>
     To persist insights, include :learn in your FINAL call:
     (FINAL answer {:learn [{:insight \"What you learned\" :tags [\"relevant-tags\"]}]})
@@ -721,7 +707,7 @@
 </critical>
 "
        ;; Inject pre-fetched learnings (model-specific + query-relevant)
-       (format-active-learnings learnings neighbor-learnings tag-definitions)
+       (format-active-learnings learnings tag-definitions)
        "
 </rlm_environment>"))
 
@@ -877,7 +863,7 @@
                  executions)))
 
 (defn iteration-loop [rlm-env query
-                      {:keys [output-spec learnings neighbor-learnings tag-definitions
+                      {:keys [output-spec learnings tag-definitions
                               max-context-tokens custom-docs system-prompt
                               pre-fetched-context hooks-atom
                               max-iterations max-consecutive-errors max-restarts]}]
@@ -907,7 +893,6 @@
                                             :custom-docs custom-docs
                                             :has-documents? has-docs?
                                             :learnings learnings
-                                            :neighbor-learnings neighbor-learnings
                                             :tag-definitions tag-definitions
                                             :has-reasoning? has-reasoning?
                                             :system-prompt system-prompt})
@@ -1299,4 +1284,59 @@
       (catch Exception e
         (trove/log! {:level :warn :data {:error (ex-message e)}
                      :msg "Auto-vote learnings failed, skipping"})
+        nil))))
+
+(defn auto-extract-learnings!
+  "Auto-extracts reusable insights from successful multi-iteration queries.
+   Only fires when iterations exceed AUTOLEARN_ITERATION_THRESHOLD (3).
+   Extracts 1-3 learnings with tags and scope.
+
+   Returns {:ids [...] :tokens ... :cost ...}, or nil."
+  [db-info rlm-router query answer-preview iterations trace scope]
+  (when (and (:conn db-info) rlm-router (> iterations AUTOLEARN_ITERATION_THRESHOLD))
+    (try
+      (let [trace-summary (->> trace
+                               (take-last 5)
+                               (map (fn [t]
+                                      (str "Iteration " (:iteration t) ": "
+                                           (when (:thinking t) (str-truncate (:thinking t) 100)))))
+                               (str/join "\n"))
+            prompt (str "You just completed a " iterations "-iteration query. "
+                        "Extract 1-3 REUSABLE insights about strategies that worked.\n\n"
+                        "Query: " query "\n"
+                        "Answer preview: " answer-preview "\n"
+                        "Approach summary:\n" trace-summary "\n\n"
+                        "For each insight:\n"
+                        "- insight: A concrete, reusable strategy (not query-specific)\n"
+                        "- context: When this strategy applies\n"
+                        "- tags: 1-3 lowercase category tags\n\n"
+                        "Only extract insights that would help with FUTURE similar queries. "
+                        "Skip obvious or query-specific observations.")
+            response (llm/ask! {:spec AUTOLEARN_SPEC
+                                :messages [(llm/user prompt)]
+                                :router rlm-router
+                                :prefer :cost :capabilities #{:chat}})
+            extracted-learnings (:learnings (:result response))
+            learning-ids (when (sequential? extracted-learnings)
+                           (->> extracted-learnings
+                                (keep (fn [{:keys [insight context tags]}]
+                                        (when (and insight (not (str/blank? insight)))
+                                          (let [stored (db-store-learning! db-info insight
+                                                                           {:context context
+                                                                            :tags (when (sequential? tags) (vec tags))
+                                                                            :scope scope
+                                                                            :source :auto})]
+                                            (rlm-debug! {:learning-id (:learning/id stored)
+                                                         :insight (str-truncate insight 100)
+                                                         :scope scope}
+                                                        "Auto-extracted learning")
+                                            (:learning/id stored)))))
+                                vec))]
+        (when (seq learning-ids)
+          {:ids learning-ids
+           :tokens (:tokens response)
+           :cost (:cost response)}))
+      (catch Exception e
+        (trove/log! {:level :warn :data {:error (ex-message e)}
+                     :msg "Auto-extract learnings failed, skipping"})
         nil))))

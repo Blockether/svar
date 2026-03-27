@@ -296,14 +296,6 @@
       (or (db-list-tags db-info) [])
       [])))
 
-(defn make-list-learning-links-fn
-  "Creates a function for the LLM to list all links for a learning."
-  [db-info-atom]
-  (fn list-learning-links [learning-id]
-    (if-let [db-info @db-info-atom]
-      (or (db-get-linked-learning-ids db-info learning-id) [])
-      [])))
-
 ;; =============================================================================
 ;; PageIndex Document Storage System
 ;; =============================================================================
@@ -669,12 +661,11 @@
                        'list-document-entities (make-list-entities-fn db-info-atom)
                        'list-document-relationships (make-list-relationships-fn db-info-atom)
                        'document-entity-stats (make-entity-stats-fn db-info-atom)})
-        ;; Learnings functions - DB-backed with voting, tags, and links (pass db-info-atom)
+        ;; Learnings functions - DB-backed with voting and tags (pass db-info-atom)
         learning-bindings (if db-info-atom
                             {'search-learnings (make-search-learnings-fn db-info-atom)
                              'learning-stats (make-learning-stats-fn db-info-atom)
-                             'list-learning-tags (make-list-learning-tags-fn db-info-atom)
-                             'list-learning-links (make-list-learning-links-fn db-info-atom)}
+                             'list-learning-tags (make-list-learning-tags-fn db-info-atom)}
                             {})
         ;; Raw text access (RLM paper §3: symbolic handle to P)
         ;; P = the symbolic handle to the input. Per the paper: P lives as a variable
