@@ -176,23 +176,35 @@
     (let [_ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
           start-time (System/currentTimeMillis)
           vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
-          exec-ch (async/thread
-                    (try
-                      (let [stdout-writer (java.io.StringWriter.)
-                            stderr-writer (java.io.StringWriter.)
-                            result (binding [*out* stdout-writer
-                                             *err* (java.io.PrintWriter. stderr-writer)]
-                                     (sci/eval-string* sci-ctx code))]
-                        {:result result :stdout (str stdout-writer) :stderr (str stderr-writer) :error nil})
-                      (catch Exception e {:result nil :stdout "" :stderr "" :error (ex-message e)})))
-          [execution-result _] (async/alts!! [exec-ch (async/timeout EVAL_TIMEOUT_MS)])
+          ;; Use future (not async/thread) so we can cancel on timeout
+          stdout-writer (java.io.StringWriter.)
+          stderr-writer (java.io.StringWriter.)
+          exec-future (future
+                        (try
+                          (let [result (binding [*out* stdout-writer
+                                                 *err* (java.io.PrintWriter. stderr-writer true)]
+                                         (sci/eval-string* sci-ctx code))]
+                            {:result result :stdout (str stdout-writer) :stderr (str stderr-writer) :error nil})
+                          (catch Exception e {:result nil :stdout (str stdout-writer) :stderr (str stderr-writer) :error (ex-message e)})))
+          execution-result (try
+                             (deref exec-future EVAL_TIMEOUT_MS nil)
+                             (catch Exception e
+                               {:result nil :stdout "" :stderr "" :error (ex-message e)}))
           execution-time (- (System/currentTimeMillis) start-time)
           timed-out? (nil? execution-result)]
       (if timed-out?
-        (do (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
-            {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)")
-             :execution-time-ms execution-time :timeout? true})
+        (do
+          ;; Cancel the future — interrupts the thread
+          (future-cancel exec-future)
+          ;; Close writers
+          (.close stdout-writer)
+          (.close stderr-writer)
+          (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
+          {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)")
+           :execution-time-ms execution-time :timeout? true})
         (let [{:keys [result stdout stderr error]} execution-result
+              _ (.close stdout-writer)
+              _ (.close stderr-writer)
               vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ vars-before))
               new-vars (apply dissoc vars-after (keys vars-before))]
           (when (seq new-vars)

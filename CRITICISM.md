@@ -120,15 +120,14 @@ Removed (no evidence of value): auto-define-tags!, auto-link-learnings!, auto-vo
 
 ---
 
-### 10. Async thread resource leaks
+### ~~10. Async thread resource leaks~~ — FIXED
 
-Code execution uses `async/thread` with a 30s timeout (`async/alts!!`). When code times out, the thread keeps running in the background — `alts!!` returns nil but the thread is NOT cancelled. `StringWriter` / `PrintWriter` are never explicitly closed.
+**Status: FIXED** (March 2026)
 
-50 iterations with timeouts = 50 zombie threads consuming memory and CPU.
-
-**Fix**: Use `future-cancel` or `Thread/interrupt` on timeout. Close writers in a finally block.
-
-**Location**: `rlm/core.clj` lines 178-214 (code execution).
+- `async/thread` replaced with `future` (supports `future-cancel`)
+- On timeout: `future-cancel` interrupts the thread
+- Writers created outside future, explicitly `.close`d in both timeout and success paths
+- No more zombie threads on timeout
 
 ---
 
