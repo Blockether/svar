@@ -363,6 +363,9 @@
       - :history-tokens - Approximate token count of conversation history.
       - :tokens - Token usage across all iterations: {:input N :output N :reasoning N :cached N :total N}.
       - :cost - Estimated USD cost: {:input-cost N :output-cost N :total-cost N :model \"...\"}.
+      - :confidence - :high, :medium, or :low (from LLM's FINAL call).
+      - :sources - Vector of source IDs the answer is based on (from LLM's FINAL call).
+      - :reasoning - String summary of how the answer was derived (from LLM's FINAL call).
       - :status - Only present on failure, e.g. :max-iterations."
   ([env query-str]
    (query-env! env query-str {}))
@@ -485,6 +488,8 @@
                   tokens :tokens
                   cost :cost
                   confidence :confidence
+                  sources :sources
+                  reasoning :reasoning
                   learn-items :learn} iteration-result
                 ;; Mutable cost accumulator — iteration costs are the baseline,
                 ;; refinement + auto-vote costs get merged in
@@ -701,6 +706,8 @@
                                            :tokens @total-tokens-atom
                                            :cost @total-cost-atom}
                                     (some? confidence) (assoc :confidence confidence)
+                                    (seq sources) (assoc :sources sources)
+                                    (some? reasoning) (assoc :reasoning reasoning)
                                     (seq learn-items) (assoc :learn learn-items)
                                     verify? (assoc :verified-claims (vec @claims-atom)))]
                    (call-hook! hooks-atom :query :post {:query query-str

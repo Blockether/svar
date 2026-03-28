@@ -221,10 +221,12 @@
 (defn check-result-for-final [result-map]
   (let [result (:result result-map)]
     (if (and (map? result) (true? (:rlm/final result)))
-      {:final? true
-       :answer (:rlm/answer result)
-       :confidence (or (:rlm/confidence result) :high)
-       :learn (:rlm/learn result)}
+      (cond-> {:final? true
+               :answer (:rlm/answer result)
+               :confidence (or (:rlm/confidence result) :high)}
+        (:rlm/sources result)   (assoc :sources (:rlm/sources result))
+        (:rlm/reasoning result) (assoc :reasoning (:rlm/reasoning result))
+        (:rlm/learn result)     (assoc :learn (:rlm/learn result)))
       {:final? false})))
 
 (defn answer-str
@@ -453,14 +455,15 @@
   <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce patterns over many chunks.</tool>
   <tool name=\"FINAL\">(FINAL answer) or (FINAL answer opts) - MUST call when you have the answer.
     opts is an optional map:
-      :confidence - :high (default) or :low. When :low, the system runs Chain-of-Verification on your answer.
+      :confidence - :high (default) or :low. When :low, the system runs Chain-of-Verification.
+      :sources - Vector of source IDs (page.node/id, document/id) that support the answer.
+      :reasoning - String. Brief summary of HOW you derived the answer.
       :learn - Vector of insights to persist: [{:insight \"...\" :tags [\"tag1\" \"tag2\"]} ...].
-        Tags are auto-created if they don't exist. Use :learn when you discover reusable strategies or patterns.
+    ALWAYS provide :sources and :reasoning when answering from documents.
     Examples:
-      (FINAL \"The penalty is 5%\")
-      (FINAL {:parties [...]} {:confidence :low})
-      (FINAL answer {:learn [{:insight \"Appendix B always has penalties\" :tags [\"contract\" \"penalties\"]}]})
-      (FINAL answer {:confidence :low :learn [{:insight \"Complex table layout\" :tags [\"tables\"]}]})</tool>
+      (FINAL \"The penalty is 5%\" {:sources [\"node-abc\" \"node-def\"] :reasoning \"Found in section 7.3, cross-referenced with appendix B\"})
+      (FINAL {:parties [...]} {:confidence :low :reasoning \"Only partial data found\"})
+      (FINAL answer {:sources sources :reasoning \"Aggregated from 3 sections\" :learn [{:insight \"Penalties in section 7\" :tags [\"contracts\"]}]})</tool>
 
   <tool name=\"list-locals\">(list-locals) - see all variables you've defined (functions show as &lt;fn&gt;, large collections summarized)</tool>
   <tool name=\"get-local\">(get-local 'var-name) - get full value of a specific variable you defined</tool>
@@ -671,7 +674,7 @@
 
     (def hits (search-document-pages \"penalty clause\"))
     (def relevant-content (mapv #(P-add! [:page.node/id (:page.node/id %)]) hits))
-    (FINAL {:answer \"...\" :sources (mapv :page.node/page-id relevant-content)})
+    (FINAL answer {:sources (mapv :page.node/id relevant-content) :reasoning \"Found via targeted search + analysis\"})
   </pattern>
 
   <pattern name=\"Regex Scan (structured extraction)\">
@@ -1051,11 +1054,13 @@
                         (store-executions! db-info (:id stored) executions))))
                   (if final-result
                     (do (trove/log! {:level :info :data {:iteration iteration :answer (str-truncate (answer-str (:answer final-result)) 200)} :msg "FINAL detected"})
-                        (merge {:answer (:answer final-result)
-                                :trace (conj trace trace-entry)
-                                :iterations (inc iteration)
-                                :confidence (:confidence final-result)
-                                :learn (:learn final-result)}
+                        (merge (cond-> {:answer (:answer final-result)
+                                        :trace (conj trace trace-entry)
+                                        :iterations (inc iteration)
+                                        :confidence (:confidence final-result)}
+                                 (:sources final-result)   (assoc :sources (:sources final-result))
+                                 (:reasoning final-result) (assoc :reasoning (:reasoning final-result))
+                                 (:learn final-result)     (assoc :learn (:learn final-result)))
                                (finalize-cost)))
                     (let [exec-feedback (format-executions executions)
                           iteration-header (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]")

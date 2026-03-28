@@ -21,7 +21,8 @@
    error margin due to internal OpenAI formatting that isn't publicly documented."
   (:require
    [clojure.string :as str]
-   [com.blockether.anomaly.core :as anomaly])
+   [com.blockether.anomaly.core :as anomaly]
+   [com.blockether.svar.internal.providers :as providers])
   (:import
    (com.knuddels.jtokkit Encodings)
    (com.knuddels.jtokkit.api
@@ -67,101 +68,8 @@
 ;; =============================================================================
 
 (def DEFAULT_CONTEXT_LIMITS
-  "Default maximum context window sizes for LLM models (in tokens).
-   
-   These are the TOTAL context limits (input + output).
-   Override per-model via :context-limits in make-config.
-   
-   Sources:
-   - OpenAI: https://platform.openai.com/docs/models
-   - Anthropic: https://docs.anthropic.com/en/docs/about-claude/models
-   - Google: https://cloud.google.com/vertex-ai/generative-ai/docs/models
-   - Zhipu: https://docs.z.ai/guides/overview/pricing
-   - DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
-   - Mistral: https://docs.mistral.ai/models
-   
-   Last updated: February 2026"
-  {;; OpenAI GPT-4 models
-   "gpt-4o"              128000
-   "gpt-4o-2024-11-20"   128000
-   "gpt-4o-2024-08-06"   128000
-   "gpt-4o-mini"         128000
-   "gpt-4-turbo"         128000
-   "gpt-4-turbo-preview" 128000
-   "gpt-4"               8192
-   "gpt-4-32k"           32768
-   "gpt-3.5-turbo"       16385
-   "gpt-3.5-turbo-16k"   16385
-   ;; OpenAI GPT-5 models (400k context, 128k max output)
-   "gpt-5"               400000
-   "gpt-5-mini"          400000
-   "gpt-5-nano"          400000
-   "gpt-5.1"             400000
-   "gpt-5.2"             400000
-   ;; OpenAI reasoning models
-   "o1"                  200000
-   "o1-preview"          128000
-   "o1-mini"             128000
-   "o3"                  200000
-   "o3-pro"              200000
-   "o3-mini"             200000
-   "o4-mini"             200000
-   ;; Anthropic models — Claude 3.x (legacy)
-   "claude-3-5-sonnet"   200000
-   "claude-3-5-haiku"    200000
-   "claude-3-opus"       200000
-   "claude-3-sonnet"     200000
-   "claude-3-haiku"      200000
-   ;; Anthropic models — Claude 4.x
-   "claude-opus-4-6"     200000   ; 1M beta available
-   "claude-opus-4-5"     200000
-   "claude-opus-4-1"     200000
-   "claude-opus-4-0"     200000
-   "claude-sonnet-4-5"   200000   ; 1M beta available
-   "claude-sonnet-4-0"   200000   ; 1M beta available
-   "claude-haiku-4-5"    200000
-   ;; Anthropic — legacy aliases (for partial matching compat)
-   "claude-4-opus"       200000
-   "claude-4-sonnet"     200000
-   "claude-4.5-sonnet"   200000
-   "claude-4.5-haiku"    200000
-   "claude-opus-4.5"     200000
-   ;; Google Gemini models
-   "gemini-1.5-pro"      2000000
-   "gemini-1.5-flash"    1000000
-   "gemini-2.0-flash"    1048576
-   "gemini-2.5-flash"    1048576
-   "gemini-2.5-pro"      1048576
-   ;; Meta models
-   "llama-3.1-405b"      128000
-   "llama-3.1-70b"       128000
-   "llama-3.1-8b"        128000
-   ;; Mistral models
-   "mistral-large"       128000
-   "mistral-medium"      32000
-   "mistral-medium-3"    131000
-   "mistral-small"       32000
-   "mistral-small-3.1"   128000
-   "codestral-2"         128000
-   ;; Zhipu GLM models
-   "glm-4"               128000
-   "glm-4-plus"          128000
-   "glm-4.5"             128000
-   "glm-4.5-air"         128000
-   "glm-4.6"             200000
-   "glm-4.6v"            128000   ; vision model, 128K not 200K
-   "glm-4.7"             200000
-   "glm-4.7-flashx"      200000
-   "glm-5"               200000
-   "glm-5-code"          200000
-   ;; DeepSeek models
-   "deepseek-v3"         128000
-   "deepseek-v3.2"       128000
-   "deepseek-chat"       128000
-   "deepseek-coder"      128000
-   "deepseek-reasoner"   128000
-   ;; Default fallback (conservative)
-   :default              8192})
+  "Context window sizes derived from providers/KNOWN_MODELS. Single source of truth."
+  providers/MODEL_CONTEXT_LIMITS)
 
 (def DEFAULT_OUTPUT_RESERVE
   "Default number of tokens to reserve for model output.
@@ -543,71 +451,8 @@
 ;; =============================================================================
 
 (def DEFAULT_MODEL_PRICING
-  "Default pricing per 1M tokens in USD as of February 2026.
-   Format: {:input price-per-1M :output price-per-1M}
-   Override per-model via :pricing in make-config.
-   
-   Sources:
-   - OpenAI: https://developers.openai.com/api/docs/pricing/
-   - Anthropic: https://docs.claude.com/en/about-claude/pricing
-   - Google: https://cloud.google.com/vertex-ai/generative-ai/pricing
-   - Zhipu: https://docs.z.ai/guides/overview/pricing
-   - DeepSeek: https://api-docs.deepseek.com/quick_start/pricing
-   - Mistral: https://docs.mistral.ai/models
-   
-   Note: These are approximate and may change. Update periodically."
-  {;; OpenAI GPT-4 models
-   "gpt-4o"              {:input 2.50   :output 10.00}
-   "gpt-4o-2024-11-20"   {:input 2.50   :output 10.00}
-   "gpt-4o-mini"         {:input 0.15   :output 0.60}
-   "gpt-4-turbo"         {:input 10.00  :output 30.00}
-   "gpt-4"               {:input 30.00  :output 60.00}
-   "gpt-3.5-turbo"       {:input 0.50   :output 1.50}
-   ;; OpenAI GPT-5 models
-   "gpt-5"               {:input 1.25   :output 10.00}
-   "gpt-5-mini"          {:input 0.25   :output 2.00}
-   "gpt-5-nano"          {:input 0.05   :output 0.40}
-   "gpt-5.1"             {:input 1.25   :output 10.00}
-   "gpt-5.2"             {:input 1.75   :output 14.00}
-   ;; OpenAI reasoning models
-   "o1"                  {:input 15.00  :output 60.00}
-   "o1-mini"             {:input 3.00   :output 12.00}
-   "o1-pro"              {:input 150.00 :output 600.00}
-   "o3"                  {:input 2.00   :output 8.00}
-   "o3-pro"              {:input 20.00  :output 80.00}
-   "o3-mini"             {:input 1.10   :output 4.40}
-   "o4-mini"             {:input 1.10   :output 4.40}
-   ;; Anthropic Claude 3.x (legacy)
-   "claude-3-5-sonnet"   {:input 3.00   :output 15.00}
-   "claude-3-5-haiku"    {:input 0.80   :output 4.00}
-   "claude-3-opus"       {:input 15.00  :output 75.00}
-   ;; Anthropic Claude 4.x
-   "claude-opus-4-6"     {:input 5.00   :output 25.00}
-   "claude-opus-4-5"     {:input 5.00   :output 25.00}
-   "claude-opus-4-1"     {:input 15.00  :output 75.00}
-   "claude-opus-4-0"     {:input 15.00  :output 75.00}
-   "claude-sonnet-4-5"   {:input 3.00   :output 15.00}
-   "claude-sonnet-4-0"   {:input 3.00   :output 15.00}
-   "claude-haiku-4-5"    {:input 1.00   :output 5.00}
-   ;; Google Gemini models
-   "gemini-2.5-pro"      {:input 1.25   :output 10.00}
-   "gemini-2.5-flash"    {:input 0.30   :output 2.50}
-   "gemini-2.0-flash"    {:input 0.10   :output 0.40}
-   ;; Zhipu GLM models
-   "glm-5"               {:input 1.00   :output 3.20}
-   "glm-5-code"          {:input 1.20   :output 5.00}
-   "glm-4.7"             {:input 0.60   :output 2.20}
-   "glm-4.7-flashx"      {:input 0.07   :output 0.40}
-   "glm-4.6"             {:input 0.60   :output 2.20}
-   "glm-4.6v"            {:input 0.30   :output 0.90}
-   ;; DeepSeek models (cache-miss pricing)
-   "deepseek-chat"       {:input 0.28   :output 0.42}
-   "deepseek-reasoner"   {:input 0.28   :output 0.50}
-   ;; Mistral models
-   "mistral-medium-3"    {:input 0.40   :output 2.00}
-   "codestral-2"         {:input 0.30   :output 0.90}
-   ;; Default fallback (conservative estimate)
-   :default              {:input 5.00   :output 15.00}})
+  "Model pricing derived from providers/KNOWN_MODELS. Single source of truth."
+  providers/MODEL_PRICING)
 
 (defn- get-model-pricing
   "Gets pricing for a model, with fallback to default.
@@ -757,8 +602,8 @@
   ([^String model ^String text ^long max-tokens]
    (truncate-text model text max-tokens {}))
   ([^String model ^String text ^long max-tokens {:keys [truncation-marker from] :or {from :end}}]
-(when (nil? text) (anomaly/incorrect! "Cannot truncate nil text" {:type :svar.tokens/nil-input}))
-    (when (<= max-tokens 0) (anomaly/incorrect! "max-tokens must be positive" {:type :svar.tokens/invalid-limit :max-tokens max-tokens}))
+   (when (nil? text) (anomaly/incorrect! "Cannot truncate nil text" {:type :svar.tokens/nil-input}))
+   (when (<= max-tokens 0) (anomaly/incorrect! "max-tokens must be positive" {:type :svar.tokens/invalid-limit :max-tokens max-tokens}))
    (let [^Encoding encoding (model->encoding model)
          ^IntArrayList tokens (.encode encoding text)
          token-count (.size tokens)]
@@ -916,8 +761,8 @@
                           (format "Context overflow: %d tokens exceed limit of %d (model %s has %d context, reserving %d for output). Reduce input by %d tokens."
                                   input-tokens max-input model ctx-limit effective-reserve overflow))}]
      (when (and throw? (not ok?))
-        (anomaly/incorrect! (:error result)
-                            {:type :svar.tokens/context-overflow
+       (anomaly/incorrect! (:error result)
+                           {:type :svar.tokens/context-overflow
                             :model model
                             :input-tokens input-tokens
                             :max-input-tokens max-input

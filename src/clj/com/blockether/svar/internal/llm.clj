@@ -568,7 +568,7 @@
                 (async/<!! (async/timeout wait-ms)))
               (recur (inc attempts)))
             (throw (ex-info "All providers exhausted"
-                            {:type :svar.router/all-providers-exhausted
+                            {:type :svar.llm/all-providers-exhausted
                              :prefs prefs :tried @tried}))))))))
 
 (defn make-router

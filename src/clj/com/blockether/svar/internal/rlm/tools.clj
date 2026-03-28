@@ -605,12 +605,15 @@
                        'FINAL (fn
                                 ([answer]
                                  (let [v (realize-value answer)]
-                                   {:rlm/final true :rlm/answer {:result v :type (type v)}}))
+                                   {:rlm/final true :rlm/answer {:result v :type (type v)}
+                                    :rlm/confidence :high}))
                                 ([answer opts]
                                  (let [v (realize-value answer)]
                                    {:rlm/final true
                                     :rlm/answer {:result v :type (type v)}
                                     :rlm/confidence (get opts :confidence :high)
+                                    :rlm/sources (get opts :sources)
+                                    :rlm/reasoning (get opts :reasoning)
                                     :rlm/learn (get opts :learn)})))
 
                        ;; Locals inspection tools - LLM can check its own state on demand

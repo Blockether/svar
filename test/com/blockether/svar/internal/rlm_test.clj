@@ -94,7 +94,7 @@
 
 (defdescribe check-result-for-final-test
   (it "detects FINAL marker in result"
-      (expect (= {:final? true :answer "done" :confidence :high :learn nil}
+      (expect (= {:final? true :answer "done" :confidence :high}
                  (#'rlm-core/check-result-for-final {:result {:rlm/final true :rlm/answer "done"}}))))
 
   (it "extracts confidence and learn from FINAL result"

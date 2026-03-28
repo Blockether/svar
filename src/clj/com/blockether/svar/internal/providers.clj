@@ -67,12 +67,7 @@
    "deepseek-v3"               {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "deepseek-v3.2"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "deepseek-chat"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "deepseek-reasoner"         {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
-
-   ;; ── Mistral ──────────────────────────────────────────────────────────────
-   "mistral-large"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "mistral-small-3.1"         {:intelligence :medium   :speed :fast   :capabilities #{:chat :vision}}
-   "codestral-2"               {:intelligence :high     :speed :fast   :capabilities #{:chat}}})
+   "deepseek-reasoner"         {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}})
 
  ;; =============================================================================
  ;; Provider-scoped model availability, pricing, and context limits
@@ -94,7 +89,9 @@
     "gpt-5.1"                   {:pricing {:input 1.25  :output 10.00} :context 128000}
     "gpt-5.2"                   {:pricing {:input 1.75  :output 14.00} :context 200000}
     "gpt-5.4"                   {:pricing {:input 2.50  :output 15.00} :context 1000000}
-    "o3-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}}
+    "o3-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}
+    "minimax-m2.5"              {:pricing {:input 0.50  :output 2.00}  :context 128000}
+    "minimax-m2.7:cloud"        {:pricing {:input 0.80  :output 3.00}  :context 128000}}
 
    :openai
    {"gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}

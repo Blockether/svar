@@ -344,24 +344,6 @@
          (sort-by :name)
          vec)))
 
-(defn db-get-tag
-  "Gets a single tag by name.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `tag-name` - String.
-
-   Returns:
-   Map with :name and :definition, or nil."
-  [{:keys [conn]} tag-name]
-  (when (and conn tag-name)
-    (let [clean (str/lower-case (str/trim tag-name))
-          e (d/pull (d/db conn) '[:learning-tag/name :learning-tag/definition]
-                    [:learning-tag/name clean])]
-      (when (:learning-tag/name e)
-        {:name (:learning-tag/name e)
-         :definition (:learning-tag/definition e)}))))
-
 ;; Forward declarations for dedup check
 (declare scan-learnings)
 
@@ -386,7 +368,7 @@
 
 (defn- create-learning-entity!
   "Creates a new learning entity in the DB. Returns the stored learning map."
-  [conn db-info insight {:keys [context tags scope source]}]
+  [{:keys [conn] :as db-info} insight {:keys [context tags scope source]}]
   (let [clean-tags (when (seq tags)
                      (->> tags (map #(str/lower-case (str/trim (str %)))) (remove str/blank?) vec))
         _ (when (seq clean-tags) (db-ensure-tags! db-info clean-tags))
@@ -445,7 +427,7 @@
    (when conn
      (if-let [existing (find-duplicate-learning conn insight)]
        (existing-learning->result existing)
-       (create-learning-entity! conn db-info insight opts)))))
+       (create-learning-entity! db-info insight opts)))))
 
 (defn learning-decayed?
   "Returns true if a learning has decayed (>70% negative votes after 5+ total votes)."
@@ -1272,8 +1254,41 @@
 ;; High-Level Document Storage
 ;; -----------------------------------------------------------------------------
 
+(defn- build-page-entity
+  "Builds a page datom without transacting."
+  [page doc-id]
+  (let [page-id (str doc-id "-page-" (:page/index page))]
+    {:entity {:page/id page-id :page/document-id doc-id :page/index (:page/index page)}
+     :page-id page-id}))
+
+(defn- build-page-node-entity
+  "Builds a page node datom without transacting."
+  [node page-id doc-id]
+  (let [node-id (str page-id "-node-" (or (:page.node/id node) (util/uuid)))
+        visual-node? (#{:image :table} (:page.node/type node))
+        img-bytes (:page.node/image-data node)
+        image-too-large? (and visual-node? img-bytes (> (alength ^bytes img-bytes) 5242880))
+        image-data (when (and visual-node? img-bytes (not image-too-large?)) img-bytes)]
+    (when image-too-large?
+      (trove/log! {:level :warn :data {:page-node-id node-id :bytes-size (alength ^bytes img-bytes)}
+                   :msg "Skipping page node image-data (exceeds 5MB limit)"}))
+    (cond-> {:page.node/id node-id :page.node/page-id page-id
+             :page.node/document-id doc-id :page.node/type (:page.node/type node)}
+      (:page.node/id node)             (assoc :page.node/local-id (:page.node/id node))
+      (:page.node/parent-id node)      (assoc :page.node/parent-id (:page.node/parent-id node))
+      (:page.node/level node)          (assoc :page.node/level (:page.node/level node))
+      (and (not visual-node?) (:page.node/content node)) (assoc :page.node/content (:page.node/content node))
+      image-data                        (assoc :page.node/image-data image-data)
+      (:page.node/description node)    (assoc :page.node/description (:page.node/description node))
+      (some? (:page.node/continuation? node)) (assoc :page.node/continuation? (:page.node/continuation? node))
+      (:page.node/caption node)        (assoc :page.node/caption (:page.node/caption node))
+      (:page.node/kind node)           (assoc :page.node/kind (:page.node/kind node))
+      (:page.node/bbox node)           (assoc :page.node/bbox (pr-str (:page.node/bbox node)))
+      (:page.node/group-id node)       (assoc :page.node/group-id (:page.node/group-id node)))))
+
 (defn db-store-pageindex-document!
   "Stores an entire PageIndex document with all its components.
+   Batches pages+nodes and TOC entries into bulk transactions.
 
    Params:
    `db-info` - Map with :conn key.
@@ -1281,31 +1296,40 @@
 
    Returns:
    Map with :document-id and counts of stored entities."
-  [db-info doc]
+  [{:keys [conn] :as db-info} doc]
   (let [doc-id (str (util/uuid))
         ;; Store raw document for replay/debugging
-        _ (d/transact! (:conn db-info) [{:raw-document/id doc-id
-                                         :raw-document/content (pr-str doc)}])
+        _ (d/transact! conn [{:raw-document/id doc-id :raw-document/content (pr-str doc)}])
         ;; Store document metadata
         _ (db-store-document! db-info doc doc-id)
-        ;; Store pages and their nodes
-        page-count (atom 0)
-        node-count (atom 0)
-        _ (doseq [page (:document/pages doc)]
-            (let [page-id (db-store-page! db-info page doc-id)]
-              (swap! page-count inc)
-              (doseq [node (:page/nodes page)]
-                (db-store-page-node! db-info node page-id doc-id)
-                (swap! node-count inc))))
-        ;; Store TOC entries
-        toc-count (atom 0)
-        _ (doseq [entry (:document/toc doc)]
-            (db-store-toc-entry! db-info entry doc-id)
-            (swap! toc-count inc))]
+        ;; Build all page + node entities in memory, then batch-transact
+        pages-and-nodes (vec (mapcat (fn [page]
+                                       (let [{:keys [entity page-id]} (build-page-entity page doc-id)
+                                             node-entities (mapv #(build-page-node-entity % page-id doc-id)
+                                                                 (:page/nodes page))]
+                                         (cons entity node-entities)))
+                                     (:document/pages doc)))
+        page-count (count (:document/pages doc))
+        node-count (- (count pages-and-nodes) page-count)
+        _ (when (seq pages-and-nodes)
+            (d/transact! conn pages-and-nodes))
+        ;; Build all TOC entries and batch-transact
+        toc-entities (vec (keep (fn [entry]
+                                  (let [entry-id (str doc-id "-toc-" (or (:document.toc/id entry) (util/uuid)))]
+                                    (cond-> {:document.toc/id entry-id
+                                             :document.toc/document-id doc-id}
+                                      (:document.toc/title entry) (assoc :document.toc/title (:document.toc/title entry))
+                                      (:document.toc/description entry) (assoc :document.toc/description (:document.toc/description entry))
+                                      (:document.toc/target-page entry) (assoc :document.toc/target-page (:document.toc/target-page entry))
+                                      (:document.toc/level entry) (assoc :document.toc/level (:document.toc/level entry))
+                                      (:document.toc/parent-id entry) (assoc :document.toc/parent-id (:document.toc/parent-id entry)))))
+                                (:document/toc doc)))
+        _ (when (seq toc-entities)
+            (d/transact! conn toc-entities))]
     {:document-id doc-id
-     :pages-stored @page-count
-     :nodes-stored @node-count
-     :toc-entries-stored @toc-count}))
+     :pages-stored page-count
+     :nodes-stored node-count
+     :toc-entries-stored (count toc-entities)}))
 
 ;; -----------------------------------------------------------------------------
 ;; TOC Entry SCI Functions (for LLM to call during execution)

@@ -20,17 +20,14 @@
             (it "returns 128000 for gpt-4o"
                 (expect (= 128000 (sut/context-limit "gpt-4o"))))
 
-            (it "returns 128000 for gpt-4-turbo"
-                (expect (= 128000 (sut/context-limit "gpt-4-turbo"))))
+            (it "returns 1000000 for gpt-4.1"
+                (expect (= 1000000 (sut/context-limit "gpt-4.1"))))
 
-            (it "returns 8192 for gpt-4"
-                (expect (= 8192 (sut/context-limit "gpt-4"))))
+            (it "returns 200000 for claude-sonnet-4-6"
+                (expect (= 200000 (sut/context-limit "claude-sonnet-4-6"))))
 
-            (it "returns 200000 for claude-3-5-sonnet"
-                (expect (= 200000 (sut/context-limit "claude-3-5-sonnet"))))
-
-            (it "returns 2000000 for gemini-1.5-pro"
-                (expect (= 2000000 (sut/context-limit "gemini-1.5-pro")))))
+            (it "returns 2000000 for gemini-2.5-pro"
+                (expect (= 2000000 (sut/context-limit "gemini-2.5-pro")))))
 
   (describe "unknown models"
             (it "returns default for unknown model"
