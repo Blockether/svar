@@ -439,8 +439,20 @@
        (< (rpm-count router ps) (:rpm provider Long/MAX_VALUE))
        (< (tpm-count router ps) (:tpm provider Long/MAX_VALUE))))
 
+(defn- preference-sort-key
+  "Returns a sort key fn for a single preference keyword.
+   Lower values = better (for sort-by ascending)."
+  [pref]
+  (case pref
+    :cost         (fn [m] (get COST_ORDER (:cost m) 0))
+    :intelligence (fn [m] (- (get INTELLIGENCE_ORDER (:intelligence m) 0)))
+    :speed        (fn [m] (- (get SPEED_ORDER (:speed m) 0)))
+    nil))
+
 (defn- resolve-model
-  "Returns the best model map for a provider given preferences, or nil."
+  "Returns the best model map for a provider given preferences, or nil.
+   :prefer can be a keyword (:cost, :intelligence, :speed) or a vector of keywords
+   for multi-criteria sorting, e.g. [:cost :speed] = cheapest first, then fastest."
   [provider prefs]
   (if (= (:strategy prefs) :root)
     (let [root-name (:root provider)]
@@ -451,11 +463,16 @@
                           (filter #(every? (:capabilities %) required-caps))
                           (filter #(if exclude (not= (:name %) exclude) true)))]
       (when (seq candidates)
-        (case (:prefer prefs)
-          :cost         (first (sort-by #(get COST_ORDER (:cost %) 0) candidates))
-          :intelligence (first (sort-by #(- (get INTELLIGENCE_ORDER (:intelligence %) 0)) candidates))
-          :speed        (first (sort-by #(- (get SPEED_ORDER (:speed %) 0)) candidates))
-          (first candidates))))))
+        (let [prefer (:prefer prefs)
+              prefs-vec (cond
+                          (vector? prefer) prefer
+                          (keyword? prefer) [prefer]
+                          :else nil)]
+          (if (seq prefs-vec)
+            ;; Multi-criteria sort: build composite key [cost-val speed-val ...]
+            (let [key-fns (keep preference-sort-key prefs-vec)]
+              (first (sort-by (fn [m] (mapv #(% m) key-fns)) candidates)))
+            (first candidates)))))))
 
 (defn select-provider
   "Returns [provider model-map] or nil. Read-only."
