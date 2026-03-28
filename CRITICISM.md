@@ -144,20 +144,14 @@ Removed (no evidence of value): auto-define-tags!, auto-link-learnings!, auto-vo
 
 ---
 
-### 12. System prompt is ~5000 tokens of mixed-value content
+### ~~12. System prompt is ~5000 tokens of mixed-value content~~ — FIXED
 
-Breakdown:
-- Document tools: ~1200 tokens (9 tools with full schemas — bloated)
-- Learnings tools: ~600 tokens (rarely used by LLM)
-- History tools: ~300 tokens (rarely used)
-- RLM patterns: ~400 tokens (LLM rarely follows them)
-- Active learnings injection: 0-2000 tokens (unbounded)
+**Status: FIXED** (March 2026)
 
-~1300 tokens of low-value content per iteration. Over 50 iterations that's 65,000 wasted input tokens.
-
-**Fix**: Make learnings/history/patterns sections optional. Collapse document tools to 3 core functions. Cap learnings injection.
-
-**Location**: `rlm/core.clj` build-system-prompt (lines 437-720).
+Reduced from ~4,414 tokens to ~3,324 tokens (25% reduction):
+- Collapsed `date_tools` (308 tokens) + `set_tools` (172 tokens) + `learnings_tools` (441 tokens) into single compact `<helpers>` section (~120 tokens)
+- Trimmed `rlm_patterns` from 374 tokens (3 code blocks) to ~80 tokens (4 bullet points)
+- Total savings: ~1,090 tokens per iteration
 
 ---
 

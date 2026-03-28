@@ -755,15 +755,14 @@
         (expect (str/includes? prompt "available_tools"))
         (expect (str/includes? prompt "FINAL"))))
 
-  (it "includes learnings tools with FINAL learning guidance"
+  (it "includes learnings and FINAL guidance in helpers"
       (let [prompt (#'rlm-core/build-system-prompt {})]
-        (expect (str/includes? prompt "learnings_tools"))
         (expect (str/includes? prompt "search-learnings"))
         (expect (str/includes? prompt "learning-stats"))
         (expect (str/includes? prompt "list-learning-tags"))
-        (expect (str/includes? prompt "learn_via_final"))
-        (expect (str/includes? prompt ":confidence"))
-        (expect (str/includes? prompt ":learn"))))
+        (expect (str/includes? prompt ":learn"))
+        (expect (str/includes? prompt ":sources"))
+        (expect (str/includes? prompt ":reasoning"))))
 
   (it "includes history tools when enabled"
       (let [prompt (#'rlm-core/build-system-prompt {:history-enabled? true})]
@@ -786,26 +785,12 @@
         (expect (str/includes? prompt "entity_schema"))
         (expect (str/includes? prompt "relationship_schema"))))
 
-  (it "includes date tools section"
+  (it "includes date and set helpers in compact format"
       (let [prompt (#'rlm-core/build-system-prompt {})]
-        (expect (str/includes? prompt "date_tools"))
         (expect (str/includes? prompt "parse-date"))
-        (expect (str/includes? prompt "date-before?"))
-        (expect (str/includes? prompt "date-after?"))
         (expect (str/includes? prompt "days-between"))
-        (expect (str/includes? prompt "date-plus-days"))
-        (expect (str/includes? prompt "date-minus-days"))
-        (expect (str/includes? prompt "date-format"))
-        (expect (str/includes? prompt "today-str"))))
-
-  (it "includes set tools section"
-      (let [prompt (#'rlm-core/build-system-prompt {})]
-        (expect (str/includes? prompt "set_tools"))
         (expect (str/includes? prompt "set-union"))
-        (expect (str/includes? prompt "set-intersection"))
-        (expect (str/includes? prompt "set-difference"))
-        (expect (str/includes? prompt "set-subset?"))
-        (expect (str/includes? prompt "set-superset?"))))
+        (expect (str/includes? prompt "set-intersection"))))
 
   (it "includes entity check in workflow when has-documents?"
       (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true})]

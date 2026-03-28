@@ -579,55 +579,12 @@
 </document_entity_tools>
 ")
        "
-<date_tools>
-  <description>Date manipulation functions for ISO-8601 date strings (YYYY-MM-DD format).</description>
-  <tool name=\"parse-date\">(parse-date date-str) - Parse and validate ISO-8601 date. Returns string or nil.</tool>
-  <tool name=\"date-before?\">(date-before? date1 date2) - True if date1 &lt; date2.</tool>
-  <tool name=\"date-after?\">(date-after? date1 date2) - True if date1 &gt; date2.</tool>
-  <tool name=\"days-between\">(days-between date1 date2) - Number of days between dates (negative if date1 &gt; date2).</tool>
-  <tool name=\"date-plus-days\">(date-plus-days date-str days) - Add days to date. Returns ISO string.</tool>
-  <tool name=\"date-minus-days\">(date-minus-days date-str days) - Subtract days from date. Returns ISO string.</tool>
-  <tool name=\"date-format\">(date-format date-str pattern) - Format date with custom pattern (e.g., \"dd/MM/yyyy\").</tool>
-  <tool name=\"today-str\">(today-str) - Returns today's date as ISO-8601 string.</tool>
-  <usage_tips>
-    - All dates use ISO-8601 format: \"2024-01-15\"
-    - Functions return nil on invalid input (no exceptions)
-    - Use days-between for deadline/duration calculations
-    - Use date-before?/date-after? for date comparisons
-  </usage_tips>
-</date_tools>
-
-<set_tools>
-  <description>Set operations for working with collections as sets.</description>
-  <tool name=\"set-union\">(set-union s1 s2) - Union of two sets.</tool>
-  <tool name=\"set-intersection\">(set-intersection s1 s2) - Intersection of two sets.</tool>
-  <tool name=\"set-difference\">(set-difference s1 s2) - Elements in s1 not in s2.</tool>
-  <tool name=\"set-subset?\">(set-subset? s1 s2) - True if s1 is a subset of s2.</tool>
-  <tool name=\"set-superset?\">(set-superset? s1 s2) - True if s1 is a superset of s2.</tool>
-  <usage_tips>
-    - Convert vectors to sets first: (set [1 2 3])
-    - Useful for comparing entity lists, finding overlaps, deduplication
-  </usage_tips>
-</set_tools>
-
-<learnings_tools>
-  <description>Store, retrieve, and vote on meta-insights about HOW to approach problems (DB-backed, persisted). Learnings capture strategies and patterns that work. Categorize with tags for precise retrieval. Validated through voting — poorly rated learnings decay and are filtered out.</description>
-  <tool name=\"search-learnings\">(search-learnings query) or (search-learnings query top-k) or (search-learnings query top-k [\"tag1\"]) - Search learnings by insight/context text (case-insensitive). Optional tag filter returns only learnings with ALL specified tags. Returns [{:learning/id :insight :context :tags :scope :useful-count :not-useful-count}...]. Pass nil/blank query for recent learnings.</tool>
-  <tool name=\"learning-stats\">(learning-stats) - Get learning statistics: {:total-learnings :active-learnings :decayed-learnings :total-votes :total-applications :all-tags}</tool>
-  <tool name=\"list-learning-tags\">(list-learning-tags) - List all tags with their definitions. Returns [{:name \"tag\" :definition \"what it means\"}...].</tool>
-  <learn_via_final>
-    To persist insights, include :learn in your FINAL call:
-    (FINAL answer {:learn [{:insight \"What you learned\" :tags [\"relevant-tags\"]}]})
-    - Only store genuinely reusable strategies or document-specific patterns
-    - Tags help future queries find relevant learnings — be specific
-    - Past learnings are auto-fetched at query start and auto-voted after each query
-  </learn_via_final>
-  <usage_tips>
-    - Search learnings at the START of a task to benefit from past insights
-    - Use tags to filter: (search-learnings nil 10 [\"aggregation\"]) finds all aggregation learnings
-    - Learnings are persisted and survive across sessions
-  </usage_tips>
-</learnings_tools>
+<helpers>
+  Date: parse-date, date-before?, date-after?, days-between, date-plus-days, date-minus-days, date-format, today-str (ISO-8601 format)
+  Sets: set-union, set-intersection, set-difference, set-subset?, set-superset?
+  Learnings: (search-learnings query), (search-learnings query top-k [\"tag\"]), (learning-stats), (list-learning-tags)
+  Persist insights via FINAL: (FINAL answer {:learn [{:insight \"...\" :tags [\"tag\"]}]})
+</helpers>
 "
        ;; Include history tools if enabled
        (when history-enabled?
@@ -663,38 +620,10 @@
 
        "
 <rlm_patterns>
-  <description>Proven strategies for processing large documents. Choose based on task type.</description>
-
-  <pattern name=\"Partition + Map (aggregation tasks)\">
-    Use when the answer depends on MANY or ALL entries (counting, summarizing, comparing).
-    Process pages in batches with llm-query-batch for parallelism:
-
-    (def total-pages (P-page-count))
-    (def chunk-size 5)
-    (def chunks (partition-all chunk-size (range total-pages)))
-    (def batch-results
-      (llm-query-batch
-        (mapv (fn [page-group]
-                (str \"Analyze pages \" (first page-group) \"-\" (last page-group) \":\\n\"
-                     (str-join \"\\n---\\n\" (mapv P-page page-group))))
-              chunks)))
-    (def Final (:content (llm-query (str \"Synthesize these results:\\n\" (str-join \"\\n\" (mapv :content batch-results))))))
-  </pattern>
-
-  <pattern name=\"Targeted Search (retrieval tasks)\">
-    Use when looking for SPECIFIC information (clauses, entities, definitions):
-
-    (def hits (search-document-pages \"penalty clause\"))
-    (def relevant-content (mapv #(P-add! [:page.node/id (:page.node/id %)]) hits))
-    (FINAL answer {:sources (mapv :page.node/id relevant-content) :reasoning \"Found via targeted search + analysis\"})
-  </pattern>
-
-  <pattern name=\"Regex Scan (structured extraction)\">
-    Use when data follows a pattern across the full text:
-
-    (def matches (re-seq #\"Section \\d+\\.\\d+\" P))
-    (def date-refs (re-seq #\"\\d{4}-\\d{2}-\\d{2}\" P))
-  </pattern>
+  Aggregation: partition pages → llm-query-batch → synthesize. Use for counting/summarizing ALL content.
+  Retrieval: search-document-pages → P-add! → analyze. Use for finding SPECIFIC info.
+  Regex: (re-seq #\"pattern\" P) for structured extraction across full text.
+  ALWAYS call (FINAL answer {:sources [...] :reasoning \"...\"}) with sources and reasoning.
 </rlm_patterns>
 
 <workflow>
