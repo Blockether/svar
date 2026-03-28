@@ -487,9 +487,7 @@
       (FINAL answer {:sources sources :reasoning \"Aggregated from 3 sections\" :learn [{:insight \"Penalties in section 7\" :tags [\"contracts\"]}]})</tool>")
        "
 
-  <tool name=\"list-locals\">(list-locals) - see all variables you've defined (functions show as &lt;fn&gt;, large collections summarized)</tool>
-  <tool name=\"get-local\">(get-local 'var-name) - get full value of a specific variable you defined</tool>
-  <tool name=\"request-more-iterations\">(request-more-iterations n) - Request n more iterations if running low. Returns {:granted n :new-budget N :cap max}. Use when you realize the task needs more steps than the current budget allows.</tool>
+  <tool name=\"request-more-iterations\">(request-more-iterations n) - Request n more iterations if running low. Returns {:granted n :new-budget N :cap max}.</tool>
 </available_tools>
 "
        (when has-documents? "
@@ -644,18 +642,13 @@
 </response_format>
 
 <critical>
-- AUTO-STORED RESULTS: Large outputs (>" INLINE_RESULT_THRESHOLD " chars) are automatically stored in _rN variables (e.g. _r0, _r1). Your history only shows metadata (type, length, preview). Use the variable directly in code: (count _r0), (first _r0), (def my-data (filter ... _r0)). Large stdout is stored in _stdoutN variables similarly.
-- VARIABLE DISCIPLINE: Always (def my-var ...) important intermediate values. Variables persist across ALL iterations. Small results appear inline but prefer variables for anything you'll reuse.
-- CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(list-documents)` calls the function, `list-documents` just references the function object and returns nothing useful. Same for FINAL: `(FINAL answer)` terminates, `FINAL answer` does NOT.
-- FAST PATH: If <context> already contains the answer, call (FINAL answer) IMMEDIATELY - no searching needed!
-- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(FINAL (summarize content))\"] — both run in the same iteration.
-- USE list-document-pages or search-document-pages FOR CONTENT (not just TOC entries!)
-- FOR LARGE DOCUMENTS: Use llm-query-batch for parallel processing instead of sequential llm-query calls
-- ALWAYS call (FINAL answer) when you have the answer - don't keep searching after finding it
-- ITERATION BUDGET: Starts at " MAX_ITERATIONS " iterations. If you need more, call (request-more-iterations n) BEFORE running low. Hard cap: " MAX_ITERATION_CAP ". " (/ EVAL_TIMEOUT_MS 1000) "s timeout per execution"
-       (when history-enabled?
-         "\n- Your current variables are shown after each iteration — use them, do NOT re-read files you already have")
-       "
+- ALL RESULTS INLINE: Execution results are shown in full. You see everything — no hidden variables.
+- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(FINAL (summarize content))\"] — read AND answer in one go.
+- CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(FINAL answer)` terminates, `FINAL answer` does NOT.
+- FAST PATH: If context already contains the answer, call (FINAL answer) IMMEDIATELY.
+- NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or FINAL with what you have.
+- ALWAYS call (FINAL answer) as soon as you have enough information.
+- ITERATION BUDGET: " MAX_ITERATIONS " iterations. Hard cap: " MAX_ITERATION_CAP ". " (/ EVAL_TIMEOUT_MS 1000) "s timeout per execution.
 </critical>
 "
        ;; Inject pre-fetched learnings (model-specific + query-relevant)
@@ -727,8 +720,9 @@
                                (range)
                                code-blocks
                                execution-results)
-          ;; Auto-store large results in REPL variables per RLM paper Algorithm 1
-          executions (auto-store-results! rlm-env raw-executions)
+          ;; Results stay inline — context budget handles size naturally.
+          ;; No auto-store: the model sees full results directly.
+          executions raw-executions
           final-result (some #(let [check (check-result-for-final %)] (when (:final? check) check)) execution-results)]
       {;; When native reasoning is present, the raw response is just a redundant JSON wrapper
        ;; around thinking+code. Use nil to keep the trace clean — thinking is in :thinking.
@@ -795,12 +789,10 @@
 
 (defn format-executions
   "Formats executions for LLM feedback as EDN.
-   Small results shown inline. Large results show metadata only — the full value
-   is in auto-stored _rN variables accessible via code.
-   Detects bare symbol references (function objects) and provides corrective feedback."
+   All results shown inline — context budget handles size naturally."
   [executions]
   (str/join "\n"
-            (map (fn [{:keys [code error result stdout auto-var auto-stdout-var]}]
+            (map (fn [{:keys [code error result stdout]}]
                    (let [code-str (str/trim (or code ""))
                          val-part (cond
                                     error
@@ -809,23 +801,11 @@
                                     (fn? result)
                                     (str ":error \"" code-str " is a function object. Call it: (" code-str ")\"")
 
-                                    auto-var
-                                    (let [result-str (pr-str (realize-value result))
-                                          preview (subs result-str 0 (min 100 (count result-str)))]
-                                      (str ":ok " auto-var
-                                           " ;; " (result-type-label result)
-                                           ", " (count result-str) " chars"
-                                           " → " preview
-                                           (when (> (count result-str) 100) "...")))
-
                                     :else
                                     (str ":ok " (pr-str (realize-value result))))
 
                          stdout-part (when-not (str/blank? stdout)
-                                       (if auto-stdout-var
-                                         (str " :stdout " auto-stdout-var
-                                              " ;; " (count stdout) " chars")
-                                         (str " :stdout " (pr-str stdout))))]
+                                       (str " :stdout " (pr-str stdout)))]
                      (str "{" code-str " → " val-part (or stdout-part "") "}")))
                  executions)))
 
@@ -973,23 +953,9 @@
                                                           (tokens/truncate-messages effective-model (vec history) max-context-tokens))
                                               dropped-count (- (count history) (count truncated))]
                                           (if (pos? dropped-count)
-                                            ;; Inject state summary so model knows what it has
-                                            (let [locals (when-let [la (:locals-atom rlm-env)]
-                                                           (into {} (map (fn [[k v]]
-                                                                          [k (cond
-                                                                               (fn? v) '<fn>
-                                                                               (string? v) (str (str-truncate v 1000) " (" (count v) " chars)")
-                                                                               (and (coll? v) (> (count v) 5))
-                                                                               (str "<" (count v) " items>")
-                                                                               :else (str-truncate (pr-str v) 1000))])
-                                                                        @la)))
-                                                  summary (str "{:state-summary true"
-                                                               "\n :iterations-completed " iteration
-                                                               "\n :truncated-history " dropped-count " messages dropped"
-                                                               (when (seq locals)
-                                                                 (str "\n :your-variables " (pr-str locals)))
-                                                               "\n :note \"Your earlier work was truncated to save context. Use variables above — do NOT re-read files you already have.\""
-                                                               "}")]
+                                            (let [summary (str "{:truncated " dropped-count " older messages dropped"
+                                                               " :iterations-so-far " iteration
+                                                               " :note \"Earlier results were truncated. Work with what you see.\"}")]
                                               (into pinned
                                                     (cons {:role "user" :content summary}
                                                           truncated)))
@@ -1054,21 +1020,6 @@
                     (let [exec-feedback (format-executions executions)
                           iteration-header (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
                                                   "{:requirement " (pr-str (str-truncate query 200)) "}")
-                          ;; Always include current locals so the model knows what it has
-                          locals-summary (when-let [la (:locals-atom rlm-env)]
-                                          (let [locals @la]
-                                            (when (seq locals)
-                                              (str "\n{:your-variables "
-                                                   (pr-str (into {}
-                                                                 (map (fn [[k v]]
-                                                                        [k (cond
-                                                                             (fn? v) '<fn>
-                                                                             (string? v) (str (str-truncate v 1000) " (" (count v) " chars)")
-                                                                             (and (coll? v) (> (count v) 5))
-                                                                             (str "<" (count v) " items>")
-                                                                             :else (str-truncate (pr-str v) 1000))])
-                                                                      locals)))
-                                                   "}"))))
                           ;; Periodic learning nudge
                           learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
                                            "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
@@ -1079,7 +1030,7 @@
                                                (if has-reasoning?
                                                  "{\"code\": [\"...\"]}"
                                                  "{\"thinking\": \"...\", \"code\": [\"...\"]}"))
-                                          (str iteration-header "\n" exec-feedback locals-summary learning-nudge repetition-warning))]
+                                          (str iteration-header "\n" exec-feedback learning-nudge repetition-warning))]
                       (rlm-debug! {:iteration iteration
                                    :code-blocks (count executions)
                                    :errors (count (filter :error executions))

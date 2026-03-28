@@ -33,8 +33,9 @@
   "Results with string representation shorter than this are shown inline.
    Larger results are auto-stored in _rN variables and only metadata
    (type, length, preview, var name) is placed in the history.
-   Per Zhang et al. (2025) Algorithm 1: hist ← hist ∥ code ∥ Metadata(stdout)."
-  150)
+   Set high enough that tool results (file reads, directory listings) stay
+   visible — the context window budget handles the size, not this threshold."
+  10000)
 
 (def ENTITY_EXTRACTION_OBJECTIVE
   "Extract entities and relationships from the provided content.\n\nReturn only the fields in the schema.\nFocus on concrete entities, avoid duplication, and include page/section when known.")
