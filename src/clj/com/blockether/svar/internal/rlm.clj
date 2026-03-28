@@ -382,14 +382,17 @@
    (let [rlm-router (:router env)
            ;; Resolve root model name for token counting / refine! config
          root-model (or (when rlm-router (rlm-routing/resolve-root-model rlm-router)) model)
-          ;; Rebuild SCI context with current context-data and custom bindings
-         locals-atom (:locals-atom env)
+           ;; Query-scoped atoms — isolate concurrent queries on the same env
+         locals-atom (atom {})
+         depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
-         llm-query-fn (:llm-query-fn env)
-         rlm-query-fn (:rlm-query-fn env)
-         sub-llm-fn (or (:sub-llm-query-fn env) (:llm-query-fn env))
-         hooks-atom (:hooks-atom env)
-         original-hooks (when hooks-atom @hooks-atom)
+          ;; Rebuild query functions with fresh depth-atom for this query
+         llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom rlm-router {:hooks-atom (:hooks-atom env)})
+         rlm-query-fn (rlm-core/make-rlm-query-fn {:strategy :root} depth-atom rlm-router db-info-atom)
+         sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:hooks-atom (:hooks-atom env)})
+          ;; Hooks: snapshot from env, override per-query, restore after
+         hooks-atom (atom (or (some-> (:hooks-atom env) deref) {}))
+         original-hooks @hooks-atom
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
          claims-atom (when verify? (atom []))
@@ -429,7 +432,8 @@
                                                    (mapv async/<!! chs)))}
          sci-ctx (rlm-tools/create-sci-context context sub-llm-fn rlm-query-fn locals-atom db-info-atom
                                                (merge custom-bindings cite-bindings budget-bindings llm-query-overrides))
-         rlm-env (assoc env :sci-ctx sci-ctx :context context :max-iterations-atom max-iterations-atom)
+         rlm-env (assoc env :sci-ctx sci-ctx :context context :max-iterations-atom max-iterations-atom
+                        :locals-atom locals-atom :hooks-atom hooks-atom)
          env-id (:env-id env)]
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
        (binding [*max-recursion-depth* max-recursion-depth]

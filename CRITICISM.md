@@ -155,16 +155,17 @@ Reduced from ~4,414 tokens to ~3,324 tokens (25% reduction):
 
 ---
 
-### 13. Concurrency is not safe
+### ~~13. Concurrency is not safe~~ — FIXED
 
-`depth-atom`, `hooks-atom`, `locals-atom` are per-env but shared across queries. Two parallel `query-env!` calls on the same env cause race conditions:
-- `depth-atom` incremented by both → incorrect recursion depth
-- `hooks-atom` modified by both → undefined behavior
-- `locals-atom` mutated by SCI execution → cross-contamination
+**Status: FIXED** (March 2026)
 
-**Fix**: Create query-scoped atoms in `query-env!`, not in `create-env`. Or document that envs are NOT thread-safe.
+`query-env!` now creates query-scoped atoms for all mutable state:
+- `locals-atom` — fresh `(atom {})` per query
+- `depth-atom` — fresh `(atom 0)` per query
+- `hooks-atom` — snapshot from env, not shared
+- Query functions (`llm-query-fn`, `rlm-query-fn`) rebuilt with query-scoped depth
 
-**Location**: `rlm.clj` lines 137-144 (create-env atoms).
+Two concurrent `query-env!` on the same env are now fully isolated.
 
 ---
 
