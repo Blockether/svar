@@ -25,8 +25,9 @@
   5)
 
 (def EVAL_TIMEOUT_MS
-  "Timeout in milliseconds for code evaluation in SCI sandbox."
-  30000)
+  "Timeout in milliseconds for code evaluation in SCI sandbox.
+   Must be long enough for nested llm-query calls."
+  120000)
 
 (def INLINE_RESULT_THRESHOLD
   "Results with string representation shorter than this are shown inline.
@@ -742,9 +743,13 @@
 (s/def :page.node/group-id
   string?)
 
-;; Optional: bounding box for visual elements [xmin, ymin, xmax, ymax] in pixels
+;; Optional: bounding box for visual elements [xmin, ymin, xmax, ymax] in pixels (legacy)
 (s/def :page.node/bbox
   (s/coll-of int? :kind vector? :count 4))
+
+;; Optional: index into PDFBox-extracted embedded images (0-based)
+(s/def :page.node/image-index
+  int?)
 
 ;; Single content node within a page (namespaced keys)
 ;; Note: :page.node/content holds text for text nodes; visual nodes use :page.node/image-data (bytes)
@@ -760,6 +765,7 @@
                 :page.node/caption
                 :page.node/kind
                 :page.node/bbox
+                :page.node/image-index
                 :page.node/group-id]))
 
 ;; Page nodes: vector of content nodes in reading order

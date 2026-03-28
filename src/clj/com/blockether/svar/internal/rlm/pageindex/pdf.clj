@@ -246,6 +246,56 @@
          (finally
            (.close document)))))))
 
+(defn extract-page-images
+  "Extracts embedded images from specific PDF pages using PDFBox.
+
+   Returns a map of page-index → vector of image byte arrays (PNG).
+   Images are extracted in document order per page.
+
+   Params:
+   `pdf-path` - String. Path to the PDF file.
+   `opts` - Optional map with:
+     `:page-set` - Set of 0-indexed page numbers, or nil for all pages.
+
+   Returns:
+   Map of {page-index [{:bytes byte[] :width int :height int} ...]}"
+  ([pdf-path] (extract-page-images pdf-path {}))
+  ([pdf-path {:keys [page-set]}]
+   (let [file (File. ^String pdf-path)]
+     (when-not (.exists file)
+       (anomaly/not-found! "PDF file not found" {:type :svar.pdf/file-not-found :path pdf-path}))
+     (let [^org.apache.pdfbox.pdmodel.PDDocument document
+           (try
+             (Loader/loadPDF file)
+             (catch IOException e
+               (anomaly/fault! "Failed to load PDF" {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+       (try
+         (let [pages (.getPages document)
+               page-count (.getNumberOfPages document)
+               indices (if page-set
+                         (filterv #(< % page-count) (sort page-set))
+                         (range page-count))]
+           (into {}
+                 (map (fn [page-idx]
+                        (let [page (.get pages page-idx)
+                              resources (.getResources page)
+                              images (when resources
+                                       (vec
+                                        (keep (fn [name]
+                                                (let [xobj (.getXObject resources name)]
+                                                  (when (instance? org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject xobj)
+                                                    (let [img (.getImage xobj)
+                                                          baos (java.io.ByteArrayOutputStream.)]
+                                                      (javax.imageio.ImageIO/write img "PNG" baos)
+                                                      {:bytes (.toByteArray baos)
+                                                       :width (.getWidth xobj)
+                                                       :height (.getHeight xobj)}))))
+                                              (iterator-seq (.iterator (.getXObjectNames resources))))))]
+                          [page-idx (or images [])]))
+                      indices)))
+         (finally
+           (.close document)))))))
+
 (comment
   ;; Example usage
   (def images (pdf->images "resources-test/example.pdf"))

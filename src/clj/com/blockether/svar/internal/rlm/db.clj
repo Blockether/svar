@@ -210,6 +210,8 @@
                                                        :execution/time-ms]}]) ...]
                 :where [?e :message/id _]]
               (d/db conn))
+         ;; Filter out system messages — they contain the full system prompt
+         (remove #(= :system (:message/role %)))
          (sort-by :message/timestamp #(compare %2 %1))
          (take limit)
          (mapv (fn [m]
@@ -623,7 +625,7 @@
                          (filter #(scope-matches-documents? (:scope %) doc-names))
                          ;; Sort by applied-count (proven useful) then recency
                          (sort-by (fn [l] [(- (or (:applied-count l) 0))
-                                           (- (or (.getTime (:timestamp l)) 0))])
+                                           (- (if-let [t (:timestamp l)] (.getTime t) 0))])
                                   compare)
                          (take top-k)
                          vec)]

@@ -117,7 +117,7 @@ Image - ALL visual elements regardless of size (DESCRIPTION IS REQUIRED)
   - id: Unique identifier
   - parent-id: ID of the Section this image belongs to (null for standalone footer/header icons)
   - kind: photo, diagram, chart, logo, icon, illustration, screenshot, map, formula, signature, badge, unknown
-  - bbox: [xmin, ymin, xmax, ymax] in pixels (coordinates must match actual image dimensions)
+  - image-index: Integer index matching an embedded image from the EMBEDDED IMAGES list (null if no match)
   - caption: Text from document caption (null if no caption present)
   - description: REQUIRED - YOUR description of what the image shows
   NOTE: Detect ALL images including tiny icons, license badges, social media icons in headers/footers
@@ -126,7 +126,7 @@ Table - Data tables (DESCRIPTION AND CONTENT ARE REQUIRED)
   - id: Unique identifier
   - parent-id: ID of the Section this table belongs to
   - kind: data, form, layout, comparison, schedule
-  - bbox: [xmin, ymin, xmax, ymax] in pixels
+  - image-index: Integer index if table is rendered as image (null for text-based tables)
   - caption: Text from document caption (null if no caption present)
   - description: REQUIRED - YOUR description of table content and structure
   - content: REQUIRED - Table data as ASCII art. Use | for columns and - for row separators.
@@ -164,12 +164,13 @@ CONTENT RULES:
 4. For Image/Table: description is REQUIRED - describe what YOU SEE
 5. For Table: content is REQUIRED - reproduce ALL table data as ASCII art (| for columns, - for row separators)
 6. For Image/Table: caption is ONLY the document's caption text (null if none)
-7. Set continuation=true if content continues from previous page
-8. Keep text content exact - no interpretation or summarization
-9. Detect ALL visual elements regardless of size - even tiny icons (20x20 pixels or smaller)
-10. Include footer/header icons, license badges (Creative Commons, etc.), social media icons, decorative icons
-11. Do NOT skip images based on size or perceived importance - capture everything visual
-12. For TocEntry: ONLY extract from actual TOC pages - never infer. Set target-section-id to null always.
+7. For Image/Table: set image-index to match the corresponding embedded image from the EMBEDDED IMAGES list (by dimensions and visual content)
+8. Set continuation=true if content continues from previous page
+9. Keep text content exact - no interpretation or summarization
+10. Detect ALL visual elements regardless of size - even tiny icons (20x20 pixels or smaller)
+11. Include footer/header icons, license badges (Creative Commons, etc.), social media icons, decorative icons
+12. Do NOT skip images based on size or perceived importance - capture everything visual
+13. For TocEntry: ONLY extract from actual TOC pages - never infer. Set target-section-id to null always.
 
 EXAMPLE STRUCTURE (flat array with parent-id references):
 [
@@ -181,7 +182,7 @@ EXAMPLE STRUCTURE (flat array with parent-id references):
   {type:'Section', id:'6', parent-id:null, description:'Introduction establishing the research context and motivation. Covers the problem statement, research objectives, and significance of the study. Provides essential background for understanding subsequent chapters.'},
   {type:'Heading', id:'7', parent-id:'6', level:'h1', content:'Chapter 1 Introduction'},
   {type:'Paragraph', id:'8', parent-id:'6', content:'Intro text...'},
-  {type:'Image', id:'9', parent-id:'6', kind:'diagram', bbox:[...], caption:null, description:'A flowchart showing the research methodology with four stages: data collection, preprocessing, analysis, and validation.'}
+  {type:'Image', id:'9', parent-id:'6', kind:'diagram', image-index:0, caption:null, description:'A flowchart showing the research methodology with four stages: data collection, preprocessing, analysis, and validation.'}
 ]
 
 NOTE: TocEntry nodes are ONLY created when you see an actual Table of Contents page.
@@ -594,10 +595,11 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                 ::spec/cardinality :spec.cardinality/one
                 ::spec/description "What kind of image this is"
                 ::spec/values image-kind-values})
-   (spec/field {::spec/name :bbox
-                ::spec/type :spec.type/int-v-4
+   (spec/field {::spec/name :image-index
+                ::spec/type :spec.type/int
                 ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Bounding box as xmin, ymin, xmax, ymax in pixels"})
+                ::spec/required false
+                ::spec/description "Index into the embedded images list (0-based). Match to the EMBEDDED IMAGES list. null if no matching embedded image."})
    (spec/field {::spec/name :caption
                 ::spec/type :spec.type/string
                 ::spec/cardinality :spec.cardinality/one
@@ -637,10 +639,11 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                 ::spec/cardinality :spec.cardinality/one
                 ::spec/description "What kind of table this is"
                 ::spec/values table-kind-values})
-   (spec/field {::spec/name :bbox
-                ::spec/type :spec.type/int-v-4
+   (spec/field {::spec/name :image-index
+                ::spec/type :spec.type/int
                 ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Bounding box as xmin, ymin, xmax, ymax in pixels"})
+                ::spec/required false
+                ::spec/description "Index into the embedded images list (0-based). Match to the EMBEDDED IMAGES list if the table is rendered as an image. null if text-based table."})
    (spec/field {::spec/name :caption
                 ::spec/type :spec.type/string
                 ::spec/cardinality :spec.cardinality/one
@@ -843,9 +846,9 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
           (image->bytes cropped))))))
 
 (defn- visual-node?
-  "Checks if a node is a visual node (Image or Table) by presence of :page.node/kind and :page.node/bbox fields."
+  "Checks if a node is a visual node (Image or Table) by presence of :page.node/kind field."
   [node]
-  (and (:page.node/kind node) (:page.node/bbox node)))
+  (some? (:page.node/kind node)))
 
 (defn- extract-image-subregion
   "Extracts a region from a BufferedImage and returns as a new BufferedImage.
@@ -865,40 +868,36 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
         (.getSubimage image (int xmin) (int ymin) (int width) (int height))))))
 
 (defn- enrich-visual-nodes
-  "Enriches visual nodes (images/tables) with extracted image bytes from the source image.
-   
-   Visual nodes are identified by having :page.node/kind and :page.node/bbox fields (Image and Table types).
-   
-   For each visual node:
-   1. Crops the region from the source image using the bbox
-   2. Stores the cropped image bytes
-   
-   Note: Page-level rotation is already handled by the PDFBox heuristic in
-   `extract-text-from-pdf` before extraction. No per-node LLM rotation needed.
-   
+  "Enriches visual nodes (images/tables) with extracted image bytes from PDFBox.
+
+   Visual nodes are identified by having :page.node/kind field (Image and Table types).
+   Each visual node may have :page.node/image-index pointing to a PDFBox-extracted image.
+
    Params:
    `nodes` - Vector of all node maps.
-   `source-image` - BufferedImage. The source page image for extraction.
-   `model` - String. The vision model name (used to determine bbox coordinate scale).
+   `pdf-images` - Vector of {:bytes byte[] :width int :height int} from PDFBox extraction.
    `page-index` - Integer. The page index (for logging).
-   
-    Returns:
-     Vector of nodes with :page.node/image-data key added to visual elements that have valid bbox."
-  [nodes ^BufferedImage source-image model page-index]
-  (let [bbox-scale (get-bbox-scale model)]
-    (mapv (fn [node]
-            (if (visual-node? node)
-              (let [bbox (:page.node/bbox node)
-                    img-width (.getWidth source-image)
-                    img-height (.getHeight source-image)
-                    clamped (scale-and-clamp-bbox bbox img-width img-height bbox-scale)]
-                (if clamped
-                  (let [cropped (extract-image-subregion source-image clamped)]
-                    (assoc node :page.node/image-data (when cropped (image->bytes cropped))
-                           :page.node/bbox clamped))
-                  node))
-              node))
-          nodes)))
+
+   Returns:
+   Vector of nodes with :page.node/image-data added for visual elements with valid image-index."
+  [nodes pdf-images page-index]
+  (mapv (fn [node]
+          (if-let [img-idx (:page.node/image-index node)]
+            (if-let [img (get pdf-images img-idx)]
+              (do
+                (trove/log! {:level :debug
+                             :data {:page page-index :image-index img-idx
+                                    :width (:width img) :height (:height img)}
+                             :msg "Attached PDFBox image to node"})
+                (assoc node :page.node/image-data (:bytes img)))
+              (do
+                (trove/log! {:level :warn
+                             :data {:page page-index :image-index img-idx
+                                    :available (count pdf-images)}
+                             :msg "Image index out of range — no PDFBox image available"})
+                node))
+            node))
+        nodes))
 
 ;; =============================================================================
 ;; Quality Refinement — Eval + Refine Extracted Pages
@@ -1007,18 +1006,25 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    
    Returns:
    Map with :page/index and :page/nodes (enriched with image data)."
-  [^BufferedImage image page-index {:keys [rlm-router objective
+  [^BufferedImage image page-index {:keys [rlm-router objective pdf-images
                                            refine-iterations refine-threshold]
                                     :or {refine-iterations DEFAULT_REFINE_ITERATIONS
                                          refine-threshold DEFAULT_REFINE_THRESHOLD}}]
-  (let [img-width (.getWidth image)
-        img-height (.getHeight image)]
+  (let [page-pdf-images (or pdf-images [])]
     (trove/log! {:level :info :data {:page page-index
                                      :iterations refine-iterations :threshold refine-threshold}
                  :msg "Refining page extraction (image)"})
     (let [base64-image (image->base64 image)
-          task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.\n\nIMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coordinates MUST be within these bounds: xmin and xmax in range [0, %d], ymin and ymax in range [0, %d]."
-                       img-width img-height img-width img-height)
+          embedded-images-hint (if (seq page-pdf-images)
+                                 (format "\n\nEMBEDDED IMAGES: This page has %d embedded images (indexed 0-%d). For Image and Table nodes that correspond to an embedded image, set image-index to the matching index. Available images:\n%s"
+                                         (count page-pdf-images)
+                                         (dec (count page-pdf-images))
+                                         (clojure.string/join "\n" (map-indexed (fn [i img]
+                                                                                  (format "  [%d] %dx%d pixels" i (:width img) (:height img)))
+                                                                                page-pdf-images)))
+                                 "")
+          task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.%s"
+                       embedded-images-hint)
           refine-result (llm/refine! {:spec vision-response-spec
                                       :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
                                                  (llm/user task (llm/image base64-image "image/png"))]
@@ -1028,9 +1034,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                                       :threshold refine-threshold
                                       :criteria PAGE_EVAL_CRITERIA})
           raw-nodes (get-in refine-result [:result :nodes] [])
-          root-model (or (some-> (llm/select-provider rlm-router {:strategy :root}) second :name)
-                         (throw (ex-info "No model in router" {:type :svar/missing-model})))
-          nodes (enrich-visual-nodes raw-nodes image root-model page-index)]
+          nodes (enrich-visual-nodes raw-nodes page-pdf-images page-index)]
       (trove/log! {:level :info :data {:page page-index
                                        :nodes (count nodes)
                                        :final-score (:final-score refine-result)
@@ -1239,18 +1243,26 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
        `:rlm-router` - Router instance for LLM calls.
        `:objective` - String. System prompt for OCR.
        `:timeout-ms` - Integer, optional. HTTP timeout (default: 360000ms / 6 min)."
-  [^BufferedImage image page-index {:keys [rlm-router objective timeout-ms]
+  [^BufferedImage image page-index {:keys [rlm-router objective timeout-ms pdf-images]
                                     :or {timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
   (let [img-width (.getWidth image)
-        img-height (.getHeight image)]
+        img-height (.getHeight image)
+        page-pdf-images (or pdf-images [])]
     (trove/log! {:level :info :data {:page page-index :timeout-ms timeout-ms
-                                     :image-width img-width :image-height img-height}
+                                     :image-width img-width :image-height img-height
+                                     :embedded-images (count page-pdf-images)}
                  :msg "Extracting content from page"})
     (let [base64-image (image->base64 image)
-          task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.
-
-IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coordinates MUST be within these bounds: xmin and xmax in range [0, %d], ymin and ymax in range [0, %d]."
-                       img-width img-height img-width img-height)
+          embedded-images-hint (if (seq page-pdf-images)
+                                 (format "\n\nEMBEDDED IMAGES: This page has %d embedded images (indexed 0-%d). For Image and Table nodes that correspond to an embedded image, set image-index to the matching index. Available images:\n%s"
+                                         (count page-pdf-images)
+                                         (dec (count page-pdf-images))
+                                         (clojure.string/join "\n" (map-indexed (fn [i img]
+                                                                                  (format "  [%d] %dx%d pixels" i (:width img) (:height img)))
+                                                                                page-pdf-images)))
+                                 "")
+          task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.%s"
+                       embedded-images-hint)
           response (llm/ask! {:spec vision-response-spec
                               :messages [(llm/system objective)
                                          (llm/user task (llm/image base64-image "image/png"))]
@@ -1259,12 +1271,8 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
                               :router rlm-router
                               :strategy :root})
           raw-nodes (get-in response [:result :nodes] [])
-          ;; Resolve model name from router for bbox scale lookup
-          root-model (or (some-> (llm/select-provider rlm-router {:strategy :root}) second :name)
-                         (throw (ex-info "No model available in router — cannot determine bbox scale"
-                                         {:type :svar/missing-model})))
-          ;; Enrich visual nodes with extracted image data + rotation correction
-          nodes (enrich-visual-nodes raw-nodes image root-model page-index)
+          ;; Enrich visual nodes with PDFBox-extracted images by index
+          nodes (enrich-visual-nodes raw-nodes page-pdf-images page-index)
         ;; Count elements for logging
           section-count (count (filter :page.node/description nodes))
           heading-count (count (filter :page.node/level nodes))
@@ -1340,12 +1348,23 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
         (trove/log! {:level :warn :data {:pdf pdf-path} :msg "PDF has no pages to extract"})
         [])
 
-      ;; Use core.async for parallel extraction
-      (let [;; Create work items with original page indices and pre-computed rotation
+      ;; Extract embedded images via PDFBox (instant, no LLM needed)
+      (let [all-pdf-images (try
+                             (pdf/extract-page-images pdf-path (or pdf-page-opts {}))
+                             (catch Exception e
+                               (trove/log! {:level :warn
+                                            :data {:pdf pdf-path :error (ex-message e)}
+                                            :msg "PDFBox image extraction failed, continuing without embedded images"})
+                               {}))
+            _ (trove/log! {:level :info
+                           :data {:total-images (reduce + 0 (map count (vals all-pdf-images)))}
+                           :msg "Extracted embedded images via PDFBox"})
+            ;; Create work items with original page indices and pre-computed rotation
             work-items (map (fn [img page-idx rotation]
                               {:index page-idx
                                :image img
-                               :rotation rotation})
+                               :rotation rotation
+                               :pdf-images (get all-pdf-images page-idx [])})
                             images page-indices page-rotations)
             result-chan (async/chan (max 1 page-count))
             extract-opts {:rlm-router rlm-router :objective objective :timeout-ms timeout-ms}]
@@ -1356,7 +1375,7 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
         (async/pipeline-blocking
          parallel
          result-chan
-         (map (fn [{:keys [index image rotation]}]
+         (map (fn [{:keys [index image rotation pdf-images]}]
                 (try
                   ;; Step 1: Apply rotation correction if needed (heuristic-detected)
                   (let [image (if (pos? rotation)
@@ -1367,7 +1386,7 @@ IMAGE DIMENSIONS: This image is %d pixels wide and %d pixels tall. All bbox coor
                                   (rotate-image image rotation))
                                 image)]
                     ;; Step 2: Extract content from (possibly corrected) image
-                    (extract-text-from-image image index extract-opts))
+                    (extract-text-from-image image index (assoc extract-opts :pdf-images pdf-images)))
                   (catch Exception e
                     (let [^java.awt.image.BufferedImage image image
                           ex-data-map (ex-data e)

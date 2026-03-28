@@ -558,7 +558,10 @@
                                   (or (get-in result [:api-usage :total_tokens])
                                       (get-in result [:tokens :total])
                                       0))
-                  result))))
+                  (assoc result
+                         :routed/provider-id pid
+                         :routed/model (:name model-map)
+                         :routed/base-url (:base-url provider))))))
         (let [earliest (earliest-available router prefs)]
           (if (and earliest (< attempts 3))
             (let [wait-ms (min (- earliest (router-now-ms router)) max-wait-ms)]
@@ -966,18 +969,17 @@
 (defn- cod-iteration-step
   "Performs a single Chain of Density iteration step.
    Tracks accumulated entity names across iterations to prevent re-extraction."
-  [source-text target-length model config special-instructions eval?
+  [source-text target-length resolved-opts special-instructions eval?
    {:keys [iterations previous-summary accumulated-entities] :as _state}]
   (let [first-iteration? (nil? previous-summary)
         objective (if first-iteration?
                     (build-cod-first-iteration-objective target-length special-instructions)
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary accumulated-entities)
-        ask-resp (ask!* {:spec (build-cod-spec)
-                         :messages [(system objective)
-                                    (user task)]
-                         :model model
-                         :config config})
+        ask-resp (ask!* (merge (select-keys resolved-opts [:model :config :api-key :base-url :provider-id])
+                               {:spec (build-cod-spec)
+                                :messages [(system objective)
+                                           (user task)]}))
         result (:result ask-resp)
         _ (when-not (map? result)
             (trove/log! {:level :warn
@@ -992,11 +994,10 @@
                  (nil? (:summary result))
                  (assoc :summary previous-summary))
         eval-resp (when eval?
-                    (eval!* {:task (str "Summarize the following text:\n\n" source-text)
-                             :output (:summary result)
-                             :model model
-                             :config config
-                             :criteria COD_EVAL_CRITERIA}))
+                    (eval!* (merge (select-keys resolved-opts [:model :config :api-key :base-url :provider-id])
+                                   {:task (str "Summarize the following text:\n\n" source-text)
+                                    :output (:summary result)
+                                    :criteria COD_EVAL_CRITERIA})))
         result (if eval-resp
                  (assoc result :score (:overall-score eval-resp))
                  result)
@@ -1056,8 +1057,9 @@
          eval? false
          refine? false
          threshold 0.9}}]
-  (let [{:keys [config model]} (resolve-opts opts)
-        step-fn (partial cod-iteration-step text target-length model config special-instructions eval?)
+  (let [resolved (resolve-opts opts)
+        model (:model resolved)
+        step-fn (partial cod-iteration-step text target-length resolved special-instructions eval?)
         initial-state {:iterations [] :previous-summary nil :accumulated-entities []
                        :total-tokens {} :total-cost {}}
         final-state (loop [state initial-state
@@ -1079,19 +1081,18 @@
         [result duration-ms] (util/with-elapsed
                                (if (and refine? (seq cod-iterations))
                                  (let [final-summary (:summary (last cod-iterations))
-                                       refine-result (refine!* {:spec (build-cod-refinement-spec)
-                                                                :messages [(system (str "You are verifying and refining a summary for faithfulness. "
-                                                                                        "Every claim in the summary must be grounded in the source text. "
-                                                                                        "Remove any meta-commentary, interpretive framing, or information not present in the source. "
-                                                                                        "Preserve entity density and the ~" target-length " word length constraint."))
-                                                                           (user (str "<source_text>\n" text "\n</source_text>\n\n"
-                                                                                      "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
-                                                                :model model
-                                                                :config config
-                                                                :iterations 1
-                                                                :threshold threshold
-                                                                :documents [{:id "source"
-                                                                             :pages [{:page "0" :text text}]}]})
+                                       refine-result (refine!* (merge (select-keys resolved [:model :config :api-key :base-url :provider-id])
+                                                                        {:spec (build-cod-refinement-spec)
+                                                                         :messages [(system (str "You are verifying and refining a summary for faithfulness. "
+                                                                                                 "Every claim in the summary must be grounded in the source text. "
+                                                                                                 "Remove any meta-commentary, interpretive framing, or information not present in the source. "
+                                                                                                 "Preserve entity density and the ~" target-length " word length constraint."))
+                                                                                    (user (str "<source_text>\n" text "\n</source_text>\n\n"
+                                                                                               "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
+                                                                         :iterations 1
+                                                                         :threshold threshold
+                                                                         :documents [{:id "source"
+                                                                                      :pages [{:page "0" :text text}]}]}))
                                        refined-summary (get-in refine-result [:result :summary]
                                                                (:result refine-result))]
                                    (conj (vec (butlast cod-iterations))

@@ -37,21 +37,35 @@
        (fn []
          (call-hook! hooks-atom :llm-call :pre {:prompt prompt :opts nil})
          (let [result (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] prefs)]
-           (call-hook! hooks-atom :llm-call :post {:prompt prompt :response (:content result) :reasoning (:reasoning result)})
+           (call-hook! hooks-atom :llm-call :post {:prompt prompt
+                                                   :response (:content result)
+                                                   :reasoning (:reasoning result)
+                                                   :provider-id (:routed/provider-id result)
+                                                   :model (:routed/model result)
+                                                   :base-url (:routed/base-url result)})
            result))))
     ([prompt opts]
      (with-depth-tracking depth-atom prefs
        (fn []
          (call-hook! hooks-atom :llm-call :pre {:prompt prompt :opts opts})
          (let [result (if-let [spec (:spec opts)]
-                        {:content (pr-str (:result (llm/ask! {:spec spec
-                                                              :messages [(llm/user prompt)]
-                                                              :router rlm-router
-                                                              :prefer (:prefer prefs)
-                                                              :strategy (:strategy prefs)
-                                                              :capabilities (:capabilities prefs)})))}
+                        (let [r (llm/ask! {:spec spec
+                                           :messages [(llm/user prompt)]
+                                           :router rlm-router
+                                           :prefer (:prefer prefs)
+                                           :strategy (:strategy prefs)
+                                           :capabilities (:capabilities prefs)})]
+                          {:content (pr-str (:result r))
+                           :routed/provider-id (:routed/provider-id r)
+                           :routed/model (:routed/model r)
+                           :routed/base-url (:routed/base-url r)})
                         (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] prefs))]
-           (call-hook! hooks-atom :llm-call :post {:prompt prompt :response (:content result) :reasoning (:reasoning result)})
+           (call-hook! hooks-atom :llm-call :post {:prompt prompt
+                                                   :response (:content result)
+                                                   :reasoning (:reasoning result)
+                                                   :provider-id (:routed/provider-id result)
+                                                   :model (:routed/model result)
+                                                   :base-url (:routed/base-url result)})
            result))))))
 
 (defn resolve-root-model

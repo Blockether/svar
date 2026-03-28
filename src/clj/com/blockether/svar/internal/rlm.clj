@@ -3,8 +3,10 @@
   (:require
    [babashka.fs :as fs]
    [clojure.core.async :as async]
+   [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.pprint :as pprint]
+   [clojure.set :as set]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.jsonish :as jsonish]
@@ -22,11 +24,14 @@
    [com.blockether.svar.internal.tokens :as tokens]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
-   [fast-edn.core :as edn]
+   [fast-edn.core :as fast-edn]
    [taoensso.trove :as trove])
   (:import
+   [java.io RandomAccessFile]
    [java.time Instant]
    [java.util Date]))
+
+(declare load-index)
 
 (def RLM_SCHEMA schema/RLM_SCHEMA)
 (def ENTITY_EXTRACTION_SPEC schema/ENTITY_EXTRACTION_SPEC)
@@ -386,13 +391,14 @@
          locals-atom (atom {})
          depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
-          ;; Rebuild query functions with fresh depth-atom for this query
-         llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom rlm-router {:hooks-atom (:hooks-atom env)})
-         rlm-query-fn (rlm-core/make-rlm-query-fn {:strategy :root} depth-atom rlm-router db-info-atom)
-         sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:hooks-atom (:hooks-atom env)})
           ;; Hooks: snapshot from env, override per-query, restore after
          hooks-atom (atom (or (some-> (:hooks-atom env) deref) {}))
          original-hooks @hooks-atom
+          ;; Rebuild query functions with fresh depth-atom — use the LOCAL hooks-atom
+          ;; so per-query hooks (merged on line ~447) are visible to llm-query-fn
+         llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom rlm-router {:hooks-atom hooks-atom})
+         rlm-query-fn (rlm-core/make-rlm-query-fn {:strategy :root} depth-atom rlm-router db-info-atom)
+         sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:hooks-atom hooks-atom})
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
          claims-atom (when verify? (atom []))
@@ -1957,8 +1963,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                       :strategy :root
                                       :target-length 150
                                       :iterations 3})]
-        (when (seq abstracts)
-          (let [abstract (:summary (last abstracts))]
+        (when-let [iterations (seq (:result abstracts))]
+          (let [abstract (:summary (last iterations))]
             (trove/log! {:level :info :data {:abstract-length (count abstract)}
                          :msg "Document abstract generated"})
             abstract))))))
@@ -2448,6 +2454,41 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (trove/log! {:level :debug :data {:path (str edn-file)} :msg "Wrote document EDN"})
     output-dir))
 
+(defn- file-hash
+  "Computes SHA-256 hash of a file for change detection."
+  [file-path]
+  (let [digest (java.security.MessageDigest/getInstance "SHA-256")
+        buffer (byte-array 8192)]
+    (with-open [is (java.io.FileInputStream. (str file-path))]
+      (loop []
+        (let [n (.read is buffer)]
+          (when (pos? n)
+            (.update digest buffer 0 n)
+            (recur)))))
+    (str "sha256:" (apply str (map #(format "%02x" %) (.digest digest))))))
+
+(defn- read-manifest
+  "Reads manifest.edn from a pageindex directory. Returns nil if not found."
+  [output-path]
+  (let [f (io/file output-path "manifest.edn")]
+    (when (.exists f)
+      (edn/read-string (slurp f)))))
+
+(defn- write-manifest!
+  "Writes manifest.edn to a pageindex directory."
+  [output-path manifest]
+  (let [dir (io/file output-path)]
+    (when-not (.exists dir)
+      (.mkdirs dir)))
+  (spit (str output-path "/manifest.edn")
+        (pr-str manifest)))
+
+(defn- update-manifest-page!
+  "Updates a single page's status in the manifest and persists immediately."
+  [output-path manifest-atom page-idx status-map]
+  (swap! manifest-atom assoc-in [:pages page-idx] status-map)
+  (write-manifest! output-path @manifest-atom))
+
 (defn read-document-edn
   "Reads a document from an EDN file, resolving image paths back to byte arrays.
    
@@ -2461,7 +2502,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
    The PageIndex document map with image bytes restored."
   [index-dir]
   (let [edn-file (io/file index-dir "document.edn")
-        doc (edn/read-once edn-file)]
+        doc (fast-edn/read-once edn-file)]
     ;; Resolve image paths back to byte arrays
     (update doc :document/pages
             (fn [pages]
@@ -2488,112 +2529,343 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                       nodes))))
                     pages)))))
 
+(defn- with-index-lock!
+  "Acquires a file lock on `lock.lck` inside the output directory.
+   Prevents concurrent index! calls on the same document from corrupting
+   the manifest. Calls `(f)` while holding the lock, returns its result.
+   Throws if the lock cannot be acquired (another index! is in progress)."
+  [output-path f]
+  (let [dir (io/file output-path)]
+    (when-not (.exists dir)
+      (.mkdirs dir))
+    (let [lock-file (io/file dir "lock.lck")
+          raf (RandomAccessFile. lock-file "rw")
+          ch (.getChannel raf)]
+      (try
+        (let [lock (.tryLock ch)]
+          (when-not lock
+            (.close ch)
+            (.close raf)
+            (anomaly/incorrect! "Another index! is already running for this document"
+                                {:type :svar.pageindex/lock-conflict
+                                 :output-path (str output-path)}))
+          (try
+            (f)
+            (finally
+              (.release lock)
+              (.close ch)
+              (.close raf))))
+        (catch java.nio.channels.OverlappingFileLockException _
+          (.close ch)
+          (.close raf)
+          (anomaly/incorrect! "Another index! is already running for this document (same JVM)"
+                              {:type :svar.pageindex/lock-conflict
+                               :output-path (str output-path)}))))))
+
 (defn ^:export index!
-  "Index a document file and save the result as EDN + PNG files.
-   
-   Takes a file path (PDF, MD, TXT) and runs build-index to extract structure.
-   The result is saved as a directory alongside the original (or custom path):
-     document.pageindex/
-       document.edn    — structured data (EDN)
-       images/          — extracted images as PNG files
-   
-       Params:
-       `file-path` - String. Path to the document file.
-       `opts` - Map, optional:
-         - :output - Custom output directory path (default: same dir, .pageindex extension)
-         - :config - LLM config override
-         - :pages - Page selector (1-indexed). Limits which pages are indexed.
-                    Supports: integer, [from to] range, or [[1 3] 5 [7 10]] mixed vector.
-                    nil = all pages (default).
-         
-         Vision extraction:
-         - :vision-model - String. Model for vision page extraction (default: DEFAULT_VISION_MODEL).
-         - :parallel - Integer. Max concurrent vision page extractions for PDFs (default: 3)
-         
-         Quality refinement (opt-in):
-         - :refine? - Boolean. Enable post-extraction quality refinement (default: false)
-         - :refine-model - String. Model for eval/refine steps (default: \"gpt-4o\")
-         - :parallel-refine - Integer. Max concurrent eval/refine operations (default: 2)
-         - :refine-iterations - Integer. Max refine iterations per page (default: 1)
-         - :refine-threshold - Float. Min eval score to pass (default: 0.8)
-         - :refine-sample-size - Integer. Pages to sample for eval (default: 3)
-       
-       Returns:
-       Map with :document (the indexed document) and :output-path (directory where files were saved).
-       
-       Throws:
-       - ex-info if file not found
-       - ex-info if document fails spec validation
-       - ex-info if :pages references out-of-bounds or invalid page numbers
-       
-       Example:
-       (index! \"docs/manual.pdf\")
-       ;; => {:document {...} :output-path \"docs/manual.pageindex\"}
-       
-       ;; Index only pages 1 through 5
-       (index! \"docs/manual.pdf\" {:pages [1 5]})
-       
-       ;; Index specific pages: 1-3, 5, and 7-10
-       (index! \"docs/manual.pdf\" {:pages [[1 3] 5 [7 10]]})
-       
-       ;; Separate models for vision vs refinement
-       (index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\"
-                                    :refine? true
-                                    :refine-model \"gpt-4o-mini\"
-                                    :parallel-refine 3})"
+  "Index a document file with incremental progress tracking.
+
+   First call performs a full index and writes both:
+   - document.edn (indexed document)
+   - manifest.edn (per-page indexing state)
+
+   Subsequent calls on the same unchanged source file read manifest.edn and:
+   - skip pages already marked :done
+   - retry pages marked :error or :pending
+
+   If the source file hash changes, a full re-index is performed automatically.
+   Set :force? true to force full re-index even when hash matches.
+
+   Returns map with :document, :output-path, :cached?, :pages-processed, :errors-count."
   ([file-path] (index! file-path {}))
   ([file-path {:keys [output vision-model parallel parallel-refine
                       refine? refine-model refine-iterations
-                      refine-threshold refine-sample-size pages]}]
+                      refine-threshold refine-sample-size pages
+                      config force?]}]
    (let [abs-path (ensure-absolute file-path)
-         output-path (or output (derive-index-path abs-path))]
+         output-path (or output (derive-index-path abs-path))
+         _ (when-not (fs/exists? abs-path)
+             (trove/log! {:level :error :data {:path abs-path} :msg "File not found"})
+             (anomaly/not-found! "File not found" {:type :svar.pageindex/file-not-found :path abs-path}))]
+     (with-index-lock! output-path
+       (fn []
+         (let [start-time (System/currentTimeMillis)
+               current-hash (file-hash abs-path)
+         existing-manifest (read-manifest output-path)
+         hash-match? (and existing-manifest (= current-hash (:file-hash existing-manifest)))
+         needs-full-reindex? (or force? (not hash-match?))
+         file-type* (file-type abs-path)
+         total-pages-hint (or (:total-pages existing-manifest)
+                              (when (and (not pages) (= :pdf file-type*))
+                                (pdf/page-count abs-path))
+                              (when (and (not pages) (= :markdown file-type*))
+                                (count (markdown/markdown-file->pages abs-path)))
+                              (when (and (not pages) (#{:text :image} file-type*))
+                                1))
+         user-page-set (when (and pages total-pages-hint)
+                         (normalize-page-spec pages total-pages-hint))
+         done-page-indices (set (keep (fn [[idx status-map]]
+                                        (when (= :done (:status status-map)) idx))
+                                      (:pages existing-manifest)))
+         selected-page-indices (cond
+                                 user-page-set (set user-page-set)
+                                 total-pages-hint (set (range total-pages-hint))
+                                 :else nil)
+         pages-to-process (cond
+                            needs-full-reindex? selected-page-indices
+                            selected-page-indices (set/difference selected-page-indices done-page-indices)
+                            :else nil)
+         existing-document (when (and hash-match? (not force?) (fs/exists? output-path))
+                             (try
+                               (load-index output-path)
+                               (catch Exception e
+                                 (trove/log! {:level :warn
+                                              :data {:output-path output-path :error (ex-message e)}
+                                              :msg "Failed loading existing indexed document; rebuilding"})
+                                 nil)))
+         ;; Merge existing manifest pages with pending entries for pages-to-process.
+         ;; Crucially: preserve :done status from prior runs so crash-recovery works.
+         manifest-initial-pages (if selected-page-indices
+                                  (let [existing-pages (or (:pages existing-manifest) {})
+                                        now-str (str (Instant/now))]
+                                    (into {}
+                                          (map (fn [idx]
+                                                 (if (and (not needs-full-reindex?)
+                                                          (= :done (:status (get existing-pages idx))))
+                                                   [idx (get existing-pages idx)]
+                                                   [idx {:status :pending
+                                                         :updated-at now-str}]))
+                                               (sort selected-page-indices))))
+                                  (or (:pages existing-manifest) {}))
+         manifest-atom (atom
+                        (merge {:file-path (str abs-path)
+                                :file-hash current-hash
+                                :total-pages total-pages-hint
+                                :model (or vision-model "default")
+                                :started-at (str (Instant/now))
+                                :completed-at nil
+                                :errors-count 0
+                                :pages manifest-initial-pages}
+                               (when (and existing-manifest hash-match? (not force?))
+                                 (select-keys existing-manifest [:last-successful-index-at]))))
+         common-index-opts (cond-> {}
+                             config (assoc :config config)
+                             vision-model (assoc :model vision-model)
+                             parallel (assoc :parallel parallel)
+                             parallel-refine (assoc :parallel-refine parallel-refine)
+                             refine? (assoc :refine? refine?)
+                             refine-model (assoc :refine-model refine-model)
+                             refine-iterations (assoc :refine-iterations refine-iterations)
+                             refine-threshold (assoc :refine-threshold refine-threshold)
+                             refine-sample-size (assoc :refine-sample-size refine-sample-size))]
 
-      ;; Validate input exists
-     (when-not (fs/exists? abs-path)
-       (trove/log! {:level :error :data {:path abs-path} :msg "File not found"})
-       (anomaly/not-found! "File not found" {:type :svar.pageindex/file-not-found :path abs-path}))
+     (write-manifest! output-path @manifest-atom)
 
-     (trove/log! {:level :info :data {:input abs-path :output output-path :refine? (boolean refine?)}
-                  :msg "Starting document indexing"})
+     (if (and hash-match?
+              (not force?)
+              existing-document
+              selected-page-indices
+              (empty? pages-to-process))
+       (do
+         (trove/log! {:level :info
+                      :id :svar.pageindex/cached
+                      :data {:input abs-path
+                             :output output-path
+                             :cached-pages (count done-page-indices)}
+                      :msg "All selected pages already indexed; returning cached document"})
+         (write-manifest! output-path (assoc @manifest-atom
+                                        :completed-at (str (Instant/now))
+                                        :last-successful-index-at (str (Instant/now))))
+         {:document existing-document
+          :output-path output-path
+          :cached? true
+          :pages-processed 0
+          :errors-count 0})
 
-      ;; Run indexing
-     (let [index-opts (cond-> {}
-                        vision-model (assoc :model vision-model)
-                        parallel (assoc :parallel parallel)
-                        parallel-refine (assoc :parallel-refine parallel-refine)
-                        refine? (assoc :refine? refine?)
-                        refine-model (assoc :refine-model refine-model)
-                        refine-iterations (assoc :refine-iterations refine-iterations)
-                        refine-threshold (assoc :refine-threshold refine-threshold)
-                        refine-sample-size (assoc :refine-sample-size refine-sample-size)
-                        pages (assoc :pages pages))
-           _ (trove/log! {:level :debug :data {:opts index-opts} :msg "Running build-index"})
-           document (build-index abs-path index-opts)
-           _ (trove/log! {:level :debug :data {:document/name (:document/name document)} :msg "build-index complete"})]
+       (do
+         (trove/log! {:level :info
+                      :id :svar.pageindex/start
+                      :data {:input abs-path
+                             :output output-path
+                             :mode (cond
+                                     force? :forced-full
+                                     needs-full-reindex? :full
+                                     :else :incremental)
+                             :hash-match? (boolean hash-match?)
+                             :selected-pages (some-> selected-page-indices count)
+                             :done-pages (count done-page-indices)
+                             :to-process (some-> pages-to-process count)}
+                      :msg (format "Starting %s indexing — %s pages to process, %d already done"
+                                   (name (cond force? :forced-full needs-full-reindex? :full :else :incremental))
+                                   (or (some-> pages-to-process count str) "all")
+                                   (count done-page-indices))})
 
-       ;; Validate the document - throw on failure
-       (when-not (schema/valid-document? document)
-         (let [explanation (schema/explain-document document)]
-           (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
-           (anomaly/incorrect! "Document failed spec validation"
-                               {:type :rlm/invalid-document
-                                :document/name (:document/name document)
-                                :explanation explanation})))
+         (let [existing-page-map (into {} (map (fn [p] [(:page/index p) p])
+                                                (:document/pages existing-document)))
+               page-map-atom (atom (if needs-full-reindex? {} existing-page-map))
+               toc-atom (atom (or (:document/toc existing-document) []))
+               ;; Seed metadata from existing doc OR from file path so we always
+               ;; have :document/name and :document/extension even if all pages error.
+               metadata-atom (atom (merge {:document/name (fs/strip-ext (fs/file-name abs-path))
+                                           :document/extension (some-> (fs/extension abs-path) name)}
+                                          (select-keys existing-document
+                                                       [:document/name :document/title :document/abstract
+                                                        :document/extension :document/created-at :document/updated-at
+                                                        :document/author])))
+               processed-count (atom 0)
+               errors-count (atom 0)]
 
-       (trove/log! {:level :debug :msg "Spec validation passed"})
+           (if (seq pages-to-process)
+             (let [total-to-process (count pages-to-process)
+                   page-times-atom (atom [])]
+               (doseq [[n idx] (map-indexed vector (sort pages-to-process))]
+                 (let [page-num (inc idx)
+                       t0 (System/currentTimeMillis)
+                       progress-pct (Math/round (* 100.0 (/ n total-to-process)))
+                       avg-ms-per-page (when (seq @page-times-atom)
+                                         (/ (reduce + @page-times-atom) (count @page-times-atom)))
+                       eta-ms (when avg-ms-per-page
+                                (long (* avg-ms-per-page (- total-to-process n))))]
+                   (trove/log! {:level :info
+                                :id :svar.pageindex/indexing-page
+                                :data (cond-> {:page (inc n)
+                                               :page-number page-num
+                                               :total total-to-process
+                                               :progress-pct progress-pct
+                                               :elapsed-ms (- (System/currentTimeMillis) start-time)
+                                               :errors @errors-count}
+                                        eta-ms (assoc :eta-ms eta-ms))
+                                :msg (format "Indexing page %d/%d (%d%%)" (inc n) total-to-process progress-pct)})
+                   (try
+                     (let [doc (build-index abs-path (assoc common-index-opts :pages page-num))
+                           page (first (:document/pages doc))
+                           now (str (Instant/now))
+                           page-elapsed (- (System/currentTimeMillis) t0)]
+                       (when-not page
+                         (anomaly/incorrect! "No page returned for selected page"
+                                             {:type :svar.pageindex/missing-page
+                                              :page-number page-num}))
+                       (swap! page-map-atom assoc idx page)
+                       (when (seq (:document/toc doc))
+                         (reset! toc-atom (:document/toc doc)))
+                       (swap! metadata-atom merge
+                              (select-keys doc [:document/name :document/title :document/abstract
+                                                :document/extension :document/created-at :document/updated-at
+                                                :document/author]))
+                       (update-manifest-page! output-path manifest-atom idx
+                                              {:status :done
+                                               :indexed-at now
+                                               :updated-at now
+                                               :nodes (count (:page/nodes page))
+                                               :elapsed-ms page-elapsed})
+                       (swap! processed-count inc)
+                       (swap! page-times-atom conj page-elapsed)
+                       (let [remaining (- total-to-process @processed-count)
+                             new-avg (/ (reduce + @page-times-atom) (count @page-times-atom))
+                             new-eta-ms (long (* new-avg remaining))]
+                         (trove/log! {:level :info
+                                      :id :svar.pageindex/indexed-page
+                                      :data {:page-number page-num
+                                             :nodes (count (:page/nodes page))
+                                             :elapsed-ms page-elapsed
+                                             :processed @processed-count
+                                             :remaining remaining
+                                             :eta-ms new-eta-ms
+                                             :errors @errors-count}
+                                      :msg (format "Indexed page %d — %d nodes, %dms (remaining: %d, ETA: %ds)"
+                                                   page-num (count (:page/nodes page)) page-elapsed
+                                                   remaining (quot new-eta-ms 1000))})))
+                     (catch Exception e
+                       (let [now (str (Instant/now))
+                             page-elapsed (- (System/currentTimeMillis) t0)]
+                         (swap! errors-count inc)
+                         (update-manifest-page! output-path manifest-atom idx
+                                                {:status :error
+                                                 :updated-at now
+                                                 :error (ex-message e)
+                                                 :elapsed-ms page-elapsed})
+                         (trove/log! {:level :warn
+                                      :id :svar.pageindex/page-error
+                                      :data {:page-number page-num
+                                             :error (ex-message e)
+                                             :elapsed-ms page-elapsed
+                                             :errors @errors-count
+                                             :remaining (- total-to-process (inc n))}
+                                      :msg (format "Page %d failed: %s — marked :error (errors so far: %d)"
+                                                   page-num (ex-message e) @errors-count)})))))))
+             ;; Fallback: file types without per-page tracking (e.g. unknown extensions)
+             (try
+               (let [doc (build-index abs-path (cond-> common-index-opts
+                                                 pages (assoc :pages pages)))
+                     now (str (Instant/now))]
+                 (swap! metadata-atom merge
+                        (select-keys doc [:document/name :document/title :document/abstract
+                                          :document/extension :document/created-at :document/updated-at
+                                          :document/author]))
+                 (when (seq (:document/toc doc))
+                   (reset! toc-atom (:document/toc doc)))
+                 (doseq [p (:document/pages doc)]
+                   (let [idx (:page/index p)]
+                     (swap! page-map-atom assoc idx p)
+                     (update-manifest-page! output-path manifest-atom idx
+                                            {:status :done
+                                             :indexed-at now
+                                             :updated-at now
+                                             :nodes (count (:page/nodes p))})
+                     (swap! processed-count inc))))
+               (catch Exception e
+                 (swap! errors-count inc)
+                 (trove/log! {:level :error
+                              :id :svar.pageindex/bulk-index-error
+                              :data {:error (ex-message e)
+                                     :elapsed-ms (- (System/currentTimeMillis) start-time)}
+                              :msg (format "Bulk indexing failed: %s" (ex-message e))}))))
 
-      ;; Save as EDN + PNG files
-       (trove/log! {:level :debug :data {:path output-path} :msg "Writing EDN + PNG files"})
-       (write-document-edn! output-path document)
-
-       (trove/log! {:level :info :data {:document/name (:document/name document)
-                                        :pages (count (:document/pages document))
-                                        :toc-entries (count (:document/toc document))
-                                        :output-path output-path}
-                    :msg "Document indexed and saved successfully"})
-
-       {:document document
-        :output-path output-path}))))
+           (let [final-pages (->> @page-map-atom (sort-by key) (mapv val))
+                 final-document (merge @metadata-atom
+                                       {:document/pages final-pages
+                                        :document/toc @toc-atom})
+                 elapsed-ms (- (System/currentTimeMillis) start-time)
+                 all-failed? (and (pos? @errors-count) (empty? final-pages))]
+             ;; Only validate+write document when we have pages.
+             ;; When all pages errored, persist manifest so next call retries.
+             (when-not all-failed?
+               (when-not (schema/valid-document? final-document)
+                 (let [explanation (schema/explain-document final-document)]
+                   (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
+                   (anomaly/incorrect! "Document failed spec validation"
+                                       {:type :rlm/invalid-document
+                                        :document/name (:document/name final-document)
+                                        :explanation explanation})))
+               (write-document-edn! output-path final-document))
+             (let [final-manifest (cond-> (assoc @manifest-atom
+                                            :completed-at (str (Instant/now))
+                                            :total-pages (or total-pages-hint (count final-pages))
+                                            :errors-count @errors-count)
+                                    (not all-failed?)
+                                    (assoc :last-successful-index-at (str (Instant/now))))]
+               (write-manifest! output-path final-manifest)
+               (trove/log! {:level (if all-failed? :warn :info)
+                            :id :svar.pageindex/complete
+                            :data {:document/name (:document/name final-document)
+                                   :pages (count final-pages)
+                                   :toc-entries (count (:document/toc final-document))
+                                   :output-path output-path
+                                   :mode (cond
+                                           force? :forced-full
+                                           needs-full-reindex? :full
+                                           :else :incremental)
+                                   :processed @processed-count
+                                   :errors @errors-count
+                                   :elapsed-ms elapsed-ms}
+                            :msg (format "Indexing %s — %d pages, %d errors, %dms"
+                                         (if all-failed? "finished with all pages failed" "complete")
+                                         (count final-pages) @errors-count elapsed-ms)})
+               {:document (when-not all-failed? final-document)
+                :output-path output-path
+                :cached? false
+                :pages-processed @processed-count
+                :errors-count @errors-count})))))))))))
 
 (defn load-index
   "Load an indexed document from a pageindex directory (EDN + PNG files).
@@ -2623,7 +2895,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                      ;; New format: directory with document.edn + images/
                      (read-document-edn abs-path)
                      ;; Legacy: could be a plain EDN file
-                     (edn/read-once (io/file abs-path)))]
+                     (fast-edn/read-once (io/file abs-path)))]
 
       ;; Validate the document - throw on failure
       (when-not (schema/valid-document? document)
