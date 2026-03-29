@@ -1148,16 +1148,16 @@
                           (store-message! db-info :tool user-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
                         (let [had-successful-execution? (some #(nil? (:error %)) executions)
                               next-errors (if had-successful-execution? 0 (inc consecutive-errors))]
-                          ;; Auto-add execution summary to P context
+                          ;; Auto-add reasoning + execution summary to P context
                           (when-let [pa (:p-atom rlm-env)]
-                            (let [summary (str "[iter " (inc iteration) "] "
-                                              (when thinking (str-truncate thinking 100))
+                            (let [summary (str "[iter " (inc iteration) "]"
+                                              (when thinking (str "\nReasoning: " (str-truncate thinking 500)))
                                               (when (seq executions)
-                                                (str "\n" (str/join "\n"
+                                                (str "\nExecutions:\n" (str/join "\n"
                                                                     (map (fn [{:keys [code result error]}]
                                                                            (if error
-                                                                             (str "  " (str-truncate code 60) " → ERROR: " (str-truncate (str error) 80))
-                                                                             (str "  " (str-truncate code 60) " → " (str-truncate (pr-str (realize-value result)) 120))))
+                                                                             (str "  " (str-truncate code 80) " → ERROR: " (str-truncate (str error) 120))
+                                                                             (str "  " (str-truncate code 80) " → " (str-truncate (pr-str (realize-value result)) 200))))
                                                                          executions)))))]
                               (swap! pa update :context conj summary)))
                           (recur (inc iteration)
