@@ -1001,8 +1001,9 @@
                   (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
                     (call-hook hooks-atom :iteration :post trace-entry))
                   ;; Store structured assistant message + executions
+                  ;; When response is nil (reasoning model), use thinking as content
                   (when history-enabled?
-                    (let [stored (store-message! db-info :assistant response
+                    (let [stored (store-message! db-info :assistant (or response thinking "[no response]")
                                                  {:iteration iteration :model effective-model
                                                   :env-id env-id :thinking thinking})]
                       (when (and stored (seq executions))
