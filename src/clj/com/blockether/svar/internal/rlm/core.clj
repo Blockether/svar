@@ -668,9 +668,11 @@
   :context — stack of strings (newest last). YOUR working memory. Use (ctx-add! text) to save, (ctx-remove! idx) to drop.
   :learnings — scratch notes visible in workspace. Use (learn! text :priority). Only learnings passed to (FINAL {:learn [...]}) are persisted.
   CRITICAL: Each iteration you ONLY see [system prompt, query, <workspace>]. No growing history.
-  :context is AUTO-POPULATED with execution summaries after each iteration.
+  :context is AUTO-POPULATED with reasoning + execution summaries after each iteration.
   :context PERSISTS ACROSS QUERIES — it survives to the next user question in this session.
-  Use (ctx-add! text) for extra notes. Use (ctx-remove! idx) to drop stale entries.
+  USE VARS: (def data (some-call ...)) stores full results in the REPL — they persist across iterations.
+  Context only shows [stored in var: data] for def'd values. Access the full value via the var name.
+  Use (ctx-add! text) for extra notes. Use (ctx-remove! idx) or (ctx-replace! from to summary) to manage.
   When context grows large, you will receive a [SYSTEM_NUDGE] to clean up — ALWAYS obey it.
 
 [SYSTEM_NUDGE] DEFINITION:
@@ -1151,16 +1153,22 @@
                           ;; Auto-add reasoning + execution summary to P context
                           (when-let [pa (:p-atom rlm-env)]
                             (let [summary (str "[iter " (inc iteration) "]"
-                                              (when thinking (str "\nReasoning: " (str-truncate thinking 500)))
+                                              (when thinking (str "\nReasoning: " thinking))
                                               (when (seq executions)
                                                 (str "\nExecutions:\n" (str/join "\n"
                                                                     (map (fn [{:keys [code result error stdout]}]
-                                                                           (str "  " (str-truncate code 80) " → "
-                                                                                (if error
-                                                                                  (str "ERROR: " (str-truncate (str error) 120))
-                                                                                  (str-truncate (pr-str (realize-value result)) 200))
-                                                                                (when (and stdout (not (str/blank? stdout)))
-                                                                                  (str " [stdout: " (str-truncate stdout 100) "]"))))
+                                                                           (let [code-str (str/trim (or code ""))
+                                                                                 is-def? (str/starts-with? code-str "(def ")]
+                                                                             (str "  " code " → "
+                                                                                  (cond
+                                                                                    error (str "ERROR: " (str error))
+                                                                                    ;; def'd vars: just show pointer, full value lives in SCI REPL
+                                                                                    is-def? (let [var-name (second (re-find #"\(def\s+(\S+)" code-str))]
+                                                                                              (str "[stored in var: " var-name "]"))
+                                                                                    ;; Non-def results: show full value
+                                                                                    :else (pr-str (realize-value result)))
+                                                                                  (when (and stdout (not (str/blank? stdout)))
+                                                                                    (str "\n    stdout: " stdout)))))
                                                                          executions)))))]
                               (swap! pa update :context conj summary)))
                           (recur (inc iteration)
