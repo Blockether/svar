@@ -1,0 +1,1 @@
+{"id":"053523cb595436b16fcaa3355dabda7a","fullName":"com.blockether.svar.internal.config-test.Tests for make-config function.with missing params.falls back to env var for base-url","name":"Tests for make-config function > with missing params > falls back to env var for base-url","status":"passed","testResultsByEnv":{"default":"26d50000b5afe3f55e0c805677b684f6"}}
