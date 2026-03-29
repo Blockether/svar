@@ -1,0 +1,4 @@
+2026-03-29T21:56:43.591163888Z :info com.blockether.svar.internal.rlm [1470 10] ::save-qa-edn Saved Q&A results as EDN 
+  data: {:path "/tmp/qa-test-7579231692934839081/test-output.edn", :questions 0}
+2026-03-29T21:56:43.591376304Z :info com.blockether.svar.internal.rlm [1516 10] ::save-qa-md Saved Q&A results as Markdown 
+  data: {:path "/tmp/qa-test-7579231692934839081/test-output.md", :questions 0}
