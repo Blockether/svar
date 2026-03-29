@@ -1002,10 +1002,20 @@
                     (call-hook hooks-atom :iteration :post trace-entry))
                   ;; Store structured assistant message + executions
                   ;; When response is nil (reasoning model), use thinking as content
+                  ;; On FINAL, include the full trace as result-edn for later reconstruction
                   (when history-enabled?
-                    (let [stored (store-message! db-info :assistant (or response thinking "[no response]")
+                    (let [result-edn (when final-result
+                                      (pr-str {:trace (conj trace trace-entry)
+                                               :answer (:answer final-result)
+                                               :iterations (inc iteration)
+                                               :tokens (let [{:keys [input-tokens output-tokens reasoning-tokens cached-tokens]} @usage-atom]
+                                                         {:input input-tokens :output output-tokens
+                                                          :reasoning reasoning-tokens :cached cached-tokens
+                                                          :total (+ input-tokens output-tokens)})}))
+                          stored (store-message! db-info :assistant (or response thinking "[no response]")
                                                  {:iteration iteration :model effective-model
-                                                  :env-id env-id :thinking thinking})]
+                                                  :env-id env-id :thinking thinking
+                                                  :result-edn result-edn})]
                       (when (and stored (seq executions))
                         (store-executions! db-info (:id stored) executions))))
                   (if final-result

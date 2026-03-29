@@ -75,7 +75,7 @@
    Map with :id, :role, :content, :tokens, :timestamp, :thinking."
   ([db-info role content]
    (store-message! db-info role content {}))
-  ([{:keys [conn]} role content {:keys [iteration thinking tokens model env-id]}]
+  ([{:keys [conn]} role content {:keys [iteration thinking tokens model env-id result-edn]}]
    (when (and conn (not (str/blank? content)))
      (let [msg-id (util/uuid)
            token-count (or tokens
@@ -90,7 +90,8 @@
                         :message/timestamp timestamp
                         :message/iteration (or iteration 0)}
                  env-id (assoc :message/env-id env-id)
-                 (not (str/blank? thinking)) (assoc :message/thinking thinking))]
+                 (not (str/blank? thinking)) (assoc :message/thinking thinking)
+                 (not (str/blank? result-edn)) (assoc :message/result-edn result-edn))]
        (d/transact! conn [msg])
        {:id msg-id :role role :content content :tokens token-count :timestamp timestamp
         :thinking thinking}))))
@@ -203,7 +204,7 @@
   (when conn
     (->> (d/q '[:find [(pull ?e [:message/id :message/content :message/thinking
                                  :message/role :message/tokens :message/timestamp
-                                 :message/iteration
+                                 :message/iteration :message/result-edn
                                  {:execution/_message [:execution/id :execution/order :execution/code
                                                        :execution/result-edn :execution/stdout
                                                        :execution/stderr :execution/error
@@ -227,7 +228,8 @@
                             :timestamp (:message/timestamp m)
                             :iteration (:message/iteration m)
                             :executions (or execs [])}
-                     (:message/thinking m) (assoc :thinking (:message/thinking m)))))))))
+                     (:message/thinking m) (assoc :thinking (:message/thinking m))
+                     (:message/result-edn m) (assoc :result-edn (:message/result-edn m)))))))))
 
 (defn get-message-executions
   "Gets ordered executions for a message by its UUID.

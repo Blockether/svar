@@ -167,6 +167,7 @@
    :message/tokens    {:db/valueType :db.type/long}
    :message/timestamp {:db/valueType :db.type/instant}
    :message/iteration {:db/valueType :db.type/long}
+   :message/result-edn {:db/valueType :db.type/string :db/doc "Full query result as EDN (trace, tokens, cost, answer)"}
 
    ;; Executions (ordered code blocks + results, linked to assistant messages)
    ;; One message → N executions. Order preserved via :execution/order.
