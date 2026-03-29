@@ -1,2 +1,0 @@
-2026-03-21T11:12:16.758698150Z :info com.blockether.svar.internal.rlm [4136 9] ::qa-dedup LLM deduplication complete 
-  data: {:original 3, :kept 2, :dropped 1}
