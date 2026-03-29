@@ -1132,9 +1132,11 @@
                             ctx-overflow-nudge (when-let [pa (:p-atom rlm-env)]
                                                  (let [ctx-count (count (:context @pa))]
                                                    (when (> ctx-count 12)
-                                                     (str "\n[SYSTEM_NUDGE] Your context has " ctx-count " entries and is getting large. "
-                                                          "Review with (ctx-list) and drop least important entries with (ctx-remove! idx). "
-                                                          "Keep only what's essential for the current task."))))
+                                                     (str "\n[SYSTEM_NUDGE] Your context has " ctx-count " entries. Manage it NOW. Options:\n"
+                                                          "  1. REMOVE stale entries: (ctx-remove! idx)\n"
+                                                          "  2. COMPACT multiple entries into one summary: (ctx-remove! old-idx) then (ctx-add! \"merged summary\")\n"
+                                                          "  3. KEEP if all entries are essential\n"
+                                                          "Decide which entries are least important for the current task and act."))))
                             user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning ctx-overflow-nudge)]
                         (rlm-debug! {:iteration iteration
                                      :code-blocks (count executions)
