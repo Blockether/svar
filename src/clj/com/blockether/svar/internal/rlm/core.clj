@@ -1069,7 +1069,8 @@
                                        {:role "user" :content user-feedback})
                                  (conj trace trace-entry)
                                next-errors
-                               restarts)))))))))))))
+                               restarts))))))))))))))
+
 
 ;; =============================================================================
 ;; Entity Extraction Functions
