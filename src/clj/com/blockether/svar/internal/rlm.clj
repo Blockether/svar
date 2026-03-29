@@ -436,9 +436,9 @@
                                                                          {:error (ex-message e)}))))
                                                                  prompts)]
                                                    (mapv async/<!! chs)))}
-         sci-ctx (rlm-tools/create-sci-context context sub-llm-fn rlm-query-fn locals-atom db-info-atom
+         {:keys [sci-ctx p-atom]} (rlm-tools/create-sci-context context sub-llm-fn rlm-query-fn locals-atom db-info-atom
                                                (merge custom-bindings cite-bindings budget-bindings llm-query-overrides))
-         rlm-env (assoc env :sci-ctx sci-ctx :context context :max-iterations-atom max-iterations-atom
+         rlm-env (assoc env :sci-ctx sci-ctx :p-atom p-atom :context context :max-iterations-atom max-iterations-atom
                         :locals-atom locals-atom :hooks-atom hooks-atom)
          env-id (:env-id env)]
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]

@@ -604,11 +604,20 @@
                        'llm-query llm-query-fn
                        'FINAL (fn
                                 ([answer]
-                                 (let [v (realize-value answer)]
+                                 (let [v (realize-value answer)
+                                       v (if (and (map? v) (vector? (:answer v)))
+                                           (clojure.string/join (:answer v))
+                                           v)]
                                    {:rlm/final true :rlm/answer {:result v :type (type v)}
-                                    :rlm/confidence :high}))
+                                    :rlm/confidence (if (map? answer) (get answer :confidence :high) :high)
+                                    :rlm/sources (when (map? answer) (get answer :sources))
+                                    :rlm/reasoning (when (map? answer) (get answer :reasoning))
+                                    :rlm/learn (when (map? answer) (get answer :learn))}))
                                 ([answer opts]
-                                 (let [v (realize-value answer)]
+                                 (let [v (realize-value answer)
+                                       v (if (vector? v)
+                                           (clojure.string/join v)
+                                           v)]
                                    {:rlm/final true
                                     :rlm/answer {:result v :type (type v)}
                                     :rlm/confidence (get opts :confidence :high)
@@ -675,34 +684,45 @@
         ;; in the REPL, NOT in the context window. The LLM uses (subs P 0 1000),
         ;; (re-seq #"pattern" P), (P-page n), etc. to explore it programmatically.
         ;;
-        ;; P is ONLY built from string :context (the paper's model).
-        ;; Ingested documents (via ingest-to-env!) are accessed through structured tools
-        ;; (search-document-pages, P-add!, list-documents) — no duplication.
-        raw-text-bindings (when (string? context-data)
-                            (let [page-size 4000
-                                  pages (loop [remaining (str/split context-data #"\n\n+")
-                                               current [] current-size 0 result []]
-                                          (if (empty? remaining)
-                                            (if (seq current)
-                                              (conj result (str/join "\n\n" current))
-                                              result)
-                                            (let [para (first remaining)
-                                                  para-size (count para)]
-                                              (if (and (> current-size 0) (> (+ current-size para-size) page-size))
-                                                (recur remaining [] 0 (conj result (str/join "\n\n" current)))
-                                                (recur (rest remaining) (conj current para)
-                                                       (+ current-size para-size) result)))))]
-                              {'P context-data
-                               'P-len (count context-data)
-                               'P-page (fn [n] (get pages n))
-                               'P-page-count (fn [] (count pages))}))
+        ;; P is the structured workspace — the ENTIRE context surface the LLM sees.
+        ;; :last-iteration — auto-managed by system, last execution results
+        ;; :context        — vector of strings, LLM-managed working memory
+        ;; :learnings      — priority-ranked insights [{:text str :priority :high|:medium|:low}]
+        initial-context (if (and context-data (not= context-data ""))
+                          [(str "[initial] " (if (string? context-data) context-data (pr-str context-data)))]
+                          [])
+        p-atom (atom {:context initial-context
+                      :learnings []})
+        raw-text-bindings {'P-atom p-atom
+                           'P p-atom
+                           ;; Context management — stack of strings (newest last, oldest trimmed first)
+                           'ctx-add! (fn [text]
+                                       (swap! p-atom update :context conj (str text))
+                                       (str "Added to context (" (count (:context @p-atom)) " items)"))
+                           'ctx-remove! (fn [idx]
+                                          (swap! p-atom update :context
+                                                 (fn [ctx]
+                                                   (let [i (if (neg? idx) (+ (count ctx) idx) idx)]
+                                                     (into (subvec ctx 0 i) (subvec ctx (inc i))))))
+                                          (str "Removed from context (" (count (:context @p-atom)) " items)"))
+                           'ctx-clear! (fn [] (swap! p-atom assoc :context []) "Context cleared")
+                           ;; Learnings — priority-based
+                           'learn! (fn
+                                     ([text] (swap! p-atom update :learnings conj {:text (str text) :priority :medium})
+                                      (str "Learned (" (count (:learnings @p-atom)) " total)"))
+                                     ([text priority] (swap! p-atom update :learnings conj {:text (str text) :priority priority})
+                                      (str "Learned (" (count (:learnings @p-atom)) " total)")))
+                           'forget! (fn [idx] (swap! p-atom update :learnings
+                                                     (fn [ls] (into (subvec ls 0 idx) (subvec ls (inc idx)))))
+                                     (str "Forgot learning (" (count (:learnings @p-atom)) " remaining)"))}
         all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
                             learning-bindings raw-text-bindings
                             (or custom-bindings {}))]
-    (sci/init {:namespaces {'user all-bindings}
-               :classes {'java.util.regex.Pattern java.util.regex.Pattern
-                         'java.util.regex.Matcher java.util.regex.Matcher
-                         'java.time.LocalDate java.time.LocalDate
-                         'java.time.Period java.time.Period
-                         'java.util.UUID java.util.UUID}
-               :deny '[require import ns eval load-string read-string]})))
+    {:sci-ctx (sci/init {:namespaces {'user all-bindings}
+                         :classes {'java.util.regex.Pattern java.util.regex.Pattern
+                                   'java.util.regex.Matcher java.util.regex.Matcher
+                                   'java.time.LocalDate java.time.LocalDate
+                                   'java.time.Period java.time.Period
+                                   'java.util.UUID java.util.UUID}
+                         :deny '[require import ns eval load-string read-string]})
+     :p-atom p-atom}))

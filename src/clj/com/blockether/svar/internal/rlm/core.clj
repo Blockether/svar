@@ -151,14 +151,16 @@
          llm-query-fn (make-routed-llm-query-fn {:strategy :root} depth-atom router)
          rlm-query-fn (when db-info-atom
                         (make-rlm-query-fn {:strategy :root} depth-atom router db-info-atom))]
-     {:sci-ctx (create-sci-context context-data llm-query-fn rlm-query-fn locals-atom db-info-atom nil)
-      :context context-data
-      :llm-query-fn llm-query-fn
-      :rlm-query-fn rlm-query-fn
-      :locals-atom locals-atom
-      :db-info-atom db-info-atom
-      :history-enabled? (boolean db-info-atom)
-      :router router})))
+     (let [{:keys [sci-ctx p-atom]} (create-sci-context context-data llm-query-fn rlm-query-fn locals-atom db-info-atom nil)]
+       {:sci-ctx sci-ctx
+        :p-atom p-atom
+        :context context-data
+        :llm-query-fn llm-query-fn
+        :rlm-query-fn rlm-query-fn
+        :locals-atom locals-atom
+        :db-info-atom db-info-atom
+        :history-enabled? (boolean db-info-atom)
+        :router router}))))
 
 (defn dispose-rlm-env! [{:keys [db-info-atom]}]
   (when db-info-atom (dispose-rlm-conn! @db-info-atom)))
@@ -292,10 +294,11 @@
         llm-query-fn (make-routed-llm-query-fn prefs depth-atom rlm-router)
         rlm-query-fn (make-rlm-query-fn prefs depth-atom rlm-router db-info-atom)
         ;; Create SCI context with shared DB (no custom bindings in sub-RLM)
-        sci-ctx (create-sci-context context llm-query-fn rlm-query-fn locals-atom db-info-atom nil)
+        {:keys [sci-ctx p-atom]} (create-sci-context context llm-query-fn rlm-query-fn locals-atom db-info-atom nil)
         sub-env {:env-id sub-env-id
                  :parent-env-id parent-env-id
                  :sci-ctx sci-ctx
+                 :p-atom p-atom
                  :context context
                  :llm-query-fn llm-query-fn
                  :rlm-query-fn rlm-query-fn
@@ -465,26 +468,41 @@
   <tool name=\"llm-query\">(llm-query prompt) or (llm-query prompt {:spec my-spec}) - Simple text query to LLM</tool>
   <tool name=\"rlm-query\">(rlm-query sub-context query) or (rlm-query sub-context query {:spec s :max-iterations n}) - Spawn sub-RLM with code execution, SHARES the same database</tool>
   <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce patterns over many chunks.</tool>
-  <tool name=\"FINAL\">(FINAL answer) or (FINAL answer opts) - MUST call when you have the answer.
-    opts is an optional map:
-      :confidence - :high (default) or :low. When :low, the system runs Chain-of-Verification.
-      :sources - Vector of source IDs (page.node/id, document/id) that support the answer."
+  <tool name=\"FINAL\">(FINAL answer) or (FINAL answer opts) or (FINAL map) - MUST call when you have the answer.
+    Three calling conventions:
+      1. (FINAL \"short answer\")                    — simple string answer
+      2. (FINAL answer {:sources [...] ...})         — answer + opts (answer can be a string, var, or vector)
+      3. (FINAL {:answer [p1 p2 ...] :sources [...]}) — single structured map (answer is auto-joined)
+
+    When answer is a vector, elements are automatically concatenated (str/join).
+    This is the PREFERRED way for long answers — build parts as vars, pass as vector:
+      (def p1 \"First part...\")
+      (def p2 \"Second part...\")
+      (FINAL {:answer [p1 p2] :sources [{:source \"file.clj\" :type :file}]})
+
+    opts / map keys:
+      :confidence - :high (default), :medium, or :low. When :low, the system runs Chain-of-Verification.
+      :sources    - Vector of source maps: [{:source \"path-or-url\" :type :file|:url|:trace :confidence :high|:medium|:low} ...]
+      :learn      - Vector of learnings: [{:insight \"What was learned\" :tags [\"tag1\" \"tag2\"]} ...]"
        (if has-reasoning?
          "
-      :learn - Vector of insights to persist: [{:insight \"...\" :tags [\"tag1\" \"tag2\"]} ...].
     ALWAYS provide :sources when answering from documents.
     Examples:
-      (FINAL \"The penalty is 5%\" {:sources [\"node-abc\" \"node-def\"]})
-      (FINAL {:parties [...]} {:confidence :low})
-      (FINAL answer {:sources sources :learn [{:insight \"Penalties in section 7\" :tags [\"contracts\"]}]})</tool>"
+      (FINAL \"The penalty is 5%\" {:sources [{:source \"node-abc\" :type :trace :confidence :high}]})
+      (FINAL {:answer [part1 part2] :confidence :low})
+      (FINAL {:answer [intro details conclusion]
+              :sources [{:source \"contract.pdf\" :type :file :confidence :high}]
+              :learn [{:insight \"Penalties defined in section 7\" :tags [\"contracts\" \"penalties\"]}]})</tool>"
          "
-      :reasoning - String. Brief summary of HOW you derived the answer.
-      :learn - Vector of insights to persist: [{:insight \"...\" :tags [\"tag1\" \"tag2\"]} ...].
+      :reasoning  - String. Brief summary of HOW you derived the answer.
     ALWAYS provide :sources and :reasoning when answering from documents.
     Examples:
-      (FINAL \"The penalty is 5%\" {:sources [\"node-abc\" \"node-def\"] :reasoning \"Found in section 7.3, cross-referenced with appendix B\"})
-      (FINAL {:parties [...]} {:confidence :low :reasoning \"Only partial data found\"})
-      (FINAL answer {:sources sources :reasoning \"Aggregated from 3 sections\" :learn [{:insight \"Penalties in section 7\" :tags [\"contracts\"]}]})</tool>")
+      (FINAL \"The penalty is 5%\" {:sources [{:source \"node-abc\" :type :trace :confidence :high}] :reasoning \"Found in section 7.3\"})
+      (FINAL {:answer [part1 part2] :confidence :low :reasoning \"Only partial data found\"})
+      (FINAL {:answer [intro details conclusion]
+              :sources [{:source \"contract.pdf\" :type :file :confidence :high}]
+              :reasoning \"Aggregated from 3 sections\"
+              :learn [{:insight \"Penalties defined in section 7\" :tags [\"contracts\" \"penalties\"]}]})</tool>")
        "
 
   <tool name=\"request-more-iterations\">(request-more-iterations n) - Request n more iterations if running low. Returns {:granted n :new-budget N :cap max}.</tool>
@@ -492,16 +510,21 @@
 "
        (when has-documents? "
 <context_tools>
-  <description>Direct programmatic access to the string context (P). Per the RLM paper: P lives as a variable in the REPL, NOT in the context window. Use code to explore it.</description>
-  <tool name=\"P\">P - The full context string. Use (subs P start end) for slicing, (count P) for length, (re-seq pattern P) for regex.</tool>
-  <tool name=\"P-len\">P-len - Length of P in characters (pre-computed).</tool>
-  <tool name=\"P-page\">(P-page n) - Returns chunk n of P (0-indexed, ~4000 chars each, split at paragraph boundaries).</tool>
-  <tool name=\"P-page-count\">(P-page-count) - Total number of chunks P is split into.</tool>
+  <description>P is your structured workspace — the ENTIRE context you see each iteration.
+  @P returns {:context [...] :last-iteration [...] :learnings [...]}.
+  :context is YOUR working memory (vector of labeled strings). :last-iteration is auto-populated with your last code results. :learnings are priority-ranked insights.</description>
+  <tool name=\"ctx-add!\">(ctx-add! text) or (ctx-add! label text) - Add a string to :context. Use this to save findings for next iteration.</tool>
+  <tool name=\"ctx-remove!\">(ctx-remove! idx) or (ctx-remove! label) - Remove from :context by index or label.</tool>
+  <tool name=\"ctx-clear!\">(ctx-clear!) - Clear all :context entries.</tool>
+  <tool name=\"ctx-list\">(ctx-list) - List :context entries with index, label, and char count.</tool>
+  <tool name=\"learn!\">(learn! text) or (learn! text :high) - Add a prioritized learning. :high/:medium/:low.</tool>
+  <tool name=\"forget!\">(forget! idx) - Remove a learning by index.</tool>
   <usage_tips>
-    - For SEARCH tasks: (re-seq #\"pattern\" P) or iterate with P-page
-    - For AGGREGATION tasks: loop over (P-page 0), (P-page 1), ... (P-page (dec (P-page-count)))
-    - For slicing: (subs P start end) for arbitrary ranges
-    - P is the context string only — ingested documents are accessed via document_tools below
+    - SAVE IMPORTANT RESULTS: (ctx-add! \"findings\" (str results)) — anything not in :context is GONE next iteration
+    - LABEL YOUR CONTEXT: (ctx-add! \"section-7\" (str section)) — labels make removal easy
+    - CLEAN UP: (ctx-remove! \"raw-data\") when you no longer need something — keeps context lean
+    - LEARNINGS PERSIST: (learn! \"Penalties defined in section 7\" :high) — high priority = always visible
+    - Ingested documents are accessed via document_tools below
   </usage_tips>
 </context_tools>
 
@@ -591,7 +614,7 @@
   Date: parse-date, date-before?, date-after?, days-between, date-plus-days, date-minus-days, date-format, today-str (ISO-8601 format)
   Sets: set-union, set-intersection, set-difference, set-subset?, set-superset?
   Learnings: (search-learnings query), (search-learnings query top-k [\"tag\"]), (learning-stats), (list-learning-tags)
-  Persist insights via FINAL: (FINAL answer {:learn [{:insight \"...\" :tags [\"tag\"]}]})
+  Persist insights via FINAL: (FINAL {:answer [answer] :learn [{:insight \"...\" :tags [\"tag\"]}]})
 </helpers>
 "
        ;; No history tools in system prompt — locals are injected in every iteration feedback.
@@ -643,12 +666,19 @@
 
 <critical>
 - ALL RESULTS INLINE: Execution results are shown in full. You see everything — no hidden variables.
-- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(FINAL (summarize content))\"]
-- LONG ANSWERS: For answers with quotes or special characters, ALWAYS use a variable: [\"(def answer (str ...))\", \"(FINAL answer)\"]. NEVER put long multi-line strings directly in FINAL — it will fail to parse.
+- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(FINAL {:answer [(summarize content)]})\"]
+- LONG ANSWERS: Build parts as variables, pass as vector: [\"(def p1 \\\"First part...\\\")\", \"(def p2 \\\"Second part...\\\")\", \"(FINAL {:answer [p1 p2]})\"]. NEVER put long multi-line strings directly in FINAL — it will fail to parse.
 - CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(FINAL answer)` terminates, `FINAL answer` does NOT.
 - FAST PATH: If context already contains the answer, call (FINAL answer) IMMEDIATELY.
 - NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or FINAL with what you have.
 - ALWAYS call (FINAL answer) as soon as you have enough information.
+- WORKSPACE P: @P is your living memory with {:context [...] :learnings [...]}.
+  :context — stack of strings (newest last). YOUR working memory. Use (ctx-add! text) to save, (ctx-remove! idx) to drop.
+  :learnings — scratch notes visible in workspace. Use (learn! text :priority). Only learnings passed to (FINAL {:learn [...]}) are persisted.
+  CRITICAL: Each iteration you ONLY see [system prompt, query, <workspace>]. NOTHING else carries over.
+  YOU MUST (ctx-add! \"summary + key results\") at the END of EVERY iteration — this is your ONLY memory.
+  If you don't ctx-add!, your findings are PERMANENTLY LOST. No safety net. No history. Only what's in :context.
+  Oldest context entries are trimmed first when budget exceeded. Keep context lean and relevant.
 - ITERATION BUDGET: " MAX_ITERATIONS " iterations. Hard cap: " MAX_ITERATION_CAP ". " (/ EVAL_TIMEOUT_MS 1000) "s timeout per execution.
 </critical>
 "
@@ -941,27 +971,58 @@
             (let [_ (rlm-debug! {:iteration iteration :msg-count (count messages)} "Iteration start")
                   _ (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
                       (call-hook hooks-atom :iteration :pre {:iteration iteration :query query}))
-                  ;; Context management: ALWAYS preserve system prompt + original user query (first 2 messages).
-                  ;; When truncating iteration history, inject a state summary so the model
-                  ;; knows what variables it has and what it already accomplished.
-                  effective-messages (let [pinned   (vec (take 2 messages))
-                                          history  (vec (drop 2 messages))]
-                                      (if (and max-context-tokens (> (count history) 2))
-                                        (let [truncated (if (and history-enabled? (> (count history) 4))
-                                                          (select-rlm-iteration-context
-                                                           db-info (vec history) max-context-tokens
-                                                           {:model effective-model})
-                                                          (tokens/truncate-messages effective-model (vec history) max-context-tokens))
-                                              dropped-count (- (count history) (count truncated))]
-                                          (if (pos? dropped-count)
-                                            (let [summary (str "{:truncated " dropped-count " older messages dropped"
-                                                               " :iterations-so-far " iteration
-                                                               " :note \"Earlier results were truncated. Work with what you see.\"}")]
-                                              (into pinned
-                                                    (cons {:role "user" :content summary}
-                                                          truncated)))
-                                            (into pinned truncated)))
-                                        messages))
+                  ;; RLM context: system prompt + user query + P workspace.
+                  ;; P contains everything: :last-iteration (auto), :context (LLM), :learnings (priority).
+                  p-snapshot (when-let [pa (:p-atom rlm-env)]
+                               (let [{:keys [context learnings]} @pa
+                                     sections (cond-> []
+                                                (seq learnings)
+                                                (conj (str "<learnings>\n"
+                                                           (str/join "\n"
+                                                                     (map-indexed (fn [i {:keys [text priority]}]
+                                                                                    (str "[" i " " (name (or priority :medium)) "] " text))
+                                                                                  learnings))
+                                                           "\n</learnings>"))
+                                                (seq context)
+                                                (conj (str "<context>\n"
+                                                           (str/join "\n" context)
+                                                           "\n</context>")))]
+                                 (when (seq sections)
+                                   (str "<workspace iteration=\"" iteration "\">\n"
+                                        (str/join "\n" sections)
+                                        "\n</workspace>"))))
+                  ;; Budget trimming: remove oldest context entries if P is too large
+                  _ (when-let [pa (:p-atom rlm-env)]
+                      (let [snapshot-size (count (str p-snapshot))
+                            max-p-chars (* 4 (or max-context-tokens 50000))] ;; ~4 chars per token
+                        (when (> snapshot-size max-p-chars)
+                          (swap! pa update :context
+                                 (fn [ctx]
+                                   (loop [c ctx]
+                                     (if (or (<= (count (str/join "\n" c)) max-p-chars) (< (count c) 2))
+                                       c
+                                       (recur (vec (rest c))))))))))  ;; drop oldest first
+                  ;; Re-snapshot after trimming
+                  p-snapshot (or p-snapshot
+                                (when-let [pa (:p-atom rlm-env)]
+                                  (let [{:keys [context learnings]} @pa
+                                        sections (cond-> []
+                                                   (seq learnings)
+                                                   (conj (str "<learnings>\n"
+                                                              (str/join "\n"
+                                                                        (map-indexed (fn [i {:keys [text priority]}]
+                                                                                       (str "[" i " " (name (or priority :medium)) "] " text))
+                                                                                     learnings))
+                                                              "\n</learnings>"))
+                                                   (seq context)
+                                                   (conj (str "<context>\n" (str/join "\n" context) "\n</context>")))]
+                                    (when (seq sections)
+                                      (str "<workspace iteration=\"" iteration "\">\n"
+                                           (str/join "\n" sections) "\n</workspace>")))))
+                  base-messages (vec (take 2 messages)) ;; [system-prompt, user-query]
+                  effective-messages (cond-> base-messages
+                                      p-snapshot
+                                      (conj {:role "user" :content p-snapshot}))
                   iteration-result (try
                                      (run-iteration rlm-env effective-messages
                                                     {:iteration-spec (if has-reasoning?
@@ -1005,14 +1066,16 @@
                   ;; When response is nil (reasoning model), use thinking as content
                   ;; On FINAL, include the full trace as result-edn for later reconstruction
                   (when history-enabled?
-                    (let [result-edn (when final-result
-                                      (pr-str {:trace (conj trace trace-entry)
-                                               :answer (:answer final-result)
-                                               :iterations (inc iteration)
-                                               :tokens (let [{:keys [input-tokens output-tokens reasoning-tokens cached-tokens]} @usage-atom]
-                                                         {:input input-tokens :output output-tokens
-                                                          :reasoning reasoning-tokens :cached cached-tokens
-                                                          :total (+ input-tokens output-tokens)})}))
+                    (let [cost-map    (when final-result (finalize-cost))
+                          result-edn (when final-result
+                                      (pr-str (cond-> (merge {:trace (conj trace trace-entry)
+                                                              :answer (:answer final-result)
+                                                              :iterations (inc iteration)
+                                                              :confidence (:confidence final-result)}
+                                                             cost-map)
+                                                (:sources final-result)   (assoc :sources (:sources final-result))
+                                                (:reasoning final-result) (assoc :reasoning (:reasoning final-result))
+                                                (:learn final-result)     (assoc :learn (:learn final-result)))))
                           stored (store-message! db-info :assistant (or response thinking "[no response]")
                                                  {:iteration iteration :model effective-model
                                                   :env-id env-id :thinking thinking
@@ -1052,7 +1115,9 @@
                             learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
                                              "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
                             repetition-warning (detect-repetition executions)
-                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning)]
+                            ctx-nudge (when (pos? iteration)
+                                        "\n[Remember: (ctx-add! \"summary of findings\") to save important results for next iteration]")
+                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning ctx-nudge)]
                         (rlm-debug! {:iteration iteration
                                      :code-blocks (count executions)
                                      :errors (count (filter :error executions))
@@ -1064,9 +1129,7 @@
                         (let [had-successful-execution? (some #(nil? (:error %)) executions)
                               next-errors (if had-successful-execution? 0 (inc consecutive-errors))]
                           (recur (inc iteration)
-                                 (conj messages
-                                       {:role "assistant" :content (truncate-for-history response 800)}
-                                       {:role "user" :content user-feedback})
+                                 messages ;; fixed — P holds all state, model enriches via ctx-add!
                                  (conj trace trace-entry)
                                next-errors
                                restarts))))))))))))))
