@@ -20,6 +20,7 @@
    [com.blockether.svar.internal.rlm.schema :as schema]
    [com.blockether.svar.internal.rlm.trajectory :as trajectory]
    [com.blockether.svar.internal.rlm.tools :as rlm-tools]
+   [sci.core :as sci]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.tokens :as tokens]
    [com.blockether.svar.internal.util :as util]
@@ -439,14 +440,23 @@
                                                    (mapv async/<!! chs)))}
          {:keys [sci-ctx p-atom]} (rlm-tools/create-sci-context context sub-llm-fn rlm-query-fn locals-atom db-info-atom
                                                (merge custom-bindings cite-bindings budget-bindings llm-query-overrides))
-         ;; Carry over persistent context from previous queries if env already has a p-atom
+         ;; Carry over persistent context, learnings, and vars from previous queries
          _ (when-let [prev-pa (:p-atom env)]
              (let [prev-ctx (:context @prev-pa)
-                   prev-learnings (:learnings @prev-pa)]
+                   prev-learnings (:learnings @prev-pa)
+                   prev-vars (:vars @prev-pa)]
                (when (seq prev-ctx)
                  (swap! p-atom assoc :context prev-ctx))
                (when (seq prev-learnings)
-                 (swap! p-atom assoc :learnings prev-learnings))))
+                 (swap! p-atom assoc :learnings prev-learnings))
+               (when (seq prev-vars)
+                 (swap! p-atom assoc :vars prev-vars)
+                 ;; Inject persisted vars back into SCI REPL
+                 (doseq [[var-name var-val] prev-vars]
+                   (try
+                     (swap! locals-atom assoc (symbol var-name) var-val)
+                     (sci/eval-string* sci-ctx (str "(def " var-name " (get-local '" var-name "))"))
+                     (catch Exception _ nil))))))
          rlm-env (assoc env :sci-ctx sci-ctx :p-atom p-atom :context context :max-iterations-atom max-iterations-atom
                         :locals-atom locals-atom :hooks-atom hooks-atom)
          env-id (:env-id env)]
