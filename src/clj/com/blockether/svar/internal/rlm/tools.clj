@@ -606,7 +606,7 @@
                                 ([answer]
                                  (let [v (realize-value answer)
                                        v (if (and (map? v) (vector? (:answer v)))
-                                           (clojure.string/join (:answer v))
+                                           (clojure.string/join (map str (:answer v)))
                                            v)]
                                    {:rlm/final true :rlm/answer {:result v :type (type v)}
                                     :rlm/confidence (if (map? answer) (get answer :confidence :high) :high)
@@ -616,7 +616,7 @@
                                 ([answer opts]
                                  (let [v (realize-value answer)
                                        v (if (vector? v)
-                                           (clojure.string/join v)
+                                           (clojure.string/join (map str v))
                                            v)]
                                    {:rlm/final true
                                     :rlm/answer {:result v :type (type v)}
