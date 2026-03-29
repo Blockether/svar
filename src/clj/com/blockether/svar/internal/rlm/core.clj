@@ -667,11 +667,11 @@
 - WORKSPACE P: @P is your living memory with {:context [...] :learnings [...]}.
   :context — stack of strings (newest last). YOUR working memory. Use (ctx-add! text) to save, (ctx-remove! idx) to drop.
   :learnings — scratch notes visible in workspace. Use (learn! text :priority). Only learnings passed to (FINAL {:learn [...]}) are persisted.
-  CRITICAL: Each iteration you ONLY see [system prompt, query, <workspace>]. NOTHING else carries over between iterations.
-  :context PERSISTS ACROSS QUERIES — what you ctx-add! survives to the next user question in this session.
-  YOU MUST (ctx-add! \"summary + key results\") at the END of EVERY iteration — this is your ONLY memory.
-  If you don't ctx-add!, your findings are PERMANENTLY LOST. No safety net. No history. Only what's in :context.
-  Oldest context entries are trimmed first when budget exceeded. Keep context lean and relevant.
+  CRITICAL: Each iteration you ONLY see [system prompt, query, <workspace>]. No growing history.
+  :context is AUTO-POPULATED with execution summaries after each iteration.
+  :context PERSISTS ACROSS QUERIES — it survives to the next user question in this session.
+  Use (ctx-add! text) for extra notes. Use (ctx-remove! idx) to drop stale entries.
+  Context is auto-compacted when it grows beyond 12 entries (oldest summarized, recent kept verbatim).
 - ITERATION BUDGET: " MAX_ITERATIONS " iterations. Hard cap: " MAX_ITERATION_CAP ". " (/ EVAL_TIMEOUT_MS 1000) "s timeout per execution.
 </critical>
 "
@@ -1124,9 +1124,7 @@
                             learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
                                              "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
                             repetition-warning (detect-repetition executions)
-                            ctx-nudge (when (pos? iteration)
-                                        "\n[Remember: (ctx-add! \"summary of findings\") to save important results for next iteration]")
-                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning ctx-nudge)]
+                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning)]
                         (rlm-debug! {:iteration iteration
                                      :code-blocks (count executions)
                                      :errors (count (filter :error executions))
@@ -1137,8 +1135,28 @@
                           (store-message! db-info :tool user-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
                         (let [had-successful-execution? (some #(nil? (:error %)) executions)
                               next-errors (if had-successful-execution? 0 (inc consecutive-errors))]
+                          ;; Auto-add execution summary to P context
+                          (when-let [pa (:p-atom rlm-env)]
+                            (let [summary (str "[iter " (inc iteration) "] "
+                                              (when thinking (str-truncate thinking 100))
+                                              (when (seq executions)
+                                                (str "\n" (str/join "\n"
+                                                                    (map (fn [{:keys [code result error]}]
+                                                                           (if error
+                                                                             (str "  " (str-truncate code 60) " → ERROR: " (str-truncate (str error) 80))
+                                                                             (str "  " (str-truncate code 60) " → " (str-truncate (pr-str (realize-value result)) 120))))
+                                                                         executions)))))]
+                              (swap! pa update :context conj summary))
+                            ;; Compact context every 10 entries — keep last 3 verbatim, summarize older
+                            (let [ctx (:context @pa)]
+                              (when (> (count ctx) 12)
+                                (let [old-entries (subvec ctx 0 (- (count ctx) 3))
+                                      recent (subvec ctx (- (count ctx) 3))
+                                      compact (str "[compacted " (count old-entries) " entries] "
+                                                   (str/join " | " (map #(str-truncate % 80) old-entries)))]
+                                  (swap! pa assoc :context (into [compact] recent))))))
                           (recur (inc iteration)
-                                 messages ;; fixed — P holds all state, model enriches via ctx-add!
+                                 messages
                                  (conj trace trace-entry)
                                next-errors
                                restarts))))))))))))))
