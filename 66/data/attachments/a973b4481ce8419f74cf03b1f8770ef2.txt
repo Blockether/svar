@@ -1,2 +1,0 @@
-2026-03-29T20:17:54.110603404Z :warn com.blockether.svar.internal.rlm.routing [17 9] llm-query failed 
-  data: {:error nil, :prefs {:strategy :root}}
