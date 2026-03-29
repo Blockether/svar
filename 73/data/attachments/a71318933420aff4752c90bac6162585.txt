@@ -1,0 +1,2 @@
+2026-03-29T23:00:46.361197761Z :warn com.blockether.svar.internal.llm [1002 13] ::cod-non-map-result SAP returned non-map for CoD spec — check jsonish/spec pipeline 
+  data: {:result-type clojure.lang.PersistentVector, :result "[{:entity \"Titan\", :rationale \"Titan, Saturn's largest moon, with its thick nitrogen atmosphere, was a focus of Voyager 1's observations of Saturn's system.\", :score 0.9} []]"}
