@@ -764,11 +764,10 @@
         (expect (str/includes? prompt ":sources"))
         (expect (str/includes? prompt ":reasoning"))))
 
-  (it "includes history tools when enabled"
+  (it "does not include history tools (removed — locals injected in feedback)"
       (let [prompt (#'rlm-core/build-system-prompt {:history-enabled? true})]
-        (expect (str/includes? prompt "search-history"))
-        (expect (str/includes? prompt "get-history"))
-        (expect (str/includes? prompt "history-stats"))))
+        (expect (not (str/includes? prompt "search-history")))
+        (expect (not (str/includes? prompt "get-history")))))
 
   (it "excludes history tools when disabled"
       (let [prompt (#'rlm-core/build-system-prompt {:history-enabled? false})]
@@ -987,29 +986,30 @@
 ;; =============================================================================
 
 (defdescribe format-executions-test
-  (it "formats successful results"
-      (let [results [{:id 1 :result 42 :stdout "" :error nil}]
+  (it "formats successful results as EDN"
+      (let [results [{:id 1 :code "(+ 1 41)" :result 42 :stdout "" :error nil}]
             formatted (#'rlm-core/format-executions results)]
-        (expect (str/includes? formatted "<result_1>"))
-        (expect (str/includes? formatted "<value>42</value>"))
-        (expect (str/includes? formatted "</result_1>"))))
+        (expect (str/includes? formatted ":ok"))
+        (expect (str/includes? formatted "42"))))
 
-  (it "formats errors"
-      (let [results [{:id 1 :result nil :stdout "" :error "Division by zero"}]
+  (it "formats errors as EDN"
+      (let [results [{:id 1 :code "(/ 1 0)" :result nil :stdout "" :error "Division by zero"}]
             formatted (#'rlm-core/format-executions results)]
-        (expect (str/includes? formatted "<error>Division by zero</error>"))))
+        (expect (str/includes? formatted ":error"))
+        (expect (str/includes? formatted "Division by zero"))))
 
   (it "includes stdout when present"
-      (let [results [{:id 1 :result nil :stdout "Hello\n" :error nil}]
+      (let [results [{:id 1 :code "(println \"Hello\")" :result nil :stdout "Hello\n" :error nil}]
             formatted (#'rlm-core/format-executions results)]
-        (expect (str/includes? formatted "<stdout>Hello"))))
+        (expect (str/includes? formatted ":stdout"))
+        (expect (str/includes? formatted "Hello"))))
 
   (it "formats multiple results"
-      (let [results [{:id 1 :result 1 :stdout "" :error nil}
-                     {:id 2 :result 2 :stdout "" :error nil}]
+      (let [results [{:id 1 :code "(+ 0 1)" :result 1 :stdout "" :error nil}
+                     {:id 2 :code "(+ 1 1)" :result 2 :stdout "" :error nil}]
             formatted (#'rlm-core/format-executions results)]
-        (expect (str/includes? formatted "<result_1>"))
-        (expect (str/includes? formatted "<result_2>")))))
+        (expect (str/includes? formatted "1"))
+        (expect (str/includes? formatted "2")))))
 
 ;; =============================================================================
 ;; Integration Tests (real LLM calls)
