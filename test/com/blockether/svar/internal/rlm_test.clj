@@ -862,7 +862,7 @@
                                            :hooks {:code-exec {:pre  (fn [data] (swap! pre-calls conj data))
                                                                :post (fn [data] (swap! post-calls conj data))}}})]
                   (try
-                    (let [sci-ctx (rlm-tools/create-sci-context {} (fn [_] {:content "ok"}) nil (atom {}) (:db-info-atom env) nil)
+                    (let [{:keys [sci-ctx]} (rlm-tools/create-sci-context {} (fn [_] {:content "ok"}) nil (atom {}) (:db-info-atom env) nil)
                           local-env {:sci-ctx sci-ctx :locals-atom (atom {}) :hooks-atom (:hooks-atom env)}
                           result (#'rlm-core/execute-code local-env "(+ 1 2)")]
                       (expect (= 3 (:result result)))
