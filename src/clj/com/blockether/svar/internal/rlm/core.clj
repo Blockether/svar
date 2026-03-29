@@ -1154,10 +1154,13 @@
                                               (when thinking (str "\nReasoning: " (str-truncate thinking 500)))
                                               (when (seq executions)
                                                 (str "\nExecutions:\n" (str/join "\n"
-                                                                    (map (fn [{:keys [code result error]}]
-                                                                           (if error
-                                                                             (str "  " (str-truncate code 80) " → ERROR: " (str-truncate (str error) 120))
-                                                                             (str "  " (str-truncate code 80) " → " (str-truncate (pr-str (realize-value result)) 200))))
+                                                                    (map (fn [{:keys [code result error stdout]}]
+                                                                           (str "  " (str-truncate code 80) " → "
+                                                                                (if error
+                                                                                  (str "ERROR: " (str-truncate (str error) 120))
+                                                                                  (str-truncate (pr-str (realize-value result)) 200))
+                                                                                (when (and stdout (not (str/blank? stdout)))
+                                                                                  (str " [stdout: " (str-truncate stdout 100) "]"))))
                                                                          executions)))))]
                               (swap! pa update :context conj summary)))
                           (recur (inc iteration)
