@@ -438,6 +438,14 @@
                                                    (mapv async/<!! chs)))}
          {:keys [sci-ctx p-atom]} (rlm-tools/create-sci-context context sub-llm-fn rlm-query-fn locals-atom db-info-atom
                                                (merge custom-bindings cite-bindings budget-bindings llm-query-overrides))
+         ;; Carry over persistent context from previous queries if env already has a p-atom
+         _ (when-let [prev-pa (:p-atom env)]
+             (let [prev-ctx (:context @prev-pa)
+                   prev-learnings (:learnings @prev-pa)]
+               (when (seq prev-ctx)
+                 (swap! p-atom assoc :context prev-ctx))
+               (when (seq prev-learnings)
+                 (swap! p-atom assoc :learnings prev-learnings))))
          rlm-env (assoc env :sci-ctx sci-ctx :p-atom p-atom :context context :max-iterations-atom max-iterations-atom
                         :locals-atom locals-atom :hooks-atom hooks-atom)
          env-id (:env-id env)]
@@ -728,6 +736,9 @@
                                                         :status :success})
                    result-map))))
            (finally
+             ;; Persist P workspace back to env for next query
+             (when-let [env-pa (:p-atom env)]
+               (reset! env-pa @p-atom))
              (when hooks-atom
                (reset! hooks-atom (or original-hooks {}))))))))))
 

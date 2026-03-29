@@ -926,7 +926,25 @@
         _ (when history-enabled?
             (store-message! db-info :system system-prompt {:iteration 0 :model effective-model :env-id env-id})
             ;; Store clean user query as content (not XML-wrapped)
-            (store-message! db-info :user query {:iteration 0 :model effective-model :env-id env-id}))]
+            (store-message! db-info :user query {:iteration 0 :model effective-model :env-id env-id}))
+        ;; Inject recent conversation history (last 3 user/assistant exchanges) into P context
+        _ (when-let [pa (:p-atom rlm-env)]
+            (when history-enabled?
+              (let [recent (try (get-recent-messages db-info 10) (catch Exception _ nil))
+                    ;; Get last 3 user messages and their answers (skip current query)
+                    user-msgs (->> recent
+                                   (filter #(= :user (:role %)))
+                                   (drop 1) ;; skip current query
+                                   (take 3))
+                    history-entries (when (seq user-msgs)
+                                     (mapv (fn [m]
+                                             (str "[user] " (:content m)))
+                                           (reverse user-msgs)))]
+                (when (seq history-entries)
+                  (swap! pa update :context
+                         (fn [ctx]
+                           (into [(str "[conversation-history]\n" (str/join "\n" history-entries))]
+                                 ctx)))))))]
     (rlm-debug! {:query query :max-iterations max-iterations :model effective-model
                  :has-output-spec? (some? output-spec) :has-pre-fetched? (some? pre-fetched-context)
                  :has-reasoning? has-reasoning?
