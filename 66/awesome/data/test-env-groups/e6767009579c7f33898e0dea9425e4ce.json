@@ -1,0 +1,1 @@
+{"id":"e6767009579c7f33898e0dea9425e4ce","fullName":"com.blockether.svar.internal.rlm-test.entity-bindings-test.search-document-entities returns empty vector when no entities exist","name":"entity-bindings-test > search-document-entities returns empty vector when no entities exist","status":"passed","testResultsByEnv":{"default":"ec2a436b3f1b55917ec9e7d85e04f2c9"}}
