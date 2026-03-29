@@ -1,0 +1,2 @@
+2026-03-29T21:09:44.717714109Z :info com.blockether.svar.internal.rlm [1470 10] ::save-qa-edn Saved Q&A results as EDN 
+  data: {:path "/tmp/qa-test-11706715309305044405/test-output.edn", :questions 1}
