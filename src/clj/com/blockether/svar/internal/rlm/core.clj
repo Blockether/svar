@@ -469,13 +469,8 @@
   <tool name=\"rlm-query\">(rlm-query sub-context query) or (rlm-query sub-context query {:spec s :max-iterations n}) - Spawn sub-RLM with code execution, SHARES the same database</tool>
   <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce patterns over many chunks.</tool>
   <tool name=\"FINAL\">(FINAL {:answer [parts...] ...}) - MUST call when you have the answer.
-    ALWAYS use the structured map form with :answer as a vector of strings/vars (auto-joined):
-
-    When answer is a vector, elements are automatically concatenated (str/join).
-    This is the PREFERRED way for long answers — build parts as vars, pass as vector:
-      (def p1 \"First part...\")
-      (def p2 \"Second part...\")
-      (FINAL {:answer [p1 p2] :sources [{:source \"file.clj\" :type :file}]})
+    ALWAYS use the structured map form. :answer is a vector of strings (auto-joined).
+    Example: (FINAL {:answer [\"Your answer here\"]})
 
     opts / map keys:
       :confidence - :high (default), :medium, or :low. When :low, the system runs Chain-of-Verification.
@@ -664,7 +659,7 @@
 <critical>
 - ALL RESULTS INLINE: Execution results are shown in full. You see everything — no hidden variables.
 - COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(def summary (summarize content))\", \"(FINAL {:answer [summary]})\"]
-- LONG ANSWERS: Build parts as variables, pass as vector: [\"(def p1 \\\"First part...\\\")\", \"(def p2 \\\"Second part...\\\")\", \"(FINAL {:answer [p1 p2]})\"]. NEVER put long multi-line strings directly in FINAL — it will fail to parse.
+- LONG ANSWERS: Put each part as a separate string in the :answer vector: (FINAL {:answer [\"part 1\" \"part 2\"]}). Elements are auto-joined.
 - CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(FINAL {:answer [...]})` terminates, `FINAL answer` does NOT.
 - FAST PATH: If context already contains the answer, call (FINAL {:answer [\"your answer\"]}) IMMEDIATELY.
 - NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or FINAL with what you have.
