@@ -1029,42 +1029,45 @@
                                  (:reasoning final-result) (assoc :reasoning (:reasoning final-result))
                                  (:learn final-result)     (assoc :learn (:learn final-result)))
                                (finalize-cost)))
-                    (let [exec-feedback (format-executions executions)
-                          iteration-header (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
-                                                  "{:requirement " (pr-str (str-truncate query 200)) "}")
-                          ;; Periodic learning nudge
-                          learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
-                                           "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
-                          ;; Detect if the LLM is stuck in a loop
-                          repetition-warning (when (seq executions) (detect-repetition executions))
-                          user-feedback (if (empty? executions)
-                                          (str iteration-header
-                                               "\n⚠ EMPTY ITERATION — no code was executed. This wastes your iteration budget."
-                                               "\nYou MUST include executable Clojure code. If you have the answer, call (FINAL answer)."
-                                               "\nFor long answers: [\"(def answer (str \\\"my answer\\\"))\", \"(FINAL answer)\"]"
-                                               (if has-reasoning?
-                                                 "\nRespond with: {\"code\": [\"(FINAL \\\"your answer\\\")\"]} "
-                                                 "\nRespond with: {\"thinking\": \"...\", \"code\": [\"(FINAL \\\"your answer\\\")\"]}"))
-                                          (str iteration-header "\n" exec-feedback learning-nudge repetition-warning))]
-                      (rlm-debug! {:iteration iteration
-                                   :code-blocks (count executions)
-                                   :errors (count (filter :error executions))
-                                   :has-thinking? (some? thinking)
-                                   :thinking-preview (when thinking (str-truncate thinking 150))
-                                   :feedback-len (count user-feedback)} "Iteration feedback")
-                      ;; Store execution feedback as :tool role (not :user — it's system-generated)
-                      (when history-enabled?
-                        (store-message! db-info :tool user-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
-                      ;; Only reset consecutive-errors when code actually ran successfully.
-                      ;; Empty responses and all-error executions keep the counter climbing.
-                      (let [had-successful-execution? (and (seq executions)
-                                                           (some #(nil? (:error %)) executions))
-                            next-errors (if had-successful-execution? 0 (inc consecutive-errors))]
-                        (recur (inc iteration)
+                    (if (empty? executions)
+                      ;; Empty iteration: DON'T increment iteration counter, DON'T add to trace.
+                      ;; Retry immediately with a nudge — this doesn't waste an iteration slot.
+                      (let [nudge (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
+                                       "{:requirement " (pr-str (str-truncate query 200)) "}\n"
+                                       "⚠ EMPTY — no code executed. You MUST include code. "
+                                       (if has-reasoning?
+                                         "Respond: {\"code\": [\"(FINAL \\\"answer\\\")\"]} "
+                                         "Respond: {\"thinking\": \"...\", \"code\": [\"(FINAL \\\"answer\\\")\"]} "))]
+                        (recur (inc iteration) ;; still increment to prevent infinite loop
                                (conj messages
-                                     {:role "assistant" :content (truncate-for-history response 800)}
-                                     {:role "user" :content user-feedback})
-                               (conj trace trace-entry)
+                                     {:role "assistant" :content (or response thinking "[empty]")}
+                                     {:role "user" :content nudge})
+                               trace ;; DON'T add empty trace entry
+                               (inc consecutive-errors)
+                               restarts))
+                      ;; Normal iteration with executions
+                      (let [exec-feedback (format-executions executions)
+                            iteration-header (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
+                                                    "{:requirement " (pr-str (str-truncate query 200)) "}")
+                            learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
+                                             "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
+                            repetition-warning (detect-repetition executions)
+                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning)]
+                        (rlm-debug! {:iteration iteration
+                                     :code-blocks (count executions)
+                                     :errors (count (filter :error executions))
+                                     :has-thinking? (some? thinking)
+                                     :thinking-preview (when thinking (str-truncate thinking 150))
+                                     :feedback-len (count user-feedback)} "Iteration feedback")
+                        (when history-enabled?
+                          (store-message! db-info :tool user-feedback {:iteration (inc iteration) :model effective-model :env-id env-id}))
+                        (let [had-successful-execution? (some #(nil? (:error %)) executions)
+                              next-errors (if had-successful-execution? 0 (inc consecutive-errors))]
+                          (recur (inc iteration)
+                                 (conj messages
+                                       {:role "assistant" :content (truncate-for-history response 800)}
+                                       {:role "user" :content user-feedback})
+                                 (conj trace trace-entry)
                                next-errors
                                restarts)))))))))))))
 
