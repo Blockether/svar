@@ -1134,7 +1134,7 @@
                                                    (when (> ctx-count 12)
                                                      (str "\n[SYSTEM_NUDGE] Your context has " ctx-count " entries. Manage it NOW. Options:\n"
                                                           "  1. REMOVE stale entries: (ctx-remove! idx)\n"
-                                                          "  2. COMPACT multiple entries into one summary: (ctx-remove! old-idx) then (ctx-add! \"merged summary\")\n"
+                                                          "  2. COMPACT a range into one summary: (ctx-replace! from-idx to-idx \"merged summary of entries from-to\")\n"
                                                           "  3. KEEP if all entries are essential\n"
                                                           "Decide which entries are least important for the current task and act."))))
                             user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning ctx-overflow-nudge)]

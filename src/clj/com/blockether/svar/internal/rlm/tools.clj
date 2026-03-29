@@ -706,6 +706,15 @@
                                                      (into (subvec ctx 0 i) (subvec ctx (inc i))))))
                                           (str "Removed from context (" (count (:context @p-atom)) " items)"))
                            'ctx-clear! (fn [] (swap! p-atom assoc :context []) "Context cleared")
+                           'ctx-replace! (fn [from-idx to-idx replacement]
+                                           (swap! p-atom update :context
+                                                  (fn [ctx]
+                                                    (let [before (subvec ctx 0 from-idx)
+                                                          after  (when (< (inc to-idx) (count ctx))
+                                                                   (subvec ctx (inc to-idx)))]
+                                                      (into (conj before (str replacement))
+                                                            (or after [])))))
+                                           (str "Replaced [" from-idx "-" to-idx "] (" (count (:context @p-atom)) " items)"))
                            ;; Learnings — priority-based
                            'learn! (fn
                                      ([text] (swap! p-atom update :learnings conj {:text (str text) :priority :medium})
