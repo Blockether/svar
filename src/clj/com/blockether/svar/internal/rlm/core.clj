@@ -675,7 +675,8 @@
 - WORKSPACE P: @P is your living memory with {:context [...] :learnings [...]}.
   :context — stack of strings (newest last). YOUR working memory. Use (ctx-add! text) to save, (ctx-remove! idx) to drop.
   :learnings — scratch notes visible in workspace. Use (learn! text :priority). Only learnings passed to (FINAL {:learn [...]}) are persisted.
-  CRITICAL: Each iteration you ONLY see [system prompt, query, <workspace>]. NOTHING else carries over.
+  CRITICAL: Each iteration you ONLY see [system prompt, query, <workspace>]. NOTHING else carries over between iterations.
+  :context PERSISTS ACROSS QUERIES — what you ctx-add! survives to the next user question in this session.
   YOU MUST (ctx-add! \"summary + key results\") at the END of EVERY iteration — this is your ONLY memory.
   If you don't ctx-add!, your findings are PERMANENTLY LOST. No safety net. No history. Only what's in :context.
   Oldest context entries are trimmed first when budget exceeded. Keep context lean and relevant.
