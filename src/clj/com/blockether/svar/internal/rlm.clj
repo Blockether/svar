@@ -158,6 +158,7 @@
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
+     :p-atom (atom {:context [] :learnings []})
      :hooks merged-hooks
      :router rlm-router
      :llm-query-fn llm-query-fn

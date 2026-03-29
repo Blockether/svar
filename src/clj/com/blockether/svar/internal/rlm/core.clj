@@ -468,11 +468,8 @@
   <tool name=\"llm-query\">(llm-query prompt) or (llm-query prompt {:spec my-spec}) - Simple text query to LLM</tool>
   <tool name=\"rlm-query\">(rlm-query sub-context query) or (rlm-query sub-context query {:spec s :max-iterations n}) - Spawn sub-RLM with code execution, SHARES the same database</tool>
   <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce patterns over many chunks.</tool>
-  <tool name=\"FINAL\">(FINAL answer) or (FINAL answer opts) or (FINAL map) - MUST call when you have the answer.
-    Three calling conventions:
-      1. (FINAL \"short answer\")                    — simple string answer
-      2. (FINAL answer {:sources [...] ...})         — answer + opts (answer can be a string, var, or vector)
-      3. (FINAL {:answer [p1 p2 ...] :sources [...]}) — single structured map (answer is auto-joined)
+  <tool name=\"FINAL\">(FINAL {:answer [parts...] ...}) - MUST call when you have the answer.
+    ALWAYS use the structured map form with :answer as a vector of strings/vars (auto-joined):
 
     When answer is a vector, elements are automatically concatenated (str/join).
     This is the PREFERRED way for long answers — build parts as vars, pass as vector:
@@ -641,11 +638,11 @@
   Aggregation: partition pages → llm-query-batch → synthesize. Use for counting/summarizing ALL content.
   Retrieval: search-document-pages → P-add! → analyze. Use for finding SPECIFIC info.
   Regex: (re-seq #\"pattern\" P) for structured extraction across full text.
-  ALWAYS call (FINAL answer {:sources [...]}) with source references when answering from documents.
+  ALWAYS call (FINAL {:answer [answer] :sources [...]}) with source references when answering from documents.
 </rlm_patterns>
 
 <workflow>
-0. FIRST: Check <context> - if it directly answers the query, call (FINAL answer) immediately without searching
+0. FIRST: Check <context> - if it directly answers the query, call (FINAL {:answer [\"your answer\"]}) immediately without searching
 1. If more info needed, check available documents: (list-documents)
 2. Browse TOC to understand document structure: (list-document-toc)
 3. Pick sections from TOC, fetch content: (def section (P-add! [:page.node/id node-id]))
@@ -654,7 +651,7 @@
 6. Write code to analyze data, store intermediate results with (def my-var ...)"
        (when history-enabled?
          "")
-       "\n" (if history-enabled? "8" "7") ". Call (FINAL answer) when done
+       "\n" (if history-enabled? "8" "7") ". Call (FINAL {:answer [...]}) when done
 </workflow>
 
 <response_format>
@@ -666,12 +663,12 @@
 
 <critical>
 - ALL RESULTS INLINE: Execution results are shown in full. You see everything — no hidden variables.
-- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(FINAL {:answer [(summarize content)]})\"]
+- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(def summary (summarize content))\", \"(FINAL {:answer [summary]})\"]
 - LONG ANSWERS: Build parts as variables, pass as vector: [\"(def p1 \\\"First part...\\\")\", \"(def p2 \\\"Second part...\\\")\", \"(FINAL {:answer [p1 p2]})\"]. NEVER put long multi-line strings directly in FINAL — it will fail to parse.
-- CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(FINAL answer)` terminates, `FINAL answer` does NOT.
-- FAST PATH: If context already contains the answer, call (FINAL answer) IMMEDIATELY.
+- CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(FINAL {:answer [...]})` terminates, `FINAL answer` does NOT.
+- FAST PATH: If context already contains the answer, call (FINAL {:answer [\"your answer\"]}) IMMEDIATELY.
 - NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or FINAL with what you have.
-- ALWAYS call (FINAL answer) as soon as you have enough information.
+- ALWAYS call (FINAL {:answer [...]}) as soon as you have enough information. NEVER call (FINAL \"string\") directly — always use the {:answer [...]} map form.
 - WORKSPACE P: @P is your living memory with {:context [...] :learnings [...]}.
   :context — stack of strings (newest last). YOUR working memory. Use (ctx-add! text) to save, (ctx-remove! idx) to drop.
   :learnings — scratch notes visible in workspace. Use (learn! text :priority). Only learnings passed to (FINAL {:learn [...]}) are persisted.
@@ -915,7 +912,7 @@
                                 (str "\n\n⚠ REPETITION DETECTED: These calls have been executed 3+ times with the SAME results:\n"
                                      (str/join "\n" (map #(str "  - " (str-truncate (str %) 80)) (distinct repeated)))
                                      "\nRepeating the same action will NOT produce different results. "
-                                     "You MUST try a DIFFERENT approach, or call (FINAL answer) with what you have."))))
+                                     "You MUST try a DIFFERENT approach, or call (FINAL {:answer [\"your answer\"]}) with what you have."))))
         finalize-cost (fn []
                         (let [{:keys [input-tokens output-tokens reasoning-tokens cached-tokens]} @usage-atom
                               total-tokens (+ input-tokens output-tokens)
@@ -1042,7 +1039,7 @@
                 ;; Error path: feed error back to LLM as user message, let it recover
                 (let [error-feedback (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
                                           "<error>LLM call failed: " (:message iter-err) "</error>\n"
-                                          "The previous attempt failed. Adjust your approach or call (FINAL answer) with what you have.")
+                                          "The previous attempt failed. Adjust your approach or call (FINAL {:answer [\"your answer\"]}) with what you have.")
                       trace-entry {:iteration iteration :error iter-err :final? false}]
                   (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
                     (call-hook hooks-atom :iteration :post trace-entry))
@@ -1101,8 +1098,8 @@
                                        "{:requirement " (pr-str (str-truncate query 200)) "}\n"
                                        "⚠ EMPTY — no code executed. You MUST include code. "
                                        (if has-reasoning?
-                                         "Respond: {\"code\": [\"(FINAL \\\"answer\\\")\"]} "
-                                         "Respond: {\"thinking\": \"...\", \"code\": [\"(FINAL \\\"answer\\\")\"]} "))]
+                                         "Respond: {\"code\": [\"(FINAL {:answer [\\\"your answer\\\"]})\"]} "
+                                         "Respond: {\"thinking\": \"...\", \"code\": [\"(FINAL {:answer [\\\"your answer\\\"]})\"]} "))]
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                                (conj messages
                                      {:role "assistant" :content (or response thinking "[empty]")}
