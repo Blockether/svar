@@ -51,6 +51,7 @@ jobs:
           LAZYTEST_ALLURE_GENERATE_REPORT: "false"
           BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
           BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
+          BLOCKETHER_LLM_DEFAULT_MODEL: ${{ secrets.BLOCKETHER_LLM_DEFAULT_MODEL }}
         run: clojure -M:test --output nested --output com.blockether.svar.allure-reporter/allure
         continue-on-error: true
 
@@ -72,6 +73,7 @@ jobs:
         env:
           BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
           BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
+          BLOCKETHER_LLM_DEFAULT_MODEL: ${{ secrets.BLOCKETHER_LLM_DEFAULT_MODEL }}
         run: clojure -M:test --md README.md
 
       - name: Build jar
