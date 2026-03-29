@@ -671,7 +671,12 @@
   :context is AUTO-POPULATED with execution summaries after each iteration.
   :context PERSISTS ACROSS QUERIES — it survives to the next user question in this session.
   Use (ctx-add! text) for extra notes. Use (ctx-remove! idx) to drop stale entries.
-  Context is auto-compacted when it grows beyond 12 entries (oldest summarized, recent kept verbatim).
+  When context grows large, you will receive a [SYSTEM_NUDGE] to clean up — ALWAYS obey it.
+
+[SYSTEM_NUDGE] DEFINITION:
+  Messages tagged [SYSTEM_NUDGE] are mandatory system instructions injected during execution.
+  They are NOT suggestions. You MUST follow them immediately in your next code block.
+  Ignoring a [SYSTEM_NUDGE] will degrade your performance and waste iterations.
 - ITERATION BUDGET: " MAX_ITERATIONS " iterations. Hard cap: " MAX_ITERATION_CAP ". " (/ EVAL_TIMEOUT_MS 1000) "s timeout per execution.
 </critical>
 "
@@ -1124,7 +1129,13 @@
                             learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
                                              "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
                             repetition-warning (detect-repetition executions)
-                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning)]
+                            ctx-overflow-nudge (when-let [pa (:p-atom rlm-env)]
+                                                 (let [ctx-count (count (:context @pa))]
+                                                   (when (> ctx-count 12)
+                                                     (str "\n[SYSTEM_NUDGE] Your context has " ctx-count " entries and is getting large. "
+                                                          "Review with (ctx-list) and drop least important entries with (ctx-remove! idx). "
+                                                          "Keep only what's essential for the current task."))))
+                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning ctx-overflow-nudge)]
                         (rlm-debug! {:iteration iteration
                                      :code-blocks (count executions)
                                      :errors (count (filter :error executions))
@@ -1146,15 +1157,7 @@
                                                                              (str "  " (str-truncate code 60) " → ERROR: " (str-truncate (str error) 80))
                                                                              (str "  " (str-truncate code 60) " → " (str-truncate (pr-str (realize-value result)) 120))))
                                                                          executions)))))]
-                              (swap! pa update :context conj summary))
-                            ;; Compact context every 10 entries — keep last 3 verbatim, summarize older
-                            (let [ctx (:context @pa)]
-                              (when (> (count ctx) 12)
-                                (let [old-entries (subvec ctx 0 (- (count ctx) 3))
-                                      recent (subvec ctx (- (count ctx) 3))
-                                      compact (str "[compacted " (count old-entries) " entries] "
-                                                   (str/join " | " (map #(str-truncate % 80) old-entries)))]
-                                  (swap! pa assoc :context (into [compact] recent))))))
+                              (swap! pa update :context conj summary)))
                           (recur (inc iteration)
                                  messages
                                  (conj trace trace-entry)
