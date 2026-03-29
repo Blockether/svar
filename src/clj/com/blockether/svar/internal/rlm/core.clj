@@ -972,24 +972,39 @@
                       (call-hook hooks-atom :iteration :pre {:iteration iteration :query query}))
                   ;; RLM context: system prompt + user query + P workspace.
                   ;; P contains everything: :last-iteration (auto), :context (LLM), :learnings (priority).
-                  p-snapshot (when-let [pa (:p-atom rlm-env)]
-                               (let [{:keys [context learnings]} @pa
-                                     sections (cond-> []
-                                                (seq learnings)
-                                                (conj (str "<learnings>\n"
-                                                           (str/join "\n"
-                                                                     (map-indexed (fn [i {:keys [text priority]}]
-                                                                                    (str "[" i " " (name (or priority :medium)) "] " text))
-                                                                                  learnings))
-                                                           "\n</learnings>"))
-                                                (seq context)
-                                                (conj (str "<context>\n"
-                                                           (str/join "\n" context)
-                                                           "\n</context>")))]
-                                 (when (seq sections)
-                                   (str "<workspace iteration=\"" iteration "\">\n"
-                                        (str/join "\n" sections)
-                                        "\n</workspace>"))))
+                  ;; Always include last 3 user messages from DB as safety net
+                  recent-user-msgs (when history-enabled?
+                                     (try
+                                       (let [recent (get-recent-messages db-info 10)]
+                                         (->> recent
+                                              (filter #(= :user (:role %)))
+                                              (drop 1) ;; skip current query
+                                              (take 3)
+                                              reverse
+                                              (mapv :content)))
+                                       (catch Exception _ nil)))
+                  p-snapshot (let [pa (:p-atom rlm-env)
+                                   {:keys [context learnings]} (when pa @pa)
+                                   sections (cond-> []
+                                              (seq recent-user-msgs)
+                                              (conj (str "<recent-messages>\n"
+                                                         (str/join "\n" (map #(str "- " %) recent-user-msgs))
+                                                         "\n</recent-messages>"))
+                                              (seq learnings)
+                                              (conj (str "<learnings>\n"
+                                                         (str/join "\n"
+                                                                   (map-indexed (fn [i {:keys [text priority]}]
+                                                                                  (str "[" i " " (name (or priority :medium)) "] " text))
+                                                                                learnings))
+                                                         "\n</learnings>"))
+                                              (seq context)
+                                              (conj (str "<context>\n"
+                                                         (str/join "\n" context)
+                                                         "\n</context>")))]
+                               (when (seq sections)
+                                 (str "<workspace iteration=\"" iteration "\">\n"
+                                      (str/join "\n" sections)
+                                      "\n</workspace>")))
                   ;; Budget trimming: remove oldest context entries if P is too large
                   _ (when-let [pa (:p-atom rlm-env)]
                       (let [snapshot-size (count (str p-snapshot))
