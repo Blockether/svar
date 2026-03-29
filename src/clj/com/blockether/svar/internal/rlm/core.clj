@@ -643,7 +643,8 @@
 
 <critical>
 - ALL RESULTS INLINE: Execution results are shown in full. You see everything — no hidden variables.
-- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(FINAL (summarize content))\"] — read AND answer in one go.
+- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(FINAL (summarize content))\"]
+- LONG ANSWERS: For answers with quotes or special characters, ALWAYS use a variable: [\"(def answer (str ...))\", \"(FINAL answer)\"]. NEVER put long multi-line strings directly in FINAL — it will fail to parse.
 - CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(FINAL answer)` terminates, `FINAL answer` does NOT.
 - FAST PATH: If context already contains the answer, call (FINAL answer) IMMEDIATELY.
 - NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or FINAL with what you have.
@@ -1037,10 +1038,13 @@
                           ;; Detect if the LLM is stuck in a loop
                           repetition-warning (when (seq executions) (detect-repetition executions))
                           user-feedback (if (empty? executions)
-                                          (str iteration-header "\nNo code was executed. You MUST include Clojure expressions in the \"code\" JSON array. Respond with valid JSON: "
+                                          (str iteration-header
+                                               "\n⚠ EMPTY ITERATION — no code was executed. This wastes your iteration budget."
+                                               "\nYou MUST include executable Clojure code. If you have the answer, call (FINAL answer)."
+                                               "\nFor long answers: [\"(def answer (str \\\"my answer\\\"))\", \"(FINAL answer)\"]"
                                                (if has-reasoning?
-                                                 "{\"code\": [\"...\"]}"
-                                                 "{\"thinking\": \"...\", \"code\": [\"...\"]}"))
+                                                 "\nRespond with: {\"code\": [\"(FINAL \\\"your answer\\\")\"]} "
+                                                 "\nRespond with: {\"thinking\": \"...\", \"code\": [\"(FINAL \\\"your answer\\\")\"]}"))
                                           (str iteration-header "\n" exec-feedback learning-nudge repetition-warning))]
                       (rlm-debug! {:iteration iteration
                                    :code-blocks (count executions)
