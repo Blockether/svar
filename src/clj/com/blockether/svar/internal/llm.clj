@@ -545,9 +545,14 @@
 
 (defn- router-transient-error? [router e]
   (let [status (:status (ex-data e))
-        codes (:transient-status-codes router)]
+        etype (:type (ex-data e))
+        codes (:transient-status-codes router)
+        msg (ex-message e)]
     (boolean
      (or (and status (contains? codes status))
+         ;; HTTP errors with timeout-like messages
+         (and (= etype :svar.core/http-error)
+              (some-> msg (clojure.string/includes? "timed out")))
          (instance? java.net.ConnectException e)
          (instance? java.net.SocketTimeoutException e)
          (some-> (.getCause e)
