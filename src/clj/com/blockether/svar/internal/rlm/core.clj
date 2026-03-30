@@ -171,11 +171,29 @@
 ;; Code Execution
 ;; =============================================================================
 
+(defn- sanitize-code
+  "Fix common delimiter mismatches from LLM-generated code.
+   Strips trailing unmatched } ] ) that cause parse errors."
+  [code]
+  (loop [s (str/trim code)]
+    (let [opens  (frequencies (filter #{\( \[ \{} s))
+          closes (frequencies (filter #{\) \] \}} s))
+          extra-close (fn [o c] (- (get closes c 0) (get opens o 0)))]
+      (cond
+        (and (str/ends-with? s "}") (pos? (extra-close \{ \})))
+        (recur (subs s 0 (dec (count s))))
+        (and (str/ends-with? s "]") (pos? (extra-close \[ \])))
+        (recur (subs s 0 (dec (count s))))
+        (and (str/ends-with? s ")") (pos? (extra-close \( \))))
+        (recur (subs s 0 (dec (count s))))
+        :else s))))
+
 (defn execute-code [{:keys [sci-ctx locals-atom hooks-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
     (when-let [call-hook (resolve 'com.blockether.svar.internal.rlm/call-hook!)]
       (call-hook hooks-atom :code-exec :pre {:code code}))
-    (let [_ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
+    (let [code (sanitize-code code)
+          _ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
           start-time (System/currentTimeMillis)
           vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
           ;; Use future (not async/thread) so we can cancel on timeout
