@@ -1,0 +1,1 @@
+{"id":"eada4dc7ad74f80510cf4c1aa5dfc620","fullName":"com.blockether.svar.internal.rlm-test.message-history-test.get-recent-messages retrieval.returns messages with expected keys","name":"message-history-test > get-recent-messages retrieval > returns messages with expected keys","status":"passed","testResultsByEnv":{"default":"af6be8ae2dce849cd15e9d3a487a44a1"}}
