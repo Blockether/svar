@@ -144,11 +144,30 @@
 ;; =============================================================================
 
 (defn- extract-response-data
-  "Extracts content, reasoning, and usage data from an OpenAI-compatible API response."
+  "Extracts content, reasoning, and usage data from an OpenAI-compatible API response.
+   Handles both OpenAI format (content is string, reasoning_content is string)
+   and Anthropic extended thinking format (content is array of blocks with type thinking/text)."
   [response]
-  {:content (get-in response [:choices 0 :message :content])
-   :reasoning (get-in response [:choices 0 :message :reasoning_content])
-   :api-usage (get-in response [:usage])})
+  (let [raw-content (get-in response [:choices 0 :message :content])
+        raw-reasoning (get-in response [:choices 0 :message :reasoning_content])]
+    (if (and (sequential? raw-content) (some map? raw-content))
+      ;; Anthropic block format: [{:type "thinking" :thinking "..."} {:type "text" :text "..."}]
+      (let [text-blocks (->> raw-content
+                             (filter #(= "text" (:type %)))
+                             (map :text)
+                             (clojure.string/join "\n"))
+            thinking-blocks (->> raw-content
+                                 (filter #(= "thinking" (:type %)))
+                                 (map :thinking)
+                                 (clojure.string/join "\n"))]
+        {:content (when-not (clojure.string/blank? text-blocks) text-blocks)
+         :reasoning (or (when-not (clojure.string/blank? thinking-blocks) thinking-blocks)
+                        raw-reasoning)
+         :api-usage (get-in response [:usage])})
+      ;; Standard OpenAI format
+      {:content raw-content
+       :reasoning raw-reasoning
+       :api-usage (get-in response [:usage])})))
 
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
