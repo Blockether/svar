@@ -1090,3 +1090,41 @@
             (let [wc (word-count (:summary iter))]
               (expect (>= wc 25))
               (expect (<= wc 100)))))))))
+
+;; =============================================================================
+;; Blockether One / Claude Opus 4.6 Integration Test
+;; =============================================================================
+
+(defn- blockether-one-enabled?
+  "Returns true if Blockether One LLM endpoint is configured."
+  []
+  (some? (System/getenv "BLOCKETHER_LLM_API_KEY")))
+
+(defdescribe blockether-one-claude-opus-test
+  (describe "ask! with claude-opus-4-6 via Blockether One"
+    (it "parses structured JSON from Claude Opus 4.6"
+      (when (blockether-one-enabled?)
+        (let [person-spec (svar/spec
+                            (svar/field svar/NAME :name
+                              svar/TYPE svar/TYPE_STRING
+                              svar/CARDINALITY svar/CARDINALITY_ONE
+                              svar/DESCRIPTION "Full name")
+                            (svar/field svar/NAME :age
+                              svar/TYPE svar/TYPE_INT
+                              svar/CARDINALITY svar/CARDINALITY_ONE
+                              svar/DESCRIPTION "Age in years"))
+              result (svar/ask! {:spec person-spec
+                                 :messages [(svar/system "Extract person data from the text.")
+                                            (svar/user "Alexander is 18 years old.")]
+                                 :model "claude-opus-4-6"})]
+          ;; ask! returns {:result <data> :tokens :cost :duration-ms}
+          (expect (map? result))
+          (expect (some? (:result result)))
+          (expect (some? (:tokens result)))
+          (expect (some? (:cost result)))
+          (expect (pos? (:duration-ms result)))
+
+          ;; Parsed data matches expected structure
+          (let [data (:result result)]
+            (expect (= "Alexander" (:name data)))
+            (expect (= 18 (:age data)))))))))
