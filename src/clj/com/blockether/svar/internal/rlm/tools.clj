@@ -752,9 +752,7 @@
     (try
       (let [ns-vars (sci/eval-string* sci-ctx "(ns-publics 'user)")]
         (->> ns-vars
-             (remove (fn [[k _]]
-                       (or (contains? initial-ns-keys k)
-                           (clojure.string/starts-with? (str k) "_"))))
+             (remove (fn [[k _]] (contains? initial-ns-keys k)))
              (mapv (fn [[k v]]
                      (let [val (try @v (catch Exception _ nil))]
                        {:name (str k) :value val :type (str (type val))})))))

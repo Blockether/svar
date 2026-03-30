@@ -151,7 +151,7 @@
         sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:hooks-atom hooks-atom})
         rlm-query-fn (rlm-core/make-rlm-query-fn {:strategy :root} depth-atom rlm-router db-info-atom)
         env-id (str (util/uuid))
-        {:keys [sci-ctx p-atom initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn rlm-query-fn locals-atom db-info-atom nil)]
+        {:keys [sci-ctx p-atom initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn rlm-query-fn locals-atom db-info-atom @custom-bindings-atom)]
     {:env-id env-id
      :config (llm/sanitize-config config)
      :depth-atom depth-atom
