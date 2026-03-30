@@ -747,6 +747,26 @@
                                                         :status :success})
                    result-map))))
            (finally
+             ;; Auto-persist all user-defined SCI vars to P :vars
+             (when p-atom
+               (try
+                 (let [sci-ns (sci/eval-string* sci-ctx "(ns-publics 'user)")
+                       user-vars (->> sci-ns
+                                      (remove (fn [[k _]]
+                                                (or (str/starts-with? (str k) "_")
+                                                    ;; Skip built-in tools
+                                                    (contains? #{'P 'P-atom 'P-len 'P-page 'P-page-count
+                                                                 'ctx-add! 'ctx-remove! 'ctx-clear! 'ctx-replace!
+                                                                 'learn! 'forget! 'persist! 'recall 'persisted
+                                                                 'FINAL 'list-dir 'read-file 'write-file 'search
+                                                                 'llm-query 'rlm-query} k))))
+                                      (into {}))]
+                   (when (seq user-vars)
+                     (swap! p-atom assoc :vars
+                            (reduce-kv (fn [m k v]
+                                         (assoc m (str k) (try @v (catch Exception _ nil))))
+                                       {} user-vars))))
+                 (catch Exception _ nil)))
              ;; Persist P workspace back to env for next query
              (when-let [env-pa (:p-atom env)]
                (reset! env-pa @p-atom))

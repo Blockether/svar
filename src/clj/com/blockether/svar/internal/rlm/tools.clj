@@ -725,18 +725,7 @@
                            'forget! (fn [idx] (swap! p-atom update :learnings
                                                      (fn [ls] (into (subvec ls 0 idx) (subvec ls (inc idx)))))
                                      (str "Forgot learning (" (count (:learnings @p-atom)) " remaining)"))
-                           ;; Cross-query persistent variables
-                           'persist! (fn [name value]
-                                      (swap! p-atom assoc-in [:vars (str name)] (realize-value value))
-                                      (str "Persisted '" name "' (survives across queries)"))
-                           'recall (fn [name]
-                                    (get-in @p-atom [:vars (str name)]))
-                           'persisted (fn []
-                                       (let [vs (:vars @p-atom)]
-                                         (when (seq vs)
-                                           (mapv (fn [[k v]] {:name k :type (str (type v))
-                                                              :preview (subs (pr-str v) 0 (min 100 (count (pr-str v))))})
-                                                 vs))))}
+}
         all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
                             learning-bindings raw-text-bindings
                             (or custom-bindings {}))]
