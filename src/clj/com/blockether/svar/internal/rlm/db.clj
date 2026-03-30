@@ -79,9 +79,9 @@
    (when (and conn (not (str/blank? content)))
      (let [msg-id (util/uuid)
            token-count (or tokens
-                           (try
-                             (tokens/count-tokens model content)
-                             (catch Exception _ (quot (count content) 4))))
+                         (try
+                           (tokens/count-tokens model content)
+                           (catch Exception _ (quot (count content) 4))))
            timestamp (java.util.Date.)
            msg (cond-> {:message/id msg-id
                         :message/role role
@@ -113,7 +113,7 @@
           msg-eid (d/q '[:find ?e .
                          :in $ ?mid
                          :where [?e :message/id ?mid]]
-                       (d/db conn) msg-id)
+                    (d/db conn) msg-id)
           entities (mapv (fn [{:keys [id code result stdout stderr error execution-time-ms]}]
                            (cond-> {:execution/id (util/uuid)
                                     :execution/order (long id)
@@ -124,7 +124,7 @@
                              (seq stderr)  (assoc :execution/stderr stderr)
                              error         (assoc :execution/error error)
                              execution-time-ms (assoc :execution/time-ms (long execution-time-ms))))
-                         executions)]
+                     executions)]
       (d/transact! conn entities)
       (mapv :execution/id entities))))
 
@@ -210,26 +210,26 @@
                                                        :execution/stderr :execution/error
                                                        :execution/time-ms]}]) ...]
                 :where [?e :message/id _]]
-              (d/db conn))
+           (d/db conn))
          ;; Filter out system messages — they contain the full system prompt
-         (remove #(= :system (:message/role %)))
-         (sort-by :message/timestamp #(compare %2 %1))
-         (take limit)
-         (mapv (fn [m]
-                 (let [raw-execs (:execution/_message m)
-                       execs (when (seq raw-execs)
-                               (->> raw-execs
-                                    (sort-by :execution/order)
-                                    (mapv format-execution)))]
-                   (cond-> {:id (:message/id m)
-                            :content (:message/content m)
-                            :role (:message/role m)
-                            :tokens (:message/tokens m)
-                            :timestamp (:message/timestamp m)
-                            :iteration (:message/iteration m)
-                            :executions (or execs [])}
-                     (:message/thinking m) (assoc :thinking (:message/thinking m))
-                     (:message/result-edn m) (assoc :result-edn (:message/result-edn m)))))))))
+      (remove #(= :system (:message/role %)))
+      (sort-by :message/timestamp #(compare %2 %1))
+      (take limit)
+      (mapv (fn [m]
+              (let [raw-execs (:execution/_message m)
+                    execs (when (seq raw-execs)
+                            (->> raw-execs
+                              (sort-by :execution/order)
+                              (mapv format-execution)))]
+                (cond-> {:id (:message/id m)
+                         :content (:message/content m)
+                         :role (:message/role m)
+                         :tokens (:message/tokens m)
+                         :timestamp (:message/timestamp m)
+                         :iteration (:message/iteration m)
+                         :executions (or execs [])}
+                  (:message/thinking m) (assoc :thinking (:message/thinking m))
+                  (:message/result-edn m) (assoc :result-edn (:message/result-edn m)))))))))
 
 (defn get-message-executions
   "Gets ordered executions for a message by its UUID.
@@ -246,24 +246,24 @@
     (let [msg-eid (d/q '[:find ?e .
                          :in $ ?mid
                          :where [?e :message/id ?mid]]
-                       (d/db conn) msg-id)]
+                    (d/db conn) msg-id)]
       (when msg-eid
         (->> (d/q '[:find [(pull ?e [:execution/id :execution/order :execution/code
                                      :execution/result-edn :execution/stdout :execution/stderr
                                      :execution/error :execution/time-ms]) ...]
                     :in $ ?msg
                     :where [?e :execution/message ?msg]]
-                  (d/db conn) msg-eid)
-             (sort-by :execution/order)
-             (mapv (fn [e]
-                     (cond-> {:id (:execution/id e)
-                              :order (:execution/order e)
-                              :code (:execution/code e)}
-                       (:execution/result-edn e) (assoc :result-edn (:execution/result-edn e))
-                       (:execution/stdout e) (assoc :stdout (:execution/stdout e))
-                       (:execution/stderr e) (assoc :stderr (:execution/stderr e))
-                       (:execution/error e) (assoc :error (:execution/error e))
-                       (:execution/time-ms e) (assoc :time-ms (:execution/time-ms e))))))))))
+               (d/db conn) msg-eid)
+          (sort-by :execution/order)
+          (mapv (fn [e]
+                  (cond-> {:id (:execution/id e)
+                           :order (:execution/order e)
+                           :code (:execution/code e)}
+                    (:execution/result-edn e) (assoc :result-edn (:execution/result-edn e))
+                    (:execution/stdout e) (assoc :stdout (:execution/stdout e))
+                    (:execution/stderr e) (assoc :stderr (:execution/stderr e))
+                    (:execution/error e) (assoc :error (:execution/error e))
+                    (:execution/time-ms e) (assoc :time-ms (:execution/time-ms e))))))))))
 
 (defn count-history-tokens
   "Counts total tokens in message history.
@@ -277,7 +277,7 @@
   (when conn
     (let [tokens (d/q '[:find ?tokens
                         :where [?e :message/tokens ?tokens]]
-                      (d/db conn))]
+                   (d/db conn))]
       (reduce + 0 (map first tokens)))))
 
 ;; =============================================================================
@@ -316,17 +316,17 @@
   [{:keys [conn]} tag-names]
   (when (and conn (seq tag-names))
     (let [clean-names (->> tag-names
-                           (map #(str/lower-case (str/trim (str %))))
-                           (remove str/blank?)
-                           distinct)
+                        (map #(str/lower-case (str/trim (str %))))
+                        (remove str/blank?)
+                        distinct)
           existing (->> (d/q '[:find [?n ...]
                                :where [?e :learning-tag/name ?n]]
-                             (d/db conn))
-                        set)
+                          (d/db conn))
+                     set)
           new-tags (->> clean-names
-                        (remove existing)
-                        (mapv (fn [n] {:learning-tag/name n
-                                       :learning-tag/created-at (java.util.Date.)})))]
+                     (remove existing)
+                     (mapv (fn [n] {:learning-tag/name n
+                                    :learning-tag/created-at (java.util.Date.)})))]
       (when (seq new-tags)
         (d/transact! conn new-tags)))))
 
@@ -342,11 +342,11 @@
   (when conn
     (->> (d/q '[:find [(pull ?e [:learning-tag/name :learning-tag/definition]) ...]
                 :where [?e :learning-tag/name _]]
-              (d/db conn))
-         (mapv (fn [t] {:name (:learning-tag/name t)
-                        :definition (:learning-tag/definition t)}))
-         (sort-by :name)
-         vec)))
+           (d/db conn))
+      (mapv (fn [t] {:name (:learning-tag/name t)
+                     :definition (:learning-tag/definition t)}))
+      (sort-by :name)
+      vec)))
 
 ;; Forward declarations for dedup check
 (declare scan-learnings)
@@ -363,12 +363,12 @@
   (let [insight-lower (str/lower-case (str/trim insight))]
     (->> (try (scan-learnings conn insight)
               (catch Exception _ []))
-         (filter (fn [l]
-                   (let [existing-lower (str/lower-case (str (:learning/insight l)))]
-                     (or (= existing-lower insight-lower)
-                         (str/includes? existing-lower insight-lower)
-                         (str/includes? insight-lower existing-lower)))))
-         first)))
+      (filter (fn [l]
+                (let [existing-lower (str/lower-case (str (:learning/insight l)))]
+                  (or (= existing-lower insight-lower)
+                    (str/includes? existing-lower insight-lower)
+                    (str/includes? insight-lower existing-lower)))))
+      first)))
 
 (defn- create-learning-entity!
   "Creates a new learning entity in the DB. Returns the stored learning map."
@@ -427,7 +427,7 @@
    Returns:
    Map with :learning/id, :learning/insight, :learning/context, :learning/tags, :learning/scope, :learning/timestamp."
   ([db-info insight] (db-store-learning! db-info insight {}))
-  ([{:keys [conn] :as db-info} insight {:keys [context tags scope source] :as opts}]
+  ([{:keys [conn] :as db-info} insight {:as opts}]
    (when conn
      (if-let [existing (find-duplicate-learning conn insight)]
        (existing-learning->result existing)
@@ -438,7 +438,7 @@
   [useful-count not-useful-count]
   (let [total (+ (or useful-count 0) (or not-useful-count 0))]
     (and (>= total DECAY_MIN_VOTES)
-         (> (/ (or not-useful-count 0) total) DECAY_THRESHOLD))))
+      (> (/ (or not-useful-count 0) total) DECAY_THRESHOLD))))
 
 (defn db-vote-learning!
   "Records a vote for a learning's usefulness.
@@ -505,9 +505,9 @@
   (if-let [cached (get @glob-regex-cache pattern)]
     cached
     (let [regex-str (-> pattern
-                        (str/replace "." "\\.")
-                        (str/replace "*" ".*")
-                        (str/replace "?" "."))
+                      (str/replace "." "\\.")
+                      (str/replace "*" ".*")
+                      (str/replace "?" "."))
           regex (re-pattern (str "(?i)^" regex-str "$"))]
       (swap! glob-regex-cache assoc pattern regex)
       regex)))
@@ -525,8 +525,8 @@
    Nil scope = global, always matches."
   [scope doc-names]
   (or (nil? scope)
-      (empty? doc-names)
-      (some #(glob-matches? scope %) doc-names)))
+    (empty? doc-names)
+    (some #(glob-matches? scope %) doc-names)))
 
 (defn- fulltext-learnings
   "Search learnings via Datalevin fulltext index."
@@ -534,7 +534,7 @@
   (d/q `[:find [(~'pull ~'?e ~learning-pull-pattern) ...]
          :in ~'$ ~'?q
          :where [(~'fulltext ~'$ ~'?q) [[~'?e]]]]
-       (d/db conn) query))
+    (d/db conn) query))
 
 (defn- scan-learnings
   "Search learnings via in-memory substring scan (fallback)."
@@ -542,21 +542,21 @@
   (let [q (str-lower query)
         all (d/q `[:find [(~'pull ~'?e ~learning-pull-pattern) ...]
                    :where [~'?e :learning/id ~'_]]
-                 (d/db conn))]
+              (d/db conn))]
     (filter (fn [l]
               (or (str-includes? (str-lower (str (:learning/insight l))) q)
-                  (str-includes? (str-lower (str (:learning/context l))) q)))
-            all)))
+                (str-includes? (str-lower (str (:learning/context l))) q)))
+      all)))
 
 (defn- all-learnings
   "Get recent learnings from DB (capped at 500 to prevent full table scan)."
   [conn]
   (->> (d/q `[:find [(~'pull ~'?e ~learning-pull-pattern) ...]
               :where [~'?e :learning/id ~'_]]
-            (d/db conn))
-       (sort-by :learning/timestamp #(compare %2 %1))
-       (take 500)
-       vec))
+         (d/db conn))
+    (sort-by :learning/timestamp #(compare %2 %1))
+    (take 500)
+    vec))
 
 (defn- search-or-list-learnings
   "Search learnings with fulltext, falling back to scan. Nil query lists all."
@@ -616,21 +616,21 @@
            or-tag-set (when (seq tags) (set (map str tags)))
            and-tag-set (when (seq all-tags) (set (map str all-tags)))
            filtered (->> (search-or-list-learnings conn q)
-                         (mapv normalize-learning)
-                         (filter #(or include-decayed? (not (:decayed? %))))
+                      (mapv normalize-learning)
+                      (filter #(or include-decayed? (not (:decayed? %))))
                          ;; OR tags: learning has ANY of the specified tags
-                         (filter #(or (nil? or-tag-set)
-                                      (some or-tag-set (:tags %))))
+                      (filter #(or (nil? or-tag-set)
+                                 (some or-tag-set (:tags %))))
                          ;; AND tags: learning has ALL of the specified tags
-                         (filter #(or (nil? and-tag-set)
-                                      (every? (set (:tags %)) and-tag-set)))
-                         (filter #(scope-matches-documents? (:scope %) doc-names))
+                      (filter #(or (nil? and-tag-set)
+                                 (every? (set (:tags %)) and-tag-set)))
+                      (filter #(scope-matches-documents? (:scope %) doc-names))
                          ;; Sort by applied-count (proven useful) then recency
-                         (sort-by (fn [l] [(- (or (:applied-count l) 0))
-                                           (- (if-let [t (:timestamp l)] (.getTime t) 0))])
-                                  compare)
-                         (take top-k)
-                         vec)]
+                      (sort-by (fn [l] [(- (or (:applied-count l) 0))
+                                        (- (if-let [t (:timestamp l)] (.getTime t) 0))])
+                        compare)
+                      (take top-k)
+                      vec)]
        (when track-usage?
          (doseq [{:keys [learning/id]} filtered]
            (db-increment-applied-count! db-info id)))
@@ -652,26 +652,26 @@
                                       :learning/useful-count
                                       :learning/not-useful-count :learning/applied-count]) ...]
                      :where [?e :learning/id _]]
-                   (d/db conn))
+                (d/db conn))
           total (count all)
           with-context (count (filter #(some? (:learning/context %)) all))
           decayed (count (filter #(learning-decayed? (or (:learning/useful-count %) 0)
-                                                     (or (:learning/not-useful-count %) 0))
-                                 all))
+                                    (or (:learning/not-useful-count %) 0))
+                           all))
           total-votes (reduce + (map #(+ (or (:learning/useful-count %) 0)
-                                         (or (:learning/not-useful-count %) 0))
-                                     all))
+                                        (or (:learning/not-useful-count %) 0))
+                                  all))
           total-applications (reduce + (map #(or (:learning/applied-count %) 0) all))
           all-tags (->> all
-                        (mapcat (fn [l]
-                                  (let [t (:learning/tags l)]
-                                    (cond (set? t) (seq t)
-                                          (sequential? t) t
-                                          (string? t) [t]
-                                          :else nil))))
-                        distinct
-                        sort
-                        vec)]
+                     (mapcat (fn [l]
+                               (let [t (:learning/tags l)]
+                                 (cond (set? t) (seq t)
+                                       (sequential? t) t
+                                       (string? t) [t]
+                                       :else nil))))
+                     distinct
+                     sort
+                     vec)]
       {:total-learnings total
        :active-learnings (- total decayed)
        :decayed-learnings decayed
@@ -718,13 +718,13 @@
     (->> (d/q '[:find [(pull ?e [:document.toc/title :document.toc/level :document.toc/target-page]) ...]
                 :in $ ?doc-id
                 :where [?e :document.toc/document-id ?doc-id]]
-              (d/db conn) doc-id)
-         (map (fn [e]
-                {:title (:document.toc/title e)
-                 :level (:document.toc/level e)
-                 :page (:document.toc/target-page e)}))
-         (sort-by (juxt :level :page))
-         vec)))
+           (d/db conn) doc-id)
+      (map (fn [e]
+             {:title (:document.toc/title e)
+              :level (:document.toc/level e)
+              :page (:document.toc/target-page e)}))
+      (sort-by (juxt :level :page))
+      vec)))
 
 (defn db-get-document
   "Gets a document by ID with abstract and TOC.
@@ -740,7 +740,7 @@
     (let [doc (d/pull (d/db conn) '[*] [:document/id doc-id])]
       (when (:db/id doc)
         (-> (dissoc doc :db/id)
-            (assoc :document/toc (get-document-toc db-info doc-id)))))))
+          (assoc :document/toc (get-document-toc db-info doc-id)))))))
 
 (defn db-list-documents
   "Lists all stored documents with abstracts and TOC summaries.
@@ -759,30 +759,19 @@
      (let [docs (d/q '[:find [(pull ?e [:document/id :document/name :document/title
                                         :document/extension :document/abstract]) ...]
                        :where [?e :document/id _]]
-                     (d/db conn))]
+                  (d/db conn))]
        (->> docs
-            (map (fn [doc]
-                   (cond-> (select-keys doc [:document/id :document/name :document/title :document/extension])
-                     (and (:document/abstract doc) (not= "" (:document/abstract doc)))
-                     (assoc :document/abstract (:document/abstract doc))
-                     include-toc? (assoc :document/toc (get-document-toc db-info (:document/id doc))))))
-            (take limit)
-            vec)))))
+         (map (fn [doc]
+                (cond-> (select-keys doc [:document/id :document/name :document/title :document/extension])
+                  (and (:document/abstract doc) (not= "" (:document/abstract doc)))
+                  (assoc :document/abstract (:document/abstract doc))
+                  include-toc? (assoc :document/toc (get-document-toc db-info (:document/id doc))))))
+         (take limit)
+         vec)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Page Storage
 ;; -----------------------------------------------------------------------------
-
-(defn- db-store-page!
-  "Stores a page (internal - called by db-store-pageindex-document!)."
-  [{:keys [conn]} page doc-id]
-  (when conn
-    (let [page-id (str doc-id "-page-" (:page/index page))
-          page-data {:page/id page-id
-                     :page/document-id doc-id
-                     :page/index (:page/index page)}]
-      (d/transact! conn [page-data])
-      page-id)))
 
 (defn db-get-page
   "Gets a page by ID.
@@ -812,9 +801,9 @@
     (->> (d/q '[:find [(pull ?e [:page/id :page/index :page/document-id]) ...]
                 :in $ ?doc-id
                 :where [?e :page/document-id ?doc-id]]
-              (d/db conn) doc-id)
-         (sort-by :page/index)
-         vec)))
+           (d/db conn) doc-id)
+      (sort-by :page/index)
+      vec)))
 
 ;; -----------------------------------------------------------------------------
 ;; Page Node Storage & Search
@@ -828,11 +817,11 @@
           visual-node? (#{:image :table} (:page.node/type node))
           img-bytes (:page.node/image-data node)
           image-too-large? (and visual-node?
-                                img-bytes
-                                (> (alength ^bytes img-bytes) 5242880))
+                             img-bytes
+                             (> (alength ^bytes img-bytes) 5242880))
           image-data (when (and visual-node?
-                                img-bytes
-                                (not image-too-large?))
+                             img-bytes
+                             (not image-too-large?))
                        img-bytes)
           entity (cond-> {:page.node/id node-id
                           :page.node/page-id page-id
@@ -866,7 +855,7 @@
                           :page.node/content :page.node/description]) ...]
          :in $ ?q
          :where [(fulltext $ ?q) [[?e]]]]
-       (d/db conn) query))
+    (d/db conn) query))
 
 (defn- scan-page-nodes
   "Search page nodes via in-memory substring scan (fallback)."
@@ -876,11 +865,11 @@
                                     :page.node/type :page.node/level :page.node/local-id
                                     :page.node/content :page.node/description]) ...]
                    :where [?e :page.node/id _]]
-                 (d/db conn))]
+              (d/db conn))]
     (filter (fn [n]
               (or (str-includes? (str-lower (str (:page.node/content n))) q)
-                  (str-includes? (str-lower (str (:page.node/description n))) q)))
-            all)))
+                (str-includes? (str-lower (str (:page.node/description n))) q)))
+      all)))
 
 (defn- search-page-nodes-raw
   "Search page nodes with fulltext, falling back to scan."
@@ -897,9 +886,9 @@
                   (str (subs content 0 150) "...")
                   content)]
     (-> node
-        (dissoc :page.node/content :page.node/description)
-        (assoc :preview preview
-               :content-length (count content)))))
+      (dissoc :page.node/content :page.node/description)
+      (assoc :preview preview
+        :content-length (count content)))))
 
 (defn db-search-page-nodes
   "Searches page nodes by text content, optionally filtered by document and type.
@@ -925,10 +914,10 @@
      (mapv brevify-node (db-list-page-nodes db-info {:document-id document-id :type type :limit top-k}))
      (when conn
        (->> (search-page-nodes-raw conn query)
-            (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
-            (filter #(or (nil? type) (= type (:page.node/type %))))
-            (take top-k)
-            (mapv brevify-node))))))
+         (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
+         (filter #(or (nil? type) (= type (:page.node/type %))))
+         (take top-k)
+         (mapv brevify-node))))))
 
 (defn db-get-page-node
   "Gets a page node by ID with full details.
@@ -964,21 +953,21 @@
                                        :page.node/type :page.node/level :page.node/local-id
                                        :page.node/content :page.node/description]) ...]
                       :where [?e :page.node/id _]]
-                    (d/db conn))]
+                 (d/db conn))]
        (->> all
-            (filter #(or (nil? page-id) (= page-id (:page.node/page-id %))))
-            (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
-            (filter #(or (nil? type) (= type (:page.node/type %))))
-            (take limit)
-            (mapv (fn [n]
-                    {:page.node/id (:page.node/id n)
-                     :page.node/page-id (:page.node/page-id n)
-                     :page.node/document-id (:page.node/document-id n)
-                     :page.node/type (:page.node/type n)
-                     :page.node/level (:page.node/level n)
-                     :page.node/local-id (:page.node/local-id n)
-                     :page.node/content (str-truncate (:page.node/content n) 200)
-                     :page.node/description (str-truncate (:page.node/description n) 200)})))))))
+         (filter #(or (nil? page-id) (= page-id (:page.node/page-id %))))
+         (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
+         (filter #(or (nil? type) (= type (:page.node/type %))))
+         (take limit)
+         (mapv (fn [n]
+                 {:page.node/id (:page.node/id n)
+                  :page.node/page-id (:page.node/page-id n)
+                  :page.node/document-id (:page.node/document-id n)
+                  :page.node/type (:page.node/type n)
+                  :page.node/level (:page.node/level n)
+                  :page.node/local-id (:page.node/local-id n)
+                  :page.node/content (str-truncate (:page.node/content n) 200)
+                  :page.node/description (str-truncate (:page.node/description n) 200)})))))))
 
 ;; -----------------------------------------------------------------------------
 ;; TOC Entry Storage
@@ -999,8 +988,8 @@
    (when conn
      (let [timestamp (java.util.Date.)
            entry-data (cond-> (assoc entry
-                                     :document.toc/document-id doc-id
-                                     :document.toc/created-at timestamp)
+                                :document.toc/document-id doc-id
+                                :document.toc/created-at timestamp)
                         (not (:document.toc/id entry))
                         (assoc :document.toc/id (str (util/uuid))))]
        (d/transact! conn [entry-data])
@@ -1013,7 +1002,7 @@
                           :document.toc/description :document.toc/target-page]) ...]
          :in $ ?q
          :where [(fulltext $ ?q) [[?e]]]]
-       (d/db conn) query))
+    (d/db conn) query))
 
 (defn- scan-toc-entries
   "Search TOC entries via in-memory substring scan (fallback)."
@@ -1022,11 +1011,11 @@
         all (d/q '[:find [(pull ?e [:document.toc/id :document.toc/title :document.toc/level
                                     :document.toc/description :document.toc/target-page]) ...]
                    :where [?e :document.toc/id _]]
-                 (d/db conn))]
+              (d/db conn))]
     (filter (fn [e]
               (or (str-includes? (str-lower (str (:document.toc/title e))) q)
-                  (str-includes? (str-lower (str (:document.toc/description e))) q)))
-            all)))
+                (str-includes? (str-lower (str (:document.toc/description e))) q)))
+      all)))
 
 (defn- search-toc-entries-raw
   "Search TOC entries with fulltext, falling back to scan."
@@ -1061,8 +1050,8 @@
      (db-list-toc-entries db-info {:limit top-k})
      (when conn
        (->> (search-toc-entries-raw conn query)
-            (take top-k)
-            (mapv normalize-toc-entry))))))
+         (take top-k)
+         (mapv normalize-toc-entry))))))
 
 (defn db-get-toc-entry
   "Gets a TOC entry by ID with full details.
@@ -1096,19 +1085,19 @@
                                        :document.toc/description :document.toc/target-page
                                        :document.toc/parent-id]) ...]
                       :where [?e :document.toc/id _]]
-                    (d/db conn))]
+                 (d/db conn))]
        (->> all
-            (filter #(or (nil? parent-id) (= parent-id (:document.toc/parent-id %))))
-            (map (fn [e]
-                   {:document.toc/id (:document.toc/id e)
-                    :document.toc/title (:document.toc/title e)
-                    :document.toc/level (:document.toc/level e)
-                    :document.toc/description (when-not (= "" (str (:document.toc/description e)))
-                                                (:document.toc/description e))
-                    :document.toc/target-page (:document.toc/target-page e)}))
-            (sort-by :document.toc/level)
-            (take limit)
-            vec)))))
+         (filter #(or (nil? parent-id) (= parent-id (:document.toc/parent-id %))))
+         (map (fn [e]
+                {:document.toc/id (:document.toc/id e)
+                 :document.toc/title (:document.toc/title e)
+                 :document.toc/level (:document.toc/level e)
+                 :document.toc/description (when-not (= "" (str (:document.toc/description e)))
+                                             (:document.toc/description e))
+                 :document.toc/target-page (:document.toc/target-page e)}))
+         (sort-by :document.toc/level)
+         (take limit)
+         vec)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Entity/Relationship Query Functions
@@ -1136,22 +1125,22 @@
              all (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type :entity/description
                                          :entity/document-id :entity/page :entity/section]) ...]
                         :where [?e :entity/id _]]
-                      (d/db conn))]
+                   (d/db conn))]
          (->> all
-              (filter (fn [e]
-                        (or (str-includes? (str-lower (str (:entity/name e))) q)
-                            (str-includes? (str-lower (str (:entity/description e))) q))))
-              (filter #(or (nil? type) (= type (:entity/type %))))
-              (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
-              (take top-k)
-              (mapv (fn [e]
-                      {:entity/id (:entity/id e)
-                       :entity/name (:entity/name e)
-                       :entity/type (:entity/type e)
-                       :entity/description (when-not (= "" (str (:entity/description e))) (:entity/description e))
-                       :entity/document-id (:entity/document-id e)
-                       :entity/page (:entity/page e)
-                       :entity/section (when-not (= "" (str (:entity/section e))) (:entity/section e))}))))))))
+           (filter (fn [e]
+                     (or (str-includes? (str-lower (str (:entity/name e))) q)
+                       (str-includes? (str-lower (str (:entity/description e))) q))))
+           (filter #(or (nil? type) (= type (:entity/type %))))
+           (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
+           (take top-k)
+           (mapv (fn [e]
+                   {:entity/id (:entity/id e)
+                    :entity/name (:entity/name e)
+                    :entity/type (:entity/type e)
+                    :entity/description (when-not (= "" (str (:entity/description e))) (:entity/description e))
+                    :entity/document-id (:entity/document-id e)
+                    :entity/page (:entity/page e)
+                    :entity/section (when-not (= "" (str (:entity/section e))) (:entity/section e))}))))))))
 
 (defn db-get-entity
   "Gets an entity by UUID.
@@ -1185,21 +1174,21 @@
      (let [all (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type :entity/description
                                        :entity/document-id :entity/page :entity/section]) ...]
                       :where [?e :entity/id _]]
-                    (d/db conn))]
+                 (d/db conn))]
        (->> all
-            (filter #(or (nil? type) (= type (:entity/type %))))
-            (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
-            (sort-by :entity/name)
-            (take limit)
-            (mapv (fn [e]
-                    {:entity/id (:entity/id e)
-                     :entity/name (:entity/name e)
-                     :entity/type (:entity/type e)
-                     :entity/description (when-not (= "" (str (:entity/description e))) (:entity/description e))
-                     :entity/document-id (:entity/document-id e)
-                     :entity/page (:entity/page e)
-                     :entity/section (when-not (= "" (str (:entity/section e))) (:entity/section e))}))
-            vec)))))
+         (filter #(or (nil? type) (= type (:entity/type %))))
+         (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
+         (sort-by :entity/name)
+         (take limit)
+         (mapv (fn [e]
+                 {:entity/id (:entity/id e)
+                  :entity/name (:entity/name e)
+                  :entity/type (:entity/type e)
+                  :entity/description (when-not (= "" (str (:entity/description e))) (:entity/description e))
+                  :entity/document-id (:entity/document-id e)
+                  :entity/page (:entity/page e)
+                  :entity/section (when-not (= "" (str (:entity/section e))) (:entity/section e))}))
+         vec)))))
 
 (defn db-list-relationships
   "Lists relationships for an entity (as source or target).
@@ -1220,17 +1209,17 @@
                                        :relationship/description]) ...]
                       :in $ ?eid
                       :where (or [?e :relationship/source-entity-id ?eid]
-                                 [?e :relationship/target-entity-id ?eid])]
-                    (d/db conn) entity-id)]
+                               [?e :relationship/target-entity-id ?eid])]
+                 (d/db conn) entity-id)]
        (->> all
-            (filter #(or (nil? type) (= type (:relationship/type %))))
-            (mapv (fn [r]
-                    {:relationship/id (:relationship/id r)
-                     :relationship/type (:relationship/type r)
-                     :relationship/source-entity-id (:relationship/source-entity-id r)
-                     :relationship/target-entity-id (:relationship/target-entity-id r)
-                     :relationship/description (when-not (= "" (str (:relationship/description r)))
-                                                 (:relationship/description r))})))))))
+         (filter #(or (nil? type) (= type (:relationship/type %))))
+         (mapv (fn [r]
+                 {:relationship/id (:relationship/id r)
+                  :relationship/type (:relationship/type r)
+                  :relationship/source-entity-id (:relationship/source-entity-id r)
+                  :relationship/target-entity-id (:relationship/target-entity-id r)
+                  :relationship/description (when-not (= "" (str (:relationship/description r)))
+                                              (:relationship/description r))})))))))
 
 (defn db-entity-stats
   "Gets entity and relationship statistics.
@@ -1244,11 +1233,11 @@
   (if conn
     (let [entities (d/q '[:find [(pull ?e [:entity/type]) ...]
                           :where [?e :entity/id _]]
-                        (d/db conn))
+                     (d/db conn))
           types-map (frequencies (map :entity/type entities))
           rel-count (count (d/q '[:find ?e
                                   :where [?e :relationship/id _]]
-                                (d/db conn)))]
+                             (d/db conn)))]
       {:total-entities (count entities)
        :types types-map
        :total-relationships rel-count})
@@ -1310,9 +1299,9 @@
         pages-and-nodes (vec (mapcat (fn [page]
                                        (let [{:keys [entity page-id]} (build-page-entity page doc-id)
                                              node-entities (mapv #(build-page-node-entity % page-id doc-id)
-                                                                 (:page/nodes page))]
+                                                             (:page/nodes page))]
                                          (cons entity node-entities)))
-                                     (:document/pages doc)))
+                               (:document/pages doc)))
         page-count (count (:document/pages doc))
         node-count (- (count pages-and-nodes) page-count)
         _ (when (seq pages-and-nodes)
@@ -1327,7 +1316,7 @@
                                       (:document.toc/target-page entry) (assoc :document.toc/target-page (:document.toc/target-page entry))
                                       (:document.toc/level entry) (assoc :document.toc/level (:document.toc/level entry))
                                       (:document.toc/parent-id entry) (assoc :document.toc/parent-id (:document.toc/parent-id entry)))))
-                                (:document/toc doc)))
+                            (:document/toc doc)))
         _ (when (seq toc-entities)
             (d/transact! conn toc-entities))]
     {:document-id doc-id

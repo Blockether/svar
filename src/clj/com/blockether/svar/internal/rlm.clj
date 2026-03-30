@@ -9,7 +9,6 @@
    [clojure.set :as set]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm.core :as rlm-core]
    [com.blockether.svar.internal.rlm.db :as rlm-db]
@@ -20,9 +19,7 @@
    [com.blockether.svar.internal.rlm.schema :as schema]
    [com.blockether.svar.internal.rlm.trajectory :as trajectory]
    [com.blockether.svar.internal.rlm.tools :as rlm-tools]
-   [sci.core :as sci]
    [com.blockether.svar.internal.spec :as spec]
-   [com.blockether.svar.internal.tokens :as tokens]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
    [fast-edn.core :as fast-edn]
@@ -70,7 +67,7 @@
    :count-history-tokens      (fn [] (rlm-db/count-history-tokens @db-info-atom))
     ;; Learnings: read-only — store/vote are auto-managed by RLM internally
    :search-learnings     (fn [query opts] (rlm-db/db-get-learnings @db-info-atom query
-                                                                   (assoc opts :track-usage? false)))
+                                            (assoc opts :track-usage? false)))
    :learning-stats       (fn [] (rlm-db/db-learning-stats @db-info-atom))
     ;; Documents: read-only access to ingested content
    :list-documents       (fn [opts] (rlm-db/db-list-documents @db-info-atom opts))
@@ -99,7 +96,7 @@
                           (if (and (map? x) (map? y))
                             (m x y)
                             y))
-                        a b))]
+              a b))]
     (reduce m {} maps)))
 
 (defn create-env
@@ -137,7 +134,7 @@
     (anomaly/incorrect! "Missing :config" {:type :rlm/missing-config}))
   (when-not (seq (:providers config))
     (anomaly/incorrect! "Missing :providers in config — provide at least one provider"
-                        {:type :rlm/missing-providers}))
+      {:type :rlm/missing-providers}))
   (let [rlm-router (llm/make-router (:providers config))
         depth-atom (atom 0)
         locals-atom (atom {})
@@ -295,8 +292,8 @@
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
    (when-not (schema/valid-documents? documents)
      (anomaly/incorrect! "Invalid documents - must be vector of PageIndex documents"
-                         {:type :rlm/invalid-documents
-                          :explanation (schema/explain-documents documents)}))
+       {:type :rlm/invalid-documents
+        :explanation (schema/explain-documents documents)}))
    (let [db-info @(:db-info-atom env)
          rlm-router (:router env)
          extract? (:extract-entities? opts false)
@@ -305,7 +302,7 @@
                    (mapv (fn [doc base-result]
                            (let [extraction-result (rlm-core/extract-entities-from-document! db-info doc rlm-router opts)]
                              (merge base-result extraction-result)))
-                         documents base-results)
+                     documents base-results)
                    base-results)]
      results)))
 
@@ -407,8 +404,6 @@
          original-hooks @hooks-atom
           ;; Rebuild query functions with fresh depth-atom — use the LOCAL hooks-atom
           ;; so per-query hooks (merged on line ~447) are visible to llm-query-fn
-         llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom rlm-router {:hooks-atom hooks-atom})
-         rlm-query-fn (rlm-core/make-rlm-query-fn {:strategy :root} depth-atom rlm-router db-info-atom)
          sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:hooks-atom hooks-atom})
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
@@ -445,21 +440,20 @@
                                                                        (sub-llm-fn p)
                                                                        (catch Exception e
                                                                          {:error (ex-message e)}))))
-                                                                 prompts)]
+                                                             prompts)]
                                                    (mapv async/<!! chs)))}
          ;; Reuse env's SCI ctx — all def'd vars persist naturally across queries
          sci-ctx (:sci-ctx env)
-         p-atom  (:p-atom env)
          ;; Update per-query bindings in the existing SCI ctx
          _ (let [per-query (merge {'llm-query sub-llm-fn}
-                                  budget-bindings cite-bindings
-                                  (or custom-bindings {}) llm-query-overrides)]
+                             budget-bindings cite-bindings
+                             (or custom-bindings {}) llm-query-overrides)]
              (doseq [[sym val] per-query]
                (when val
                  (try (rlm-tools/sci-update-binding! sci-ctx locals-atom sym val)
                       (catch Exception _ nil)))))
          rlm-env (assoc env :context context :max-iterations-atom max-iterations-atom
-                        :hooks-atom hooks-atom)
+                   :hooks-atom hooks-atom)
          env-id (:env-id env)]
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
        (binding [*max-recursion-depth* max-recursion-depth]
@@ -481,14 +475,14 @@
                  doc-names (when (:conn db-info)
                              (try (->> (d/q '[:find [?n ...]
                                               :where [?e :document/name ?n]]
-                                            (d/db (:conn db-info)))
-                                       (mapv (fn [n] (let [ext (when-let [i (str/last-index-of n ".")] (subs n i))]
-                                                       (or ext n)))))
+                                         (d/db (:conn db-info)))
+                                    (mapv (fn [n] (let [ext (when-let [i (str/last-index-of n ".")] (subs n i))]
+                                                    (or ext n)))))
                                   (catch Exception _ [])))
                  ;; Auto-fetch query-relevant learnings only (scope-filtered)
                  active-learnings (when (:conn db-info)
                                     (rlm-db/db-get-learnings db-info query-str
-                                                             {:top-k 5 :track-usage? true :doc-names doc-names}))
+                                      {:top-k 5 :track-usage? true :doc-names doc-names}))
                  ;; Auto-fetch all tag definitions for context injection
                  tag-definitions (when (:conn db-info)
                                    (rlm-db/db-list-tags db-info))
@@ -502,15 +496,15 @@
                                 (str "<plan>\n" plan "\n</plan>"))
                 ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
                  iteration-result (rlm-core/iteration-loop rlm-env query-str
-                                                           {:max-iterations max-iterations
-                                                            :output-spec spec
-                                                            :learnings active-learnings
-                                                            :tag-definitions tag-definitions
-                                                            :max-context-tokens max-context-tokens
-                                                            :custom-docs (into (or custom-docs []) cite-docs)
-                                                            :system-prompt system-prompt
-                                                            :pre-fetched-context plan-context
-                                                            :hooks-atom hooks-atom})
+                                    {:max-iterations max-iterations
+                                     :output-spec spec
+                                     :learnings active-learnings
+                                     :tag-definitions tag-definitions
+                                     :max-context-tokens max-context-tokens
+                                     :custom-docs (into (or custom-docs []) cite-docs)
+                                     :system-prompt system-prompt
+                                     :pre-fetched-context plan-context
+                                     :hooks-atom hooks-atom})
                  {answer :answer
                   trace :trace
                   iterations :iterations
@@ -528,14 +522,14 @@
                  merge-cost! (fn [extra-tokens extra-cost]
                                (when extra-tokens
                                  (swap! total-tokens-atom
-                                        (fn [acc]
-                                          (merge-with + acc
-                                                      (select-keys extra-tokens [:input :output :reasoning :cached :total])))))
+                                   (fn [acc]
+                                     (merge-with + acc
+                                       (select-keys extra-tokens [:input :output :reasoning :cached :total])))))
                                (when extra-cost
                                  (swap! total-cost-atom
-                                        (fn [acc]
-                                          (merge-with + (select-keys acc [:input-cost :output-cost :total-cost])
-                                                      (select-keys extra-cost [:input-cost :output-cost :total-cost]))))))
+                                   (fn [acc]
+                                     (merge-with + (select-keys acc [:input-cost :output-cost :total-cost])
+                                       (select-keys extra-cost [:input-cost :output-cost :total-cost]))))))
                  ;; Merge planning cost if planning phase ran
                  _ (when plan-result
                      (merge-cost! (:tokens plan-result) (:cost plan-result)))]
@@ -549,12 +543,12 @@
                                        :auto-voted (count active-learnings)} "RLM query-env! finished (max iterations)")
                  (try
                    (rlm-db/store-trajectory! @db-info-atom
-                                             {:env-id env-id :query query-str :status status
-                                              :answer (:result answer answer) :iterations iterations
-                                              :duration-ms duration-ms :model root-model
-                                              :doc-pages (try (when-let [c (:conn @db-info-atom)]
-                                                                (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
-                                                              (catch Exception _ 0))})
+                     {:env-id env-id :query query-str :status status
+                      :answer (:result answer answer) :iterations iterations
+                      :duration-ms duration-ms :model root-model
+                      :doc-pages (try (when-let [c (:conn @db-info-atom)]
+                                        (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
+                                      (catch Exception _ 0))})
                    (catch Exception e
                      (trove/log! {:level :warn :data {:error (ex-message e)}
                                   :msg "Failed to store trajectory (max iterations)"})))
@@ -588,28 +582,28 @@
                              stored-docs (when conn
                                            (let [docs (d/q '[:find [(pull ?e [*]) ...]
                                                              :where [?e :document/id _]]
-                                                           (d/db conn))]
+                                                        (d/db conn))]
                                              (when (seq docs)
                                                (mapv (fn [doc]
                                                        (let [doc-id (or (:document/id doc) (:document/name doc))
                                                              nodes (d/q '[:find [(pull ?e [:page.node/page-id :page.node/content]) ...]
                                                                           :in $ ?doc-id
                                                                           :where [?e :page.node/document-id ?doc-id]]
-                                                                        (d/db conn) doc-id)]
+                                                                     (d/db conn) doc-id)]
                                                          {:id doc-id
                                                           :pages (mapv (fn [pn]
                                                                          {:page (or (:page.node/page-id pn) "0")
                                                                           :text (or (:page.node/content pn) "")})
-                                                                       nodes)}))
-                                                     docs))))
+                                                                   nodes)}))
+                                                 docs))))
                             ;; Build refine config from a DIFFERENT model than root (cross-verification).
                             ;; If only one model available, falls back to same model (better than nothing).
                              [refine-provider refine-model-map]
                              (or (llm/select-provider rlm-router
-                                                      {:prefer :intelligence :capabilities #{:chat}
-                                                       :exclude-model root-model})
-                                 (llm/select-provider rlm-router
-                                                      {:prefer :intelligence :capabilities #{:chat}}))
+                                   {:prefer :intelligence :capabilities #{:chat}
+                                    :exclude-model root-model})
+                               (llm/select-provider rlm-router
+                                 {:prefer :intelligence :capabilities #{:chat}}))
                              refine-config (when refine-provider
                                              {:api-key (:api-key refine-provider)
                                               :base-url (:base-url refine-provider)
@@ -617,9 +611,9 @@
                              refine-model (or (:name refine-model-map) root-model)
                              refine-opts (cond-> {:spec spec
                                                   :messages [(llm/system (str "You are verifying and refining an answer to a specific query. "
-                                                                              "Check the answer for accuracy, completeness, and correctness."))
+                                                                           "Check the answer for accuracy, completeness, and correctness."))
                                                              (llm/user (str "<query>\n" query-str "\n</query>\n\n"
-                                                                            "<answer>\n" answer-as-str "\n</answer>"))]
+                                                                         "<answer>\n" answer-as-str "\n</answer>"))]
                                                   :config refine-config :model refine-model
                                                   :iterations max-refinements :threshold threshold}
                                            (seq stored-docs) (assoc :documents stored-docs))
@@ -630,7 +624,7 @@
                            ;; If refinement didn't change the answer (converged or identical text),
                            ;; keep the original Clojure value from FINAL — no re-parse needed.
                              answer-unchanged? (or (:converged? raw-refine)
-                                                   (= (str refined-str) answer-as-str))
+                                                 (= (str refined-str) answer-as-str))
                              parsed (if answer-unchanged?
                                       answer-value
                                     ;; Refinement modified the answer — parse the new text through spec.
@@ -675,7 +669,7 @@
                  ;; (with :thinking and linked :execution/* entities)
                  ;; Auto-vote via LLM: evaluate which learnings actually helped
                  (when-let [{:keys [tokens cost]} (rlm-core/reflect-vote! db-info rlm-router active-learnings query-str :success
-                                                                          (rlm-db/str-truncate (pr-str final-answer) 300))]
+                                                    (rlm-db/str-truncate (pr-str final-answer) 300))]
                    (merge-cost! tokens cost))
                    ;; Auto-extract new learnings from successful multi-iteration queries
                  (when autolearn?
@@ -686,8 +680,8 @@
                      (async/thread
                        (try
                          (rlm-core/reflect-extract! db-info rlm-router query-str
-                                                    (rlm-db/str-truncate (pr-str final-answer) 300)
-                                                    iterations trace inferred-scope nil)
+                           (rlm-db/str-truncate (pr-str final-answer) 300)
+                           iterations trace inferred-scope nil)
                          (catch Exception e
                            (trove/log! {:level :warn :data {:error (ex-message e)}
                                         :msg "Auto-extract failed (async)"}))))))
@@ -703,10 +697,10 @@
                            (doseq [tag-name tags]
                              (rlm-db/db-upsert-tag! db-info tag-name nil)))
                          (rlm-db/db-store-learning! db-info
-                                                    {:learning/insight insight
-                                                     :learning/context (str "Query: " (rlm-db/str-truncate query-str 200))
-                                                     :learning/tags (vec tags)
-                                                     :learning/scope (or inferred-scope model-scope)})))))
+                           {:learning/insight insight
+                            :learning/context (str "Query: " (rlm-db/str-truncate query-str 200))
+                            :learning/tags (vec tags)
+                            :learning/scope (or inferred-scope model-scope)})))))
                  (rlm-core/rlm-debug! {:iterations iterations :duration-ms duration-ms
                                        :refinement-count refinement-count
                                        :confidence confidence
@@ -715,13 +709,13 @@
                                        :answer-preview (rlm-db/str-truncate (pr-str final-answer) 200)} "RLM query-env! finished (success)")
                  (try
                    (rlm-db/store-trajectory! @db-info-atom
-                                             {:env-id env-id :query query-str :status :success
-                                              :answer final-answer :iterations iterations
-                                              :duration-ms duration-ms :model root-model
-                                              :eval-score eval-scores
-                                              :doc-pages (try (when-let [c (:conn @db-info-atom)]
-                                                                (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
-                                                              (catch Exception _ 0))})
+                     {:env-id env-id :query query-str :status :success
+                      :answer final-answer :iterations iterations
+                      :duration-ms duration-ms :model root-model
+                      :eval-score eval-scores
+                      :doc-pages (try (when-let [c (:conn @db-info-atom)]
+                                        (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
+                                      (catch Exception _ 0))})
                    (catch Exception e
                      (trove/log! {:level :warn :data {:error (ex-message e)}
                                   :msg "Failed to store trajectory (success)"})))
@@ -776,32 +770,32 @@
   (let [truncate (fn [s n] (if (and s (> (count s) n)) (str (subs s 0 n) "...") s))
         format-execution (fn [{:keys [id code result stdout error execution-time-ms]}]
                            (str "║ [" id "] "
-                                (truncate (str/replace (or code "") #"\n" " ") max-code-length) "\n"
-                                "║     "
-                                (if error
-                                  (str "ERROR: " error)
-                                  (str "=> " (truncate (pr-str result) max-result-length)))
-                                (when execution-time-ms (str " (" execution-time-ms "ms)"))
-                                (when (and show-stdout? stdout (not (str/blank? stdout)))
-                                  (str "\n║     STDOUT: " (truncate stdout max-result-length)))))
+                             (truncate (str/replace (or code "") #"\n" " ") max-code-length) "\n"
+                             "║     "
+                             (if error
+                               (str "ERROR: " error)
+                               (str "=> " (truncate (pr-str result) max-result-length)))
+                             (when execution-time-ms (str " (" execution-time-ms "ms)"))
+                             (when (and show-stdout? stdout (not (str/blank? stdout)))
+                               (str "\n║     STDOUT: " (truncate stdout max-result-length)))))
         format-iteration (fn [{:keys [iteration response executions final?]}]
                            (str "\n"
-                                "╔══════════════════════════════════════════════════════════════════════════════\n"
-                                "║ ITERATION " iteration (when final? " [FINAL]") "\n"
-                                "╠══════════════════════════════════════════════════════════════════════════════\n"
-                                "║ RESPONSE:\n"
-                                "║ " (str/replace (truncate response max-response-length) #"\n" "\n║ ") "\n"
-                                (when (seq executions)
-                                  (str "╠──────────────────────────────────────────────────────────────────────────────\n"
-                                       "║ EXECUTIONS (" (count executions) "):\n"
-                                       (str/join "\n"
-                                                 (map format-execution executions))
-                                       "\n"))
-                                "╚══════════════════════════════════════════════════════════════════════════════"))]
+                             "╔══════════════════════════════════════════════════════════════════════════════\n"
+                             "║ ITERATION " iteration (when final? " [FINAL]") "\n"
+                             "╠══════════════════════════════════════════════════════════════════════════════\n"
+                             "║ RESPONSE:\n"
+                             "║ " (str/replace (truncate response max-response-length) #"\n" "\n║ ") "\n"
+                             (when (seq executions)
+                               (str "╠──────────────────────────────────────────────────────────────────────────────\n"
+                                 "║ EXECUTIONS (" (count executions) "):\n"
+                                 (str/join "\n"
+                                   (map format-execution executions))
+                                 "\n"))
+                             "╚══════════════════════════════════════════════════════════════════════════════"))]
     (if (empty? trace)
       "No trace entries."
       (str "RLM EXECUTION TRACE (" (count trace) " iterations)\n"
-           (str/join "\n" (map format-iteration trace))))))
+        (str/join "\n" (map format-iteration trace))))))
 
 (defn pprint-trace
   "Pretty-prints an RLM execution trace to stdout for debugging.
@@ -844,38 +838,38 @@
         ;; Format document overview
         docs-section
         (str/join "\n"
-                  (map (fn [doc]
-                         (str "- " (or (:document/title doc) (:document/name doc))
-                              " (ID: " (:document/id doc) ")"
-                              (when-let [abstract (:document/abstract doc)]
-                                (str "\n  Abstract: " (rlm-db/str-truncate abstract 300)))))
-                       documents))
+          (map (fn [doc]
+                 (str "- " (or (:document/title doc) (:document/name doc))
+                   " (ID: " (:document/id doc) ")"
+                   (when-let [abstract (:document/abstract doc)]
+                     (str "\n  Abstract: " (rlm-db/str-truncate abstract 300)))))
+            documents))
         ;; Format TOC — indented by level for structure
         toc-section
         (str/join "\n"
-                  (map (fn [e]
-                         (let [level-num (let [l (:document.toc/level e)]
-                                           (if (string? l)
-                                             (parse-long (re-find #"\d+" (str l)))
-                                             (or l 0)))
-                               indent (str/join (repeat (min 4 (or level-num 0)) "  "))]
-                           (str indent "- [" (:document.toc/id e) " p" (:document.toc/target-page e) "] "
-                                (:document.toc/title e)
-                                (when-let [desc (:document.toc/description e)]
-                                  (str " — " (rlm-db/str-truncate desc 100))))))
-                       toc-entries))
+          (map (fn [e]
+                 (let [level-num (let [l (:document.toc/level e)]
+                                   (if (string? l)
+                                     (parse-long (re-find #"\d+" (str l)))
+                                     (or l 0)))
+                       indent (str/join (repeat (min 4 (or level-num 0)) "  "))]
+                   (str indent "- [" (:document.toc/id e) " p" (:document.toc/target-page e) "] "
+                     (:document.toc/title e)
+                     (when-let [desc (:document.toc/description e)]
+                       (str " — " (rlm-db/str-truncate desc 100))))))
+            toc-entries))
         ;; Format page content summaries — grouped by document
         content-section
         (str/join "\n"
-                  (->> page-nodes
-                       (filter #(or (not-empty (:page.node/content %))
-                                    (not-empty (:page.node/description %))))
-                       (map (fn [node]
-                              (str "  [" (:page.node/document-id node)
-                                   " p" (:page.node/page-id node)
-                                   " " (name (or (:page.node/type node) :unknown)) "] "
-                                   (or (not-empty (:page.node/content node))
-                                       (:page.node/description node)))))))]
+          (->> page-nodes
+            (filter #(or (not-empty (:page.node/content %))
+                       (not-empty (:page.node/description %))))
+            (map (fn [node]
+                   (str "  [" (:page.node/document-id node)
+                     " p" (:page.node/page-id node)
+                     " " (name (or (:page.node/type node) :unknown)) "] "
+                     (or (not-empty (:page.node/content node))
+                       (:page.node/description node)))))))]
     (str "You are selecting diverse passages from a document corpus for question-answer generation.
 
 YOUR TASK: Select exactly " count " passages that will serve as source material for generating Q&A pairs.
@@ -918,31 +912,31 @@ For each passage, provide:
   [passages batch-index {:keys [persona k-candidates multi-hop?]}]
   (let [passage-descriptions
         (str/join "\n\n"
-                  (map-indexed
-                   (fn [i p]
-                     (str "PASSAGE " (inc i) ":\n"
-                          "  Document: " (:document-id p) "\n"
-                          "  Page: " (:page p) "\n"
-                          "  Section: " (:section-title p) "\n"
-                          "  Summary: " (:content-summary p) "\n"
-                          "  Target difficulty: " (name (or (:suggested-difficulty p) :understand)) "\n"
-                          "  Target category: " (name (or (:suggested-category p) :factual))))
-                   passages))
+          (map-indexed
+            (fn [i p]
+              (str "PASSAGE " (inc i) ":\n"
+                "  Document: " (:document-id p) "\n"
+                "  Page: " (:page p) "\n"
+                "  Section: " (:section-title p) "\n"
+                "  Summary: " (:content-summary p) "\n"
+                "  Target difficulty: " (name (or (:suggested-difficulty p) :understand)) "\n"
+                "  Target category: " (name (or (:suggested-category p) :factual))))
+            passages))
         k (or k-candidates 1)
         per-passage-count (if (> k 1)
                             (str "Generate " k " candidate Q&A pairs per passage. "
-                                 "Rate each candidate 1-5 on quality (groundedness, clarity, specificity). "
-                                 "Then keep only the BEST candidate per passage in your final output.")
+                              "Rate each candidate 1-5 on quality (groundedness, clarity, specificity). "
+                              "Then keep only the BEST candidate per passage in your final output.")
                             "Generate 1-2 Q&A pairs per passage.")
         persona-instruction (when persona
                               (str "\n\nPERSONA: " (get GENERATION_PERSONAS persona
-                                                        (str "You are " (name persona) ". Ask questions from this perspective.")) "\n"))
+                                                     (str "You are " (name persona) ". Ask questions from this perspective.")) "\n"))
         multi-hop-instruction (when multi-hop?
                                 "\n\nMULTI-HOP QUESTIONS: Some passages are paired across different sections. For paired passages, generate questions that REQUIRE information from BOTH passages to answer — the answer should synthesize facts from multiple sources. Mark these as 'analyze' or 'create' difficulty.\n")]
     (str "You are generating high-quality question-answer pairs from specific passages in the corpus.
 This is batch " batch-index ". " per-passage-count
-         (or persona-instruction "")
-         (or multi-hop-instruction "") "
+      (or persona-instruction "")
+      (or multi-hop-instruction "") "
 
 PASSAGES TO PROCESS:
 " passage-descriptions "
@@ -988,8 +982,7 @@ After generating all Q&A pairs, call (FINAL {:questions [...]}).")))
   (when (>= (clojure.core/count passages) 2)
     (let [;; Group by document
           by-doc (group-by :document-id passages)
-          pairs (atom [])
-          passage-vec (vec passages)]
+          pairs (atom [])]
       ;; Cross-document pairs (highest value)
       (when (> (clojure.core/count by-doc) 1)
         (let [doc-ids (vec (keys by-doc))]
@@ -1005,7 +998,7 @@ After generating all Q&A pairs, call (FINAL {:questions [...]}).")))
             (let [p1 (nth sorted i)
                   p2 (nth sorted (min (+ i 2) (dec (clojure.core/count sorted))))]
               (when (and p1 p2 (not= p1 p2)
-                         (> (Math/abs (- (:page p2) (:page p1))) 1))
+                      (> (Math/abs (- (:page p2) (:page p1))) 1))
                 (swap! pairs conj [p1 p2]))))))
       ;; Return up to 3 pairs
       (vec (take 3 @pairs)))))
@@ -1015,14 +1008,14 @@ After generating all Q&A pairs, call (FINAL {:questions [...]}).")))
   [questions]
   (let [question-descriptions
         (str/join "\n\n"
-                  (map-indexed
-                   (fn [i q]
-                     (str "QUESTION " i " (index " i "):\n"
-                          "  Q: " (:question q) "\n"
-                          "  A: " (:answer q) "\n"
-                          "  Evidence: " (rlm-db/str-truncate (or (:evidence-span q) "") 200) "\n"
-                          "  Source: " (:source-document q) " page " (:source-page q)))
-                   questions))]
+          (map-indexed
+            (fn [i q]
+              (str "QUESTION " i " (index " i "):\n"
+                "  Q: " (:question q) "\n"
+                "  A: " (:answer q) "\n"
+                "  Evidence: " (rlm-db/str-truncate (or (:evidence-span q) "") 200) "\n"
+                "  Source: " (:source-document q) " page " (:source-page q)))
+            questions))]
     (str "You are a quality auditor verifying question-answer pairs against source documents.
 For each Q&A pair below, verify it meets quality standards.
 
@@ -1067,30 +1060,30 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         remainder (rem total-count n)]
     (into {} (map-indexed (fn [i item]
                             [item (if (< i remainder) (inc base) base)])
-                          item-vec))))
+               item-vec))))
 
 (defn dedup-batch
   "Deduplicates a single batch of questions via LLM. Returns kept questions."
   [questions rlm-router]
   (let [numbered-list
         (str/join "\n"
-                  (map-indexed
-                   (fn [i q]
-                     (str "[" i "] " (:question q)))
-                   questions))
+          (map-indexed
+            (fn [i q]
+              (str "[" i "] " (:question q)))
+            questions))
         result (llm/ask!
-                {:spec DEDUP_SPEC
-                 :messages
-                 [(llm/system "You are a deduplication engine. Given a numbered list of questions, identify semantic duplicates — questions that ask the same thing in different words. For each group of duplicates, keep only the BEST version (most clear, specific, and well-phrased). Return the 0-based indices of questions to KEEP.")
-                  (llm/user (str "Identify and remove semantic duplicates from this list. Return indices of questions to KEEP (one per duplicate group, choosing the best phrasing):\n\n" numbered-list))]
-                 :router rlm-router
-                 :prefer :cost :capabilities #{:chat}})
+                 {:spec DEDUP_SPEC
+                  :messages
+                  [(llm/system "You are a deduplication engine. Given a numbered list of questions, identify semantic duplicates — questions that ask the same thing in different words. For each group of duplicates, keep only the BEST version (most clear, specific, and well-phrased). Return the 0-based indices of questions to KEEP.")
+                   (llm/user (str "Identify and remove semantic duplicates from this list. Return indices of questions to KEEP (one per duplicate group, choosing the best phrasing):\n\n" numbered-list))]
+                  :router rlm-router
+                  :prefer :cost :capabilities #{:chat}})
         keep-indices (set (or (:keep-indices (:result result)) []))
         kept (vec (keep-indexed
-                   (fn [i q]
-                     (when (contains? keep-indices i)
-                       q))
-                   questions))]
+                    (fn [i q]
+                      (when (contains? keep-indices i)
+                        q))
+                    questions))]
     ;; Fallback: if LLM returns empty or error, keep all
     (if (seq kept) kept questions)))
 
@@ -1147,22 +1140,22 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     []
     (let [revision-descriptions
           (str/join "\n\n"
-                    (map-indexed
-                     (fn [i q]
-                       (str "QUESTION " i ":\n"
-                            "  Q: " (:question q) "\n"
-                            "  A: " (:answer q) "\n"
-                            "  Evidence: " (rlm-db/str-truncate (or (:evidence-span q) "") 200) "\n"
-                            "  Source: " (:source-document q) " page " (:source-page q) "\n"
-                            "  Issue: " (or (:revision-note q) "Minor quality issue")))
-                     questions))
+            (map-indexed
+              (fn [i q]
+                (str "QUESTION " i ":\n"
+                  "  Q: " (:question q) "\n"
+                  "  A: " (:answer q) "\n"
+                  "  Evidence: " (rlm-db/str-truncate (or (:evidence-span q) "") 200) "\n"
+                  "  Source: " (:source-document q) " page " (:source-page q) "\n"
+                  "  Issue: " (or (:revision-note q) "Minor quality issue")))
+              questions))
           result (llm/ask!
-                  {:spec REVISION_SPEC
-                   :messages
-                   [(llm/system "You are a question revision engine. Given Q&A pairs with identified issues, fix the problems while preserving the core question intent, answer accuracy, and evidence grounding. Keep the same source-document, source-page, difficulty, and category. Fix only the identified issue.")
-                    (llm/user (str "Revise these questions to fix the identified issues:\n\n" revision-descriptions))]
-                   :router rlm-router
-                   :prefer :cost :capabilities #{:chat}})
+                   {:spec REVISION_SPEC
+                    :messages
+                    [(llm/system "You are a question revision engine. Given Q&A pairs with identified issues, fix the problems while preserving the core question intent, answer accuracy, and evidence grounding. Keep the same source-document, source-page, difficulty, and category. Fix only the identified issue.")
+                     (llm/user (str "Revise these questions to fix the identified issues:\n\n" revision-descriptions))]
+                    :router rlm-router
+                    :prefer :cost :capabilities #{:chat}})
           revised (or (:questions (:result result)) [])]
       (trove/log! {:level :info :id ::qa-revision
                    :data {:input (clojure.core/count questions)
@@ -1179,21 +1172,21 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (let [;; Pad verifications with :pass for any missing indices
         ver-map (into {} (map (fn [v] [(:question-index v) v]) verifications))
         results (map-indexed
-                 (fn [i q]
-                   (let [v (get ver-map i {:verdict :pass})
-                         verdict (:verdict v)]
-                     (when-not (= :pass verdict)
-                       (trove/log! {:level :debug :id ::qa-filter
-                                    :data {:index i :verdict verdict :note (:revision-note v)
-                                           :question (rlm-db/str-truncate (:question q) 100)}
-                                    :msg "Question failed verification"}))
-                     {:question q :verification v
-                      :passed? (= :pass verdict)
-                      :needs-revision? (= :needs-revision verdict)}))
-                 questions)]
+                  (fn [i q]
+                    (let [v (get ver-map i {:verdict :pass})
+                          verdict (:verdict v)]
+                      (when-not (= :pass verdict)
+                        (trove/log! {:level :debug :id ::qa-filter
+                                     :data {:index i :verdict verdict :note (:revision-note v)
+                                            :question (rlm-db/str-truncate (:question q) 100)}
+                                     :msg "Question failed verification"}))
+                      {:question q :verification v
+                       :passed? (= :pass verdict)
+                       :needs-revision? (= :needs-revision verdict)}))
+                  questions)]
     {:passed (mapv :question (filter :passed? results))
      :needs-revision (mapv (fn [r] (assoc (:question r) :revision-note (get-in r [:verification :revision-note])))
-                           (filter :needs-revision? results))
+                       (filter :needs-revision? results))
      :dropped (mapv :question (filter #(and (not (:passed? %)) (not (:needs-revision? %))) results))
      :results (mapv :verification results)}))
 
@@ -1287,12 +1280,12 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          corpus-toc (rlm-db/db-list-toc-entries db-info)
          corpus-nodes (rlm-db/db-list-page-nodes db-info {:limit 500})
          selection-prompt (build-toc-based-selection-prompt
-                           {:count passage-count
-                            :difficulty-dist difficulty
-                            :category-dist categories
-                            :documents corpus-documents
-                            :toc-entries corpus-toc
-                            :page-nodes corpus-nodes})
+                            {:count passage-count
+                             :difficulty-dist difficulty
+                             :category-dist categories
+                             :documents corpus-documents
+                             :toc-entries corpus-toc
+                             :page-nodes corpus-nodes})
          selection-result (llm/ask! {:spec CHUNK_SELECTION_SPEC
                                      :messages [(llm/system "You are a passage selection engine for Q&A generation. Select diverse passages from the corpus based on the provided structure. Return your selections in the required JSON format.")
                                                 (llm/user selection-prompt)]
@@ -1325,49 +1318,49 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          batch-count (clojure.core/count all-batches)
          standard-batch-count (clojure.core/count standard-batches)
          work-items (map-indexed
-                     (fn [idx batch]
-                       (let [is-multi-hop? (>= idx standard-batch-count)
-                             persona (when persona-vec
-                                       (nth persona-vec (mod idx (clojure.core/count persona-vec))))]
-                         {:batch-idx idx :batch (vec batch)
-                          :persona persona :multi-hop? is-multi-hop?
-                          :k-candidates k-candidates}))
-                     all-batches)
+                      (fn [idx batch]
+                        (let [is-multi-hop? (>= idx standard-batch-count)
+                              persona (when persona-vec
+                                        (nth persona-vec (mod idx (clojure.core/count persona-vec))))]
+                          {:batch-idx idx :batch (vec batch)
+                           :persona persona :multi-hop? is-multi-hop?
+                           :k-candidates k-candidates}))
+                      all-batches)
          result-chan (async/chan batch-count)
          _ (async/pipeline-blocking
-            parallel
+             parallel
 
-            result-chan
-            (map (fn [{:keys [batch-idx batch persona multi-hop? k-candidates]}]
-                   (trove/log! {:level :debug :id ::qa-batch
-                                :data {:batch batch-idx :passages-in-batch (clojure.core/count batch)
-                                       :persona (when persona (name persona))
-                                       :multi-hop? multi-hop?}
-                                :msg (str "Generating batch " batch-idx)})
-                   (try
-                     (let [forked-env (fork-env-for-query env)
-                           prompt (build-generation-prompt batch batch-idx
-                                                           {:persona persona
-                                                            :k-candidates k-candidates
-                                                            :multi-hop? multi-hop?})
-                           result (query-env! forked-env prompt
-                                              {:spec QUESTIONIFY_SPEC
-                                               :debug? debug?
-                                               :max-iterations 20
-                                               :model effective-model})]
-                       {:batch-idx batch-idx
-                        :questions (or (get-in result [:answer :questions]) [])
-                        :trace (:trace result)
-                        :iterations (or (:iterations result) 0)})
-                     (catch Exception e
-                       (trove/log! {:level :error :id ::qa-batch-error
-                                    :data {:batch batch-idx :error (ex-message e)}
-                                    :msg "Batch generation failed"})
-                       {:batch-idx batch-idx
-                        :questions []
-                        :trace []
-                        :iterations 0}))))
-            (async/to-chan! work-items))
+             result-chan
+             (map (fn [{:keys [batch-idx batch persona multi-hop? k-candidates]}]
+                    (trove/log! {:level :debug :id ::qa-batch
+                                 :data {:batch batch-idx :passages-in-batch (clojure.core/count batch)
+                                        :persona (when persona (name persona))
+                                        :multi-hop? multi-hop?}
+                                 :msg (str "Generating batch " batch-idx)})
+                    (try
+                      (let [forked-env (fork-env-for-query env)
+                            prompt (build-generation-prompt batch batch-idx
+                                     {:persona persona
+                                      :k-candidates k-candidates
+                                      :multi-hop? multi-hop?})
+                            result (query-env! forked-env prompt
+                                     {:spec QUESTIONIFY_SPEC
+                                      :debug? debug?
+                                      :max-iterations 20
+                                      :model effective-model})]
+                        {:batch-idx batch-idx
+                         :questions (or (get-in result [:answer :questions]) [])
+                         :trace (:trace result)
+                         :iterations (or (:iterations result) 0)})
+                      (catch Exception e
+                        (trove/log! {:level :error :id ::qa-batch-error
+                                     :data {:batch batch-idx :error (ex-message e)}
+                                     :msg "Batch generation failed"})
+                        {:batch-idx batch-idx
+                         :questions []
+                         :trace []
+                         :iterations 0}))))
+             (async/to-chan! work-items))
          ;; Collect results from pipeline and sort by batch index for deterministic order
          generation-results (let [results (loop [acc []]
                                             (if-let [result (async/<!! result-chan)]
@@ -1388,10 +1381,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                           :msg "Phase 3: Verifying Q&A pairs against source material"})
              (let [ver-prompt (build-verification-prompt all-questions)
                    ver-result (query-env! env ver-prompt
-                                          {:spec VERIFICATION_SPEC
-                                           :debug? debug?
-                                           :max-iterations 15
-                                           :model effective-model})
+                                {:spec VERIFICATION_SPEC
+                                 :debug? debug?
+                                 :max-iterations 15
+                                 :model effective-model})
                    verifications (or (get-in ver-result [:answer :verifications]) [])
                    filtered (filter-verified-questions all-questions verifications)
                    ;; Revision sub-phase: revise needs-revision questions instead of dropping
@@ -1421,12 +1414,12 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          ;; ===== Build stats =====
          duration-ms (util/elapsed-since start-time)
          total-iterations (+ (or (:iterations selection-result) 0)
-                             (reduce + 0 (map :iterations generation-results))
-                             ver-iterations)
+                            (reduce + 0 (map :iterations generation-results))
+                            ver-iterations)
          stats {:total-generated (clojure.core/count all-questions)
                 :passed-verification (clojure.core/count passed)
                 :duplicates-removed (- (clojure.core/count passed)
-                                       (clojure.core/count deduped))
+                                      (clojure.core/count deduped))
                 :final-count (clojure.core/count final-questions)
                 :by-difficulty (frequencies (map :difficulty final-questions))
                 :by-category (frequencies (map :category final-questions))}]
@@ -1490,7 +1483,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          (when include-stats?
            (let [s (:stats result)]
              (.append sb "## Statistics\n\n")
-             (.append sb (str "| Metric | Value |\n|--------|-------|\n"))
+             (.append sb "| Metric | Value |\n|--------|-------|\n")
              (.append sb (str "| Total generated | " (:total-generated s) " |\n"))
              (.append sb (str "| Passed verification | " (:passed-verification s) " |\n"))
              (.append sb (str "| Duplicates removed | " (:duplicates-removed s) " |\n"))
@@ -1501,16 +1494,16 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          (.append sb "## Questions\n\n")
          (doseq [[i q] (map-indexed vector questions)]
            (.append sb (str "### Q" (inc i)
-                            " [" (name (or (:difficulty q) :unknown))
-                            " / " (name (or (:category q) :unknown)) "]\n\n"))
+                         " [" (name (or (:difficulty q) :unknown))
+                         " / " (name (or (:category q) :unknown)) "]\n\n"))
            (.append sb (str "**Question:** " (:question q) "\n\n"))
            (.append sb (str "**Answer:** " (:answer q) "\n\n"))
            (when (:evidence-span q)
              (.append sb (str "**Evidence:**\n> " (:evidence-span q) "\n\n")))
            (.append sb (str "**Source:** " (:source-document q)
-                            ", page " (:source-page q)
-                            (when (:source-section q) (str " — " (:source-section q)))
-                            "\n\n"))
+                         ", page " (:source-page q)
+                         (when (:source-section q) (str " — " (:source-section q)))
+                         "\n\n"))
            (.append sb "---\n\n"))
          ;; Dropped questions section
          (when (and include-dropped? (seq (:dropped-questions result)))
@@ -1550,9 +1543,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
    String. Document name without extension."
   [file-path]
   (-> file-path
-      (io/file)
-      (.getName)
-      (str/replace #"\.(pdf|md|markdown|txt|text)$" "")))
+    (io/file)
+    (.getName)
+    (str/replace #"\.(pdf|md|markdown|txt|text)$" "")))
 
 (defn- extract-extension
   "Extracts file extension from file path.
@@ -1612,7 +1605,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (try
     (let [file (io/file input)]
       (and (.exists file)
-           (.isFile file)))
+        (.isFile file)))
     (catch Exception _
       ;; Invalid path (e.g., too long, invalid characters)
       false)))
@@ -1643,46 +1636,46 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         ;; Build mapping of local-id -> UUID for all nodes on this page
         ;; Collect IDs from both :page.node/id and :document.toc/id
         id-mapping (reduce
-                    (fn [acc node]
-                      (let [local-id (or (:page.node/id node) (:document.toc/id node))]
-                        (if local-id
-                          (assoc acc local-id (str (util/uuid)))
-                          acc)))
-                    {}
-                    nodes)
+                     (fn [acc node]
+                       (let [local-id (or (:page.node/id node) (:document.toc/id node))]
+                         (if local-id
+                           (assoc acc local-id (str (util/uuid)))
+                           acc)))
+                     {}
+                     nodes)
         ;; Translate IDs in all nodes (both namespaces)
         translated-nodes (mapv
-                          (fn [node]
-                            (cond-> node
+                           (fn [node]
+                             (cond-> node
                                ;; Translate :page.node/id
-                              (:page.node/id node)
-                              (assoc :page.node/id (get id-mapping (:page.node/id node)))
+                               (:page.node/id node)
+                               (assoc :page.node/id (get id-mapping (:page.node/id node)))
 
                                ;; Translate :page.node/parent-id (if exists and in mapping)
-                              (and (:page.node/parent-id node)
-                                   (get id-mapping (:page.node/parent-id node)))
-                              (assoc :page.node/parent-id (get id-mapping (:page.node/parent-id node)))
+                               (and (:page.node/parent-id node)
+                                 (get id-mapping (:page.node/parent-id node)))
+                               (assoc :page.node/parent-id (get id-mapping (:page.node/parent-id node)))
 
                                ;; Translate :page.node/target-section-id (if exists and in mapping)
-                              (and (:page.node/target-section-id node)
-                                   (get id-mapping (:page.node/target-section-id node)))
-                              (assoc :page.node/target-section-id (get id-mapping (:page.node/target-section-id node)))
+                               (and (:page.node/target-section-id node)
+                                 (get id-mapping (:page.node/target-section-id node)))
+                               (assoc :page.node/target-section-id (get id-mapping (:page.node/target-section-id node)))
 
                                ;; Translate :document.toc/id
-                              (:document.toc/id node)
-                              (assoc :document.toc/id (get id-mapping (:document.toc/id node)))
+                               (:document.toc/id node)
+                               (assoc :document.toc/id (get id-mapping (:document.toc/id node)))
 
                                ;; Translate :document.toc/parent-id (if exists and in mapping)
-                              (and (:document.toc/parent-id node)
-                                   (get id-mapping (:document.toc/parent-id node)))
-                              (assoc :document.toc/parent-id (get id-mapping (:document.toc/parent-id node)))
+                               (and (:document.toc/parent-id node)
+                                 (get id-mapping (:document.toc/parent-id node)))
+                               (assoc :document.toc/parent-id (get id-mapping (:document.toc/parent-id node)))
 
                                ;; Translate :document.toc/target-section-id (if exists and in mapping)
                                ;; Note: This references a :page.node/id, so we use the same mapping
-                              (and (:document.toc/target-section-id node)
-                                   (get id-mapping (:document.toc/target-section-id node)))
-                              (assoc :document.toc/target-section-id (get id-mapping (:document.toc/target-section-id node)))))
-                          nodes)]
+                               (and (:document.toc/target-section-id node)
+                                 (get id-mapping (:document.toc/target-section-id node)))
+                               (assoc :document.toc/target-section-id (get id-mapping (:document.toc/target-section-id node)))))
+                           nodes)]
     (assoc page :page/nodes translated-nodes)))
 
 (defn- translate-all-ids
@@ -1709,8 +1702,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   "Finds the last visual node of the given type on a page."
   [page node-type]
   (->> (:page/nodes page)
-       (filter #(= node-type (:page.node/type %)))
-       last))
+    (filter #(= node-type (:page.node/type %)))
+    last))
 
 (defn group-continuations
   "Groups continuation nodes across pages by assigning a shared :page.node/group-id.
@@ -1735,7 +1728,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                     curr-page (nth pages i)]
                 (doseq [node (:page/nodes curr-page)]
                   (when (and (visual-node? node)
-                             (:page.node/continuation? node))
+                          (:page.node/continuation? node))
                     (let [node-type (:page.node/type node)
                           prev-visual (last-visual-of-type prev-page node-type)]
                       (when prev-visual
@@ -1752,13 +1745,13 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         pages
         (mapv (fn [page]
                 (update page :page/nodes
-                        (fn [nodes]
-                          (mapv (fn [node]
-                                  (if-let [gid (get assignments (:page.node/id node))]
-                                    (assoc node :page.node/group-id gid)
-                                    node))
-                                nodes))))
-              pages)))))
+                  (fn [nodes]
+                    (mapv (fn [node]
+                            (if-let [gid (get assignments (:page.node/id node))]
+                              (assoc node :page.node/group-id gid)
+                              node))
+                      nodes))))
+          pages)))))
 
 ;; =============================================================================
 ;; TOC Post-Processing
@@ -1814,40 +1807,40 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         ;; Build a map of section-id -> heading for that section
         ;; A heading belongs to a section if its parent-id matches the section's id
         section-headings (reduce
-                          (fn [acc node]
-                            (if (and (= :heading (:page.node/type node))
-                                     (:page.node/parent-id node))
-                              (assoc acc (:page.node/parent-id node) node)
-                              acc))
-                          {}
-                          all-nodes)
+                           (fn [acc node]
+                             (if (and (= :heading (:page.node/type node))
+                                   (:page.node/parent-id node))
+                               (assoc acc (:page.node/parent-id node) node)
+                               acc))
+                           {}
+                           all-nodes)
         ;; Find all sections and create TOC entries
         sections (filter #(= :section (:page.node/type %)) all-nodes)
         ;; Find page index for each section
         section-page-index (reduce
-                            (fn [acc {:keys [page/index page/nodes]}]
-                              (reduce
-                               (fn [acc2 node]
-                                 (if (= :section (:page.node/type node))
-                                   (assoc acc2 (:page.node/id node) index)
-                                   acc2))
-                               acc
-                               nodes))
-                            {}
-                            pages)]
+                             (fn [acc {:keys [page/index page/nodes]}]
+                               (reduce
+                                 (fn [acc2 node]
+                                   (if (= :section (:page.node/type node))
+                                     (assoc acc2 (:page.node/id node) index)
+                                     acc2))
+                                 acc
+                                 nodes))
+                             {}
+                             pages)]
     (vec
-     (keep
-      (fn [section]
-        (when-let [heading (get section-headings (:page.node/id section))]
-          {:document.toc/type :toc-entry
-           :document.toc/id (str (util/uuid))
-           :document.toc/parent-id nil
-           :document.toc/title (:page.node/content heading)
-           :document.toc/description (:page.node/description section)
-           :document.toc/target-page (get section-page-index (:page.node/id section))
-           :document.toc/target-section-id (:page.node/id section)
-           :document.toc/level (heading-level->toc-level (:page.node/level heading))}))
-      sections))))
+      (keep
+        (fn [section]
+          (when-let [heading (get section-headings (:page.node/id section))]
+            {:document.toc/type :toc-entry
+             :document.toc/id (str (util/uuid))
+             :document.toc/parent-id nil
+             :document.toc/title (:page.node/content heading)
+             :document.toc/description (:page.node/description section)
+             :document.toc/target-page (get section-page-index (:page.node/id section))
+             :document.toc/target-section-id (:page.node/id section)
+             :document.toc/level (heading-level->toc-level (:page.node/level heading))}))
+        sections))))
 
 (defn- link-toc-entries
   "Links existing TocEntry nodes to matching Section nodes.
@@ -1865,49 +1858,49 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (let [all-nodes (vec (collect-all-nodes pages))
         ;; Build map of section-id -> section node (for description lookup)
         section-by-id (reduce
-                       (fn [acc node]
-                         (if (= :section (:page.node/type node))
-                           (assoc acc (:page.node/id node) node)
-                           acc))
-                       {}
-                       all-nodes)
+                        (fn [acc node]
+                          (if (= :section (:page.node/type node))
+                            (assoc acc (:page.node/id node) node)
+                            acc))
+                        {}
+                        all-nodes)
         ;; Build map of normalized heading content -> section-id
         ;; A heading's parent-id is the section it introduces
         heading->section (reduce
-                          (fn [acc node]
-                            (if (and (= :heading (:page.node/type node))
-                                     (:page.node/content node)
-                                     (:page.node/parent-id node))
-                              (let [normalized (-> (:page.node/content node)
-                                                   str/trim
-                                                   str/lower-case)]
-                                (assoc acc normalized (:page.node/parent-id node)))
-                              acc))
-                          {}
-                          all-nodes)]
+                           (fn [acc node]
+                             (if (and (= :heading (:page.node/type node))
+                                   (:page.node/content node)
+                                   (:page.node/parent-id node))
+                               (let [normalized (-> (:page.node/content node)
+                                                  str/trim
+                                                  str/lower-case)]
+                                 (assoc acc normalized (:page.node/parent-id node)))
+                               acc))
+                           {}
+                           all-nodes)]
     ;; Update TocEntry nodes with target-section-id and description
     (mapv
-     (fn [page]
-       (update page :page/nodes
-               (fn [nodes]
-                 (mapv
-                  (fn [node]
-                    (if (and (= :toc-entry (:document.toc/type node))
-                             (nil? (:document.toc/target-section-id node))
-                             (:document.toc/title node))
-                      (let [normalized-title (-> (:document.toc/title node)
-                                                 str/trim
-                                                 str/lower-case)
-                            section-id (get heading->section normalized-title)
-                            section (when section-id (get section-by-id section-id))]
-                        (if section-id
-                          (cond-> node
-                            true (assoc :document.toc/target-section-id section-id)
-                            (:page.node/description section) (assoc :document.toc/description (:page.node/description section)))
-                          node))
+      (fn [page]
+        (update page :page/nodes
+          (fn [nodes]
+            (mapv
+              (fn [node]
+                (if (and (= :toc-entry (:document.toc/type node))
+                      (nil? (:document.toc/target-section-id node))
+                      (:document.toc/title node))
+                  (let [normalized-title (-> (:document.toc/title node)
+                                           str/trim
+                                           str/lower-case)
+                        section-id (get heading->section normalized-title)
+                        section (when section-id (get section-by-id section-id))]
+                    (if section-id
+                      (cond-> node
+                        true (assoc :document.toc/target-section-id section-id)
+                        (:page.node/description section) (assoc :document.toc/description (:page.node/description section)))
                       node))
-                  nodes))))
-     pages)))
+                  node))
+              nodes))))
+      pages)))
 
 (defn- postprocess-toc
   "Post-processes pages to ensure TOC exists and is properly linked.
@@ -1927,7 +1920,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     ;; TOC exists - link entries to sections and extract them
     (let [linked-pages (link-toc-entries pages)
           toc-entries (vec (filter #(= :toc-entry (:document.toc/type %))
-                                   (collect-all-nodes linked-pages)))]
+                             (collect-all-nodes linked-pages)))]
       (trove/log! {:level :debug :data {:toc-entries (count toc-entries)}
                    :msg "Linked existing TOC entries to sections"})
       {:pages linked-pages
@@ -1953,11 +1946,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
    Vector of non-empty description strings."
   [pages]
   (->> pages
-       (mapcat :page/nodes)
-       (filter #(= :section (:page.node/type %)))
-       (keep :page.node/description)
-       (filter seq)
-       vec))
+    (mapcat :page/nodes)
+    (filter #(= :section (:page.node/type %)))
+    (keep :page.node/description)
+    (filter seq)
+    vec))
 
 (defn- generate-document-abstract
   "Generates a document-level abstract from all section descriptions.
@@ -2000,17 +1993,17 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   [n total-page-count]
   (when-not (integer? n)
     (anomaly/incorrect! (str "Page spec must be an integer, got: " (pr-str n))
-                        {:type :svar.pageindex/invalid-page-spec
-                         :value n}))
+      {:type :svar.pageindex/invalid-page-spec
+       :value n}))
   (when (< n 1)
     (anomaly/incorrect! (str "Page number must be >= 1, got: " n)
-                        {:type :svar.pageindex/invalid-page-spec
-                         :value n}))
+      {:type :svar.pageindex/invalid-page-spec
+       :value n}))
   (when (> n total-page-count)
     (anomaly/incorrect! (str "Page " n " exceeds total page count " total-page-count)
-                        {:type :svar.pageindex/page-out-of-bounds
-                         :value n
-                         :total-page-count total-page-count})))
+      {:type :svar.pageindex/page-out-of-bounds
+       :value n
+       :total-page-count total-page-count})))
 
 (defn- normalize-range
   "Expands a [from to] 1-indexed range into a set of 0-indexed page indices."
@@ -2019,9 +2012,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (validate-page-number to total-page-count)
   (when (> from to)
     (anomaly/incorrect! (str "Invalid page range: start " from " > end " to)
-                        {:type :svar.pageindex/invalid-page-range
-                         :from from
-                         :to to}))
+      {:type :svar.pageindex/invalid-page-range
+       :from from
+       :to to}))
   (set (range (dec from) to)))
 
 (defn normalize-page-spec
@@ -2045,7 +2038,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
     (vector? pages-spec)
     (if (and (= 2 (count pages-spec))
-             (every? integer? pages-spec))
+          (every? integer? pages-spec))
       ;; Two-integer vector → range [from to]
       (normalize-range pages-spec total-page-count)
       ;; Mixed vector of ranges and singles
@@ -2060,15 +2053,15 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
                   :else
                   (anomaly/incorrect! (str "Invalid element in page spec: " (pr-str item))
-                                      {:type :svar.pageindex/invalid-page-spec
-                                       :value item})))
-              #{}
-              pages-spec))
+                    {:type :svar.pageindex/invalid-page-spec
+                     :value item})))
+        #{}
+        pages-spec))
 
     :else
     (anomaly/incorrect! (str "Invalid page spec type: " (pr-str pages-spec))
-                        {:type :svar.pageindex/invalid-page-spec
-                         :value pages-spec})))
+      {:type :svar.pageindex/invalid-page-spec
+       :value pages-spec})))
 
 (defn filter-pages
   "Filters a page-list by a set of 0-indexed page indices.
@@ -2103,10 +2096,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (when (= :unknown ftype)
       (let [extension (extract-extension file-path)]
         (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
-                              {:type :svar.pageindex/unsupported-file-type
-                               :file file-path
-                               :extension extension
-                               :supported-extensions SUPPORTED_EXTENSIONS})))
+          {:type :svar.pageindex/unsupported-file-type
+           :file file-path
+           :extension extension
+           :supported-extensions SUPPORTED_EXTENSIONS})))
     (trove/log! {:level :info :data {:file file-path :type ftype}
                  :msg "Extracting text from document"})
     ;; For PDFs, resolve :pages to :page-set before extraction so vision layer
@@ -2236,21 +2229,21 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   ;; Validate file exists
   (when-not (.exists (io/file file-path))
     (anomaly/not-found! (str "File not found: " file-path)
-                        {:type :svar.pageindex/file-not-found :file file-path}))
+      {:type :svar.pageindex/file-not-found :file file-path}))
    ;; Validate file type is supported
   (when-not (supported-extension? file-path)
     (let [extension (extract-extension file-path)]
       (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
-                            {:type :svar.pageindex/unsupported-file-type
-                             :file file-path
-                             :extension extension
-                             :supported-extensions SUPPORTED_EXTENSIONS})))
+        {:type :svar.pageindex/unsupported-file-type
+         :file file-path
+         :extension extension
+         :supported-extensions SUPPORTED_EXTENSIONS})))
   (let [vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
         vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         ;; Create router from config or env vars — ALL LLM calls go through the router
         vision-router (or (:rlm-router opts)
-                          (llm/config->router (cond-> (or (:config opts) {})
-                                                vision-model (assoc :model vision-model))))
+                        (llm/config->router (cond-> (or (:config opts) {})
+                                              vision-model (assoc :model vision-model))))
         output-dir (:output-dir opts)
         vision-opts {:rlm-router vision-router :objective vision-objective}]
     (trove/log! {:level :info :data {:file file-path}
@@ -2283,28 +2276,28 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                               (let [dir-file (io/file output-dir)]
                                 (when-not (.exists dir-file)
                                   (anomaly/not-found! (str "Output directory not found: " output-dir)
-                                                      {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
+                                    {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
                                 (mapv (fn [page]
                                         (update page :page/nodes
-                                                (fn [nodes]
-                                                  (mapv (fn [node]
-                                                          (let [img-bytes (:page.node/image-data node)]
-                                                            (if (and (#{:image :table} (:page.node/type node))
-                                                                     img-bytes)
-                                                              (do
-                                                                (try
-                                                                  (let [file-path (fs/path output-dir (str (:page.node/id node) ".png"))]
-                                                                    (with-open [out (io/output-stream (io/file (str file-path)))]
-                                                                      (.write out ^bytes img-bytes)))
-                                                                  (catch Exception e
-                                                                    (trove/log! {:level :warn
-                                                                                 :data {:node-id (:page.node/id node)
-                                                                                        :error (ex-message e)}
-                                                                                 :msg "Failed to write image bytes to output directory"})))
-                                                                (dissoc node :page.node/image-data))
-                                                              node)))
-                                                        nodes))))
-                                      pages))
+                                          (fn [nodes]
+                                            (mapv (fn [node]
+                                                    (let [img-bytes (:page.node/image-data node)]
+                                                      (if (and (#{:image :table} (:page.node/type node))
+                                                            img-bytes)
+                                                        (do
+                                                          (try
+                                                            (let [file-path (fs/path output-dir (str (:page.node/id node) ".png"))]
+                                                              (with-open [out (io/output-stream (io/file (str file-path)))]
+                                                                (.write out ^bytes img-bytes)))
+                                                            (catch Exception e
+                                                              (trove/log! {:level :warn
+                                                                           :data {:node-id (:page.node/id node)
+                                                                                  :error (ex-message e)}
+                                                                           :msg "Failed to write image bytes to output directory"})))
+                                                          (dissoc node :page.node/image-data))
+                                                        node)))
+                                              nodes))))
+                                  pages))
                               pages)
            ;; Step 3: Generate document abstract from section descriptions
           abstract-opts {:rlm-router vision-router}
@@ -2343,29 +2336,29 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         ;; Create router from config or env vars
         vision-router (or (:rlm-router opts)
-                          (llm/config->router (cond-> (or (:config opts) {})
-                                                vision-model (assoc :model vision-model))))
+                        (llm/config->router (cond-> (or (:config opts) {})
+                                              vision-model (assoc :model vision-model))))
         vision-opts {:rlm-router vision-router :objective vision-objective}]
     ;; Validate required options
     (when-not content-type
       (anomaly/incorrect! "Missing required :content-type option for string input"
-                          {:type :svar.pageindex/missing-content-type :valid-types [:md :txt]}))
+        {:type :svar.pageindex/missing-content-type :valid-types [:md :txt]}))
     (when-not doc-name
       (anomaly/incorrect! "Missing required :doc-name option for string input" {:type :svar.pageindex/missing-doc-name}))
     (trove/log! {:level :info :data {:doc-name doc-name :content-type content-type}
                  :msg "Starting text extraction from string content"})
     (let [page-list-raw (case content-type
                           :pdf (anomaly/unsupported! "PDF content-type not supported for string input"
-                                                     {:type :svar.pageindex/pdf-string-unsupported
-                                                      :hint "PDF requires vision extraction from file path"})
+                                 {:type :svar.pageindex/pdf-string-unsupported
+                                  :hint "PDF requires vision extraction from file path"})
                           :md (markdown/markdown->pages content)
                           :markdown (markdown/markdown->pages content)
                           :txt (vision/extract-text-from-string content (merge opts vision-opts))
                           :text (vision/extract-text-from-string content (merge opts vision-opts))
                           (anomaly/incorrect! "Unknown content-type"
-                                              {:type :svar.pageindex/unknown-content-type
-                                               :content-type content-type
-                                               :valid-types [:md :txt]}))
+                            {:type :svar.pageindex/unknown-content-type
+                             :content-type content-type
+                             :valid-types [:md :txt]}))
           ;; Step 1: Translate local IDs to global UUIDs
           page-list-uuids (translate-all-ids page-list-raw)
           ;; Step 2: Group continuation nodes across pages
@@ -2440,32 +2433,32 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         images-dir (io/file output-dir "images")
         ;; Extract images and replace bytes with relative paths
         doc-with-paths (update document :document/pages
-                               (fn [pages]
-                                 (mapv (fn [page]
-                                         (update page :page/nodes
-                                                 (fn [nodes]
-                                                   (mapv (fn [node]
-                                                           (let [img-bytes (:page.node/image-data node)]
-                                                             (if (and (bytes? img-bytes)
-                                                                      (#{:image :table} (:page.node/type node)))
-                                                               (let [img-name (str (:page.node/id node) ".png")
-                                                                     img-path (io/file images-dir img-name)]
+                         (fn [pages]
+                           (mapv (fn [page]
+                                   (update page :page/nodes
+                                     (fn [nodes]
+                                       (mapv (fn [node]
+                                               (let [img-bytes (:page.node/image-data node)]
+                                                 (if (and (bytes? img-bytes)
+                                                       (#{:image :table} (:page.node/type node)))
+                                                   (let [img-name (str (:page.node/id node) ".png")
+                                                         img-path (io/file images-dir img-name)]
                                                                  ;; Ensure images dir exists
-                                                                 (when-not (.exists images-dir)
-                                                                   (.mkdirs images-dir))
+                                                     (when-not (.exists images-dir)
+                                                       (.mkdirs images-dir))
                                                                  ;; Write PNG
-                                                                 (with-open [out (io/output-stream img-path)]
-                                                                   (.write out ^bytes img-bytes))
-                                                                 (trove/log! {:level :debug
-                                                                              :data {:node-id (:page.node/id node) :path (str "images/" img-name)}
-                                                                              :msg "Wrote image file"})
+                                                     (with-open [out (io/output-stream img-path)]
+                                                       (.write out ^bytes img-bytes))
+                                                     (trove/log! {:level :debug
+                                                                  :data {:node-id (:page.node/id node) :path (str "images/" img-name)}
+                                                                  :msg "Wrote image file"})
                                                                  ;; Replace bytes with relative path
-                                                                 (-> node
-                                                                     (dissoc :page.node/image-data)
-                                                                     (assoc :page.node/image-path (str "images/" img-name))))
-                                                               node)))
-                                                         nodes))))
-                                       pages)))
+                                                     (-> node
+                                                       (dissoc :page.node/image-data)
+                                                       (assoc :page.node/image-path (str "images/" img-name))))
+                                                   node)))
+                                         nodes))))
+                             pages)))
         edn-file (io/file dir-file "document.edn")]
     ;; Ensure output dir exists
     (when-not (.exists dir-file)
@@ -2502,7 +2495,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (when-not (.exists dir)
       (.mkdirs dir)))
   (spit (str output-path "/manifest.edn")
-        (pr-str manifest)))
+    (pr-str manifest)))
 
 (defn- update-manifest-page!
   "Updates a single page's status in the manifest and persists immediately."
@@ -2526,29 +2519,29 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         doc (fast-edn/read-once edn-file)]
     ;; Resolve image paths back to byte arrays
     (update doc :document/pages
-            (fn [pages]
-              (mapv (fn [page]
-                      (update page :page/nodes
-                              (fn [nodes]
-                                (mapv (fn [node]
-                                        (if-let [img-rel-path (:page.node/image-path node)]
-                                          (let [img-file (io/file index-dir img-rel-path)]
-                                            (if (.exists img-file)
-                                              (let [img-bytes (let [ba (byte-array (.length img-file))]
-                                                                (with-open [is (java.io.FileInputStream. img-file)]
-                                                                  (.read is ba))
-                                                                ba)]
-                                                (-> node
-                                                    (dissoc :page.node/image-path)
-                                                    (assoc :page.node/image-data img-bytes)))
-                                              (do
-                                                (trove/log! {:level :warn
-                                                             :data {:path (str img-file)}
-                                                             :msg "Image file not found, skipping"})
-                                                (dissoc node :page.node/image-path))))
-                                          node))
-                                      nodes))))
-                    pages)))))
+      (fn [pages]
+        (mapv (fn [page]
+                (update page :page/nodes
+                  (fn [nodes]
+                    (mapv (fn [node]
+                            (if-let [img-rel-path (:page.node/image-path node)]
+                              (let [img-file (io/file index-dir img-rel-path)]
+                                (if (.exists img-file)
+                                  (let [img-bytes (let [ba (byte-array (.length img-file))]
+                                                    (with-open [is (java.io.FileInputStream. img-file)]
+                                                      (.read is ba))
+                                                    ba)]
+                                    (-> node
+                                      (dissoc :page.node/image-path)
+                                      (assoc :page.node/image-data img-bytes)))
+                                  (do
+                                    (trove/log! {:level :warn
+                                                 :data {:path (str img-file)}
+                                                 :msg "Image file not found, skipping"})
+                                    (dissoc node :page.node/image-path))))
+                              node))
+                      nodes))))
+          pages)))))
 
 (defn- with-index-lock!
   "Acquires a file lock on `lock.lck` inside the output directory.
@@ -2568,8 +2561,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
             (.close ch)
             (.close raf)
             (anomaly/incorrect! "Another index! is already running for this document"
-                                {:type :svar.pageindex/lock-conflict
-                                 :output-path (str output-path)}))
+              {:type :svar.pageindex/lock-conflict
+               :output-path (str output-path)}))
           (try
             (f)
             (finally
@@ -2580,8 +2573,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
           (.close ch)
           (.close raf)
           (anomaly/incorrect! "Another index! is already running for this document (same JVM)"
-                              {:type :svar.pageindex/lock-conflict
-                               :output-path (str output-path)}))))))
+            {:type :svar.pageindex/lock-conflict
+             :output-path (str output-path)}))))))
 
 (defn ^:export index!
   "Index a document file with incremental progress tracking.
@@ -2612,281 +2605,281 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
        (fn []
          (let [start-time (System/currentTimeMillis)
                current-hash (file-hash abs-path)
-         existing-manifest (read-manifest output-path)
-         hash-match? (and existing-manifest (= current-hash (:file-hash existing-manifest)))
-         needs-full-reindex? (or force? (not hash-match?))
-         file-type* (file-type abs-path)
-         total-pages-hint (or (:total-pages existing-manifest)
-                              (when (and (not pages) (= :pdf file-type*))
-                                (pdf/page-count abs-path))
-                              (when (and (not pages) (= :markdown file-type*))
-                                (count (markdown/markdown-file->pages abs-path)))
-                              (when (and (not pages) (#{:text :image} file-type*))
-                                1))
-         user-page-set (when (and pages total-pages-hint)
-                         (normalize-page-spec pages total-pages-hint))
-         done-page-indices (set (keep (fn [[idx status-map]]
-                                        (when (= :done (:status status-map)) idx))
-                                      (:pages existing-manifest)))
-         selected-page-indices (cond
-                                 user-page-set (set user-page-set)
-                                 total-pages-hint (set (range total-pages-hint))
-                                 :else nil)
-         pages-to-process (cond
-                            needs-full-reindex? selected-page-indices
-                            selected-page-indices (set/difference selected-page-indices done-page-indices)
-                            :else nil)
-         existing-document (when (and hash-match? (not force?) (fs/exists? output-path))
-                             (try
-                               (load-index output-path)
-                               (catch Exception e
-                                 (trove/log! {:level :warn
-                                              :data {:output-path output-path :error (ex-message e)}
-                                              :msg "Failed loading existing indexed document; rebuilding"})
-                                 nil)))
+               existing-manifest (read-manifest output-path)
+               hash-match? (and existing-manifest (= current-hash (:file-hash existing-manifest)))
+               needs-full-reindex? (or force? (not hash-match?))
+               file-type* (file-type abs-path)
+               total-pages-hint (or (:total-pages existing-manifest)
+                                  (when (and (not pages) (= :pdf file-type*))
+                                    (pdf/page-count abs-path))
+                                  (when (and (not pages) (= :markdown file-type*))
+                                    (count (markdown/markdown-file->pages abs-path)))
+                                  (when (and (not pages) (#{:text :image} file-type*))
+                                    1))
+               user-page-set (when (and pages total-pages-hint)
+                               (normalize-page-spec pages total-pages-hint))
+               done-page-indices (set (keep (fn [[idx status-map]]
+                                              (when (= :done (:status status-map)) idx))
+                                        (:pages existing-manifest)))
+               selected-page-indices (cond
+                                       user-page-set (set user-page-set)
+                                       total-pages-hint (set (range total-pages-hint))
+                                       :else nil)
+               pages-to-process (cond
+                                  needs-full-reindex? selected-page-indices
+                                  selected-page-indices (set/difference selected-page-indices done-page-indices)
+                                  :else nil)
+               existing-document (when (and hash-match? (not force?) (fs/exists? output-path))
+                                   (try
+                                     (load-index output-path)
+                                     (catch Exception e
+                                       (trove/log! {:level :warn
+                                                    :data {:output-path output-path :error (ex-message e)}
+                                                    :msg "Failed loading existing indexed document; rebuilding"})
+                                       nil)))
          ;; Merge existing manifest pages with pending entries for pages-to-process.
          ;; Crucially: preserve :done status from prior runs so crash-recovery works.
-         manifest-initial-pages (if selected-page-indices
-                                  (let [existing-pages (or (:pages existing-manifest) {})
-                                        now-str (str (Instant/now))]
-                                    (into {}
-                                          (map (fn [idx]
-                                                 (if (and (not needs-full-reindex?)
-                                                          (= :done (:status (get existing-pages idx))))
-                                                   [idx (get existing-pages idx)]
-                                                   [idx {:status :pending
-                                                         :updated-at now-str}]))
-                                               (sort selected-page-indices))))
-                                  (or (:pages existing-manifest) {}))
-         manifest-atom (atom
-                        (merge {:file-path (str abs-path)
-                                :file-hash current-hash
-                                :total-pages total-pages-hint
-                                :model (or vision-model "default")
-                                :started-at (str (Instant/now))
-                                :completed-at nil
-                                :errors-count 0
-                                :pages manifest-initial-pages}
-                               (when (and existing-manifest hash-match? (not force?))
-                                 (select-keys existing-manifest [:last-successful-index-at]))))
-         common-index-opts (cond-> {}
-                             config (assoc :config config)
-                             vision-model (assoc :model vision-model)
-                             parallel (assoc :parallel parallel)
-                             parallel-refine (assoc :parallel-refine parallel-refine)
-                             refine? (assoc :refine? refine?)
-                             refine-model (assoc :refine-model refine-model)
-                             refine-iterations (assoc :refine-iterations refine-iterations)
-                             refine-threshold (assoc :refine-threshold refine-threshold)
-                             refine-sample-size (assoc :refine-sample-size refine-sample-size))]
+               manifest-initial-pages (if selected-page-indices
+                                        (let [existing-pages (or (:pages existing-manifest) {})
+                                              now-str (str (Instant/now))]
+                                          (into {}
+                                            (map (fn [idx]
+                                                   (if (and (not needs-full-reindex?)
+                                                         (= :done (:status (get existing-pages idx))))
+                                                     [idx (get existing-pages idx)]
+                                                     [idx {:status :pending
+                                                           :updated-at now-str}]))
+                                              (sort selected-page-indices))))
+                                        (or (:pages existing-manifest) {}))
+               manifest-atom (atom
+                               (merge {:file-path (str abs-path)
+                                       :file-hash current-hash
+                                       :total-pages total-pages-hint
+                                       :model (or vision-model "default")
+                                       :started-at (str (Instant/now))
+                                       :completed-at nil
+                                       :errors-count 0
+                                       :pages manifest-initial-pages}
+                                 (when (and existing-manifest hash-match? (not force?))
+                                   (select-keys existing-manifest [:last-successful-index-at]))))
+               common-index-opts (cond-> {}
+                                   config (assoc :config config)
+                                   vision-model (assoc :model vision-model)
+                                   parallel (assoc :parallel parallel)
+                                   parallel-refine (assoc :parallel-refine parallel-refine)
+                                   refine? (assoc :refine? refine?)
+                                   refine-model (assoc :refine-model refine-model)
+                                   refine-iterations (assoc :refine-iterations refine-iterations)
+                                   refine-threshold (assoc :refine-threshold refine-threshold)
+                                   refine-sample-size (assoc :refine-sample-size refine-sample-size))]
 
-     (write-manifest! output-path @manifest-atom)
+           (write-manifest! output-path @manifest-atom)
 
-     (if (and hash-match?
-              (not force?)
-              existing-document
-              selected-page-indices
-              (empty? pages-to-process))
-       (do
-         (trove/log! {:level :info
-                      :id :svar.pageindex/cached
-                      :data {:input abs-path
-                             :output output-path
-                             :cached-pages (count done-page-indices)}
-                      :msg "All selected pages already indexed; returning cached document"})
-         (write-manifest! output-path (assoc @manifest-atom
-                                        :completed-at (str (Instant/now))
-                                        :last-successful-index-at (str (Instant/now))))
-         {:document existing-document
-          :output-path output-path
-          :cached? true
-          :pages-processed 0
-          :errors-count 0})
+           (if (and hash-match?
+                 (not force?)
+                 existing-document
+                 selected-page-indices
+                 (empty? pages-to-process))
+             (do
+               (trove/log! {:level :info
+                            :id :svar.pageindex/cached
+                            :data {:input abs-path
+                                   :output output-path
+                                   :cached-pages (count done-page-indices)}
+                            :msg "All selected pages already indexed; returning cached document"})
+               (write-manifest! output-path (assoc @manifest-atom
+                                              :completed-at (str (Instant/now))
+                                              :last-successful-index-at (str (Instant/now))))
+               {:document existing-document
+                :output-path output-path
+                :cached? true
+                :pages-processed 0
+                :errors-count 0})
 
-       (do
-         (trove/log! {:level :info
-                      :id :svar.pageindex/start
-                      :data {:input abs-path
-                             :output output-path
-                             :mode (cond
-                                     force? :forced-full
-                                     needs-full-reindex? :full
-                                     :else :incremental)
-                             :hash-match? (boolean hash-match?)
-                             :selected-pages (some-> selected-page-indices count)
-                             :done-pages (count done-page-indices)
-                             :to-process (some-> pages-to-process count)}
-                      :msg (format "Starting %s indexing — %s pages to process, %d already done"
-                                   (name (cond force? :forced-full needs-full-reindex? :full :else :incremental))
-                                   (or (some-> pages-to-process count str) "all")
-                                   (count done-page-indices))})
-
-         (let [existing-page-map (into {} (map (fn [p] [(:page/index p) p])
-                                                (:document/pages existing-document)))
-               page-map-atom (atom (if needs-full-reindex? {} existing-page-map))
-               toc-atom (atom (or (:document/toc existing-document) []))
-               ;; Seed metadata from existing doc OR from file path so we always
-               ;; have :document/name and :document/extension even if all pages error.
-               metadata-atom (atom (merge {:document/name (fs/strip-ext (fs/file-name abs-path))
-                                           :document/extension (some-> (fs/extension abs-path) name)}
-                                          (select-keys existing-document
-                                                       [:document/name :document/title :document/abstract
-                                                        :document/extension :document/created-at :document/updated-at
-                                                        :document/author])))
-               processed-count (atom 0)
-               errors-count (atom 0)]
-
-           (if (seq pages-to-process)
-             (let [total-to-process (count pages-to-process)
-                   page-times-atom (atom [])]
-               (doseq [[n idx] (map-indexed vector (sort pages-to-process))]
-                 (let [page-num (inc idx)
-                       t0 (System/currentTimeMillis)
-                       progress-pct (Math/round (* 100.0 (/ n total-to-process)))
-                       avg-ms-per-page (when (seq @page-times-atom)
-                                         (/ (reduce + @page-times-atom) (count @page-times-atom)))
-                       eta-ms (when avg-ms-per-page
-                                (long (* avg-ms-per-page (- total-to-process n))))]
-                   (trove/log! {:level :info
-                                :id :svar.pageindex/indexing-page
-                                :data (cond-> {:page (inc n)
-                                               :page-number page-num
-                                               :total total-to-process
-                                               :progress-pct progress-pct
-                                               :elapsed-ms (- (System/currentTimeMillis) start-time)
-                                               :errors @errors-count}
-                                        eta-ms (assoc :eta-ms eta-ms))
-                                :msg (format "Indexing page %d/%d (%d%%)" (inc n) total-to-process progress-pct)})
-                   (try
-                     (let [doc (build-index abs-path (assoc common-index-opts :pages page-num))
-                           page (first (:document/pages doc))
-                           now (str (Instant/now))
-                           page-elapsed (- (System/currentTimeMillis) t0)]
-                       (when-not page
-                         (anomaly/incorrect! "No page returned for selected page"
-                                             {:type :svar.pageindex/missing-page
-                                              :page-number page-num}))
-                       (swap! page-map-atom assoc idx page)
-                       (when (seq (:document/toc doc))
-                         (reset! toc-atom (:document/toc doc)))
-                       (swap! metadata-atom merge
-                              (select-keys doc [:document/name :document/title :document/abstract
-                                                :document/extension :document/created-at :document/updated-at
-                                                :document/author]))
-                       (update-manifest-page! output-path manifest-atom idx
-                                              {:status :done
-                                               :indexed-at now
-                                               :updated-at now
-                                               :nodes (count (:page/nodes page))
-                                               :elapsed-ms page-elapsed})
-                       (swap! processed-count inc)
-                       (swap! page-times-atom conj page-elapsed)
-                       (let [remaining (- total-to-process @processed-count)
-                             new-avg (/ (reduce + @page-times-atom) (count @page-times-atom))
-                             new-eta-ms (long (* new-avg remaining))]
-                         (trove/log! {:level :info
-                                      :id :svar.pageindex/indexed-page
-                                      :data {:page-number page-num
-                                             :nodes (count (:page/nodes page))
-                                             :elapsed-ms page-elapsed
-                                             :processed @processed-count
-                                             :remaining remaining
-                                             :eta-ms new-eta-ms
-                                             :errors @errors-count}
-                                      :msg (format "Indexed page %d — %d nodes, %dms (remaining: %d, ETA: %ds)"
-                                                   page-num (count (:page/nodes page)) page-elapsed
-                                                   remaining (quot new-eta-ms 1000))})))
-                     (catch Exception e
-                       (let [now (str (Instant/now))
-                             page-elapsed (- (System/currentTimeMillis) t0)]
-                         (swap! errors-count inc)
-                         (update-manifest-page! output-path manifest-atom idx
-                                                {:status :error
-                                                 :updated-at now
-                                                 :error (ex-message e)
-                                                 :elapsed-ms page-elapsed})
-                         (trove/log! {:level :warn
-                                      :id :svar.pageindex/page-error
-                                      :data {:page-number page-num
-                                             :error (ex-message e)
-                                             :elapsed-ms page-elapsed
-                                             :errors @errors-count
-                                             :remaining (- total-to-process (inc n))}
-                                      :msg (format "Page %d failed: %s — marked :error (errors so far: %d)"
-                                                   page-num (ex-message e) @errors-count)})))))))
-             ;; Fallback: file types without per-page tracking (e.g. unknown extensions)
-             (try
-               (let [doc (build-index abs-path (cond-> common-index-opts
-                                                 pages (assoc :pages pages)))
-                     now (str (Instant/now))]
-                 (swap! metadata-atom merge
-                        (select-keys doc [:document/name :document/title :document/abstract
-                                          :document/extension :document/created-at :document/updated-at
-                                          :document/author]))
-                 (when (seq (:document/toc doc))
-                   (reset! toc-atom (:document/toc doc)))
-                 (doseq [p (:document/pages doc)]
-                   (let [idx (:page/index p)]
-                     (swap! page-map-atom assoc idx p)
-                     (update-manifest-page! output-path manifest-atom idx
-                                            {:status :done
-                                             :indexed-at now
-                                             :updated-at now
-                                             :nodes (count (:page/nodes p))})
-                     (swap! processed-count inc))))
-               (catch Exception e
-                 (swap! errors-count inc)
-                 (trove/log! {:level :error
-                              :id :svar.pageindex/bulk-index-error
-                              :data {:error (ex-message e)
-                                     :elapsed-ms (- (System/currentTimeMillis) start-time)}
-                              :msg (format "Bulk indexing failed: %s" (ex-message e))}))))
-
-           (let [final-pages (->> @page-map-atom (sort-by key) (mapv val))
-                 final-document (merge @metadata-atom
-                                       {:document/pages final-pages
-                                        :document/toc @toc-atom})
-                 elapsed-ms (- (System/currentTimeMillis) start-time)
-                 all-failed? (and (pos? @errors-count) (empty? final-pages))]
-             ;; Only validate+write document when we have pages.
-             ;; When all pages errored, persist manifest so next call retries.
-             (when-not all-failed?
-               (when-not (schema/valid-document? final-document)
-                 (let [explanation (schema/explain-document final-document)]
-                   (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
-                   (anomaly/incorrect! "Document failed spec validation"
-                                       {:type :rlm/invalid-document
-                                        :document/name (:document/name final-document)
-                                        :explanation explanation})))
-               (write-document-edn! output-path final-document))
-             (let [final-manifest (cond-> (assoc @manifest-atom
-                                            :completed-at (str (Instant/now))
-                                            :total-pages (or total-pages-hint (count final-pages))
-                                            :errors-count @errors-count)
-                                    (not all-failed?)
-                                    (assoc :last-successful-index-at (str (Instant/now))))]
-               (write-manifest! output-path final-manifest)
-               (trove/log! {:level (if all-failed? :warn :info)
-                            :id :svar.pageindex/complete
-                            :data {:document/name (:document/name final-document)
-                                   :pages (count final-pages)
-                                   :toc-entries (count (:document/toc final-document))
-                                   :output-path output-path
+             (do
+               (trove/log! {:level :info
+                            :id :svar.pageindex/start
+                            :data {:input abs-path
+                                   :output output-path
                                    :mode (cond
                                            force? :forced-full
                                            needs-full-reindex? :full
                                            :else :incremental)
-                                   :processed @processed-count
-                                   :errors @errors-count
-                                   :elapsed-ms elapsed-ms}
-                            :msg (format "Indexing %s — %d pages, %d errors, %dms"
+                                   :hash-match? (boolean hash-match?)
+                                   :selected-pages (some-> selected-page-indices count)
+                                   :done-pages (count done-page-indices)
+                                   :to-process (some-> pages-to-process count)}
+                            :msg (format "Starting %s indexing — %s pages to process, %d already done"
+                                   (name (cond force? :forced-full needs-full-reindex? :full :else :incremental))
+                                   (or (some-> pages-to-process count str) "all")
+                                   (count done-page-indices))})
+
+               (let [existing-page-map (into {} (map (fn [p] [(:page/index p) p])
+                                                  (:document/pages existing-document)))
+                     page-map-atom (atom (if needs-full-reindex? {} existing-page-map))
+                     toc-atom (atom (or (:document/toc existing-document) []))
+               ;; Seed metadata from existing doc OR from file path so we always
+               ;; have :document/name and :document/extension even if all pages error.
+                     metadata-atom (atom (merge {:document/name (fs/strip-ext (fs/file-name abs-path))
+                                                 :document/extension (some-> (fs/extension abs-path) name)}
+                                           (select-keys existing-document
+                                             [:document/name :document/title :document/abstract
+                                              :document/extension :document/created-at :document/updated-at
+                                              :document/author])))
+                     processed-count (atom 0)
+                     errors-count (atom 0)]
+
+                 (if (seq pages-to-process)
+                   (let [total-to-process (count pages-to-process)
+                         page-times-atom (atom [])]
+                     (doseq [[n idx] (map-indexed vector (sort pages-to-process))]
+                       (let [page-num (inc idx)
+                             t0 (System/currentTimeMillis)
+                             progress-pct (Math/round (* 100.0 (/ n total-to-process)))
+                             avg-ms-per-page (when (seq @page-times-atom)
+                                               (/ (reduce + @page-times-atom) (count @page-times-atom)))
+                             eta-ms (when avg-ms-per-page
+                                      (long (* avg-ms-per-page (- total-to-process n))))]
+                         (trove/log! {:level :info
+                                      :id :svar.pageindex/indexing-page
+                                      :data (cond-> {:page (inc n)
+                                                     :page-number page-num
+                                                     :total total-to-process
+                                                     :progress-pct progress-pct
+                                                     :elapsed-ms (- (System/currentTimeMillis) start-time)
+                                                     :errors @errors-count}
+                                              eta-ms (assoc :eta-ms eta-ms))
+                                      :msg (format "Indexing page %d/%d (%d%%)" (inc n) total-to-process progress-pct)})
+                         (try
+                           (let [doc (build-index abs-path (assoc common-index-opts :pages page-num))
+                                 page (first (:document/pages doc))
+                                 now (str (Instant/now))
+                                 page-elapsed (- (System/currentTimeMillis) t0)]
+                             (when-not page
+                               (anomaly/incorrect! "No page returned for selected page"
+                                 {:type :svar.pageindex/missing-page
+                                  :page-number page-num}))
+                             (swap! page-map-atom assoc idx page)
+                             (when (seq (:document/toc doc))
+                               (reset! toc-atom (:document/toc doc)))
+                             (swap! metadata-atom merge
+                               (select-keys doc [:document/name :document/title :document/abstract
+                                                 :document/extension :document/created-at :document/updated-at
+                                                 :document/author]))
+                             (update-manifest-page! output-path manifest-atom idx
+                               {:status :done
+                                :indexed-at now
+                                :updated-at now
+                                :nodes (count (:page/nodes page))
+                                :elapsed-ms page-elapsed})
+                             (swap! processed-count inc)
+                             (swap! page-times-atom conj page-elapsed)
+                             (let [remaining (- total-to-process @processed-count)
+                                   new-avg (/ (reduce + @page-times-atom) (count @page-times-atom))
+                                   new-eta-ms (long (* new-avg remaining))]
+                               (trove/log! {:level :info
+                                            :id :svar.pageindex/indexed-page
+                                            :data {:page-number page-num
+                                                   :nodes (count (:page/nodes page))
+                                                   :elapsed-ms page-elapsed
+                                                   :processed @processed-count
+                                                   :remaining remaining
+                                                   :eta-ms new-eta-ms
+                                                   :errors @errors-count}
+                                            :msg (format "Indexed page %d — %d nodes, %dms (remaining: %d, ETA: %ds)"
+                                                   page-num (count (:page/nodes page)) page-elapsed
+                                                   remaining (quot new-eta-ms 1000))})))
+                           (catch Exception e
+                             (let [now (str (Instant/now))
+                                   page-elapsed (- (System/currentTimeMillis) t0)]
+                               (swap! errors-count inc)
+                               (update-manifest-page! output-path manifest-atom idx
+                                 {:status :error
+                                  :updated-at now
+                                  :error (ex-message e)
+                                  :elapsed-ms page-elapsed})
+                               (trove/log! {:level :warn
+                                            :id :svar.pageindex/page-error
+                                            :data {:page-number page-num
+                                                   :error (ex-message e)
+                                                   :elapsed-ms page-elapsed
+                                                   :errors @errors-count
+                                                   :remaining (- total-to-process (inc n))}
+                                            :msg (format "Page %d failed: %s — marked :error (errors so far: %d)"
+                                                   page-num (ex-message e) @errors-count)})))))))
+             ;; Fallback: file types without per-page tracking (e.g. unknown extensions)
+                   (try
+                     (let [doc (build-index abs-path (cond-> common-index-opts
+                                                       pages (assoc :pages pages)))
+                           now (str (Instant/now))]
+                       (swap! metadata-atom merge
+                         (select-keys doc [:document/name :document/title :document/abstract
+                                           :document/extension :document/created-at :document/updated-at
+                                           :document/author]))
+                       (when (seq (:document/toc doc))
+                         (reset! toc-atom (:document/toc doc)))
+                       (doseq [p (:document/pages doc)]
+                         (let [idx (:page/index p)]
+                           (swap! page-map-atom assoc idx p)
+                           (update-manifest-page! output-path manifest-atom idx
+                             {:status :done
+                              :indexed-at now
+                              :updated-at now
+                              :nodes (count (:page/nodes p))})
+                           (swap! processed-count inc))))
+                     (catch Exception e
+                       (swap! errors-count inc)
+                       (trove/log! {:level :error
+                                    :id :svar.pageindex/bulk-index-error
+                                    :data {:error (ex-message e)
+                                           :elapsed-ms (- (System/currentTimeMillis) start-time)}
+                                    :msg (format "Bulk indexing failed: %s" (ex-message e))}))))
+
+                 (let [final-pages (->> @page-map-atom (sort-by key) (mapv val))
+                       final-document (merge @metadata-atom
+                                        {:document/pages final-pages
+                                         :document/toc @toc-atom})
+                       elapsed-ms (- (System/currentTimeMillis) start-time)
+                       all-failed? (and (pos? @errors-count) (empty? final-pages))]
+             ;; Only validate+write document when we have pages.
+             ;; When all pages errored, persist manifest so next call retries.
+                   (when-not all-failed?
+                     (when-not (schema/valid-document? final-document)
+                       (let [explanation (schema/explain-document final-document)]
+                         (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
+                         (anomaly/incorrect! "Document failed spec validation"
+                           {:type :rlm/invalid-document
+                            :document/name (:document/name final-document)
+                            :explanation explanation})))
+                     (write-document-edn! output-path final-document))
+                   (let [final-manifest (cond-> (assoc @manifest-atom
+                                                  :completed-at (str (Instant/now))
+                                                  :total-pages (or total-pages-hint (count final-pages))
+                                                  :errors-count @errors-count)
+                                          (not all-failed?)
+                                          (assoc :last-successful-index-at (str (Instant/now))))]
+                     (write-manifest! output-path final-manifest)
+                     (trove/log! {:level (if all-failed? :warn :info)
+                                  :id :svar.pageindex/complete
+                                  :data {:document/name (:document/name final-document)
+                                         :pages (count final-pages)
+                                         :toc-entries (count (:document/toc final-document))
+                                         :output-path output-path
+                                         :mode (cond
+                                                 force? :forced-full
+                                                 needs-full-reindex? :full
+                                                 :else :incremental)
+                                         :processed @processed-count
+                                         :errors @errors-count
+                                         :elapsed-ms elapsed-ms}
+                                  :msg (format "Indexing %s — %d pages, %d errors, %dms"
                                          (if all-failed? "finished with all pages failed" "complete")
                                          (count final-pages) @errors-count elapsed-ms)})
-               {:document (when-not all-failed? final-document)
-                :output-path output-path
-                :cached? false
-                :pages-processed @processed-count
-                :errors-count @errors-count})))))))))))
+                     {:document (when-not all-failed? final-document)
+                      :output-path output-path
+                      :cached? false
+                      :pages-processed @processed-count
+                      :errors-count @errors-count})))))))))))
 
 (defn load-index
   "Load an indexed document from a pageindex directory (EDN + PNG files).
@@ -2923,9 +2916,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         (let [explanation (schema/explain-document document)]
           (trove/log! {:level :error :data {:path abs-path :explanation explanation} :msg "Loaded document failed spec validation"})
           (anomaly/incorrect! "Loaded document failed spec validation"
-                              {:type :rlm/invalid-document
-                               :path abs-path
-                               :explanation explanation})))
+            {:type :rlm/invalid-document
+             :path abs-path
+             :explanation explanation})))
 
       (trove/log! {:level :info :data {:path abs-path
                                        :document/name (:document/name document)
@@ -2968,8 +2961,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                   (let [explanation (schema/explain-document doc-or-path)]
                     (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
                     (anomaly/incorrect! "Document failed spec validation"
-                                        {:type :rlm/invalid-document
-                                         :explanation explanation})))
+                      {:type :rlm/invalid-document
+                       :explanation explanation})))
                 doc-or-path))
         toc (:document/toc doc)
         pages (:document/pages doc)]

@@ -37,18 +37,18 @@
         cause-msg (when cause (or (ex-message cause) ""))]
     (or
      ;; charred.api/read-json fails on truncated response body
-     (str/includes? msg "EOF reached while reading")
-     (str/includes? msg "Unexpected end of input")
+      (str/includes? msg "EOF reached while reading")
+      (str/includes? msg "Unexpected end of input")
      ;; java.net.http connection errors
-     (instance? java.io.EOFException e)
-     (instance? java.io.EOFException cause)
-     (instance? java.net.SocketTimeoutException e)
-     (instance? java.net.SocketTimeoutException cause)
-     (and cause-msg (str/includes? cause-msg "Connection reset"))
-     (and cause-msg (str/includes? cause-msg "EOF"))
+      (instance? java.io.EOFException e)
+      (instance? java.io.EOFException cause)
+      (instance? java.net.SocketTimeoutException e)
+      (instance? java.net.SocketTimeoutException cause)
+      (and cause-msg (str/includes? cause-msg "Connection reset"))
+      (and cause-msg (str/includes? cause-msg "EOF"))
      ;; babashka.http-client wraps errors in ExceptionInfo
-     (and (instance? clojure.lang.ExceptionInfo e)
-          (some-> cause retryable-exception?)))))
+      (and (instance? clojure.lang.ExceptionInfo e)
+        (some-> cause retryable-exception?)))))
 
 (defn- http-post!
   "Makes an HTTP POST request with JSON body and OAuth token.
@@ -66,10 +66,10 @@
    ExceptionInfo on HTTP errors."
   [url body api-key timeout-ms]
   (let [response (http/post url
-                            {:headers {"Authorization" (str "Bearer " api-key)
-                                       "Content-Type" "application/json"}
-                             :body (json/write-json-str body)
-                             :timeout timeout-ms})]
+                   {:headers {"Authorization" (str "Bearer " api-key)
+                              "Content-Type" "application/json"}
+                    :body (json/write-json-str body)
+                    :timeout timeout-ms})]
     (json/read-json (:body response) :key-fn keyword)))
 
 (defn- http-get!
@@ -83,8 +83,8 @@
    Map. Parsed JSON response."
   [url api-key]
   (let [response (http/get url
-                           {:headers {"Authorization" (str "Bearer " api-key)
-                                      "Content-Type" "application/json"}})]
+                   {:headers {"Authorization" (str "Bearer " api-key)
+                              "Content-Type" "application/json"}})]
     (json/read-json (:body response) :key-fn keyword)))
 
 (defn- with-retry
@@ -136,7 +136,7 @@
                                         :msg "Retrying HTTP request"})
                            (Thread/sleep (long delay-ms))
                            (recur (inc attempt)
-                                  (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
+                             (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
          :else (throw (:error result)))))))
 
 ;; =============================================================================
@@ -153,16 +153,16 @@
     (if (and (sequential? raw-content) (some map? raw-content))
       ;; Anthropic block format: [{:type "thinking" :thinking "..."} {:type "text" :text "..."}]
       (let [text-blocks (->> raw-content
-                             (filter #(= "text" (:type %)))
-                             (map :text)
-                             (clojure.string/join "\n"))
+                          (filter #(= "text" (:type %)))
+                          (map :text)
+                          (clojure.string/join "\n"))
             thinking-blocks (->> raw-content
-                                 (filter #(= "thinking" (:type %)))
-                                 (map :thinking)
-                                 (clojure.string/join "\n"))]
+                              (filter #(= "thinking" (:type %)))
+                              (map :thinking)
+                              (clojure.string/join "\n"))]
         {:content (when-not (clojure.string/blank? text-blocks) text-blocks)
          :reasoning (or (when-not (clojure.string/blank? thinking-blocks) thinking-blocks)
-                        raw-reasoning)
+                      raw-reasoning)
          :api-usage (get-in response [:usage])})
       ;; Standard OpenAI format
       {:content raw-content
@@ -198,20 +198,20 @@
           (if (vector? (:content msg))
             ;; Multimodal content - filter out image data
             (update msg :content
-                    (fn [content-blocks]
-                      (mapv (fn [block]
-                              (if (= "image_url" (:type block))
+              (fn [content-blocks]
+                (mapv (fn [block]
+                        (if (= "image_url" (:type block))
                                 ;; Replace base64 data with placeholder
-                                (let [url (get-in block [:image_url :url] "")]
-                                  (if (str/starts-with? url "data:")
-                                    (assoc-in block [:image_url :url]
-                                              (str (first (str/split url #",")) ",<BASE64_DATA_TRUNCATED>"))
-                                    block))
-                                block))
-                            content-blocks)))
+                          (let [url (get-in block [:image_url :url] "")]
+                            (if (str/starts-with? url "data:")
+                              (assoc-in block [:image_url :url]
+                                (str (first (str/split url #",")) ",<BASE64_DATA_TRUNCATED>"))
+                              block))
+                          block))
+                  content-blocks)))
             ;; Text-only content - pass through
             msg))
-        messages))
+    messages))
 
 (def ^:private API_KEY_ERROR_PATTERNS
   "Known error patterns that indicate API key configuration issues."
@@ -229,7 +229,7 @@
     (some (fn [{:keys [pattern message]}]
             (when (re-find pattern response-body)
               message))
-          API_KEY_ERROR_PATTERNS)))
+      API_KEY_ERROR_PATTERNS)))
 
 (defn- chat-completion-with-retry
   "Calls the LLM API with exponential backoff retry for rate limits."
@@ -267,9 +267,9 @@
                                 :response-body response-body}
                          :msg "LLM API key configuration error detected"}))
           (anomaly/fault! error-message
-                          (cond-> (merge (ex-data e) {:type :svar.core/http-error
-                                                      :llm-request sanitized-request})
-                            api-key-error (assoc :api-key-error api-key-error))))))))
+            (cond-> (merge (ex-data e) {:type :svar.core/http-error
+                                        :llm-request sanitized-request})
+              api-key-error (assoc :api-key-error api-key-error))))))))
 
 ;; PUBLIC — rlm.clj accesses this directly
 (defn chat-completion
@@ -294,7 +294,7 @@
    (let [timeout-ms (get opts :timeout-ms config/DEFAULT_TIMEOUT_MS)
          extra-body (:extra-body opts)]
      (chat-completion-with-retry
-      messages model api-key base-url opts timeout-ms extra-body))))
+       messages model api-key base-url opts timeout-ms extra-body))))
 
 (defn- build-system-prompt
   "Builds the system prompt with the objective wrapped in XML tags."
@@ -315,7 +315,7 @@
                                 :image_url {:url (if url
                                                    url
                                                    (str "data:" media-type ";base64," base64))}})
-                             images)
+                         images)
           text-block {:type "text" :text text}]
       (conj image-blocks text-block))))
 
@@ -455,8 +455,8 @@
 
 (defn- provider-available? [router provider ps]
   (and (not (in-cooldown? router ps))
-       (< (rpm-count router ps) (:rpm provider Long/MAX_VALUE))
-       (< (tpm-count router ps) (:tpm provider Long/MAX_VALUE))))
+    (< (rpm-count router ps) (:rpm provider Long/MAX_VALUE))
+    (< (tpm-count router ps) (:tpm provider Long/MAX_VALUE))))
 
 (defn- preference-sort-key
   "Returns a sort key fn for a single preference keyword.
@@ -479,8 +479,8 @@
     (let [required-caps (or (:capabilities prefs) #{})
           exclude (:exclude-model prefs)
           candidates (->> (:models provider)
-                          (filter #(every? (:capabilities %) required-caps))
-                          (filter #(if exclude (not= (:name %) exclude) true)))]
+                       (filter #(every? (:capabilities %) required-caps))
+                       (filter #(if exclude (not= (:name %) exclude) true)))]
       (when (seq candidates)
         (let [prefer (:prefer prefs)
               prefs-vec (cond
@@ -499,8 +499,8 @@
   (let [{:keys [providers state]} router
         current-state @state
         candidates (->> providers
-                        (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
-                        (filter (fn [[p _]] (provider-available? router p (get current-state (:id p) {})))))]
+                     (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
+                     (filter (fn [[p _]] (provider-available? router p (get current-state (:id p) {})))))]
     (when (seq candidates)
       (first (sort-by (fn [[p _]] (:priority p 0)) candidates)))))
 
@@ -512,13 +512,13 @@
       (let [current @state
             ts (router-now-ms router)
             candidates (->> providers
-                            (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
-                            (filter (fn [[p _]] (provider-available? router p (get current (:id p) {})))))]
+                         (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
+                         (filter (fn [[p _]] (provider-available? router p (get current (:id p) {})))))]
         (when (seq candidates)
           (let [[provider model-map] (first (sort-by (fn [[p _]] (:priority p 0)) candidates))
                 pid (:id provider)
                 new-state (update-in current [pid :requests]
-                                     (fn [r] (conj (router-prune-window router (or r [])) ts)))]
+                            (fn [r] (conj (router-prune-window router (or r [])) ts)))]
             (if (compare-and-set! state current new-state)
               [provider model-map]
               (recur))))))))
@@ -529,38 +529,38 @@
         ts (router-now-ms router)
         window-ms (:window-ms router)]
     (->> providers
-         (filter #(some? (resolve-model % prefs)))
-         (keep (fn [p]
-                 (let [ps (get current-state (:id p) {})
-                       cd (:cooldown-until ps)
-                       cooldown-ready (when (and cd (> cd ts)) cd)
-                       requests (sort (mapv #(if (map? %) (:ts %) %)
-                                            (router-prune-window router (:requests ps []))))
-                       rpm-ready (when (and (seq requests)
-                                            (>= (count requests) (:rpm p Long/MAX_VALUE)))
-                                   (+ (long (first requests)) window-ms))
-                       times (remove nil? [cooldown-ready rpm-ready])]
-                   (when (seq times) (apply max times)))))
-         sort first)))
+      (filter #(some? (resolve-model % prefs)))
+      (keep (fn [p]
+              (let [ps (get current-state (:id p) {})
+                    cd (:cooldown-until ps)
+                    cooldown-ready (when (and cd (> cd ts)) cd)
+                    requests (sort (mapv #(if (map? %) (:ts %) %)
+                                     (router-prune-window router (:requests ps []))))
+                    rpm-ready (when (and (seq requests)
+                                      (>= (count requests) (:rpm p Long/MAX_VALUE)))
+                                (+ (long (first requests)) window-ms))
+                    times (remove nil? [cooldown-ready rpm-ready])]
+                (when (seq times) (apply max times)))))
+      sort first)))
 
 (defn- record-tokens! [router provider-id token-count]
   (let [ts (router-now-ms router)]
     (swap! (:state router) update-in [provider-id :tokens]
-           (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
+      (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
 
 (defn- record-rate-limit! [router provider-id]
   (let [cooldown-ms (:cooldown-ms router)]
     (trove/log! {:level :warn :data {:provider provider-id :cooldown-ms cooldown-ms}
                  :msg "Provider rate-limited, entering cooldown"})
     (swap! (:state router) assoc-in [provider-id :cooldown-until]
-           (+ (router-now-ms router) cooldown-ms))))
+      (+ (router-now-ms router) cooldown-ms))))
 
 (defn- record-transient-error! [router provider-id]
   (let [short-cooldown-ms (max 5000 (quot (:cooldown-ms router) 4))]
     (trove/log! {:level :warn :data {:provider provider-id :cooldown-ms short-cooldown-ms}
                  :msg "Provider transient error, short cooldown"})
     (swap! (:state router) assoc-in [provider-id :cooldown-until]
-           (+ (router-now-ms router) short-cooldown-ms))))
+      (+ (router-now-ms router) short-cooldown-ms))))
 
 (defn- router-transient-error? [router e]
   (let [status (:status (ex-data e))
@@ -568,15 +568,15 @@
         codes (:transient-status-codes router)
         msg (ex-message e)]
     (boolean
-     (or (and status (contains? codes status))
+      (or (and status (contains? codes status))
          ;; HTTP errors with timeout-like messages
-         (and (= etype :svar.core/http-error)
-              (some-> msg (clojure.string/includes? "timed out")))
-         (instance? java.net.ConnectException e)
-         (instance? java.net.SocketTimeoutException e)
-         (some-> (.getCause e)
-                 ((fn [c] (or (instance? java.net.ConnectException c)
-                              (instance? java.net.SocketTimeoutException c)))))))))
+        (and (= etype :svar.core/http-error)
+          (some-> msg (clojure.string/includes? "timed out")))
+        (instance? java.net.ConnectException e)
+        (instance? java.net.SocketTimeoutException e)
+        (some-> (.getCause e)
+          ((fn [c] (or (instance? java.net.ConnectException c)
+                     (instance? java.net.SocketTimeoutException c)))))))))
 
 (defn- with-provider-fallback [router prefs f]
   (let [tried (atom #{})
@@ -596,13 +596,13 @@
             (if (= result ::transient-error)
               (recur (inc attempts))
               (do (record-tokens! router pid
-                                  (or (get-in result [:api-usage :total_tokens])
-                                      (get-in result [:tokens :total])
-                                      0))
+                    (or (get-in result [:api-usage :total_tokens])
+                      (get-in result [:tokens :total])
+                      0))
                   (assoc result
-                         :routed/provider-id pid
-                         :routed/model (:name model-map)
-                         :routed/base-url (:base-url provider))))))
+                    :routed/provider-id pid
+                    :routed/model (:name model-map)
+                    :routed/base-url (:base-url provider))))))
         (let [earliest (earliest-available router prefs)]
           (if (and earliest (< attempts 3))
             (let [wait-ms (min (- earliest (router-now-ms router)) max-wait-ms)]
@@ -612,8 +612,8 @@
                 (async/<!! (async/timeout wait-ms)))
               (recur (inc attempts)))
             (throw (ex-info "All providers exhausted"
-                            {:type :svar.llm/all-providers-exhausted
-                             :prefs prefs :tried @tried}))))))))
+                     {:type :svar.llm/all-providers-exhausted
+                      :prefs prefs :tried @tried}))))))))
 
 (defn make-router
   "Creates a router from a vector of provider maps.
@@ -641,7 +641,7 @@
          merged (merge router-default-opts opts)]
      (when (seq dupes)
        (throw (ex-info (str "Duplicate provider IDs: " (str/join ", " (map name dupes)))
-                       {:type :svar/duplicate-provider-ids :ids dupes})))
+                {:type :svar/duplicate-provider-ids :ids dupes})))
      {:providers              normalized
       :state                  (atom (zipmap ids (repeat {:requests [] :tokens [] :cooldown-until nil})))
       :clock                  (get opts :clock #(System/currentTimeMillis))
@@ -662,8 +662,8 @@
      (if (seq (:providers config))
        (make-router (:providers config))
        (let [model-name (or (:model config)
-                            (throw (ex-info "Model name required — pass :model in config or set BLOCKETHER_LLM_DEFAULT_MODEL env var"
-                                            {:type :svar/missing-model})))]
+                          (throw (ex-info "Model name required — pass :model in config or set BLOCKETHER_LLM_DEFAULT_MODEL env var"
+                                   {:type :svar/missing-model})))]
          (make-router [{:id :default
                         :api-key (:api-key config)
                         :base-url (:base-url config)
@@ -676,21 +676,21 @@
   (with-provider-fallback router prefs
     (fn [provider model-map]
       (chat-completion messages (:name model-map)
-                       (:api-key provider)
-                       (:base-url provider)
-                       (cond-> {}
-                         (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
-                         (assoc :extra-body (merge (:reasoning-params model-map)
-                                                   (when (:json-mode? prefs)
-                                                     {:response_format {:type "json_object"}})))
-                         (and (:json-mode? prefs) (not (seq (:reasoning-params model-map))))
-                         (assoc :extra-body {:response_format {:type "json_object"}}))))))
+        (:api-key provider)
+        (:base-url provider)
+        (cond-> {}
+          (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
+          (assoc :extra-body (merge (:reasoning-params model-map)
+                               (when (:json-mode? prefs)
+                                 {:response_format {:type "json_object"}})))
+          (and (:json-mode? prefs) (not (seq (:reasoning-params model-map))))
+          (assoc :extra-body {:response_format {:type "json_object"}}))))))
 
 (defn sanitize-config
   [config]
   (update config :providers
-          (fn [providers]
-            (mapv #(dissoc % :api-key) providers))))
+    (fn [providers]
+      (mapv #(dissoc % :api-key) providers))))
 
 ;; =============================================================================
 ;; ask!* - Low-level structured output (primitive, no routing)
@@ -715,7 +715,7 @@
    When no :router is provided, creates one from :config or env vars."
   [opts]
   (let [router (or (:router opts)
-                   (config->router (:config opts)))
+                 (config->router (:config opts)))
         prefs (cond
                 (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
@@ -724,11 +724,11 @@
       router prefs
       (fn [provider model-map]
         (ask!*
-         (assoc opts
-                :model (:name model-map)
-                :api-key (:api-key provider)
-                :base-url (:base-url provider)
-                :provider-id (:id provider)))))))
+          (assoc opts
+            :model (:name model-map)
+            :api-key (:api-key provider)
+            :base-url (:base-url provider)
+            :provider-id (:id provider)))))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
@@ -740,29 +740,29 @@
   (let [fields (::spec/fields spec-def)
         humanizable-fields (filter ::spec/humanize? fields)]
     (reduce
-     (fn [acc field-def]
-       (let [field-name (::spec/name field-def)
+      (fn [acc field-def]
+        (let [field-name (::spec/name field-def)
              ;; Get the simple key (strip namespace for lookup)
-             simple-key (keyword (name field-name))
-             cardinality (::spec/cardinality field-def)
-             current-val (get acc simple-key)]
-         (cond
+              simple-key (keyword (name field-name))
+              cardinality (::spec/cardinality field-def)
+              current-val (get acc simple-key)]
+          (cond
            ;; Single string value
-           (and (= cardinality :spec.cardinality/one)
-                (string? current-val))
-           (assoc acc simple-key (humanizer-fn current-val))
+            (and (= cardinality :spec.cardinality/one)
+              (string? current-val))
+            (assoc acc simple-key (humanizer-fn current-val))
 
            ;; Many - vector of strings
-           (and (= cardinality :spec.cardinality/many)
-                (vector? current-val))
-           (assoc acc simple-key
-                  (mapv (fn [v] (if (string? v) (humanizer-fn v) v))
-                        current-val))
+            (and (= cardinality :spec.cardinality/many)
+              (vector? current-val))
+            (assoc acc simple-key
+              (mapv (fn [v] (if (string? v) (humanizer-fn v) v))
+                current-val))
 
            ;; Not a string or nil - leave unchanged
-           :else acc)))
-     result
-     humanizable-fields)))
+            :else acc)))
+      result
+      humanizable-fields)))
 
 (defn ask!*
   "Low-level ask — calls the LLM directly without routing. Use ask! instead.
@@ -795,7 +795,7 @@
                                (if (= role "system")
                                  (assoc msg :content (build-system-prompt content))
                                  msg))
-                             messages)
+                         messages)
         ;; Append schema prompt as final user message
         messages (conj processed-msgs {:role "user" :content schema-prompt})
           ;; Pre-flight context check (also counts input tokens for reuse)
@@ -805,15 +805,15 @@
                         (let [check (tokens/check-context-limit model messages check-opts)]
                           (when-not (:ok? check)
                             (anomaly/incorrect! (:error check)
-                                                {:type :svar.core/context-overflow
-                                                 :model model
-                                                 :input-tokens (:input-tokens check)
-                                                 :max-input-tokens (:max-input-tokens check)
-                                                 :overflow (:overflow check)
-                                                 :utilization (:utilization check)
-                                                 :suggestion (str "Reduce task content by ~"
-                                                                  (int (* (double (:overflow check)) 0.75)) " words, "
-                                                                  "or use a larger context model.")}))
+                              {:type :svar.core/context-overflow
+                               :model model
+                               :input-tokens (:input-tokens check)
+                               :max-input-tokens (:max-input-tokens check)
+                               :overflow (:overflow check)
+                               :utilization (:utilization check)
+                               :suggestion (str "Reduce task content by ~"
+                                             (int (* (double (:overflow check)) 0.75)) " words, "
+                                             "or use a larger context model.")}))
                           check))
           ;; API call
         retry-opts (merge network {:timeout-ms timeout-ms})
@@ -821,8 +821,8 @@
                                                               (chat-completion messages model api-key chat-url retry-opts))
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
         token-stats (tokens/count-and-estimate model messages content
-                                               (cond-> {:pricing pricing :api-usage api-usage}
-                                                 context-check (assoc :input-tokens (:input-tokens context-check))))
+                      (cond-> {:pricing pricing :api-usage api-usage}
+                        context-check (assoc :input-tokens (:input-tokens context-check))))
           ;; Parse response
         raw-result (spec/str->data-with-spec content spec)
           ;; Apply spec-driven humanization if humanizer fn provided
@@ -860,11 +860,11 @@
       router prefs
       (fn [provider model-map]
         (abstract!*
-         (assoc opts
-                :model (:name model-map)
-                :api-key (:api-key provider)
-                :base-url (:base-url provider)
-                :provider-id (:id provider)))))))
+          (assoc opts
+            :model (:name model-map)
+            :api-key (:api-key provider)
+            :base-url (:base-url provider)
+            :provider-id (:id provider)))))))
 
 (def ^:private DEFAULT_ITERATIONS
   "Default number of Chain of Density iterations."
@@ -901,13 +901,13 @@
     
     " COD_ENTITY_CRITERIA "
     "
-       (when special-instructions
-         (str "
+    (when special-instructions
+      (str "
     <special_instructions>
         " special-instructions "
     </special_instructions>
     "))
-       "
+    "
     <output_requirements>
         <field name=\"entities\">Array of objects, each with 'entity' (atomic name), 'rationale' (why it's salient), and 'score' (0.0-1.0 salience)</field>
         <field name=\"summary\">The initial factual summary (~" target-length " words)</field>
@@ -928,17 +928,17 @@
     </process>
     
     " (str/replace COD_ENTITY_CRITERIA
-                   "</entity_criteria>"
-                   (str "    <criterion name=\"novel\">Not present in the previous summary or the already-extracted entities list</criterion>\n"
-                        "</entity_criteria>")) "
+        "</entity_criteria>"
+        (str "    <criterion name=\"novel\">Not present in the previous summary or the already-extracted entities list</criterion>\n"
+          "</entity_criteria>")) "
     "
-       (when special-instructions
-         (str "
+    (when special-instructions
+      (str "
     <special_instructions>
         " special-instructions "
     </special_instructions>
     "))
-       "
+    "
     <guidelines>
         <instruction>Make every word count by rewriting for better flow</instruction>
         <instruction>Create space through fusion, compression, and removing fillers</instruction>
@@ -968,42 +968,42 @@
 
     (seq accumulated-entities)
     (str "\n\n<already_extracted_entities>\n"
-         (str/join ", " accumulated-entities)
-         "\n</already_extracted_entities>")))
+      (str/join ", " accumulated-entities)
+      "\n</already_extracted_entities>")))
 
 (defn- build-cod-entity-spec
   "Builds the entity sub-spec for Chain of Density iterations.
    Each entity has a name, brief rationale, and a salience score."
   []
   (spec/spec :CodEntity
-             (spec/field ::spec/name :entity
-                         ::spec/type :spec.type/string
-                         ::spec/cardinality :spec.cardinality/one
-                         ::spec/description "Atomic entity name — a single person, place, date, concept, or thing")
-             (spec/field ::spec/name :rationale
-                         ::spec/type :spec.type/string
-                         ::spec/cardinality :spec.cardinality/one
-                         ::spec/description "Brief rationale: why this entity is salient to the text")
-             (spec/field ::spec/name :score
-                         ::spec/type :spec.type/float
-                         ::spec/cardinality :spec.cardinality/one
-                         ::spec/description "Salience score from 0.0 to 1.0 — how central this entity is to the text's main point")))
+    (spec/field ::spec/name :entity
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Atomic entity name — a single person, place, date, concept, or thing")
+    (spec/field ::spec/name :rationale
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Brief rationale: why this entity is salient to the text")
+    (spec/field ::spec/name :score
+      ::spec/type :spec.type/float
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Salience score from 0.0 to 1.0 — how central this entity is to the text's main point")))
 
 (defn- build-cod-spec
   "Builds the spec for a single Chain of Density iteration output.
    Each entity includes a rationale justifying its salience and a 0.0-1.0 score."
   []
   (spec/spec
-   {:refs [(build-cod-entity-spec)]}
-   (spec/field ::spec/name :entities
-               ::spec/type :spec.type/ref
-               ::spec/cardinality :spec.cardinality/many
-               ::spec/target :CodEntity
-               ::spec/description "Salient entities identified in this iteration, each with rationale and salience score")
-   (spec/field ::spec/name :summary
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "The summary for this iteration")))
+    {:refs [(build-cod-entity-spec)]}
+    (spec/field ::spec/name :entities
+      ::spec/type :spec.type/ref
+      ::spec/cardinality :spec.cardinality/many
+      ::spec/target :CodEntity
+      ::spec/description "Salient entities identified in this iteration, each with rationale and salience score")
+    (spec/field ::spec/name :summary
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "The summary for this iteration")))
 
 (def ^:private COD_EVAL_CRITERIA
   "Evaluation criteria for Chain of Density summaries."
@@ -1023,9 +1023,9 @@
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary accumulated-entities)
         ask-resp (ask!* (merge (select-keys resolved-opts [:model :config :api-key :base-url :provider-id])
-                               {:spec (build-cod-spec)
-                                :messages [(system objective)
-                                           (user task)]}))
+                          {:spec (build-cod-spec)
+                           :messages [(system objective)
+                                      (user task)]}))
         result (:result ask-resp)
         _ (when-not (map? result)
             (trove/log! {:level :warn
@@ -1035,15 +1035,15 @@
         ;; First-iteration nil summary is unrecoverable; subsequent iterations fall back.
         _ (when (and first-iteration? (nil? (:summary result)))
             (anomaly/fault! "LLM returned nil summary on first CoD iteration"
-                            {:result result}))
+              {:result result}))
         result (cond-> result
                  (nil? (:summary result))
                  (assoc :summary previous-summary))
         eval-resp (when eval?
                     (eval!* (merge (select-keys resolved-opts [:model :config :api-key :base-url :provider-id])
-                                   {:task (str "Summarize the following text:\n\n" source-text)
-                                    :output (:summary result)
-                                    :criteria COD_EVAL_CRITERIA})))
+                              {:task (str "Summarize the following text:\n\n" source-text)
+                               :output (:summary result)
+                               :criteria COD_EVAL_CRITERIA})))
         result (if eval-resp
                  (assoc result :score (:overall-score eval-resp))
                  result)
@@ -1054,7 +1054,7 @@
         ;; Case-insensitive dedup against accumulated entities
         accumulated-lower (set (map str/lower-case (or accumulated-entities [])))
         new-entity-names (->> (keep :entity (:entities result))
-                              (remove #(contains? accumulated-lower (str/lower-case %))))
+                           (remove #(contains? accumulated-lower (str/lower-case %))))
         ;; Aggregate token/cost from ask + eval
         iter-tokens (merge-with + (:tokens ask-resp) (:tokens eval-resp))
         iter-cost (merge-with + (:cost ask-resp) (:cost eval-resp))]
@@ -1068,10 +1068,10 @@
   "Builds a spec for the CoVe refinement pass on a CoD summary."
   []
   (spec/spec
-   (spec/field ::spec/name :summary
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "The refined, faithful summary")))
+    (spec/field ::spec/name :summary
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "The refined, faithful summary")))
 
 (defn abstract!*
   "Creates a dense, entity-rich summary of text using Chain of Density prompting.
@@ -1104,7 +1104,6 @@
          refine? false
          threshold 0.9}}]
   (let [resolved (resolve-opts opts)
-        model (:model resolved)
         step-fn (partial cod-iteration-step text target-length resolved special-instructions eval?)
         initial-state {:iterations [] :previous-summary nil :accumulated-entities []
                        :total-tokens {} :total-cost {}}
@@ -1118,8 +1117,8 @@
                             (let [prev-score (:score (nth iters (- (count iters) 2)))
                                   curr-score (:score (last iters))]
                               (if (or (and curr-score (>= curr-score threshold))
-                                      (and prev-score curr-score
-                                           (< (Math/abs (double (- curr-score prev-score))) 0.02)))
+                                    (and prev-score curr-score
+                                      (< (Math/abs (double (- curr-score prev-score))) 0.02)))
                                 next-state
                                 (recur next-state (dec remaining))))
                             (recur next-state (dec remaining))))))
@@ -1128,24 +1127,24 @@
                                (if (and refine? (seq cod-iterations))
                                  (let [final-summary (:summary (last cod-iterations))
                                        refine-result (refine!* (merge (select-keys resolved [:model :config :api-key :base-url :provider-id])
-                                                                        {:spec (build-cod-refinement-spec)
-                                                                         :messages [(system (str "You are verifying and refining a summary for faithfulness. "
-                                                                                                 "Every claim in the summary must be grounded in the source text. "
-                                                                                                 "Remove any meta-commentary, interpretive framing, or information not present in the source. "
-                                                                                                 "Preserve entity density and the ~" target-length " word length constraint."))
-                                                                                    (user (str "<source_text>\n" text "\n</source_text>\n\n"
-                                                                                               "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
-                                                                         :iterations 1
-                                                                         :threshold threshold
-                                                                         :documents [{:id "source"
-                                                                                      :pages [{:page "0" :text text}]}]}))
+                                                                 {:spec (build-cod-refinement-spec)
+                                                                  :messages [(system (str "You are verifying and refining a summary for faithfulness. "
+                                                                                       "Every claim in the summary must be grounded in the source text. "
+                                                                                       "Remove any meta-commentary, interpretive framing, or information not present in the source. "
+                                                                                       "Preserve entity density and the ~" target-length " word length constraint."))
+                                                                             (user (str "<source_text>\n" text "\n</source_text>\n\n"
+                                                                                     "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
+                                                                  :iterations 1
+                                                                  :threshold threshold
+                                                                  :documents [{:id "source"
+                                                                               :pages [{:page "0" :text text}]}]}))
                                        refined-summary (get-in refine-result [:result :summary]
-                                                               (:result refine-result))]
+                                                         (:result refine-result))]
                                    (conj (vec (butlast cod-iterations))
-                                         (assoc (last cod-iterations)
-                                                :summary (if (string? refined-summary) refined-summary final-summary)
-                                                :refined? true
-                                                :refinement-score (:final-score refine-result))))
+                                     (assoc (last cod-iterations)
+                                       :summary (if (string? refined-summary) refined-summary final-summary)
+                                       :refined? true
+                                       :refinement-score (:final-score refine-result))))
                                  cod-iterations))]
     {:result result
      :tokens (:total-tokens final-state)
@@ -1170,80 +1169,80 @@
   [_criteria]
   (spec/spec
    ;; Top-level assessment
-   (spec/field ::spec/name :overall-score
-               ::spec/type :spec.type/float
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Overall quality score from 0.0 to 1.0, weighted average of criteria")
-   (spec/field ::spec/name :correct?
-               ::spec/type :spec.type/bool
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Whether the output is fundamentally correct (true/false)")
-   (spec/field ::spec/name :summary
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Brief overall assessment summary")
+    (spec/field ::spec/name :overall-score
+      ::spec/type :spec.type/float
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Overall quality score from 0.0 to 1.0, weighted average of criteria")
+    (spec/field ::spec/name :correct?
+      ::spec/type :spec.type/bool
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Whether the output is fundamentally correct (true/false)")
+    (spec/field ::spec/name :summary
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Brief overall assessment summary")
    ;; Criteria evaluations as a vector
-   (spec/field ::spec/name :criteria
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/many
-               ::spec/description "Evaluation of each criterion")
-   (spec/field ::spec/name :criteria/name
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Name of the criterion (e.g., accuracy, completeness)")
-   (spec/field ::spec/name :criteria/score
-               ::spec/type :spec.type/float
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Score from 0.0 to 1.0 for this criterion")
-   (spec/field ::spec/name :criteria/confidence
-               ::spec/type :spec.type/float
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Confidence in this score assessment from 0.0 to 1.0")
-   (spec/field ::spec/name :criteria/reasoning
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Brief reasoning explaining the score")
+    (spec/field ::spec/name :criteria
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/many
+      ::spec/description "Evaluation of each criterion")
+    (spec/field ::spec/name :criteria/name
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Name of the criterion (e.g., accuracy, completeness)")
+    (spec/field ::spec/name :criteria/score
+      ::spec/type :spec.type/float
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Score from 0.0 to 1.0 for this criterion")
+    (spec/field ::spec/name :criteria/confidence
+      ::spec/type :spec.type/float
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Confidence in this score assessment from 0.0 to 1.0")
+    (spec/field ::spec/name :criteria/reasoning
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Brief reasoning explaining the score")
    ;; Issues as a vector with full details
-   (spec/field ::spec/name :issues
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/many
-               ::spec/required false
-               ::spec/description "List of issues found, empty array if none")
-   (spec/field ::spec/name :issues/issue
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Description of the issue")
-   (spec/field ::spec/name :issues/severity
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/values {"high" "Major issue that invalidates the output"
-                              "medium" "Significant issue that degrades quality"
-                              "low" "Minor issue that should be noted"}
-               ::spec/description "Severity level of the issue")
-   (spec/field ::spec/name :issues/confidence
-               ::spec/type :spec.type/float
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Confidence in this issue assessment from 0.0 to 1.0")
-   (spec/field ::spec/name :issues/reasoning
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Explanation of why this is an issue")
-   (spec/field ::spec/name :issues/mitigation
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/required false
-               ::spec/description "Optional suggestion for how to fix or mitigate this issue")))
+    (spec/field ::spec/name :issues
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/many
+      ::spec/required false
+      ::spec/description "List of issues found, empty array if none")
+    (spec/field ::spec/name :issues/issue
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Description of the issue")
+    (spec/field ::spec/name :issues/severity
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/values {"high" "Major issue that invalidates the output"
+                     "medium" "Significant issue that degrades quality"
+                     "low" "Minor issue that should be noted"}
+      ::spec/description "Severity level of the issue")
+    (spec/field ::spec/name :issues/confidence
+      ::spec/type :spec.type/float
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Confidence in this issue assessment from 0.0 to 1.0")
+    (spec/field ::spec/name :issues/reasoning
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Explanation of why this is an issue")
+    (spec/field ::spec/name :issues/mitigation
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/required false
+      ::spec/description "Optional suggestion for how to fix or mitigate this issue")))
 
 (defn- build-eval-objective
   "Builds the evaluation objective prompt."
   [criteria ground-truths]
   (let [criteria-list (->> criteria
-                           (map (fn [[k v]] (str "- " (name k) ": " v)))
-                           (str/join "\n"))
+                        (map (fn [[k v]] (str "- " (name k) ": " v)))
+                        (str/join "\n"))
         ground-truths-list (when (seq ground-truths)
                              (->> ground-truths
-                                  (map-indexed (fn [i gt] (str "        <fact id=\"" (inc (long i)) "\">" gt "</fact>")))
-                                  (str/join "\n")))]
+                               (map-indexed (fn [i gt] (str "        <fact id=\"" (inc (long i)) "\">" gt "</fact>")))
+                               (str/join "\n")))]
     (str "<evaluation_task>
     <role>You are a rigorous evaluator assessing LLM outputs for quality and correctness.</role>
     
@@ -1269,14 +1268,14 @@
         <guideline range=\"0.0-0.3\">Failing - Major issues, does not meet criterion</guideline>
     </scoring_guidelines>
     "
-         (when ground-truths-list
-           (str "
+      (when ground-truths-list
+        (str "
     <ground_truths>
         <note>Use these reference facts to verify correctness. The output should align with ALL of these.</note>
 " ground-truths-list "
     </ground_truths>
     "))
-         "
+      "
     <output_requirements>
         <requirement>Include an entry in 'criteria' array for EACH criterion listed above</requirement>
         <requirement>Calculate overall-score as weighted average of criteria scores</requirement>
@@ -1290,9 +1289,9 @@
   "Builds the evaluation task content."
   [original-task output context]
   (str "<original_task>\n" original-task "\n</original_task>\n\n"
-       "<output_to_evaluate>\n" (if (string? output) output (pr-str output)) "\n</output_to_evaluate>"
-       (when context
-         (str "\n\n<additional_context>\n" context "\n</additional_context>"))))
+    "<output_to_evaluate>\n" (if (string? output) output (pr-str output)) "\n</output_to_evaluate>"
+    (when context
+      (str "\n\n<additional_context>\n" context "\n</additional_context>"))))
 
 (defn- build-scores
   "Builds scores map from criteria vector."
@@ -1300,9 +1299,9 @@
   (let [criteria (:criteria eval-result)
         ;; Build scores map from criteria vector
         criteria-scores (->> criteria
-                             (map (fn [{:keys [name score]}]
-                                    [(keyword name) score]))
-                             (into {}))]
+                          (map (fn [{:keys [name score]}]
+                                 [(keyword name) score]))
+                          (into {}))]
     (assoc criteria-scores :overall (:overall-score eval-result))))
 
 (defn eval!
@@ -1316,11 +1315,11 @@
       router prefs
       (fn [provider model-map]
         (eval!*
-         (assoc opts
-                :model (:name model-map)
-                :api-key (:api-key provider)
-                :base-url (:base-url provider)
-                :provider-id (:id provider)))))))
+          (assoc opts
+            :model (:name model-map)
+            :api-key (:api-key provider)
+            :base-url (:base-url provider)
+            :provider-id (:id provider)))))))
 
 (defn eval!*
   "Low-level eval — calls ask!* directly without routing. Use eval! instead."
@@ -1330,12 +1329,12 @@
   (let [{:keys [config model]} (resolve-opts opts)
         ;; Resolve task: explicit :task wins, else extract from :messages
         effective-task (or task
-                           (when messages
-                             (->> messages
-                                  (remove #(= "assistant" (:role %)))
-                                  (map :content)
-                                  (str/join "\n")))
-                           "")
+                         (when messages
+                           (->> messages
+                             (remove #(= "assistant" (:role %)))
+                             (map :content)
+                             (str/join "\n")))
+                         "")
         eval-spec (build-eval-spec criteria)
         objective (build-eval-objective criteria ground-truths)
         eval-task (build-eval-task effective-task output context)
@@ -1348,10 +1347,10 @@
                   :config config}))
         scores (build-scores result)]
     (assoc result
-           :scores scores
-           :duration-ms duration-ms
-           :tokens tokens
-           :cost cost)))
+      :scores scores
+      :duration-ms duration-ms
+      :tokens tokens
+      :cost cost)))
 
 ;; =============================================================================
 ;; refine! - Iterative refinement with decomposition and verification
@@ -1370,29 +1369,29 @@
   "Builds the spec for decomposing output into verifiable claims."
   []
   (spec/spec
-   (spec/field ::spec/name :claims
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/many
-               ::spec/description "Verifiable claims or assertions extracted from the output")
-   (spec/field ::spec/name :claims/claim
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "The specific claim or assertion text")
-   (spec/field ::spec/name :claims/category
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/values {"factual" "Objective fact that can be independently verified"
-                              "inference" "Logical conclusion derived from other information"
-                              "subjective" "Opinion, judgment, or subjective assessment"}
-               ::spec/description "Category of the claim")
-   (spec/field ::spec/name :claims/confidence
-               ::spec/type :spec.type/float
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Confidence that this claim is accurate (0.0 to 1.0)")
-   (spec/field ::spec/name :claims/verifiable?
-               ::spec/type :spec.type/bool
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Whether this claim can be independently verified")))
+    (spec/field ::spec/name :claims
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/many
+      ::spec/description "Verifiable claims or assertions extracted from the output")
+    (spec/field ::spec/name :claims/claim
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "The specific claim or assertion text")
+    (spec/field ::spec/name :claims/category
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/values {"factual" "Objective fact that can be independently verified"
+                     "inference" "Logical conclusion derived from other information"
+                     "subjective" "Opinion, judgment, or subjective assessment"}
+      ::spec/description "Category of the claim")
+    (spec/field ::spec/name :claims/confidence
+      ::spec/type :spec.type/float
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Confidence that this claim is accurate (0.0 to 1.0)")
+    (spec/field ::spec/name :claims/verifiable?
+      ::spec/type :spec.type/bool
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Whether this claim can be independently verified")))
 
 (defn- build-decomposition-objective
   "Builds the objective prompt for claim decomposition."
@@ -1432,7 +1431,7 @@
   "Builds the task content for decomposition."
   [original-task output]
   (str "<original_task>\n" original-task "\n</original_task>\n\n"
-       "<output_to_decompose>\n" (if (string? output) output (pr-str output)) "\n</output_to_decompose>"))
+    "<output_to_decompose>\n" (if (string? output) output (pr-str output)) "\n</output_to_decompose>"))
 
 (defn- decompose-output
   "Extracts verifiable claims from an LLM output using DuTy-inspired decomposition."
@@ -1449,13 +1448,13 @@
   "Formats claims into a string for the verification task."
   [claims]
   (->> claims
-       (map-indexed (fn [i claim]
-                      (str "<claim id=\"" (inc (long i)) "\">\n"
-                           "  <text>" (:claim claim) "</text>\n"
-                           "  <category>" (:category claim) "</category>\n"
-                           "  <confidence>" (:confidence claim) "</confidence>\n"
-                           "</claim>")))
-       (str/join "\n")))
+    (map-indexed (fn [i claim]
+                   (str "<claim id=\"" (inc (long i)) "\">\n"
+                     "  <text>" (:claim claim) "</text>\n"
+                     "  <category>" (:category claim) "</category>\n"
+                     "  <confidence>" (:confidence claim) "</confidence>\n"
+                     "</claim>")))
+    (str/join "\n")))
 
 (def ^:private MAX_DOCUMENT_CONTENT_CHARS 16000)
 
@@ -1492,16 +1491,16 @@
   (when (seq documents)
     (let [truncated-documents (truncate-documents documents MAX_DOCUMENT_CONTENT_CHARS)]
       (str "<source_documents>\n"
-           (str/join "\n"
-                     (map (fn [{:keys [id pages]}]
-                            (str "  <document id=\"" id "\">\n"
-                                 (str/join "\n"
-                                           (map (fn [{:keys [page text]}]
-                                                  (str "    <page number=\"" page "\">" text "</page>"))
-                                                pages))
-                                 "\n  </document>"))
-                          truncated-documents))
-           "\n</source_documents>"))))
+        (str/join "\n"
+          (map (fn [{:keys [id pages]}]
+                 (str "  <document id=\"" id "\">\n"
+                   (str/join "\n"
+                     (map (fn [{:keys [page text]}]
+                            (str "    <page number=\"" page "\">" text "</page>"))
+                       pages))
+                   "\n  </document>"))
+            truncated-documents))
+        "\n</source_documents>"))))
 
 ;; =============================================================================
 ;; Factored CoVe: Question Planning + Independent Per-Claim Verification
@@ -1511,18 +1510,18 @@
   "Builds the spec for generating verification questions (without answers)."
   []
   (spec/spec
-   (spec/field ::spec/name :questions
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/many
-               ::spec/description "Verification questions, one per claim")
-   (spec/field ::spec/name :questions/claim
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "The original claim text being verified")
-   (spec/field ::spec/name :questions/question
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "A targeted verification question to test this claim")))
+    (spec/field ::spec/name :questions
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/many
+      ::spec/description "Verification questions, one per claim")
+    (spec/field ::spec/name :questions/claim
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "The original claim text being verified")
+    (spec/field ::spec/name :questions/question
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "A targeted verification question to test this claim")))
 
 (defn- build-question-planning-objective
   "Builds the system prompt for verification question planning."
@@ -1553,7 +1552,7 @@
   "Builds the task content for verification question planning."
   [original-task claims]
   (str "<original_task>\n" original-task "\n</original_task>\n\n"
-       "<claims_to_plan_questions_for>\n" (format-claims-for-verification claims) "\n</claims_to_plan_questions_for>"))
+    "<claims_to_plan_questions_for>\n" (format-claims-for-verification claims) "\n</claims_to_plan_questions_for>"))
 
 (defn- plan-verification-questions
   "Step 1 of Factored CoVe: Generate verification questions without answers."
@@ -1569,64 +1568,64 @@
   [has-documents?]
   (if has-documents?
     (spec/spec
-     (spec/field ::spec/name :answer
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Your independent answer to the verification question")
-     (spec/field ::spec/name :verdict
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/values {"correct" "The claim is accurate based on your independent answer"
-                                "incorrect" "The claim contradicts your independent answer"
-                                "partially-correct" "The claim is partly accurate but needs refinement"
-                                "uncertain" "Cannot determine accuracy with available information"}
-                 ::spec/description "Verdict comparing your answer against the original claim")
-     (spec/field ::spec/name :reasoning
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Explanation of your reasoning")
-     (spec/field ::spec/name :correction
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Suggested correction if claim is incorrect or partially correct")
-     (spec/field ::spec/name :document-id
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Document ID supporting or contradicting the claim")
-     (spec/field ::spec/name :page
-                 ::spec/type :spec.type/int
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Page number supporting or contradicting the claim")
-     (spec/field ::spec/name :section
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Section supporting or contradicting the claim"))
+      (spec/field ::spec/name :answer
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/description "Your independent answer to the verification question")
+      (spec/field ::spec/name :verdict
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/values {"correct" "The claim is accurate based on your independent answer"
+                       "incorrect" "The claim contradicts your independent answer"
+                       "partially-correct" "The claim is partly accurate but needs refinement"
+                       "uncertain" "Cannot determine accuracy with available information"}
+        ::spec/description "Verdict comparing your answer against the original claim")
+      (spec/field ::spec/name :reasoning
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/description "Explanation of your reasoning")
+      (spec/field ::spec/name :correction
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/required false
+        ::spec/description "Suggested correction if claim is incorrect or partially correct")
+      (spec/field ::spec/name :document-id
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/required false
+        ::spec/description "Document ID supporting or contradicting the claim")
+      (spec/field ::spec/name :page
+        ::spec/type :spec.type/int
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/required false
+        ::spec/description "Page number supporting or contradicting the claim")
+      (spec/field ::spec/name :section
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/required false
+        ::spec/description "Section supporting or contradicting the claim"))
     (spec/spec
-     (spec/field ::spec/name :answer
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Your independent answer to the verification question")
-     (spec/field ::spec/name :verdict
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/values {"correct" "The claim is accurate based on your independent answer"
-                                "incorrect" "The claim contradicts your independent answer"
-                                "partially-correct" "The claim is partly accurate but needs refinement"
-                                "uncertain" "Cannot determine accuracy with available information"}
-                 ::spec/description "Verdict comparing your answer against the original claim")
-     (spec/field ::spec/name :reasoning
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Explanation of your reasoning")
-     (spec/field ::spec/name :correction
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Suggested correction if claim is incorrect or partially correct"))))
+      (spec/field ::spec/name :answer
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/description "Your independent answer to the verification question")
+      (spec/field ::spec/name :verdict
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/values {"correct" "The claim is accurate based on your independent answer"
+                       "incorrect" "The claim contradicts your independent answer"
+                       "partially-correct" "The claim is partly accurate but needs refinement"
+                       "uncertain" "Cannot determine accuracy with available information"}
+        ::spec/description "Verdict comparing your answer against the original claim")
+      (spec/field ::spec/name :reasoning
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/description "Explanation of your reasoning")
+      (spec/field ::spec/name :correction
+        ::spec/type :spec.type/string
+        ::spec/cardinality :spec.cardinality/one
+        ::spec/required false
+        ::spec/description "Suggested correction if claim is incorrect or partially correct"))))
 
 (defn- build-single-verification-objective
   "Builds the system prompt for independently answering a single verification question."
@@ -1670,9 +1669,9 @@
   "Builds the task for independently verifying a single claim."
   [claim-text question documents]
   (str "<claim_to_verify>" claim-text "</claim_to_verify>\n\n"
-       "<verification_question>" question "</verification_question>"
-       (when (seq documents)
-         (str "\n\n" (build-source-documents-block documents)))))
+    "<verification_question>" question "</verification_question>"
+    (when (seq documents)
+      (str "\n\n" (build-source-documents-block documents)))))
 
 (defn- verify-single-claim
   "Step 2 of Factored CoVe: Answer a single verification question independently."
@@ -1687,7 +1686,7 @@
   "Returns true if a claim should be sent to verification."
   [claim]
   (and (not= false (:verifiable? claim))
-       (not= "subjective" (:category claim))))
+    (not= "subjective" (:category claim))))
 
 (defn- filter-verifiable-claims
   "Splits claims into verifiable and non-verifiable groups."
@@ -1708,11 +1707,11 @@
                                :answer "N/A"
                                :verdict "uncertain"
                                :reasoning "Claim is subjective or not independently verifiable"})
-                            non-verifiable)}
+                        non-verifiable)}
       ;; Factored CoVe
       (let [;; Step 1: Plan verification questions (one LLM call — sees all claims)
             planning-result (plan-verification-questions verifiable original-task
-                                                         original-objective model config)
+                              original-objective model config)
             planned-questions (:questions planning-result)
 
             ;; Step 2: Answer each question independently (one LLM call per question)
@@ -1722,7 +1721,7 @@
                           question (:question planned-q)
                           result (verify-single-claim claim-text question model config documents)]
                       (merge {:claim claim-text :question question} result)))
-                  planned-questions)
+              planned-questions)
 
             ;; Non-verifiable claims → uncertain without LLM calls
             skipped-results
@@ -1732,7 +1731,7 @@
                      :answer "N/A"
                      :verdict "uncertain"
                      :reasoning "Claim is subjective or not independently verifiable"})
-                  non-verifiable)]
+              non-verifiable)]
         {:verifications (into factored-verifications skipped-results)}))))
 
 ;; =============================================================================
@@ -1743,51 +1742,51 @@
   "Formats verification results for cross-claim inconsistency detection."
   [verifications]
   (->> verifications
-       (map-indexed (fn [i v]
-                      (str "<verified_claim id=\"" (inc (long i)) "\">\n"
-                           "  <claim>" (:claim v) "</claim>\n"
-                           "  <independent_answer>" (:answer v) "</independent_answer>\n"
-                           "  <verdict>" (:verdict v) "</verdict>\n"
-                           "  <reasoning>" (:reasoning v) "</reasoning>\n"
-                           (when (:correction v)
-                             (str "  <correction>" (:correction v) "</correction>\n"))
-                           "</verified_claim>")))
-       (str/join "\n")))
+    (map-indexed (fn [i v]
+                   (str "<verified_claim id=\"" (inc (long i)) "\">\n"
+                     "  <claim>" (:claim v) "</claim>\n"
+                     "  <independent_answer>" (:answer v) "</independent_answer>\n"
+                     "  <verdict>" (:verdict v) "</verdict>\n"
+                     "  <reasoning>" (:reasoning v) "</reasoning>\n"
+                     (when (:correction v)
+                       (str "  <correction>" (:correction v) "</correction>\n"))
+                     "</verified_claim>")))
+    (str/join "\n")))
 
 (defn- build-inconsistency-detection-spec
   "Builds the spec for detecting cross-claim inconsistencies."
   []
   (spec/spec
-   (spec/field ::spec/name :inconsistencies
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/many
-               ::spec/description "Cross-claim inconsistencies detected between verification results and original output. Empty array if none found.")
-   (spec/field ::spec/name :inconsistencies/claims
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "The conflicting claim texts, quoted verbatim from the verification results")
-   (spec/field ::spec/name :inconsistencies/type
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/values {"contradiction" "Two or more claims directly contradict each other"
-                              "inconsistency" "Claims are not directly contradictory but cannot both be fully accurate"
-                              "drift" "Verification answer reveals the original output diverged from facts in a way not caught by individual verdicts"}
-               ::spec/description "Type of inconsistency")
-   (spec/field ::spec/name :inconsistencies/description
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Clear description of the inconsistency and why it matters")
-   (spec/field ::spec/name :inconsistencies/severity
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/values {"high" "Factual contradiction that must be resolved"
-                              "medium" "Notable inconsistency that should be addressed"
-                              "low" "Minor tension that may be acceptable"}
-               ::spec/description "Severity of the inconsistency")
-   (spec/field ::spec/name :inconsistencies/resolution
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Suggested resolution for the inconsistency")))
+    (spec/field ::spec/name :inconsistencies
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/many
+      ::spec/description "Cross-claim inconsistencies detected between verification results and original output. Empty array if none found.")
+    (spec/field ::spec/name :inconsistencies/claims
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "The conflicting claim texts, quoted verbatim from the verification results")
+    (spec/field ::spec/name :inconsistencies/type
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/values {"contradiction" "Two or more claims directly contradict each other"
+                     "inconsistency" "Claims are not directly contradictory but cannot both be fully accurate"
+                     "drift" "Verification answer reveals the original output diverged from facts in a way not caught by individual verdicts"}
+      ::spec/description "Type of inconsistency")
+    (spec/field ::spec/name :inconsistencies/description
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Clear description of the inconsistency and why it matters")
+    (spec/field ::spec/name :inconsistencies/severity
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/values {"high" "Factual contradiction that must be resolved"
+                     "medium" "Notable inconsistency that should be addressed"
+                     "low" "Minor tension that may be acceptable"}
+      ::spec/description "Severity of the inconsistency")
+    (spec/field ::spec/name :inconsistencies/resolution
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Suggested resolution for the inconsistency")))
 
 (defn- build-inconsistency-detection-objective
   "Builds the system prompt for cross-claim inconsistency detection."
@@ -1820,8 +1819,8 @@
   "Builds the task content for cross-claim inconsistency detection."
   [original-output verifications]
   (str "<original_output>\n" (if (string? original-output) original-output (pr-str original-output)) "\n</original_output>\n\n"
-       "<verification_results>\n" (format-verifications-for-inconsistency-detection verifications) "\n</verification_results>\n\n"
-       "<instruction>Identify any cross-claim contradictions, inconsistencies, or factual drift between the verification results and the original output. If none are found, return an empty inconsistencies array.</instruction>"))
+    "<verification_results>\n" (format-verifications-for-inconsistency-detection verifications) "\n</verification_results>\n\n"
+    "<instruction>Identify any cross-claim contradictions, inconsistencies, or factual drift between the verification results and the original output. If none are found, return an empty inconsistencies array.</instruction>"))
 
 (defn- detect-inconsistencies
   "Step 3 of Factor+Revise CoVe: Explicit cross-claim inconsistency detection."
@@ -1840,15 +1839,15 @@
   "Formats verification results into feedback for refinement."
   [verifications]
   (->> verifications
-       (map-indexed (fn [i v]
-                      (str "<verification id=\"" (inc (long i)) "\">\n"
-                           "  <claim>" (:claim v) "</claim>\n"
-                           "  <verdict>" (:verdict v) "</verdict>\n"
-                           "  <reasoning>" (:reasoning v) "</reasoning>\n"
-                           (when (:correction v)
-                             (str "  <correction>" (:correction v) "</correction>\n"))
-                           "</verification>")))
-       (str/join "\n")))
+    (map-indexed (fn [i v]
+                   (str "<verification id=\"" (inc (long i)) "\">\n"
+                     "  <claim>" (:claim v) "</claim>\n"
+                     "  <verdict>" (:verdict v) "</verdict>\n"
+                     "  <reasoning>" (:reasoning v) "</reasoning>\n"
+                     (when (:correction v)
+                       (str "  <correction>" (:correction v) "</correction>\n"))
+                     "</verification>")))
+    (str/join "\n")))
 
 (defn- format-issues-for-refinement
   "Formats evaluation issues into feedback for refinement."
@@ -1856,14 +1855,14 @@
   (if (empty? issues)
     "<issues>None identified</issues>"
     (->> issues
-         (map-indexed (fn [i issue]
-                        (str "<issue id=\"" (inc (long i)) "\" severity=\"" (:severity issue) "\">\n"
-                             "  <description>" (:issue issue) "</description>\n"
-                             "  <reasoning>" (:reasoning issue) "</reasoning>\n"
-                             (when (:mitigation issue)
-                               (str "  <mitigation>" (:mitigation issue) "</mitigation>\n"))
-                             "</issue>")))
-         (str/join "\n"))))
+      (map-indexed (fn [i issue]
+                     (str "<issue id=\"" (inc (long i)) "\" severity=\"" (:severity issue) "\">\n"
+                       "  <description>" (:issue issue) "</description>\n"
+                       "  <reasoning>" (:reasoning issue) "</reasoning>\n"
+                       (when (:mitigation issue)
+                         (str "  <mitigation>" (:mitigation issue) "</mitigation>\n"))
+                       "</issue>")))
+      (str/join "\n"))))
 
 (defn- format-inconsistencies-for-refinement
   "Formats cross-claim inconsistencies into feedback for refinement."
@@ -1871,15 +1870,15 @@
   (if (empty? inconsistencies)
     "<cross_claim_inconsistencies>None detected</cross_claim_inconsistencies>"
     (str "<cross_claim_inconsistencies>\n"
-         (->> inconsistencies
-              (map-indexed (fn [i incon]
-                             (str "  <inconsistency id=\"" (inc (long i)) "\" type=\"" (:type incon) "\" severity=\"" (:severity incon) "\">\n"
-                                  "    <claims>" (:claims incon) "</claims>\n"
-                                  "    <description>" (:description incon) "</description>\n"
-                                  "    <resolution>" (:resolution incon) "</resolution>\n"
-                                  "  </inconsistency>")))
-              (str/join "\n"))
-         "\n</cross_claim_inconsistencies>")))
+      (->> inconsistencies
+        (map-indexed (fn [i incon]
+                       (str "  <inconsistency id=\"" (inc (long i)) "\" type=\"" (:type incon) "\" severity=\"" (:severity incon) "\">\n"
+                         "    <claims>" (:claims incon) "</claims>\n"
+                         "    <description>" (:description incon) "</description>\n"
+                         "    <resolution>" (:resolution incon) "</resolution>\n"
+                         "  </inconsistency>")))
+        (str/join "\n"))
+      "\n</cross_claim_inconsistencies>")))
 
 (defn- build-refinement-objective
   "Builds the objective prompt for output refinement."
@@ -1916,11 +1915,11 @@
   "Builds the task content for refinement with full context."
   [original-task current-output verifications evaluation-issues inconsistencies]
   (str "<original_task>\n" original-task "\n</original_task>\n\n"
-       "<current_output>\n" (if (string? current-output) current-output (pr-str current-output)) "\n</current_output>\n\n"
-       "<verification_feedback>\n" (format-verifications-for-refinement verifications) "\n</verification_feedback>\n\n"
-       (format-inconsistencies-for-refinement inconsistencies) "\n\n"
-       "<evaluation_issues>\n" (format-issues-for-refinement evaluation-issues) "\n</evaluation_issues>\n\n"
-       "<instruction>Generate a refined version of the output that resolves all cross-claim inconsistencies, addresses the verification feedback and evaluation issues, while maintaining correct content.</instruction>"))
+    "<current_output>\n" (if (string? current-output) current-output (pr-str current-output)) "\n</current_output>\n\n"
+    "<verification_feedback>\n" (format-verifications-for-refinement verifications) "\n</verification_feedback>\n\n"
+    (format-inconsistencies-for-refinement inconsistencies) "\n\n"
+    "<evaluation_issues>\n" (format-issues-for-refinement evaluation-issues) "\n</evaluation_issues>\n\n"
+    "<instruction>Generate a refined version of the output that resolves all cross-claim inconsistencies, addresses the verification feedback and evaluation issues, while maintaining correct content.</instruction>"))
 
 (defn- should-stop?
   "Determines if refinement should stop based on strategy and current state."
@@ -1933,10 +1932,10 @@
       :threshold (>= current-score threshold)
       :fixed (>= current-iteration max-iterations)
       :both (or (>= current-score threshold)
-                (>= current-iteration max-iterations))
+              (>= current-iteration max-iterations))
       ;; Default to :both behavior
       (or (>= current-score threshold)
-          (>= current-iteration max-iterations)))))
+        (>= current-iteration max-iterations)))))
 
 (defn- refinement-iteration-step
   "Performs a single refinement iteration:
@@ -1950,7 +1949,7 @@
         (util/with-elapsed
           (let [;; Step 1: Decompose - extract claims from current output
                 decomposition (decompose-output current-output original-task original-objective
-                                                model config)
+                                model config)
                 claims (:claims decomposition)
 
                 ;; Step 2: Verify - check claims with independent per-claim verification
@@ -1959,7 +1958,7 @@
 
                 ;; Step 3: Detect cross-claim inconsistencies (Factor+Revise)
                 inconsistency-result (detect-inconsistencies current-output verifications
-                                                             original-objective model config)
+                                       original-objective model config)
                 inconsistencies (or (:inconsistencies inconsistency-result) [])
 
                 ;; Step 4: Evaluate - get quality assessment
@@ -1972,8 +1971,8 @@
                 ;; Step 5: Refine - generate improved output incorporating all feedback
                 refinement-objective (build-refinement-objective original-objective iteration)
                 refinement-task (build-refinement-task original-task current-output
-                                                       verifications (:issues evaluation)
-                                                       inconsistencies)
+                                  verifications (:issues evaluation)
+                                  inconsistencies)
                 {:keys [result]} (ask!* {:spec spec
                                          :messages [(system refinement-objective)
                                                     (user refinement-task)]
@@ -1992,17 +1991,17 @@
                           :verification {:verifications verifications
                                          :incorrect-count incorrect-count
                                          :uncertain-count (->> verifications
-                                                               (filter #(= "uncertain" (:verdict %)))
-                                                               count)}
+                                                            (filter #(= "uncertain" (:verdict %)))
+                                                            count)}
                           :inconsistencies {:detected inconsistencies
                                             :count (count inconsistencies)
                                             :high-severity-count (->> inconsistencies
-                                                                      (filter #(= "high" (:severity %)))
-                                                                      count)}
+                                                                   (filter #(= "high" (:severity %)))
+                                                                   count)}
                           :evaluation evaluation
                           :refinements (->> verifications
-                                            (filter #(contains? #{"incorrect" "partially-correct"} (:verdict %)))
-                                            (mapv #(select-keys % [:claim :verdict :correction])))
+                                         (filter #(contains? #{"incorrect" "partially-correct"} (:verdict %)))
+                                         (mapv #(select-keys % [:claim :verdict :correction])))
                           :duration-ms iter-duration-ms}
 
         ;; Track prompt evolution
@@ -2078,16 +2077,16 @@
                        :prompt-evolution []}
 
         step-fn (partial refinement-iteration-step
-                         spec original-objective original-task model config criteria documents)
+                  spec original-objective original-task model config criteria documents)
 
           ;; Run iterations until stopping condition met
         [final-state total-duration-ms]
         (util/with-elapsed
           (loop [state initial-state]
             (if (should-stop? stop-strategy threshold
-                              (:latest-score state)
-                              (:iteration-num state)
-                              iterations)
+                  (:latest-score state)
+                  (:iteration-num state)
+                  iterations)
               state
               (recur (step-fn state)))))
 
@@ -2102,7 +2101,7 @@
 
           ;; Phase 4: Compute gradient and window
         all-scores (conj (mapv #(get-in % [:evaluation :overall-score]) (:iterations final-state))
-                         final-score)
+                     final-score)
         gradient (compute-gradient all-scores)
         window-scores (vec (take-last window-size all-scores))
         iterations-count (:iteration-num final-state)
@@ -2164,22 +2163,22 @@
         summary (:summary evaluation)
         scores (:scores evaluation)]
     (str "<evaluation_feedback>\n"
-         "  <summary>" summary "</summary>\n"
-         "  <scores>" (pr-str (dissoc scores :overall)) "</scores>\n"
-         (when (seq issues)
-           (str "  <issues>\n"
-                (->> issues
-                     (map (fn [{:keys [issue severity reasoning mitigation]}]
-                            (str "    <issue severity=\"" severity "\">\n"
-                                 "      <description>" issue "</description>\n"
-                                 (when reasoning (str "      <reasoning>" reasoning "</reasoning>\n"))
-                                 (when mitigation (str "      <mitigation>" mitigation "</mitigation>\n"))
-                                 "    </issue>")))
-                     (str/join "\n"))
-                "\n  </issues>\n"))
-         "</evaluation_feedback>\n\n"
-         "Regenerate " n " improved samples addressing the feedback above. "
-         "Maintain what was good and fix the identified issues.")))
+      "  <summary>" summary "</summary>\n"
+      "  <scores>" (pr-str (dissoc scores :overall)) "</scores>\n"
+      (when (seq issues)
+        (str "  <issues>\n"
+          (->> issues
+            (map (fn [{:keys [issue severity reasoning mitigation]}]
+                   (str "    <issue severity=\"" severity "\">\n"
+                     "      <description>" issue "</description>\n"
+                     (when reasoning (str "      <reasoning>" reasoning "</reasoning>\n"))
+                     (when mitigation (str "      <mitigation>" mitigation "</mitigation>\n"))
+                     "    </issue>")))
+            (str/join "\n"))
+          "\n  </issues>\n"))
+      "</evaluation_feedback>\n\n"
+      "Regenerate " n " improved samples addressing the feedback above. "
+      "Maintain what was good and fix the identified issues.")))
 
 (defn sample!
   "Routed sample! — provider fallback + rate limiting."
@@ -2192,11 +2191,11 @@
       router prefs
       (fn [provider model-map]
         (sample!*
-         (assoc opts
-                :model (:name model-map)
-                :api-key (:api-key provider)
-                :base-url (:base-url provider)
-                :provider-id (:id provider)))))))
+          (assoc opts
+            :model (:name model-map)
+            :api-key (:api-key provider)
+            :base-url (:base-url provider)
+            :provider-id (:id provider)))))))
 
 (defn sample!*
   "Low-level sample — generates test data without routing. Use sample! instead."
@@ -2219,22 +2218,22 @@
           ;; Build items spec wrapping user's spec
           item-spec (assoc spec ::spec/spec-name :Item)
           items-spec (spec/spec
-                      {:refs [item-spec]}
-                      (spec/field ::spec/name :items
-                                  ::spec/type :spec.type/ref
-                                  ::spec/cardinality :spec.cardinality/many
-                                  ::spec/description "Array of generated samples"
-                                  ::spec/target :Item))
+                       {:refs [item-spec]}
+                       (spec/field ::spec/name :items
+                         ::spec/type :spec.type/ref
+                         ::spec/cardinality :spec.cardinality/many
+                         ::spec/description "Array of generated samples"
+                         ::spec/target :Item))
 
           ;; Build generation messages
           count-instruction (str "Generate exactly " n " sample items. "
-                                 "Each item should be unique and realistic. "
-                                 "Ensure diversity across all samples.")
+                              "Each item should be unique and realistic. "
+                              "Ensure diversity across all samples.")
           generation-messages (if messages
                                 (conj (vec messages) (user count-instruction))
                                 [(system (str "You are a test data generator. Generate realistic, diverse "
-                                              "samples that match the provided specification. "
-                                              "Ensure variety and quality."))
+                                           "samples that match the provided specification. "
+                                           "Ensure variety and quality."))
                                  (user count-instruction)])
 
           ;; Generation + self-correction loop
@@ -2262,7 +2261,7 @@
                     new-best-score (if better? score best-score)]
 
                 (if (or (>= score (double threshold))
-                        (>= (long iter) (dec (long iterations))))
+                      (>= (long iter) (dec (long iterations))))
                   ;; Done — return best result
                   {:samples new-best-samples
                    :scores (:scores evaluation)
@@ -2273,11 +2272,11 @@
                   ;; Self-correct: feed back evaluation and regenerate
                   (let [feedback (build-sample-refinement-feedback evaluation n)]
                     (recur (inc (long iter))
-                           (conj current-messages
-                                 (assistant (spec/data->str result))
-                                 (user feedback))
-                           new-best-samples
-                           new-best-score))))))]
+                      (conj current-messages
+                        (assistant (spec/data->str result))
+                        (user feedback))
+                      new-best-samples
+                      new-best-score))))))]
 
       {:samples samples
        :scores scores
@@ -2295,7 +2294,7 @@
    Accepts all opts that refine!* accepts, plus :router, :strategy, :prefer, :capabilities."
   [opts]
   (let [router (or (:router opts)
-                   (config->router (:config opts)))
+                 (config->router (:config opts)))
         prefs (cond
                 (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
@@ -2304,8 +2303,8 @@
       router prefs
       (fn [provider model-map]
         (refine!*
-         (assoc opts
-                :model (:name model-map)
-                :api-key (:api-key provider)
-                :base-url (:base-url provider)
-                :provider-id (:id provider)))))))
+          (assoc opts
+            :model (:name model-map)
+            :api-key (:api-key provider)
+            :base-url (:base-url provider)
+            :provider-id (:id provider)))))))

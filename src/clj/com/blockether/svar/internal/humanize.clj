@@ -438,19 +438,19 @@
   "Patterns that are unambiguously AI artifacts. Safe for arbitrary text.
    Includes: AI identity, refusal, knowledge, and punctuation patterns."
   (merge AI_IDENTITY_PATTERNS
-         REFUSAL_PATTERNS
-         KNOWLEDGE_PATTERNS
-         PUNCTUATION_PATTERNS))
+    REFUSAL_PATTERNS
+    KNOWLEDGE_PATTERNS
+    PUNCTUATION_PATTERNS))
 
 (def AGGRESSIVE_PATTERNS
   "Patterns that may match valid English. Opt-in only.
    Includes: hedging, overused verbs/adjectives/nouns, opening/closing cliches."
   (merge HEDGING_PATTERNS
-         OVERUSED_VERBS_PATTERNS
-         OVERUSED_ADJECTIVES_PATTERNS
-         OVERUSED_NOUNS_AND_TRANSITIONS_PATTERNS
-         OPENING_CLICHE_PATTERNS
-         CLOSING_CLICHE_PATTERNS))
+    OVERUSED_VERBS_PATTERNS
+    OVERUSED_ADJECTIVES_PATTERNS
+    OVERUSED_NOUNS_AND_TRANSITIONS_PATTERNS
+    OPENING_CLICHE_PATTERNS
+    CLOSING_CLICHE_PATTERNS))
 
 (def DEFAULT_PATTERNS
   "Combined map of all humanization patterns (safe + aggressive).
@@ -478,7 +478,7 @@
         prefix (if (word-char? first-char) "(?<=^|[^\\p{L}\\p{N}_])" "")
         suffix (if (word-char? last-char) "(?=$|[^\\p{L}\\p{N}_])" "")]
     (Pattern/compile (str prefix escaped suffix)
-                     (bit-or Pattern/CASE_INSENSITIVE Pattern/UNICODE_CASE))))
+      (bit-or Pattern/CASE_INSENSITIVE Pattern/UNICODE_CASE))))
 
 (defn- detect-case
   "Detect the case pattern of a matched string.
@@ -487,9 +487,9 @@
   (let [letters (filter #(Character/isLetter ^char %) s)]
     (cond
       (and (seq letters)
-           (every? #(Character/isUpperCase ^char %) letters)) :upper
+        (every? #(Character/isUpperCase ^char %) letters)) :upper
       (and (pos? (.length s))
-           (Character/isUpperCase (.charAt s 0))) :title
+        (Character/isUpperCase (.charAt s 0))) :title
       :else :lower)))
 
 (defn- apply-case
@@ -499,7 +499,7 @@
     :upper (str/upper-case replacement)
     :title (if (pos? (.length replacement))
              (str (str/upper-case (subs replacement 0 1))
-                  (subs replacement 1))
+               (subs replacement 1))
              replacement)
     :lower replacement))
 
@@ -521,8 +521,8 @@
   [^String text ^String pattern ^String replacement]
   (let [regex (build-pattern-regex pattern)
         preserve-case? (and (single-word? pattern)
-                            (single-word? replacement)
-                            (pos? (.length replacement)))]
+                         (single-word? replacement)
+                         (pos? (.length replacement)))]
     (if preserve-case?
       ;; T6: Case-preserving single-word replacement
       (let [matcher (.matcher regex text)
@@ -570,17 +570,17 @@
             ;; Replace zones with placeholders (reverse order to preserve indices)
             protected (reduce (fn [t [i [start end _orig]]]
                                 (str (subs t 0 start)
-                                     (nth placeholders i)
-                                     (subs t end)))
-                              text
-                              (reverse (map-indexed vector zones)))
+                                  (nth placeholders i)
+                                  (subs t end)))
+                        text
+                        (reverse (map-indexed vector zones)))
             ;; Apply transformation
             transformed (f protected)
             ;; Restore original zones
             restored (reduce (fn [t [i [_ _ orig]]]
                                (str/replace t (nth placeholders i) orig))
-                             transformed
-                             (map-indexed vector zones))]
+                       transformed
+                       (map-indexed vector zones))]
         restored))))
 
 ;; ============================================================================
@@ -596,16 +596,16 @@
   [^String s]
   (-> s
       ;; Collapse doubled punctuation: ", ," or ",," -> ","
-      (str/replace #",\s*," ",")
-      (str/replace #"\.\s*\." ".")
-      (str/replace #";\s*;" ";")
+    (str/replace #",\s*," ",")
+    (str/replace #"\.\s*\." ".")
+    (str/replace #";\s*;" ";")
       ;; Fix spacing before punctuation
-      (str/replace #"\s+([,.;:!?])" "$1")
+    (str/replace #"\s+([,.;:!?])" "$1")
       ;; Normalize whitespace
-      (str/replace #"\s+" " ")
-      (str/trim)
+    (str/replace #"\s+" " ")
+    (str/trim)
       ;; Strip leading punctuation/whitespace at string start
-      (str/replace #"^[\s,;:]+\s*" "")))
+    (str/replace #"^[\s,;:]+\s*" "")))
 
 ;; ============================================================================
 ;; Public API
@@ -653,13 +653,13 @@
                       :else SAFE_PATTERNS)
            sorted-patterns (sort-by (comp - count key) patterns)]
        (apply-with-exclusions
-        s
-        (fn [text]
-          (-> (reduce (fn [t [pattern replacement]]
-                        (replace-phrase t pattern replacement))
-                      text
-                      sorted-patterns)
-              (cleanup-artifacts))))))))
+         s
+         (fn [text]
+           (-> (reduce (fn [t [pattern replacement]]
+                         (replace-phrase t pattern replacement))
+                 text
+                 sorted-patterns)
+             (cleanup-artifacts))))))))
 
 (defn humanize-data
   "Recursively humanizes all strings in a data structure.

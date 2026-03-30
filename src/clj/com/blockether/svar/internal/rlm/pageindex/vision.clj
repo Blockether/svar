@@ -225,14 +225,14 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
 (def ^:private rotation-detection-spec
   "Spec for page rotation detection response."
   (spec/spec
-   (spec/field {::spec/name :rotation
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Page rotation in degrees clockwise (0, 90, 180, or 270)"
-                ::spec/values {"0" "Correct orientation, text reads left-to-right top-to-bottom"
-                               "90" "Rotated 90 degrees clockwise, text reads top-to-bottom"
-                               "180" "Upside down, text reads right-to-left bottom-to-top"
-                               "270" "Rotated 90 degrees counter-clockwise, text reads bottom-to-top"}})))
+    (spec/field {::spec/name :rotation
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Page rotation in degrees clockwise (0, 90, 180, or 270)"
+                 ::spec/values {"0" "Correct orientation, text reads left-to-right top-to-bottom"
+                                "90" "Rotated 90 degrees clockwise, text reads top-to-bottom"
+                                "180" "Upside down, text reads right-to-left bottom-to-top"
+                                "270" "Rotated 90 degrees counter-clockwise, text reads bottom-to-top"}})))
 
 (defn- detect-rotation
   "Detects the rotation of a page image using vision LLM.
@@ -270,7 +270,7 @@ Pay special attention to:
 
 DO NOT assume 0. Actually examine the character orientation carefully.")
                                        (llm/user "Look at the characters and text in this image. Are the letters upright (normal) or are they rotated sideways/upside down? Return the rotation needed to make text readable in normal left-to-right orientation."
-                                                 (llm/image base64-image "image/png"))]
+                                         (llm/image base64-image "image/png"))]
                             :check-context? false
                             :timeout-ms timeout-ms
                             :router rlm-router
@@ -409,316 +409,316 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
   "Spec for section nodes. A section is a logical grouping of content.
    Other nodes reference sections via parent-id to establish hierarchy."
   (spec/spec
-   :section
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"section" "Section node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :parent-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of parent section (null for top-level sections)"})
-   (spec/field {::spec/name :description
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Brief summary of what this section contains"})))
+    :section
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"section" "Section node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :parent-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of parent section (null for top-level sections)"})
+    (spec/field {::spec/name :description
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Brief summary of what this section contains"})))
 
 (def ^:private heading-spec
   "Spec for heading nodes. Headings belong to sections via parent-id."
   (spec/spec
-   :heading
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"heading" "Heading node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :parent-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of the section this heading belongs to"})
-   (spec/field {::spec/name :level
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Heading level"
-                ::spec/values heading-level-values})
-   (spec/field {::spec/name :content
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The heading text"})))
+    :heading
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"heading" "Heading node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :parent-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of the section this heading belongs to"})
+    (spec/field {::spec/name :level
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Heading level"
+                 ::spec/values heading-level-values})
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The heading text"})))
 
 (def ^:private paragraph-spec
   "Spec for paragraph/text content nodes."
   (spec/spec
-   :paragraph
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"paragraph" "Paragraph node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :parent-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of parent section this paragraph belongs to"})
-   (spec/field {::spec/name :level
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Content type"
-                ::spec/values text-level-values})
-   (spec/field {::spec/name :content
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The text content"})
-   (spec/field {::spec/name :continuation?
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "True if continues from previous page"})))
+    :paragraph
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"paragraph" "Paragraph node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :parent-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of parent section this paragraph belongs to"})
+    (spec/field {::spec/name :level
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Content type"
+                 ::spec/values text-level-values})
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The text content"})
+    (spec/field {::spec/name :continuation?
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "True if continues from previous page"})))
 
 (def ^:private list-item-spec
   "Spec for list item nodes."
   (spec/spec
-   :list-item
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"list-item" "List item node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :parent-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of parent section this list item belongs to"})
-   (spec/field {::spec/name :level
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "List nesting level"
-                ::spec/values list-level-values})
-   (spec/field {::spec/name :content
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The list item text"})
-   (spec/field {::spec/name :continuation?
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "True if continues from previous page"})))
+    :list-item
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"list-item" "List item node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :parent-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of parent section this list item belongs to"})
+    (spec/field {::spec/name :level
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "List nesting level"
+                 ::spec/values list-level-values})
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The list item text"})
+    (spec/field {::spec/name :continuation?
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "True if continues from previous page"})))
 
 (def ^:private toc-entry-spec
   "Spec for table of contents entry nodes (document-level, not page-level)."
   (spec/spec
-   :toc-entry
-   {::spec/key-ns "document.toc"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"toc-entry" "Table of contents entry node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :parent-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of parent section this TOC entry belongs to"})
-   (spec/field {::spec/name :title
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The TOC entry title text (e.g., 'Chapter 1 Introduction')"})
-   (spec/field {::spec/name :description
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Brief summary of section contents (copied from linked Section in post-processing)"})
-   (spec/field {::spec/name :target-page
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Page number this entry points to (null if not visible)"})
-   (spec/field {::spec/name :target-section-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of the Section node this entry links to (if identifiable)"})
-   (spec/field {::spec/name :level
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "TOC nesting level"
-                ::spec/values list-level-values})))
+    :toc-entry
+    {::spec/key-ns "document.toc"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"toc-entry" "Table of contents entry node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :parent-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of parent section this TOC entry belongs to"})
+    (spec/field {::spec/name :title
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The TOC entry title text (e.g., 'Chapter 1 Introduction')"})
+    (spec/field {::spec/name :description
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Brief summary of section contents (copied from linked Section in post-processing)"})
+    (spec/field {::spec/name :target-page
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Page number this entry points to (null if not visible)"})
+    (spec/field {::spec/name :target-section-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of the Section node this entry links to (if identifiable)"})
+    (spec/field {::spec/name :level
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "TOC nesting level"
+                 ::spec/values list-level-values})))
 
 (def ^:private image-spec
   "Spec for image nodes. Description is REQUIRED, caption is optional."
   (spec/spec
-   :image
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"image" "Image node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :parent-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of parent section this image belongs to"})
-   (spec/field {::spec/name :kind
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "What kind of image this is"
-                ::spec/values image-kind-values})
-   (spec/field {::spec/name :image-index
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Index into the embedded images list (0-based). Match to the EMBEDDED IMAGES list. null if no matching embedded image."})
-   (spec/field {::spec/name :caption
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Caption from the document (null if no caption present)"})
-   (spec/field {::spec/name :description
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "REQUIRED: AI description of what the image shows"})
-   (spec/field {::spec/name :continuation?
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "True if this image continues from previous page (e.g., truncated diagram, split figure)"})))
+    :image
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"image" "Image node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :parent-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of parent section this image belongs to"})
+    (spec/field {::spec/name :kind
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "What kind of image this is"
+                 ::spec/values image-kind-values})
+    (spec/field {::spec/name :image-index
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Index into the embedded images list (0-based). Match to the EMBEDDED IMAGES list. null if no matching embedded image."})
+    (spec/field {::spec/name :caption
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Caption from the document (null if no caption present)"})
+    (spec/field {::spec/name :description
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "REQUIRED: AI description of what the image shows"})
+    (spec/field {::spec/name :continuation?
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "True if this image continues from previous page (e.g., truncated diagram, split figure)"})))
 
 (def ^:private table-spec
   "Spec for table nodes. Description is REQUIRED, caption is optional."
   (spec/spec
-   :table
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"table" "Table node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :parent-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "ID of parent section this table belongs to"})
-   (spec/field {::spec/name :kind
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "What kind of table this is"
-                ::spec/values table-kind-values})
-   (spec/field {::spec/name :image-index
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Index into the embedded images list (0-based). Match to the EMBEDDED IMAGES list if the table is rendered as an image. null if text-based table."})
-   (spec/field {::spec/name :caption
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Caption from the document (null if no caption present)"})
-   (spec/field {::spec/name :description
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "REQUIRED: AI description of the table content and structure"})
-   (spec/field {::spec/name :content
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "REQUIRED: Table data as ASCII art with pipe column separators and dash row separators. Reproduce ALL rows and columns exactly as shown in the document."})
-   (spec/field {::spec/name :continuation?
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "True if this table continues from previous page (e.g., 'Table X (cont.)')"})))
+    :table
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"table" "Table node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :parent-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "ID of parent section this table belongs to"})
+    (spec/field {::spec/name :kind
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "What kind of table this is"
+                 ::spec/values table-kind-values})
+    (spec/field {::spec/name :image-index
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Index into the embedded images list (0-based). Match to the EMBEDDED IMAGES list if the table is rendered as an image. null if text-based table."})
+    (spec/field {::spec/name :caption
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Caption from the document (null if no caption present)"})
+    (spec/field {::spec/name :description
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "REQUIRED: AI description of the table content and structure"})
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "REQUIRED: Table data as ASCII art with pipe column separators and dash row separators. Reproduce ALL rows and columns exactly as shown in the document."})
+    (spec/field {::spec/name :continuation?
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "True if this table continues from previous page (e.g., 'Table X (cont.)')"})))
 
 (def ^:private header-spec
   "Spec for page header nodes."
   (spec/spec
-   :header
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"header" "Header node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :content
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The header text"})))
+    :header
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"header" "Header node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The header text"})))
 
 (def ^:private footer-spec
   "Spec for page footer nodes."
   (spec/spec
-   :footer
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"footer" "Footer node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :content
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The footer text"})))
+    :footer
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"footer" "Footer node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The footer text"})))
 
 (def ^:private metadata-spec
   "Spec for document metadata nodes."
   (spec/spec
-   :metadata
-   {::spec/key-ns "page.node"}
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Node type discriminator"
-                ::spec/values {"metadata" "Metadata node"}})
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Unique identifier (1, 2, 3, etc.)"})
-   (spec/field {::spec/name :content
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The metadata content (title, version, date, etc.)"})))
+    :metadata
+    {::spec/key-ns "page.node"}
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Node type discriminator"
+                 ::spec/values {"metadata" "Metadata node"}})
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Unique identifier (1, 2, 3, etc.)"})
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The metadata content (title, version, date, etc.)"})))
 
 ;; =============================================================================
 ;; Vision Response Spec with Union Type
@@ -741,14 +741,14 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    
    Hierarchy is established via parent-id references, not nesting."
   (spec/spec
-   {:refs [section-spec heading-spec paragraph-spec list-item-spec toc-entry-spec
-           image-spec table-spec header-spec footer-spec metadata-spec]}
-   (spec/field {::spec/name :nodes
-                ::spec/type :spec.type/ref
-                ::spec/target [:section :heading :paragraph :list-item :toc-entry
-                               :image :table :header :footer :metadata]
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Document nodes in reading order (top to bottom, left to right)"})))
+    {:refs [section-spec heading-spec paragraph-spec list-item-spec toc-entry-spec
+            image-spec table-spec header-spec footer-spec metadata-spec]}
+    (spec/field {::spec/name :nodes
+                 ::spec/type :spec.type/ref
+                 ::spec/target [:section :heading :paragraph :list-item :toc-entry
+                                :image :table :header :footer :metadata]
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Document nodes in reading order (top to bottom, left to right)"})))
 
 ;; =============================================================================
 ;; Image Processing
@@ -897,7 +897,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                              :msg "Image index out of range — no PDFBox image available"})
                 node))
             node))
-        nodes))
+    nodes))
 
 ;; =============================================================================
 ;; Quality Refinement — Eval + Refine Extracted Pages
@@ -934,23 +934,23 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
    String. One line per node."
   [page]
   (->> (:page/nodes page)
-       (map (fn [node]
-              (let [ntype (:page.node/type node)
-                    content (:page.node/content node)
-                    desc (:page.node/description node)]
-                (case ntype
-                  :section (str "[Section] " desc)
-                  :heading (str "[Heading " (:page.node/level node) "] " content)
-                  :paragraph (str "[Paragraph] " (when content (subs content 0 (min 200 (count content)))))
-                  :list-item (str "[ListItem] " content)
-                  :image (str "[Image: " (:page.node/kind node) "] " desc)
-                  :table (str "[Table: " (:page.node/kind node) "] " desc)
-                  :header (str "[Header] " content)
-                  :footer (str "[Footer] " content)
-                  :metadata (str "[Metadata] " content)
-                  :toc-entry (str "[TOC] " (:document.toc/title node))
-                  (str "[" (when ntype (name ntype)) "] " (or content desc ""))))))
-       (str/join "\n")))
+    (map (fn [node]
+           (let [ntype (:page.node/type node)
+                 content (:page.node/content node)
+                 desc (:page.node/description node)]
+             (case ntype
+               :section (str "[Section] " desc)
+               :heading (str "[Heading " (:page.node/level node) "] " content)
+               :paragraph (str "[Paragraph] " (when content (subs content 0 (min 200 (count content)))))
+               :list-item (str "[ListItem] " content)
+               :image (str "[Image: " (:page.node/kind node) "] " desc)
+               :table (str "[Table: " (:page.node/kind node) "] " desc)
+               :header (str "[Header] " content)
+               :footer (str "[Footer] " content)
+               :metadata (str "[Metadata] " content)
+               :toc-entry (str "[TOC] " (:document.toc/title node))
+               (str "[" (when ntype (name ntype)) "] " (or content desc ""))))))
+    (str/join "\n")))
 
 (defn- eval-page-extraction
   "Evaluates quality of a page's node extraction using llm/eval!.
@@ -970,10 +970,10 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
     (trove/log! {:level :info :data {:page page-index}
                  :msg "Evaluating page extraction quality"})
     (let [result (llm/eval! {:task (str "Extract all visible content from document page " page-index
-                                        " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
-                                        "Image, Table) with correct parent-id hierarchy. Every piece of visible "
-                                        "text should be captured. Section descriptions should be meaningful "
-                                        "2-3 sentence summaries.")
+                                     " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
+                                     "Image, Table) with correct parent-id hierarchy. Every piece of visible "
+                                     "text should be captured. Section descriptions should be meaningful "
+                                     "2-3 sentence summaries.")
                              :output serialized
                              :router rlm-router
                              :strategy :root
@@ -1017,14 +1017,14 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
     (let [base64-image (image->base64 image)
           embedded-images-hint (if (seq page-pdf-images)
                                  (format "\n\nEMBEDDED IMAGES: This page has %d embedded images (indexed 0-%d). For Image and Table nodes that correspond to an embedded image, set image-index to the matching index. Available images:\n%s"
-                                         (count page-pdf-images)
-                                         (dec (count page-pdf-images))
-                                         (clojure.string/join "\n" (map-indexed (fn [i img]
-                                                                                  (format "  [%d] %dx%d pixels" i (:width img) (:height img)))
-                                                                                page-pdf-images)))
+                                   (count page-pdf-images)
+                                   (dec (count page-pdf-images))
+                                   (clojure.string/join "\n" (map-indexed (fn [i img]
+                                                                            (format "  [%d] %dx%d pixels" i (:width img) (:height img)))
+                                                               page-pdf-images)))
                                  "")
           task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.%s"
-                       embedded-images-hint)
+                 embedded-images-hint)
           refine-result (llm/refine! {:spec vision-response-spec
                                       :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
                                                  (llm/user task (llm/image base64-image "image/png"))]
@@ -1063,8 +1063,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
   (let [refine-result (llm/refine! {:spec vision-response-spec
                                     :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
                                                (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                              "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                                              "<document_content>\n" content "\n</document_content>"))]
+                                                           "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                           "<document_content>\n" content "\n</document_content>"))]
                                     :router rlm-router
                                     :strategy :root
                                     :iterations refine-iterations
@@ -1135,16 +1135,16 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
     (let [eval-results (if (<= (long parallel-refine) 1)
                          (mapv (fn [idx]
                                  (eval-page-extraction (nth pages idx) opts))
-                               sample-indices)
+                           sample-indices)
                          (let [in-ch (async/chan (count sample-indices))
                                out-ch (async/chan (count sample-indices))]
                            (async/onto-chan! in-ch (vec sample-indices))
                            (async/pipeline-blocking
-                            parallel-refine
-                            out-ch
-                            (map (fn [idx]
-                                   (eval-page-extraction (nth pages idx) opts)))
-                            in-ch)
+                             parallel-refine
+                             out-ch
+                             (map (fn [idx]
+                                    (eval-page-extraction (nth pages idx) opts)))
+                             in-ch)
                            (loop [acc []]
                              (if-let [result (async/<!! out-ch)]
                                (recur (conj acc result))
@@ -1175,31 +1175,31 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                                             image)]
                         (refine-page-image rotated-image idx opts))
                       page))
-                  pages)
+              pages)
             ;; Parallel: only refine bad pages, preserve good ones in-place
             (let [bad-page-inputs (filterv #(contains? bad-indices (:page/index %)) pages)
                   in-ch (async/chan (count bad-page-inputs))
                   out-ch (async/chan (count bad-page-inputs))]
               (async/onto-chan! in-ch bad-page-inputs)
               (async/pipeline-blocking
-               parallel-refine
-               out-ch
-               (map (fn [page]
-                      (let [idx (:page/index page)
-                            image (nth images idx)
-                            rotation (get page-rotations idx 0)
-                            rotated-image (if (pos? (long rotation))
-                                            (rotate-image image rotation)
-                                            image)]
-                        (refine-page-image rotated-image idx opts))))
-               in-ch)
+                parallel-refine
+                out-ch
+                (map (fn [page]
+                       (let [idx (:page/index page)
+                             image (nth images idx)
+                             rotation (get page-rotations idx 0)
+                             rotated-image (if (pos? (long rotation))
+                                             (rotate-image image rotation)
+                                             image)]
+                         (refine-page-image rotated-image idx opts))))
+                in-ch)
               (let [refined-map (loop [m {}]
                                   (if-let [result (async/<!! out-ch)]
                                     (recur (assoc m (:page/index result) result))
                                     m))]
                 (mapv (fn [page]
                         (get refined-map (:page/index page) page))
-                      pages)))))))))
+                  pages)))))))))
 
 (defn- quality-pass-single
   "Post-extraction quality pass for single-page extractors.
@@ -1255,14 +1255,14 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
     (let [base64-image (image->base64 image)
           embedded-images-hint (if (seq page-pdf-images)
                                  (format "\n\nEMBEDDED IMAGES: This page has %d embedded images (indexed 0-%d). For Image and Table nodes that correspond to an embedded image, set image-index to the matching index. Available images:\n%s"
-                                         (count page-pdf-images)
-                                         (dec (count page-pdf-images))
-                                         (clojure.string/join "\n" (map-indexed (fn [i img]
-                                                                                  (format "  [%d] %dx%d pixels" i (:width img) (:height img)))
-                                                                                page-pdf-images)))
+                                   (count page-pdf-images)
+                                   (dec (count page-pdf-images))
+                                   (clojure.string/join "\n" (map-indexed (fn [i img]
+                                                                            (format "  [%d] %dx%d pixels" i (:width img) (:height img)))
+                                                               page-pdf-images)))
                                  "")
           task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.%s"
-                       embedded-images-hint)
+                 embedded-images-hint)
           response (llm/ask! {:spec vision-response-spec
                               :messages [(llm/system objective)
                                          (llm/user task (llm/image base64-image "image/png"))]
@@ -1365,7 +1365,7 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
                                :image img
                                :rotation rotation
                                :pdf-images (get all-pdf-images page-idx [])})
-                            images page-indices page-rotations)
+                         images page-indices page-rotations)
             result-chan (async/chan (max 1 page-count))
             extract-opts {:rlm-router rlm-router :objective objective :timeout-ms timeout-ms}]
 
@@ -1373,55 +1373,55 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
         ;; Page rotation is detected via PDFBox text position heuristics (no LLM cost).
         ;; This catches landscape content on portrait pages that PDFBox /Rotate misses.
         (async/pipeline-blocking
-         parallel
-         result-chan
-         (map (fn [{:keys [index image rotation pdf-images]}]
-                (try
+          parallel
+          result-chan
+          (map (fn [{:keys [index image rotation pdf-images]}]
+                 (try
                   ;; Step 1: Apply rotation correction if needed (heuristic-detected)
-                  (let [image (if (pos? rotation)
-                                (do
-                                  (trove/log! {:level :info
-                                               :data {:page index :rotation rotation}
-                                               :msg "Correcting page rotation (heuristic)"})
-                                  (rotate-image image rotation))
-                                image)]
+                   (let [image (if (pos? rotation)
+                                 (do
+                                   (trove/log! {:level :info
+                                                :data {:page index :rotation rotation}
+                                                :msg "Correcting page rotation (heuristic)"})
+                                   (rotate-image image rotation))
+                                 image)]
                     ;; Step 2: Extract content from (possibly corrected) image
-                    (extract-text-from-image image index (assoc extract-opts :pdf-images pdf-images)))
-                  (catch Exception e
-                    (let [^java.awt.image.BufferedImage image image
-                          ex-data-map (ex-data e)
+                     (extract-text-from-image image index (assoc extract-opts :pdf-images pdf-images)))
+                   (catch Exception e
+                     (let [^java.awt.image.BufferedImage image image
+                           ex-data-map (ex-data e)
                            ;; Extract response body for HTTP errors (400, 500, etc.)
-                          response-body (:body ex-data-map)
-                          status (:status ex-data-map)
+                           response-body (:body ex-data-map)
+                           status (:status ex-data-map)
                            ;; Extract full LLM request from exception (includes sanitized messages)
-                          llm-request (:llm-request ex-data-map)
+                           llm-request (:llm-request ex-data-map)
                            ;; Build basic request info as fallback
-                          basic-info {:timeout-ms timeout-ms
-                                      :objective-length (count objective)
-                                      :image-width (.getWidth image)
-                                      :image-height (.getHeight image)}
+                           basic-info {:timeout-ms timeout-ms
+                                       :objective-length (count objective)
+                                       :image-width (.getWidth image)
+                                       :image-height (.getHeight image)}
                            ;; Use full LLM request if available, otherwise basic info
-                          request-info (if llm-request
-                                         (assoc llm-request
-                                                :image-width (.getWidth image)
-                                                :image-height (.getHeight image))
-                                         basic-info)]
-                      (trove/log! {:level :error
-                                   :data (cond-> {:page index
-                                                  :error (ex-message e)
-                                                  :request request-info}
-                                           status (assoc :status status)
-                                           response-body (assoc :response-body response-body))
-                                   :msg "Failed to extract text from page"})
+                           request-info (if llm-request
+                                          (assoc llm-request
+                                            :image-width (.getWidth image)
+                                            :image-height (.getHeight image))
+                                          basic-info)]
+                       (trove/log! {:level :error
+                                    :data (cond-> {:page index
+                                                   :error (ex-message e)
+                                                   :request request-info}
+                                            status (assoc :status status)
+                                            response-body (assoc :response-body response-body))
+                                    :msg "Failed to extract text from page"})
                        ;; Return error as data - we'll check after collection
-                      {:page/index index
-                       :extraction-error (cond-> {:page index
-                                                  :message (ex-message e)
-                                                  :type (type e)
-                                                  :request request-info}
-                                           status (assoc :status status)
-                                           response-body (assoc :response-body response-body))})))))
-         (async/to-chan! work-items))
+                       {:page/index index
+                        :extraction-error (cond-> {:page index
+                                                   :message (ex-message e)
+                                                   :type (type e)
+                                                   :request request-info}
+                                            status (assoc :status status)
+                                            response-body (assoc :response-body response-body))})))))
+          (async/to-chan! work-items))
 
         ;; Collect results and sort by page number
         (let [results (loop [acc []]
@@ -1436,12 +1436,12 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
           (when (seq errors)
             (let [first-error (:extraction-error (first errors))]
               (anomaly/fault! "PDF page extraction failed"
-                              {:type :svar.vision/pdf-extraction-failed
-                               :pdf-path pdf-path
-                               :failed-page (:page first-error)
-                               :error-message (:message first-error)
-                               :total-errors (count errors)
-                               :all-errors (mapv :extraction-error errors)})))
+                {:type :svar.vision/pdf-extraction-failed
+                 :pdf-path pdf-path
+                 :failed-page (:page first-error)
+                 :error-message (:message first-error)
+                 :total-errors (count errors)
+                 :all-errors (mapv :extraction-error errors)})))
 
           ;; Quality pass: eval sampled pages, refine those below threshold
           (if refine?
@@ -1471,8 +1471,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
   (let [response (llm/ask! {:spec vision-response-spec
                             :messages [(llm/system objective)
                                        (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                      "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                                      "<document_content>\n" content "\n</document_content>"))]
+                                                   "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                   "<document_content>\n" content "\n</document_content>"))]
                             :router rlm-router
                             :strategy :root
                             :check-context? false
@@ -1547,8 +1547,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
           pages [result]]
       (if refine?
         (quality-pass-single pages
-                             (fn [idx refine-opts] (refine-page-text content idx refine-opts))
-                             opts)
+          (fn [idx refine-opts] (refine-page-text content idx refine-opts))
+          opts)
         pages))))
 
 (defn extract-text-from-image-file
@@ -1578,8 +1578,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
         pages [result]]
     (if refine?
       (quality-pass-single pages
-                           (fn [idx refine-opts] (refine-page-image image idx refine-opts))
-                           opts)
+        (fn [idx refine-opts] (refine-page-image image idx refine-opts))
+        opts)
       pages)))
 
 (defn extract-text-from-string
@@ -1609,8 +1609,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
         pages [result]]
     (if refine?
       (quality-pass-single pages
-                           (fn [idx refine-opts] (refine-page-text content idx refine-opts))
-                           opts)
+        (fn [idx refine-opts] (refine-page-text content idx refine-opts))
+        opts)
       pages)))
 
 ;; =============================================================================
@@ -1620,10 +1620,10 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
 (def ^:private title-inference-spec
   "Spec for document title inference response."
   (spec/spec
-   (spec/field {::spec/name :title
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The inferred document title"})))
+    (spec/field {::spec/name :title
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The inferred document title"})))
 
 (defn infer-document-title
   "Infers document title from extracted content using LLM.
@@ -1646,33 +1646,33 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
         all-nodes (mapcat :page/nodes pages)
         ;; Get first few headings
         headings (->> all-nodes
-                      (filter #(= :heading (:page.node/type %)))
-                      (take 5)
-                      (map :page.node/content))
+                   (filter #(= :heading (:page.node/type %)))
+                   (take 5)
+                   (map :page.node/content))
         ;; Get first few section descriptions  
         sections (->> all-nodes
-                      (filter #(= :section (:page.node/type %)))
-                      (take 5)
-                      (map :page.node/description))
+                   (filter #(= :section (:page.node/type %)))
+                   (take 5)
+                   (map :page.node/description))
         ;; Get metadata nodes
         metadata (->> all-nodes
-                      (filter #(= :metadata (:page.node/type %)))
-                      (map :page.node/content))
+                   (filter #(= :metadata (:page.node/type %)))
+                   (map :page.node/content))
         ;; Get first paragraph
         first-para (->> all-nodes
-                        (filter #(and (= :paragraph (:page.node/type %))
-                                      (= "paragraph" (:page.node/level %))))
-                        first
-                        :page.node/content)
+                     (filter #(and (= :paragraph (:page.node/type %))
+                                (= "paragraph" (:page.node/level %))))
+                     first
+                     :page.node/content)
         ;; Build context for LLM
         context (str "Document headings:\n"
-                     (str/join "\n" (map #(str "- " %) headings))
-                     "\n\nSection summaries:\n"
-                     (str/join "\n" (map #(str "- " %) (remove nil? sections)))
-                     (when (seq metadata)
-                       (str "\n\nMetadata:\n" (str/join "\n" metadata)))
-                     (when first-para
-                       (str "\n\nFirst paragraph:\n" (subs first-para 0 (min 500 (count first-para))))))]
+                  (str/join "\n" (map #(str "- " %) headings))
+                  "\n\nSection summaries:\n"
+                  (str/join "\n" (map #(str "- " %) (remove nil? sections)))
+                  (when (seq metadata)
+                    (str "\n\nMetadata:\n" (str/join "\n" metadata)))
+                  (when first-para
+                    (str "\n\nFirst paragraph:\n" (subs first-para 0 (min 500 (count first-para))))))]
     (when (or (seq headings) (seq sections) (seq metadata))
       (trove/log! {:level :debug :data {:headings (count headings)
                                         :sections (count sections)
@@ -1681,8 +1681,8 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
       (let [response (llm/ask! {:spec title-inference-spec
                                 :messages [(llm/system "You are a document analyst. Infer the most appropriate title for a document based on its structure and content.")
                                            (llm/user (str "Based on the following document content, infer the document's title. "
-                                                          "Return the most likely title - it should be concise and descriptive.\n\n"
-                                                          context))]
+                                                       "Return the most likely title - it should be concise and descriptive.\n\n"
+                                                       context))]
                                 :router rlm-router
                                 :prefer :cost
                                 :capabilities #{:chat}

@@ -116,22 +116,22 @@
    Spec definition for LLM moderation response."
   []
   (spec/spec
-   (spec/field ::spec/name :flagged
-               ::spec/type :spec.type/bool
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "true if content violates any of the specified policies, false otherwise")
-   (spec/field ::spec/name :violations
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/many
-               ::spec/description "List of policy violations detected (empty if none)")
-   (spec/field ::spec/name :violations/policy
-               ::spec/type :spec.type/string
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Name of the violated policy")
-   (spec/field ::spec/name :violations/score
-               ::spec/type :spec.type/float
-               ::spec/cardinality :spec.cardinality/one
-               ::spec/description "Confidence score from 0.0 to 1.0 indicating severity of violation")))
+    (spec/field ::spec/name :flagged
+      ::spec/type :spec.type/bool
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "true if content violates any of the specified policies, false otherwise")
+    (spec/field ::spec/name :violations
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/many
+      ::spec/description "List of policy violations detected (empty if none)")
+    (spec/field ::spec/name :violations/policy
+      ::spec/type :spec.type/string
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Name of the violated policy")
+    (spec/field ::spec/name :violations/score
+      ::spec/type :spec.type/float
+      ::spec/cardinality :spec.cardinality/one
+      ::spec/description "Confidence score from 0.0 to 1.0 indicating severity of violation")))
 
 (defn- policies->str
   "Converts a set of policy keywords to a formatted string for the prompt.
@@ -157,8 +157,8 @@
          :violence "Violent content"
          :violence/graphic "Graphic violence"}]
     (->> policies
-         (map (fn [p] (str "- " (name p) ": " (get policy-descriptions p "Content policy violation"))))
-         (str/join "\n"))))
+      (map (fn [p] (str "- " (name p) ": " (get policy-descriptions p "Content policy violation"))))
+      (str/join "\n"))))
 
 (defn- build-moderation-objective
   "Builds the objective prompt for content moderation.
@@ -195,9 +195,9 @@
   [result policies]
   (if (:flagged result)
     (->> (:violations result)
-         (filter (fn [v] (contains? policies (keyword (:policy v)))))
-         (mapv (fn [v] {:policy (keyword (:policy v))
-                        :score (:score v)})))
+      (filter (fn [v] (contains? policies (keyword (:policy v)))))
+      (mapv (fn [v] {:policy (keyword (:policy v))
+                     :score (:score v)})))
     []))
 
 ;; =============================================================================
@@ -274,24 +274,24 @@
                                               :duration-ms duration-ms}
                           :msg "Static guard detected prompt injection"})
              (throw (ex-info error-message
-                             {:type (or type :svar.guard/prompt-injection)
-                              :pattern pattern
-                              :input input})))
+                      {:type (or type :svar.guard/prompt-injection)
+                       :pattern pattern
+                       :input input})))
 
            ;; Multiple matches - aggregate
            :else
            (let [violation-types (set (keep :type matches))
                  error-message (str "Multiple violations detected: "
-                                    (str/join ", " (map :pattern matches)))]
+                                 (str/join ", " (map :pattern matches)))]
              (trove/log! {:level :warn :data {:input-length (count text)
                                               :patterns-matched (count matches)
                                               :types violation-types
                                               :duration-ms duration-ms}
                           :msg "Static guard detected multiple violations"})
              (throw (ex-info error-message
-                             {:type :svar.guard/multiple-violations
-                              :violations matches
-                              :input input})))))))))
+                      {:type :svar.guard/multiple-violations
+                       :violations matches
+                       :input input})))))))))
 
 ;; =============================================================================
 ;; Moderation Guard Factory
@@ -341,8 +341,8 @@
               policies DEFAULT_MODERATION_POLICIES}} opts]
     (when-not ask-fn
       (throw (ex-info ":ask-fn is required for moderation guard"
-                      {:type :svar.guard/invalid-config
-                       :missing :ask-fn})))
+               {:type :svar.guard/invalid-config
+                :missing :ask-fn})))
     (fn [input]
       (let [start-time (System/nanoTime)
             text (input->text input)
@@ -371,10 +371,10 @@
                                              :duration-ms duration-ms}
                          :msg "Moderation guard detected policy violation"})
             (throw (ex-info (str "Content violates moderation policies: "
-                                 (str/join ", " (map #(name (:policy %)) violations)))
-                            {:type :svar.guard/moderation-violation
-                             :violations violations
-                             :input input}))))))))
+                              (str/join ", " (map #(name (:policy %)) violations)))
+                     {:type :svar.guard/moderation-violation
+                      :violations violations
+                      :input input}))))))))
 
 ;; =============================================================================
 ;; Combined Guard

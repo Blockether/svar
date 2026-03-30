@@ -21,12 +21,12 @@
   (when conn
     (let [all (d/q '[:find [(pull ?e [*]) ...]
                      :where [?e :trajectory/id _]]
-                   (d/db conn))
+                (d/db conn))
           filtered (->> all
-                        (filter #(>= (or (:trajectory/iterations %) 0) min-iterations))
-                        (filter #(if status (= (:trajectory/status %) status) true))
-                        (sort-by :trajectory/timestamp)
-                        reverse)]
+                     (filter #(>= (or (:trajectory/iterations %) 0) min-iterations))
+                     (filter #(if status (= (:trajectory/status %) status) true))
+                     (sort-by :trajectory/timestamp)
+                     reverse)]
       (if limit (take limit filtered) filtered))))
 
 (defn score-trajectory
@@ -47,16 +47,16 @@
           messages (d/q '[:find [(pull ?e [:message/content :message/role :message/iteration]) ...]
                           :in $ ?env-id
                           :where [?e :message/env-id ?env-id]]
-                        db env-id)
+                     db env-id)
           exec-codes (->> (d/q '[:find [(pull ?e [:execution/code]) ...]
                                  :in $ ?env-id
                                  :where
                                  [?m :message/env-id ?env-id]
                                  [?m :message/role :assistant]
                                  [?e :execution/message ?m]]
-                               db env-id)
-                          (map :execution/code)
-                          (remove str/blank?))
+                            db env-id)
+                       (map :execution/code)
+                       (remove str/blank?))
           all-code (str/join "\n" exec-codes)
           iterations (count (filter #(= (:message/role %) :assistant) messages))
           score (atom 0)]
@@ -66,13 +66,13 @@
       (when (re-find #"\((?:search-document-pages|search-document-toc|search-document-entities)\s" all-code) (swap! score + 1))
       (when (and (pos? max-iterations) (< iterations (/ max-iterations 2))) (swap! score + 2))
       (let [error-count (->> messages
-                             (filter #(= (:message/role %) :user))
-                             (filter #(when-let [c (:message/content %)] (str/includes? c "<error>")))
-                             count)]
+                          (filter #(= (:message/role %) :user))
+                          (filter #(when-let [c (:message/content %)] (str/includes? c "<error>")))
+                          count)]
         (when (> error-count 2) (swap! score - 2)))
       (let [final-msg (->> messages
-                           (filter #(= (:message/role %) :assistant))
-                           last)]
+                        (filter #(= (:message/role %) :assistant))
+                        last)]
         (when (and final-msg (< (count (or (:message/content final-msg) "")) 20))
           (swap! score - 1)))
       @score)))
@@ -96,24 +96,24 @@
   (when conn
     (let [trajectories (list-trajectories db-info {:status :success :min-iterations min-iterations})
           hard-filtered (->> trajectories
-                             (filter #(<= (:trajectory/iterations %)
-                                          (* max-iterations max-iteration-ratio)))
+                          (filter #(<= (:trajectory/iterations %)
+                                     (* max-iterations max-iteration-ratio)))
                              ;; If eval-score exists, it must pass the quality gate
-                             (filter #(if-let [es (:trajectory/eval-score %)]
-                                        (>= es min-eval-score)
-                                        true)))
+                          (filter #(if-let [es (:trajectory/eval-score %)]
+                                     (>= es min-eval-score)
+                                     true)))
           scored (->> hard-filtered
-                      (map (fn [t]
-                             (let [base-score (score-trajectory db-info (:trajectory/env-id t) max-iterations)
+                   (map (fn [t]
+                          (let [base-score (score-trajectory db-info (:trajectory/env-id t) max-iterations)
                                    ;; Eval-score bonus: 0.8+ = +3, 0.6+ = +1
-                                   eval-bonus (if-let [es (:trajectory/eval-score t)]
-                                                (cond (>= es 0.8) 3
-                                                      (>= es 0.6) 1
-                                                      :else 0)
-                                                0)]
-                               (assoc t :trajectory/score (+ base-score eval-bonus)))))
-                      (filter #(>= (:trajectory/score %) min-score))
-                      (sort-by :trajectory/score >))]
+                                eval-bonus (if-let [es (:trajectory/eval-score t)]
+                                             (cond (>= es 0.8) 3
+                                                   (>= es 0.6) 1
+                                                   :else 0)
+                                             0)]
+                            (assoc t :trajectory/score (+ base-score eval-bonus)))))
+                   (filter #(>= (:trajectory/score %) min-score))
+                   (sort-by :trajectory/score >))]
       (if limit (take limit scored) scored))))
 
 (defn reconstruct-conversation
@@ -128,23 +128,23 @@
           messages (->> (d/q '[:find [(pull ?e [* {:execution/_message [:execution/code :execution/order]}]) ...]
                                :in $ ?env-id
                                :where [?e :message/env-id ?env-id]]
-                             db env-id)
-                        (sort-by (juxt :message/iteration :message/timestamp)))
+                          db env-id)
+                     (sort-by (juxt :message/iteration :message/timestamp)))
           conversation (mapv (fn [msg]
                                (let [role (:message/role msg)
                                      content (:message/content msg)]
                                  (if (= role :assistant)
                                    (let [executions (->> (:execution/_message msg)
-                                                         (sort-by :execution/order)
-                                                         (mapv :execution/code)
-                                                         (remove str/blank?)
-                                                         vec)
+                                                      (sort-by :execution/order)
+                                                      (mapv :execution/code)
+                                                      (remove str/blank?)
+                                                      vec)
                                          thinking (or (:message/thinking msg) "")]
                                      {:role :assistant
                                       :thinking thinking
                                       :code executions})
                                    {:role role :content content})))
-                             messages)]
+                         messages)]
       conversation)))
 
 (defn- format-for-training
@@ -160,7 +160,7 @@
             :user      {"role" "user" "content" content}
             :assistant {"role" "assistant"
                         "content" (json/write-json-str {"thinking" thinking "code" code})}))
-        conversation))
+    conversation))
 
 (defn export-trajectories!
   "Exports filtered trajectories as JSONL for fine-tuning.
@@ -189,11 +189,11 @@
             (trove/log! {:level :warn :msg "No trajectories passed filtering"})
             (throw (ex-info "No trajectories to export" {:type :trajectory/empty})))
         exports (->> trajectories
-                     (keep (fn [t]
-                             (when-let [conv (seq (reconstruct-conversation db-info (:trajectory/env-id t)))]
-                               {:trajectory t
-                                :messages (format-for-training conv)})))
-                     vec)
+                  (keep (fn [t]
+                          (when-let [conv (seq (reconstruct-conversation db-info (:trajectory/env-id t)))]
+                            {:trajectory t
+                             :messages (format-for-training conv)})))
+                  vec)
         _ (when (empty? exports)
             (trove/log! {:level :warn :msg "No reconstructable trajectories to export"})
             (throw (ex-info "No reconstructable trajectories to export" {:type :trajectory/no-conversation})))
@@ -215,10 +215,10 @@
                   :val-count (count val-set)
                   :avg-score (when (seq exports)
                                (double (/ (reduce + (map #(get-in % [:trajectory :trajectory/score]) exports))
-                                          (count exports))))
+                                         (count exports))))
                   :avg-iterations (when (seq exports)
                                     (double (/ (reduce + (map #(get-in % [:trajectory :trajectory/iterations]) exports))
-                                               (count exports))))
+                                              (count exports))))
                   :models (distinct (map #(get-in % [:trajectory :trajectory/model]) exports))
                   :timestamp (java.util.Date.)}]
     (spit (str output-dir "/metadata.edn") (pr-str metadata))

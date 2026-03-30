@@ -64,15 +64,15 @@
     (it "[:cost] same as :cost"
       (let [r (make-router)]
         (expect (= (selected-model r {:prefer :cost})
-                   (selected-model r {:prefer [:cost]})))))
+                  (selected-model r {:prefer [:cost]})))))
     (it "[:intelligence] same as :intelligence"
       (let [r (make-router)]
         (expect (= (selected-model r {:prefer :intelligence})
-                   (selected-model r {:prefer [:intelligence]})))))
+                  (selected-model r {:prefer [:intelligence]})))))
     (it "[:speed] same as :speed"
       (let [r (make-router)]
         (expect (= (selected-model r {:prefer :speed})
-                   (selected-model r {:prefer [:speed]})))))))
+                  (selected-model r {:prefer [:speed]})))))))
 
 (defdescribe capabilities-filter-test
   (describe "requiring :vision"

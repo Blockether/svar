@@ -71,9 +71,9 @@
          ;; Step 1: Build PageIndex from PDF (uses glm-4.6v by default, parallel 2 to reduce proxy load)
          _ (println "[1/5] Building PageIndex from chapter.pdf...")
          chapter-doc (pageindex/build-index CHAPTER_PDF_PATH
-                                            (cond-> {:parallel 2
-                                                     :timeout-ms (or (:timeout-ms opts) 480000)}
-                                              (:vision-model opts) (assoc :model (:vision-model opts))))
+                       (cond-> {:parallel 2
+                                :timeout-ms (or (:timeout-ms opts) 480000)}
+                         (:vision-model opts) (assoc :model (:vision-model opts))))
          _ (println (str "       Pages: " (count (:document/pages chapter-doc))))
          _ (println (str "       TOC entries: " (count (:document/toc chapter-doc))))
          _ (println)
@@ -94,10 +94,10 @@
 
          ;; Step 4: Run generate-qa-env!
          q-opts (dissoc
-                 (merge {:count 10}
-                        (select-keys opts [:count :difficulty :categories :model
-                                           :verify? :debug? :max-iterations]))
-                 :save-path)
+                  (merge {:count 10}
+                    (select-keys opts [:count :difficulty :categories :model
+                                       :verify? :debug? :max-iterations]))
+                  :save-path)
          _ (println (str "[4/5] Running generate-qa-env! (target: " (:count q-opts) " questions)..."))
          q-result (svar/generate-qa-env! env q-opts)
          _ (println (str "       Generated: " (count (:questions q-result)) " questions"))

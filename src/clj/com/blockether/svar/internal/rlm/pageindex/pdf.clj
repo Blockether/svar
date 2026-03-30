@@ -68,11 +68,11 @@
              (Loader/loadPDF file)
              (catch IOException e
                (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                               {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+                 {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
        (try
          (when (.isEncrypted document)
            (anomaly/incorrect! "PDF is encrypted/password protected"
-                               {:type :svar.pdf/encrypted :path pdf-path}))
+             {:type :svar.pdf/encrypted :path pdf-path}))
 
          (let [renderer (PDFRenderer. document)
                page-count (.getNumberOfPages document)
@@ -81,7 +81,7 @@
                          (range page-count))]
            (mapv (fn [page-idx]
                    (.renderImageWithDPI renderer page-idx (float dpi) ImageType/RGB))
-                 indices))
+             indices))
 
          (finally
            (.close document)))))))
@@ -107,7 +107,7 @@
             (Loader/loadPDF file)
             (catch IOException e
               (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                              {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+                {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
       (try
         (.getNumberOfPages document)
         (finally
@@ -152,7 +152,7 @@
             (Loader/loadPDF file)
             (catch IOException e
               (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                              {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+                {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
       (try
         (let [^org.apache.pdfbox.pdmodel.PDDocumentInformation info
               (.getDocumentInformation document)]
@@ -206,43 +206,43 @@
              (Loader/loadPDF file)
              (catch IOException e
                (anomaly/fault! "Failed to load PDF - file may be corrupted"
-                               {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
+                 {:type :svar.pdf/corrupted-file :path pdf-path :cause (ex-message e)})))]
        (try
          (let [page-count (.getNumberOfPages document)
                indices (if page-set
                          (filterv #(< % page-count) (sort page-set))
                          (range page-count))]
            (mapv
-            (fn [page-idx]
+             (fn [page-idx]
               ;; Collect text directions for this page
-              (let [directions (atom [])
-                    stripper (proxy [PDFTextStripper] []
-                               (processTextPosition [^TextPosition text]
-                                 (swap! directions conj (.getDir text))))]
-                (.setStartPage stripper (inc page-idx))
-                (.setEndPage stripper (inc page-idx))
-                (.getText stripper document)
+               (let [directions (atom [])
+                     stripper (proxy [PDFTextStripper] []
+                                (processTextPosition [^TextPosition text]
+                                  (swap! directions conj (.getDir text))))]
+                 (.setStartPage stripper (inc page-idx))
+                 (.setEndPage stripper (inc page-idx))
+                 (.getText stripper document)
 
                 ;; Determine majority text direction
-                (let [dirs @directions]
-                  (if (empty? dirs)
-                    0 ;; No text on page — assume correct orientation
-                    (let [freq (frequencies (map #(Math/round (double %)) dirs))
+                 (let [dirs @directions]
+                   (if (empty? dirs)
+                     0 ;; No text on page — assume correct orientation
+                     (let [freq (frequencies (map #(Math/round (double %)) dirs))
                           ;; Find the direction with the most characters
-                          [majority-dir _] (apply max-key val freq)
+                           [majority-dir _] (apply max-key val freq)
                           ;; The text direction IS the correction needed:
                           ;; Text dir 0° → normal, no rotation
                           ;; Text dir 90° → text sideways, rotate image 90° CW (right)
                           ;; Text dir 180° → upside down, rotate 180°
                           ;; Text dir 270° → text sideways other way, rotate 270° CW
-                          correction (case (long majority-dir)
-                                       0 0
-                                       90 90
-                                       180 180
-                                       270 270
-                                       0)]
-                      correction)))))
-            indices))
+                           correction (case (long majority-dir)
+                                        0 0
+                                        90 90
+                                        180 180
+                                        270 270
+                                        0)]
+                       correction)))))
+             indices))
          (finally
            (.close document)))))))
 
@@ -276,23 +276,23 @@
                          (filterv #(< % page-count) (sort page-set))
                          (range page-count))]
            (into {}
-                 (map (fn [page-idx]
-                        (let [page (.get pages page-idx)
-                              resources (.getResources page)
-                              images (when resources
-                                       (vec
-                                        (keep (fn [name]
-                                                (let [xobj (.getXObject resources name)]
-                                                  (when (instance? org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject xobj)
-                                                    (let [img (.getImage xobj)
-                                                          baos (java.io.ByteArrayOutputStream.)]
-                                                      (javax.imageio.ImageIO/write img "PNG" baos)
-                                                      {:bytes (.toByteArray baos)
-                                                       :width (.getWidth xobj)
-                                                       :height (.getHeight xobj)}))))
-                                              (iterator-seq (.iterator (.getXObjectNames resources))))))]
-                          [page-idx (or images [])]))
-                      indices)))
+             (map (fn [page-idx]
+                    (let [page (.get pages page-idx)
+                          resources (.getResources page)
+                          images (when resources
+                                   (vec
+                                     (keep (fn [name]
+                                             (let [xobj (.getXObject resources name)]
+                                               (when (instance? org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject xobj)
+                                                 (let [img (.getImage xobj)
+                                                       baos (java.io.ByteArrayOutputStream.)]
+                                                   (javax.imageio.ImageIO/write img "PNG" baos)
+                                                   {:bytes (.toByteArray baos)
+                                                    :width (.getWidth xobj)
+                                                    :height (.getHeight xobj)}))))
+                                       (iterator-seq (.iterator (.getXObjectNames resources))))))]
+                      [page-idx (or images [])]))
+               indices)))
          (finally
            (.close document)))))))
 

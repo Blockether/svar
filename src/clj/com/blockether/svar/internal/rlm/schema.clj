@@ -43,92 +43,92 @@
 (def ENTITY_SPEC
   "Spec for extracted entities."
   (spec/spec
-   :entity
-   {::spec/key-ns "entity"}
-   (spec/field {::spec/name :name
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Entity name"})
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Entity type (e.g. :party, :organization, :obligation, :term, :condition)"})
-   (spec/field {::spec/name :description
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Entity description"})
-   (spec/field {::spec/name :section
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Section identifier or label"})
-   (spec/field {::spec/name :page
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Page index (0-based)"})))
+    :entity
+    {::spec/key-ns "entity"}
+    (spec/field {::spec/name :name
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Entity name"})
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Entity type (e.g. :party, :organization, :obligation, :term, :condition)"})
+    (spec/field {::spec/name :description
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Entity description"})
+    (spec/field {::spec/name :section
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Section identifier or label"})
+    (spec/field {::spec/name :page
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Page index (0-based)"})))
 
 (def RELATIONSHIP_SPEC
   "Spec for extracted relationships."
   (spec/spec
-   :relationship
-   {::spec/key-ns "relationship"}
-   (spec/field {::spec/name :source
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Source entity name"})
-   (spec/field {::spec/name :target
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Target entity name"})
-   (spec/field {::spec/name :type
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Relationship type (e.g. :owns, :obligates, :references, :defines)"})
-   (spec/field {::spec/name :description
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Relationship description"})))
+    :relationship
+    {::spec/key-ns "relationship"}
+    (spec/field {::spec/name :source
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Source entity name"})
+    (spec/field {::spec/name :target
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Target entity name"})
+    (spec/field {::spec/name :type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Relationship type (e.g. :owns, :obligates, :references, :defines)"})
+    (spec/field {::spec/name :description
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Relationship description"})))
 
 (def ENTITY_EXTRACTION_SPEC
   "Spec for entity extraction output."
   (spec/spec
-   {:refs [ENTITY_SPEC RELATIONSHIP_SPEC]}
-   (spec/field {::spec/name :entities
-                ::spec/type :spec.type/ref
-                ::spec/target :entity
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Extracted entities"})
-   (spec/field {::spec/name :relationships
-                ::spec/type :spec.type/ref
-                ::spec/target :relationship
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/required false
-                ::spec/description "Extracted relationships"})))
+    {:refs [ENTITY_SPEC RELATIONSHIP_SPEC]}
+    (spec/field {::spec/name :entities
+                 ::spec/type :spec.type/ref
+                 ::spec/target :entity
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Extracted entities"})
+    (spec/field {::spec/name :relationships
+                 ::spec/type :spec.type/ref
+                 ::spec/target :relationship
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/required false
+                 ::spec/description "Extracted relationships"})))
 
 (def ITERATION_SPEC
   "Spec for each RLM iteration response. Forces structured output from LLM.
    Used when the provider does NOT have native reasoning (thinking) capability."
   (spec/spec
-   (spec/field {::spec/name :thinking
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Your reasoning: what you observed, what you learned, what to do next"})
-   (spec/field {::spec/name :code
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})))
+    (spec/field {::spec/name :thinking
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Your reasoning: what you observed, what you learned, what to do next"})
+    (spec/field {::spec/name :code
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})))
 
 (def ITERATION_SPEC_CODE_ONLY
   "Spec for RLM iteration response when the provider has native reasoning.
    No 'thinking' field — the model's native reasoning tokens handle that.
    Saves output tokens by not duplicating reasoning in JSON."
   (spec/spec
-   (spec/field {::spec/name :code
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})))
+    (spec/field {::spec/name :code
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})))
 
 (defn bytes->base64
   "Converts raw bytes to a base64 string.
@@ -324,60 +324,60 @@
 (def LEARNING_VOTE_ENTRY_SPEC
   "Spec for a single learning vote entry."
   (spec/spec
-   :vote-entry
-   {::spec/key-ns "vote_entry"}
-   (spec/field {::spec/name :id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The learning UUID being voted on"})
-   (spec/field {::spec/name :vote
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/values {"useful" "Learning directly helped answer the query"
-                               "not_useful" "Learning was irrelevant or unhelpful for this query"}
-                ::spec/description "Whether this learning was useful for the query"})
-   (spec/field {::spec/name :reason
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Brief explanation of why this learning was or wasn't useful"})))
+    :vote-entry
+    {::spec/key-ns "vote_entry"}
+    (spec/field {::spec/name :id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The learning UUID being voted on"})
+    (spec/field {::spec/name :vote
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values {"useful" "Learning directly helped answer the query"
+                                "not_useful" "Learning was irrelevant or unhelpful for this query"}
+                 ::spec/description "Whether this learning was useful for the query"})
+    (spec/field {::spec/name :reason
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Brief explanation of why this learning was or wasn't useful"})))
 
 (def LEARNING_VOTE_SPEC
   "Spec for LLM-based learning usefulness evaluation."
   (spec/spec
-   {:refs [LEARNING_VOTE_ENTRY_SPEC]}
-   (spec/field {::spec/name :votes
-                ::spec/type :spec.type/ref
-                ::spec/target :vote-entry
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "One vote per learning that was injected"})))
+    {:refs [LEARNING_VOTE_ENTRY_SPEC]}
+    (spec/field {::spec/name :votes
+                 ::spec/type :spec.type/ref
+                 ::spec/target :vote-entry
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "One vote per learning that was injected"})))
 
 (def AUTOLEARN_ENTRY_SPEC
   "Spec for a single auto-extracted learning."
   (spec/spec
-   :autolearn-entry
-   {::spec/key-ns "learning"}
-   (spec/field {::spec/name :insight
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "A reusable insight about what strategy/approach worked. Must be general enough to help future queries, not specific to this exact query."})
-   (spec/field {::spec/name :context
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "When this insight applies (e.g. 'aggregation over large PDFs', 'entity extraction from contracts')"})
-   (spec/field {::spec/name :tags
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "1-3 short lowercase tags for categorization (e.g. 'aggregation', 'pdf', 'search')"})))
+    :autolearn-entry
+    {::spec/key-ns "learning"}
+    (spec/field {::spec/name :insight
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "A reusable insight about what strategy/approach worked. Must be general enough to help future queries, not specific to this exact query."})
+    (spec/field {::spec/name :context
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "When this insight applies (e.g. 'aggregation over large PDFs', 'entity extraction from contracts')"})
+    (spec/field {::spec/name :tags
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "1-3 short lowercase tags for categorization (e.g. 'aggregation', 'pdf', 'search')"})))
 
 (def AUTOLEARN_SPEC
   "Spec for auto-extracted learnings from successful multi-iteration queries."
   (spec/spec
-   {:refs [AUTOLEARN_ENTRY_SPEC]}
-   (spec/field {::spec/name :learnings
-                ::spec/type :spec.type/ref
-                ::spec/target :autolearn-entry
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "1-3 reusable insights extracted from this query's execution trace"})))
+    {:refs [AUTOLEARN_ENTRY_SPEC]}
+    (spec/field {::spec/name :learnings
+                 ::spec/type :spec.type/ref
+                 ::spec/target :autolearn-entry
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "1-3 reusable insights extracted from this query's execution trace"})))
 
 (def AUTOLEARN_ITERATION_THRESHOLD
   "Minimum iterations before auto-extracting learnings. Queries with fewer
@@ -415,167 +415,167 @@
 (def QUESTION_SPEC
   "Spec for a single generated question-answer pair."
   (spec/spec
-   :question
-   {::spec/key-ns "question"}
-   (spec/field {::spec/name :question
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The question text — must be self-contained and understandable without the source document"})
-   (spec/field {::spec/name :answer
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "The answer, grounded in source material"})
-   (spec/field {::spec/name :evidence-span
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Exact verbatim quote from the source document that supports the answer"})
-   (spec/field {::spec/name :source-document
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Source document ID"})
-   (spec/field {::spec/name :source-page
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Source page number (0-based)"})
-   (spec/field {::spec/name :source-section
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Source section or heading title"})
-   (spec/field {::spec/name :difficulty
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/values BLOOM_DIFFICULTIES
-                ::spec/description "Bloom's taxonomy cognitive level"})
-   (spec/field {::spec/name :category
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/values QUESTION_CATEGORIES
-                ::spec/description "Question category"})))
+    :question
+    {::spec/key-ns "question"}
+    (spec/field {::spec/name :question
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The question text — must be self-contained and understandable without the source document"})
+    (spec/field {::spec/name :answer
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The answer, grounded in source material"})
+    (spec/field {::spec/name :evidence-span
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Exact verbatim quote from the source document that supports the answer"})
+    (spec/field {::spec/name :source-document
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Source document ID"})
+    (spec/field {::spec/name :source-page
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Source page number (0-based)"})
+    (spec/field {::spec/name :source-section
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Source section or heading title"})
+    (spec/field {::spec/name :difficulty
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values BLOOM_DIFFICULTIES
+                 ::spec/description "Bloom's taxonomy cognitive level"})
+    (spec/field {::spec/name :category
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values QUESTION_CATEGORIES
+                 ::spec/description "Question category"})))
 
 (def QUESTIONIFY_SPEC
   "Spec for generate-qa-env! Q&A generation output."
   (spec/spec
-   {:refs [QUESTION_SPEC]}
-   (spec/field {::spec/name :questions
-                ::spec/type :spec.type/ref
-                ::spec/target :question
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Generated question-answer pairs"})))
+    {:refs [QUESTION_SPEC]}
+    (spec/field {::spec/name :questions
+                 ::spec/type :spec.type/ref
+                 ::spec/target :question
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Generated question-answer pairs"})))
 
 (def PASSAGE_SPEC
   "Spec for a selected passage from Phase 1."
   (spec/spec
-   :passage
-   {::spec/key-ns "passage"}
-   (spec/field {::spec/name :document-id
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Document ID"})
-   (spec/field {::spec/name :page
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Page number (0-based)"})
-   (spec/field {::spec/name :section-title
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Section or heading title"})
-   (spec/field {::spec/name :content-summary
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Brief summary of what this passage covers (1-2 sentences)"})
-   (spec/field {::spec/name :suggested-difficulty
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/values BLOOM_DIFFICULTIES
-                ::spec/description "Suggested Bloom's taxonomy difficulty level for questions from this passage"})
-   (spec/field {::spec/name :suggested-category
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/values QUESTION_CATEGORIES
-                ::spec/description "Suggested question category for this passage"})))
+    :passage
+    {::spec/key-ns "passage"}
+    (spec/field {::spec/name :document-id
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Document ID"})
+    (spec/field {::spec/name :page
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Page number (0-based)"})
+    (spec/field {::spec/name :section-title
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Section or heading title"})
+    (spec/field {::spec/name :content-summary
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Brief summary of what this passage covers (1-2 sentences)"})
+    (spec/field {::spec/name :suggested-difficulty
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values BLOOM_DIFFICULTIES
+                 ::spec/description "Suggested Bloom's taxonomy difficulty level for questions from this passage"})
+    (spec/field {::spec/name :suggested-category
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values QUESTION_CATEGORIES
+                 ::spec/description "Suggested question category for this passage"})))
 
 (def CHUNK_SELECTION_SPEC
   "Spec for Phase 1 passage selection output."
   (spec/spec
-   {:refs [PASSAGE_SPEC]}
-   (spec/field {::spec/name :passages
-                ::spec/type :spec.type/ref
-                ::spec/target :passage
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Selected passages for Q&A generation"})))
+    {:refs [PASSAGE_SPEC]}
+    (spec/field {::spec/name :passages
+                 ::spec/type :spec.type/ref
+                 ::spec/target :passage
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Selected passages for Q&A generation"})))
 
 (def VERIFICATION_RESULT_SPEC
   "Spec for a single verification result."
   (spec/spec
-   :verification
-   {::spec/key-ns "verification"}
-   (spec/field {::spec/name :question-index
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Index of the question being verified (0-based)"})
-   (spec/field {::spec/name :grounded
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Whether the evidence span actually exists in the source and supports the answer"})
-   (spec/field {::spec/name :non-trivial
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Whether the question requires reading the document — not answerable from titles or headings alone"})
-   (spec/field {::spec/name :self-contained
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Whether the question is understandable without the source document context"})
-   (spec/field {::spec/name :answerable
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Whether the question can be answered from the evidence span alone, without external knowledge"})
-   (spec/field {::spec/name :answer-consistent
-                ::spec/type :spec.type/bool
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/description "Whether the provided answer accurately matches the question's intent and the evidence"})
-   (spec/field {::spec/name :verdict
-                ::spec/type :spec.type/keyword
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/values {"pass" "Question meets all quality criteria"
-                               "fail" "Question has fundamental issues and should be dropped"
-                               "needs-revision" "Question has minor issues but contains value"}
-                ::spec/description "Verification verdict"})
-   (spec/field {::spec/name :revision-note
-                ::spec/type :spec.type/string
-                ::spec/cardinality :spec.cardinality/one
-                ::spec/required false
-                ::spec/description "Explanation of issues if verdict is not pass"})))
+    :verification
+    {::spec/key-ns "verification"}
+    (spec/field {::spec/name :question-index
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Index of the question being verified (0-based)"})
+    (spec/field {::spec/name :grounded
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the evidence span actually exists in the source and supports the answer"})
+    (spec/field {::spec/name :non-trivial
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the question requires reading the document — not answerable from titles or headings alone"})
+    (spec/field {::spec/name :self-contained
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the question is understandable without the source document context"})
+    (spec/field {::spec/name :answerable
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the question can be answered from the evidence span alone, without external knowledge"})
+    (spec/field {::spec/name :answer-consistent
+                 ::spec/type :spec.type/bool
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Whether the provided answer accurately matches the question's intent and the evidence"})
+    (spec/field {::spec/name :verdict
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/values {"pass" "Question meets all quality criteria"
+                                "fail" "Question has fundamental issues and should be dropped"
+                                "needs-revision" "Question has minor issues but contains value"}
+                 ::spec/description "Verification verdict"})
+    (spec/field {::spec/name :revision-note
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Explanation of issues if verdict is not pass"})))
 
 (def VERIFICATION_SPEC
   "Spec for Phase 3 verification output."
   (spec/spec
-   {:refs [VERIFICATION_RESULT_SPEC]}
-   (spec/field {::spec/name :verifications
-                ::spec/type :spec.type/ref
-                ::spec/target :verification
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Verification results for each question"})))
+    {:refs [VERIFICATION_RESULT_SPEC]}
+    (spec/field {::spec/name :verifications
+                 ::spec/type :spec.type/ref
+                 ::spec/target :verification
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Verification results for each question"})))
 
 ;; -- Prompt builders --
 
 (def DEDUP_SPEC
   "Spec for LLM-based semantic deduplication output."
   (spec/spec
-   (spec/field {::spec/name :keep-indices
-                ::spec/type :spec.type/int
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "0-based indices of questions to KEEP — one per semantic group, choosing the highest quality version"})))
+    (spec/field {::spec/name :keep-indices
+                 ::spec/type :spec.type/int
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "0-based indices of questions to KEEP — one per semantic group, choosing the highest quality version"})))
 
 (def REVISION_SPEC
   "Spec for revising questions that need improvement."
   (spec/spec
-   {:refs [QUESTION_SPEC]}
-   (spec/field {::spec/name :questions
-                ::spec/type :spec.type/ref
-                ::spec/target :question
-                ::spec/cardinality :spec.cardinality/many
-                ::spec/description "Revised question-answer pairs"})))
+    {:refs [QUESTION_SPEC]}
+    (spec/field {::spec/name :questions
+                 ::spec/type :spec.type/ref
+                 ::spec/target :question
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "Revised question-answer pairs"})))
 
 ;; =============================================================================
 ;; PageIndex Specs (merged from internal.pageindex.spec)
@@ -657,7 +657,7 @@
   (s/keys :req [:image/page
                 :image/description
                 :image/bbox]
-          :opt [:image/data]))
+    :opt [:image/data]))
 
 (s/def :node/images
   (s/coll-of ::extracted-image :kind vector?))
@@ -665,7 +665,7 @@
 ;; Structure index: Hierarchical numbering ("1", "1.1", "1.2.3", etc.)
 (s/def :node/structure
   (s/and string?
-         #(re-matches #"\d+(\.\d+)*" %)))
+    #(re-matches #"\d+(\.\d+)*" %)))
 
 ;; TOC page: What the table of contents CLAIMS the page number is
 ;; (Often wrong! Example: TOC says "Chapter 1 ... 1" but it's actually on page 3)
@@ -679,15 +679,15 @@
                 :node/title
                 :node/start-index
                 :node/end-index]
-          :opt [:node/parent-id
-                :node/physical-index
-                :node/text
-                :node/summary
-                :node/keywords
-                :node/abbreviations
-                :node/images
-                :node/structure
-                :toc/page]))
+    :opt [:node/parent-id
+          :node/physical-index
+          :node/text
+          :node/summary
+          :node/keywords
+          :node/abbreviations
+          :node/images
+          :node/structure
+          :toc/page]))
 
 ;; Flat structure: Vector of nodes
 (s/def ::flat-structure
@@ -758,17 +758,17 @@
 (s/def ::content-node
   (s/keys :req [:page.node/type
                 :page.node/id]
-          :opt [:page.node/parent-id
-                :page.node/level
-                :page.node/content
-                :page.node/image-data
-                :page.node/description
-                :page.node/continuation?
-                :page.node/caption
-                :page.node/kind
-                :page.node/bbox
-                :page.node/image-index
-                :page.node/group-id]))
+    :opt [:page.node/parent-id
+          :page.node/level
+          :page.node/content
+          :page.node/image-data
+          :page.node/description
+          :page.node/continuation?
+          :page.node/caption
+          :page.node/kind
+          :page.node/bbox
+          :page.node/image-index
+          :page.node/group-id]))
 
 ;; Page nodes: vector of content nodes in reading order
 (s/def :page/nodes
@@ -872,8 +872,8 @@
                 :document.toc/target-page
                 :document.toc/target-section-id
                 :document.toc/level]
-          :opt [:document.toc/parent-id
-                :document.toc/description]))
+    :opt [:document.toc/parent-id
+          :document.toc/description]))
 
 ;; Document TOC: vector of TOC entries
 (s/def :document/toc
@@ -896,11 +896,11 @@
                 :document/extension
                 :document/pages
                 :document/toc]
-          :opt [:document/title
-                :document/abstract
-                :document/created-at
-                :document/updated-at
-                :document/author]))
+    :opt [:document/title
+          :document/abstract
+          :document/created-at
+          :document/updated-at
+          :document/author]))
 
 ;; Vector of documents
 (s/def ::documents

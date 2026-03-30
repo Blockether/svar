@@ -2,7 +2,13 @@
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
-   [com.blockether.svar.internal.rlm.db :as db :refer :all]
+   [com.blockether.svar.internal.rlm.db :as db
+    :refer [count-history-tokens db-entity-stats db-get-document db-get-entity
+            db-get-learnings db-get-page-node db-get-toc-entry db-learning-stats
+            db-list-documents db-list-entities db-list-page-nodes db-list-relationships
+            db-list-tags db-list-toc-entries db-search-entities db-search-page-nodes
+            db-search-toc-entries db-store-toc-entry! get-recent-messages
+            str-includes? str-lower str-truncate]]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
@@ -81,7 +87,7 @@
   (if (or (nil? s) (<= (count s) max-chars))
     s
     (str (subs s 0 max-chars)
-         "\n... [" (- (count s) max-chars) " more chars — store in a variable with (def my-var ...)]")))
+      "\n... [" (- (count s) max-chars) " more chars — store in a variable with (def my-var ...)]")))
 
 ;; =============================================================================
 ;; Raw Text Access (RLM Paper §3: symbolic handle to prompt P)
@@ -93,10 +99,10 @@
   (when conn
     (->> (d/q '[:find [(pull ?e [:page.node/content :page.node/document-id :page.node/page-id :page.node/id]) ...]
                 :where [?e :page.node/id _]]
-              (d/db conn))
-         (sort-by (juxt :page.node/document-id :page.node/page-id :page.node/id))
-         (keep :page.node/content)
-         (str/join "\n"))))
+           (d/db conn))
+      (sort-by (juxt :page.node/document-id :page.node/page-id :page.node/id))
+      (keep :page.node/content)
+      (str/join "\n"))))
 
 (defn build-page-texts
   "Builds a vector of page texts indexed by page number across all documents."
@@ -104,17 +110,17 @@
   (when conn
     (let [page-nodes (d/q '[:find [(pull ?e [:page.node/content :page.node/page-id :page.node/id]) ...]
                             :where [?e :page.node/id _]]
-                          (d/db conn))
+                       (d/db conn))
           pages (d/q '[:find [(pull ?e [:page/id :page/document-id :page/index]) ...]
                        :where [?e :page/id _]]
-                     (d/db conn))
+                  (d/db conn))
           nodes-by-page (group-by :page.node/page-id page-nodes)
           sorted-pages (sort-by (juxt :page/document-id :page/index) pages)]
       (mapv (fn [page]
               (let [nodes (get nodes-by-page (:page/id page) [])
                     sorted-nodes (sort-by :page.node/id nodes)]
                 (str/join "\n" (keep :page.node/content sorted-nodes))))
-            sorted-pages))))
+        sorted-pages))))
 
 ;; =============================================================================
 ;; Debug Logging
@@ -163,7 +169,7 @@
   (try
     (when (and date1 date2)
       (.isBefore (java.time.LocalDate/parse date1)
-                 (java.time.LocalDate/parse date2)))
+        (java.time.LocalDate/parse date2)))
     (catch Exception _
       false)))
 
@@ -180,7 +186,7 @@
   (try
     (when (and date1 date2)
       (.isAfter (java.time.LocalDate/parse date1)
-                (java.time.LocalDate/parse date2)))
+        (java.time.LocalDate/parse date2)))
     (catch Exception _
       false)))
 
@@ -197,8 +203,8 @@
   (try
     (when (and date1 date2)
       (.between java.time.temporal.ChronoUnit/DAYS
-                (java.time.LocalDate/parse date1)
-                (java.time.LocalDate/parse date2)))
+        (java.time.LocalDate/parse date1)
+        (java.time.LocalDate/parse date2)))
     (catch Exception _
       nil)))
 
@@ -377,7 +383,7 @@
           (if (and (> current-size 0) (> (+ current-size para-size) page-size))
             (recur remaining [] 0 (conj result (str/join "\n\n" current)))
             (recur (rest remaining) (conj current para)
-                   (+ current-size para-size) result)))))))
+              (+ current-size para-size) result)))))))
 
 (defn make-get-page-node-fn
   "Creates P-add! — fetches content using Datalevin lookup ref syntax.
@@ -406,12 +412,12 @@
             (let [nodes (d/q '[:find [(pull ?e [:page.node/content :page.node/page-id]) ...]
                                :in $ ?doc-id
                                :where [?e :page.node/document-id ?doc-id]]
-                             (d/db conn) id)]
+                          (d/db conn) id)]
               (when (seq nodes)
                 (let [full-text (->> nodes
-                                     (sort-by :page.node/page-id)
-                                     (keep :page.node/content)
-                                     (str/join "\n"))]
+                                  (sort-by :page.node/page-id)
+                                  (keep :page.node/content)
+                                  (str/join "\n"))]
                   (chunk-text full-text))))
 
             :document.toc/id
@@ -420,8 +426,8 @@
 
             ;; Unknown attribute
             (throw (ex-info (str "P-add! unknown lookup attribute: " attr
-                                 ". Use :page.node/id, :document/id, or :document.toc/id")
-                            {:type :svar/invalid-lookup-ref :attr attr :id id}))))))))
+                              ". Use :page.node/id, :document/id, or :document.toc/id")
+                     {:type :svar/invalid-lookup-ref :attr attr :id id}))))))))
 
 (defn make-list-page-nodes-fn
   "Creates list-document-pages — list/filter document page nodes."
@@ -557,7 +563,7 @@
        (let [results (get-recent-messages db-info (or n 5))]
          (mapv (fn [{:keys [content role tokens]}]
                  {:role (name role) :content content :tokens tokens})
-               results))
+           results))
        []))))
 
 (defn make-get-history-fn
@@ -570,7 +576,7 @@
        (let [results (get-recent-messages db-info n)]
          (mapv (fn [{:keys [content role tokens]}]
                  {:role (name role) :content content :tokens tokens})
-               results))
+           results))
        []))))
 
 (defn make-history-stats-fn
@@ -628,13 +634,13 @@
                        ;; Locals inspection tools - LLM can check its own state on demand
                        'list-locals (fn []
                                       (into {}
-                                            (map (fn [[k v]]
-                                                   [k (cond
-                                                        (fn? v) '<fn>
-                                                        (and (coll? v) (> (count v) 10))
-                                                        (str "<" (type v) " with " (count v) " items>")
-                                                        :else v)])
-                                                 @locals-atom)))
+                                        (map (fn [[k v]]
+                                               [k (cond
+                                                    (fn? v) '<fn>
+                                                    (and (coll? v) (> (count v) 10))
+                                                    (str "<" (type v) " with " (count v) " items>")
+                                                    :else v)])
+                                          @locals-atom)))
                        'get-local (fn [var-name] (get @locals-atom var-name))
                        'spec spec/spec
                        'field spec/field
@@ -698,56 +704,54 @@
                                        (str "Added to context (" (count (:context @p-atom)) " items)"))
                            'ctx-remove! (fn [idx]
                                           (swap! p-atom update :context
-                                                 (fn [ctx]
-                                                   (let [i (if (neg? idx) (+ (count ctx) idx) idx)]
-                                                     (into (subvec ctx 0 i) (subvec ctx (inc i))))))
+                                            (fn [ctx]
+                                              (let [i (if (neg? idx) (+ (count ctx) idx) idx)]
+                                                (into (subvec ctx 0 i) (subvec ctx (inc i))))))
                                           (str "Removed from context (" (count (:context @p-atom)) " items)"))
                            'ctx-clear! (fn [] (swap! p-atom assoc :context []) "Context cleared")
                            'ctx-replace! (fn [from-idx to-idx replacement]
                                            (swap! p-atom update :context
-                                                  (fn [ctx]
-                                                    (let [before (subvec ctx 0 from-idx)
-                                                          after  (when (< (inc to-idx) (count ctx))
-                                                                   (subvec ctx (inc to-idx)))]
-                                                      (into (conj before (str replacement))
-                                                            (or after [])))))
+                                             (fn [ctx]
+                                               (let [before (subvec ctx 0 from-idx)
+                                                     after  (when (< (inc to-idx) (count ctx))
+                                                              (subvec ctx (inc to-idx)))]
+                                                 (into (conj before (str replacement))
+                                                   (or after [])))))
                                            (str "Replaced [" from-idx "-" to-idx "] (" (count (:context @p-atom)) " items)"))
                            ;; Learnings — priority-based
                            'learn! (fn
                                      ([text] (swap! p-atom update :learnings conj {:text (str text) :priority :medium})
-                                      (str "Learned (" (count (:learnings @p-atom)) " total)"))
+                                             (str "Learned (" (count (:learnings @p-atom)) " total)"))
                                      ([text priority] (swap! p-atom update :learnings conj {:text (str text) :priority priority})
-                                      (str "Learned (" (count (:learnings @p-atom)) " total)")))
+                                                      (str "Learned (" (count (:learnings @p-atom)) " total)")))
                            'forget! (fn [idx] (swap! p-atom update :learnings
-                                                     (fn [ls] (into (subvec ls 0 idx) (subvec ls (inc idx)))))
-                                     (str "Forgot learning (" (count (:learnings @p-atom)) " remaining)"))
-}
+                                                (fn [ls] (into (subvec ls 0 idx) (subvec ls (inc idx)))))
+                                      (str "Forgot learning (" (count (:learnings @p-atom)) " remaining)"))}
         all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
-                            learning-bindings raw-text-bindings
-                            (or custom-bindings {}))]
-    (let [sci-ctx (sci/init {:namespaces {'user all-bindings
-                                          'clojure.string {'split str/split 'join str/join 'replace str/replace
-                                                           'trim str/trim 'lower-case str/lower-case 'upper-case str/upper-case
-                                                           'starts-with? str/starts-with? 'ends-with? str/ends-with?
-                                                           'includes? str/includes? 'blank? str/blank?
-                                                           'split-lines str/split-lines 'triml str/triml 'trimr str/trimr
-                                                           'capitalize str/capitalize 'reverse str/reverse
-                                                           're-quote-replacement str/re-quote-replacement}
-                                          'clojure.set {'union clojure.set/union 'intersection clojure.set/intersection
-                                                        'difference clojure.set/difference 'subset? clojure.set/subset?
-                                                        'superset? clojure.set/superset?}
-}
-                             :ns-aliases {'str 'clojure.string
+                       learning-bindings raw-text-bindings
+                       (or custom-bindings {}))
+        sci-ctx (sci/init {:namespaces {'user all-bindings
+                                        'clojure.string {'split str/split 'join str/join 'replace str/replace
+                                                         'trim str/trim 'lower-case str/lower-case 'upper-case str/upper-case
+                                                         'starts-with? str/starts-with? 'ends-with? str/ends-with?
+                                                         'includes? str/includes? 'blank? str/blank?
+                                                         'split-lines str/split-lines 'triml str/triml 'trimr str/trimr
+                                                         'capitalize str/capitalize 'reverse str/reverse
+                                                         're-quote-replacement str/re-quote-replacement}
+                                        'clojure.set {'union clojure.set/union 'intersection clojure.set/intersection
+                                                      'difference clojure.set/difference 'subset? clojure.set/subset?
+                                                      'superset? clojure.set/superset?}}
+                           :ns-aliases {'str 'clojure.string
                                         'set 'clojure.set}
-                             :classes {'java.util.regex.Pattern java.util.regex.Pattern
-                                       'java.util.regex.Matcher java.util.regex.Matcher
-                                       'java.time.LocalDate java.time.LocalDate
-                                       'java.time.Period java.time.Period
-                                       'java.util.UUID java.util.UUID}
-                             :deny '[require import ns eval load-string read-string]})]
-      {:sci-ctx sci-ctx
-       :p-atom p-atom
-       :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))})))
+                           :classes {'java.util.regex.Pattern java.util.regex.Pattern
+                                     'java.util.regex.Matcher java.util.regex.Matcher
+                                     'java.time.LocalDate java.time.LocalDate
+                                     'java.time.Period java.time.Period
+                                     'java.util.UUID java.util.UUID}
+                           :deny '[require import ns eval load-string read-string]})]
+    {:sci-ctx sci-ctx
+     :p-atom p-atom
+     :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))}))
 
 ;; =============================================================================
 ;; SCI Context Helpers
@@ -762,10 +766,10 @@
     (try
       (let [ns-vars (sci/eval-string* sci-ctx "(ns-publics 'user)")]
         (->> ns-vars
-             (remove (fn [[k _]] (contains? initial-ns-keys k)))
-             (mapv (fn [[k v]]
-                     (let [val (try @v (catch Exception _ nil))]
-                       {:name (str k) :value val :type (str (type val))})))))
+          (remove (fn [[k _]] (contains? initial-ns-keys k)))
+          (mapv (fn [[k v]]
+                  (let [val (try @v (catch Exception _ nil))]
+                    {:name (str k) :value val :type (str (type val))})))))
       (catch Exception _ nil))))
 
 (defn sci-update-binding!

@@ -21,8 +21,8 @@
    Keyword. Normalized Clojure keyword."
   [k]
   (-> k
-      (str/replace "_" "-")
-      keyword))
+    (str/replace "_" "-")
+    keyword))
 
 (defn- java->clojure
   "Converts Java Map/List to Clojure data structures recursively.

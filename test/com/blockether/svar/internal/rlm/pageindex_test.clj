@@ -73,102 +73,102 @@
 
 (defdescribe pdf-module-test
   (describe "page-count"
-            (it "returns correct page count for example.pdf"
-                (expect (= 1 (pdf/page-count TEST_PDF_PATH))))
+    (it "returns correct page count for example.pdf"
+      (expect (= 1 (pdf/page-count TEST_PDF_PATH))))
 
-            (it "throws for non-existent file"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(pdf/page-count "non-existent.pdf")))))
+    (it "throws for non-existent file"
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(pdf/page-count "non-existent.pdf")))))
 
   (describe "pdf-metadata"
-            (it "extracts author from example.pdf"
-                (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
-                  (expect (= "Vb1" (:author meta)))))
+    (it "extracts author from example.pdf"
+      (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
+        (expect (= "Vb1" (:author meta)))))
 
-            (it "extracts creator application"
-                (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
-                  (expect (= "Acrobat PDFMaker 11 für Word" (:creator meta)))))
+    (it "extracts creator application"
+      (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
+        (expect (= "Acrobat PDFMaker 11 für Word" (:creator meta)))))
 
-            (it "extracts producer"
-                (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
-                  (expect (= "Adobe PDF Library 11.0" (:producer meta)))))
+    (it "extracts producer"
+      (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
+        (expect (= "Adobe PDF Library 11.0" (:producer meta)))))
 
-            (it "extracts creation date"
-                (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
-                  (expect (some? (:created-at meta)))
-                  (expect (inst? (:created-at meta)))))
+    (it "extracts creation date"
+      (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
+        (expect (some? (:created-at meta)))
+        (expect (inst? (:created-at meta)))))
 
-            (it "extracts modification date"
-                (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
-                  (expect (some? (:updated-at meta)))
-                  (expect (inst? (:updated-at meta)))))
+    (it "extracts modification date"
+      (let [meta (pdf/pdf-metadata TEST_PDF_PATH)]
+        (expect (some? (:updated-at meta)))
+        (expect (inst? (:updated-at meta)))))
 
-            (it "throws for non-existent file"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(pdf/pdf-metadata "non-existent.pdf")))))
+    (it "throws for non-existent file"
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(pdf/pdf-metadata "non-existent.pdf")))))
 
   (describe "pdf->images"
-            (it "returns vector of BufferedImage"
-                (let [images (pdf/pdf->images TEST_PDF_PATH)]
-                  (expect (vector? images))
-                  (expect (= 1 (count images)))
-                  (expect (instance? BufferedImage (first images)))))
+    (it "returns vector of BufferedImage"
+      (let [images (pdf/pdf->images TEST_PDF_PATH)]
+        (expect (vector? images))
+        (expect (= 1 (count images)))
+        (expect (instance? BufferedImage (first images)))))
 
-            (it "renders at default DPI (150)"
-                (let [images (pdf/pdf->images TEST_PDF_PATH)
-                      img (first images)]
+    (it "renders at default DPI (150)"
+      (let [images (pdf/pdf->images TEST_PDF_PATH)
+            img (first images)]
         ;; At 150 DPI, a typical A4 page (~8.27x11.69 inches) renders to ~1240x1754 pixels
         ;; Allow some tolerance for different PDF page sizes
-                  (expect (> (.getWidth img) 500))
-                  (expect (> (.getHeight img) 500))))
+        (expect (> (.getWidth img) 500))
+        (expect (> (.getHeight img) 500))))
 
-            (it "renders at custom DPI"
-                (let [images-150 (pdf/pdf->images TEST_PDF_PATH {:dpi 150})
-                      images-300 (pdf/pdf->images TEST_PDF_PATH {:dpi 300})
-                      img-150 (first images-150)
-                      img-300 (first images-300)]
+    (it "renders at custom DPI"
+      (let [images-150 (pdf/pdf->images TEST_PDF_PATH {:dpi 150})
+            images-300 (pdf/pdf->images TEST_PDF_PATH {:dpi 300})
+            img-150 (first images-150)
+            img-300 (first images-300)]
         ;; 300 DPI should be ~2x larger than 150 DPI
-                  (expect (> (.getWidth img-300) (* 1.5 (.getWidth img-150))))
-                  (expect (> (.getHeight img-300) (* 1.5 (.getHeight img-150))))))
+        (expect (> (.getWidth img-300) (* 1.5 (.getWidth img-150))))
+        (expect (> (.getHeight img-300) (* 1.5 (.getHeight img-150))))))
 
-            (it "throws for non-existent file"
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(pdf/pdf->images "non-existent.pdf")))))
+    (it "throws for non-existent file"
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(pdf/pdf->images "non-existent.pdf")))))
 
   (describe "pdf->images with :page-set"
-            (it "renders only selected pages"
-                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{0}})]
-                  (expect (vector? images))
-                  (expect (= 1 (count images)))
-                  (expect (instance? BufferedImage (first images)))))
+    (it "renders only selected pages"
+      (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{0}})]
+        (expect (vector? images))
+        (expect (= 1 (count images)))
+        (expect (instance? BufferedImage (first images)))))
 
-            (it "empty page-set renders nothing"
-                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{}})]
-                  (expect (vector? images))
-                  (expect (= 0 (count images)))))
+    (it "empty page-set renders nothing"
+      (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{}})]
+        (expect (vector? images))
+        (expect (= 0 (count images)))))
 
-            (it "nil page-set renders all pages (default)"
-                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set nil})]
-                  (expect (= 1 (count images)))))
+    (it "nil page-set renders all pages (default)"
+      (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set nil})]
+        (expect (= 1 (count images)))))
 
-            (it "page-set beyond page count renders nothing for that index"
-                (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{5}})]
-                  (expect (= 0 (count images))))))
+    (it "page-set beyond page count renders nothing for that index"
+      (let [images (pdf/pdf->images TEST_PDF_PATH {:page-set #{5}})]
+        (expect (= 0 (count images))))))
 
   (describe "detect-text-rotation with :page-set"
-            (it "detects rotation only for selected pages"
-                (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH {:page-set #{0}})]
-                  (expect (vector? rotations))
-                  (expect (= 1 (count rotations)))))
+    (it "detects rotation only for selected pages"
+      (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH {:page-set #{0}})]
+        (expect (vector? rotations))
+        (expect (= 1 (count rotations)))))
 
-            (it "empty page-set returns empty vector"
-                (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH {:page-set #{}})]
-                  (expect (vector? rotations))
-                  (expect (= 0 (count rotations)))))
+    (it "empty page-set returns empty vector"
+      (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH {:page-set #{}})]
+        (expect (vector? rotations))
+        (expect (= 0 (count rotations)))))
 
-            (it "nil page-set returns all pages (default)"
-                (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH)]
-                  (expect (= 1 (count rotations)))))))
+    (it "nil page-set returns all pages (default)"
+      (let [rotations (pdf/detect-text-rotation TEST_PDF_PATH)]
+        (expect (= 1 (count rotations)))))))
 
 ;; =============================================================================
 ;; Spec Validation Tests (No LLM Required)
@@ -176,79 +176,79 @@
 
 (defdescribe spec-validation-test
   (describe "document structure validation"
-            (it "validates minimal valid document"
-                (let [doc {:document/name "test"
-                           :document/extension "pdf"
-                           :document/pages [{:page/index 0
-                                             :page/nodes []}]
-                           :document/toc []}]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "validates minimal valid document"
+      (let [doc {:document/name "test"
+                 :document/extension "pdf"
+                 :document/pages [{:page/index 0
+                                   :page/nodes []}]
+                 :document/toc []}]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "rejects document without name"
-                (let [doc {:document/extension "pdf"
-                           :document/pages []
-                           :document/toc []}]
-                  (expect (not (pageindex-spec/valid-document? doc)))))
+    (it "rejects document without name"
+      (let [doc {:document/extension "pdf"
+                 :document/pages []
+                 :document/toc []}]
+        (expect (not (pageindex-spec/valid-document? doc)))))
 
-            (it "rejects document without extension"
-                (let [doc {:document/name "test"
-                           :document/pages []
-                           :document/toc []}]
-                  (expect (not (pageindex-spec/valid-document? doc)))))
+    (it "rejects document without extension"
+      (let [doc {:document/name "test"
+                 :document/pages []
+                 :document/toc []}]
+        (expect (not (pageindex-spec/valid-document? doc)))))
 
-            (it "validates document with optional fields"
-                (let [doc {:document/name "test"
-                           :document/title "Test Document"
-                           :document/abstract "This is a test."
-                           :document/extension "pdf"
-                           :document/author "Test Author"
-                           :document/pages [{:page/index 0
-                                             :page/nodes []}]
-                           :document/toc []
-                           :document/created-at (java.time.Instant/now)
-                           :document/updated-at (java.time.Instant/now)}]
-                  (expect (pageindex-spec/valid-document? doc)))))
+    (it "validates document with optional fields"
+      (let [doc {:document/name "test"
+                 :document/title "Test Document"
+                 :document/abstract "This is a test."
+                 :document/extension "pdf"
+                 :document/author "Test Author"
+                 :document/pages [{:page/index 0
+                                   :page/nodes []}]
+                 :document/toc []
+                 :document/created-at (java.time.Instant/now)
+                 :document/updated-at (java.time.Instant/now)}]
+        (expect (pageindex-spec/valid-document? doc)))))
 
   (describe "page structure validation"
-            (it "validates page with nodes"
-                (let [page {:page/index 0
-                            :page/nodes [{:page.node/type :paragraph
-                                          :page.node/id "1"
-                                          :page.node/content "Test content"}]}]
-                  (expect (s/valid? ::pageindex-spec/page page))))
+    (it "validates page with nodes"
+      (let [page {:page/index 0
+                  :page/nodes [{:page.node/type :paragraph
+                                :page.node/id "1"
+                                :page.node/content "Test content"}]}]
+        (expect (s/valid? ::pageindex-spec/page page))))
 
-            (it "validates page with section and heading"
-                (let [page {:page/index 0
-                            :page/nodes [{:page.node/type :section
-                                          :page.node/id "1"
-                                          :page.node/description "A test section"}
-                                         {:page.node/type :heading
-                                          :page.node/id "2"
-                                          :page.node/parent-id "1"
-                                          :page.node/level "h1"
-                                          :page.node/content "Test Heading"}]}]
-                  (expect (s/valid? ::pageindex-spec/page page)))))
+    (it "validates page with section and heading"
+      (let [page {:page/index 0
+                  :page/nodes [{:page.node/type :section
+                                :page.node/id "1"
+                                :page.node/description "A test section"}
+                               {:page.node/type :heading
+                                :page.node/id "2"
+                                :page.node/parent-id "1"
+                                :page.node/level "h1"
+                                :page.node/content "Test Heading"}]}]
+        (expect (s/valid? ::pageindex-spec/page page)))))
 
   (describe "TOC entry validation"
-            (it "validates complete TOC entry"
-                (let [entry {:document.toc/type :toc-entry
-                             :document.toc/id "uuid-string"
-                             :document.toc/title "Chapter 1"
-                             :document.toc/target-page 0
-                             :document.toc/target-section-id "section-uuid"
-                             :document.toc/level "l1"}]
-                  (expect (s/valid? ::pageindex-spec/toc-entry entry))))
+    (it "validates complete TOC entry"
+      (let [entry {:document.toc/type :toc-entry
+                   :document.toc/id "uuid-string"
+                   :document.toc/title "Chapter 1"
+                   :document.toc/target-page 0
+                   :document.toc/target-section-id "section-uuid"
+                   :document.toc/level "l1"}]
+        (expect (s/valid? ::pageindex-spec/toc-entry entry))))
 
-            (it "validates TOC entry with optional fields"
-                (let [entry {:document.toc/type :toc-entry
-                             :document.toc/id "uuid-string"
-                             :document.toc/parent-id "parent-uuid"
-                             :document.toc/title "Section 1.1"
-                             :document.toc/description "An introduction to the topic"
-                             :document.toc/target-page 5
-                             :document.toc/target-section-id "section-uuid"
-                             :document.toc/level "l2"}]
-                  (expect (s/valid? ::pageindex-spec/toc-entry entry))))))
+    (it "validates TOC entry with optional fields"
+      (let [entry {:document.toc/type :toc-entry
+                   :document.toc/id "uuid-string"
+                   :document.toc/parent-id "parent-uuid"
+                   :document.toc/title "Section 1.1"
+                   :document.toc/description "An introduction to the topic"
+                   :document.toc/target-page 5
+                   :document.toc/target-section-id "section-uuid"
+                   :document.toc/level "l2"}]
+        (expect (s/valid? ::pageindex-spec/toc-entry entry))))))
 
 ;; =============================================================================
 ;; Fixture Structure Tests (expected index shape)
@@ -256,22 +256,22 @@
 
 (defdescribe fixture-structure-test
   (describe "EXAMPLE_PDF_FIXTURE"
-            (it "has required document fields"
-                (expect (= "example" (:document/name EXAMPLE_PDF_FIXTURE)))
-                (expect (= "pdf" (:document/extension EXAMPLE_PDF_FIXTURE)))
-                (expect (= "Vb1" (:document/author EXAMPLE_PDF_FIXTURE))))
+    (it "has required document fields"
+      (expect (= "example" (:document/name EXAMPLE_PDF_FIXTURE)))
+      (expect (= "pdf" (:document/extension EXAMPLE_PDF_FIXTURE)))
+      (expect (= "Vb1" (:document/author EXAMPLE_PDF_FIXTURE))))
 
-            (it "has pages vector"
-                (expect (vector? (:document/pages EXAMPLE_PDF_FIXTURE)))
-                (expect (= 1 (count (:document/pages EXAMPLE_PDF_FIXTURE)))))
+    (it "has pages vector"
+      (expect (vector? (:document/pages EXAMPLE_PDF_FIXTURE)))
+      (expect (= 1 (count (:document/pages EXAMPLE_PDF_FIXTURE)))))
 
-            (it "has page with correct index"
-                (let [page (first (:document/pages EXAMPLE_PDF_FIXTURE))]
-                  (expect (= 0 (:page/index page)))
-                  (expect (vector? (:page/nodes page)))))
+    (it "has page with correct index"
+      (let [page (first (:document/pages EXAMPLE_PDF_FIXTURE))]
+        (expect (= 0 (:page/index page)))
+        (expect (vector? (:page/nodes page)))))
 
-            (it "has TOC vector"
-                (expect (vector? (:document/toc EXAMPLE_PDF_FIXTURE))))))
+    (it "has TOC vector"
+      (expect (vector? (:document/toc EXAMPLE_PDF_FIXTURE))))))
 
 ;; =============================================================================
 ;; Core API Tests (No LLM - file detection only)
@@ -279,13 +279,13 @@
 
 (defdescribe core-api-test
   (describe "file type detection"
-            (it "detects PDF files exist"
-                (expect (.exists (io/file TEST_PDF_PATH))))
+    (it "detects PDF files exist"
+      (expect (.exists (io/file TEST_PDF_PATH))))
 
-            (it "throws for non-existent file"
+    (it "throws for non-existent file"
       ;; Test via the build-index error path - file exists check
-                (expect (throws? clojure.lang.ExceptionInfo
-                                 #(pageindex/build-index "non-existent.pdf"))))))
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(pageindex/build-index "non-existent.pdf"))))))
 
 ;; =============================================================================
 ;; Integration Tests (Requires LLM - marked for conditional execution)
@@ -295,7 +295,7 @@
   "LLM config for integration tests."
   {:api-key (System/getenv "OPENAI_API_KEY")
    :base-url (or (System/getenv "OPENAI_BASE_URL")
-                 "https://api.openai.com/v1")})
+               "https://api.openai.com/v1")})
 
 (defn- integration-tests-enabled?
   "Returns true if LLM integration tests should run."
@@ -304,56 +304,56 @@
 
 (defdescribe build-index-integration-test
   (describe "build-index for example.pdf"
-            (it "produces valid document structure (when LLM available)"
-                (when (integration-tests-enabled?)
-                  (let [doc (pageindex/build-index TEST_PDF_PATH
-                                                   {:config integration-config})]
+    (it "produces valid document structure (when LLM available)"
+      (when (integration-tests-enabled?)
+        (let [doc (pageindex/build-index TEST_PDF_PATH
+                    {:config integration-config})]
           ;; Check required fields
-                    (expect (= "example" (:document/name doc)))
-                    (expect (= "pdf" (:document/extension doc)))
+          (expect (= "example" (:document/name doc)))
+          (expect (= "pdf" (:document/extension doc)))
 
           ;; Check pages
-                    (expect (vector? (:document/pages doc)))
-                    (expect (= 1 (count (:document/pages doc))))
+          (expect (vector? (:document/pages doc)))
+          (expect (= 1 (count (:document/pages doc))))
 
           ;; Check page structure
-                    (let [page (first (:document/pages doc))]
-                      (expect (= 0 (:page/index page)))
-                      (expect (vector? (:page/nodes page))))
+          (let [page (first (:document/pages doc))]
+            (expect (= 0 (:page/index page)))
+            (expect (vector? (:page/nodes page))))
 
           ;; Check TOC
-                    (expect (vector? (:document/toc doc)))
+          (expect (vector? (:document/toc doc)))
 
           ;; Check metadata from PDF
-                    (expect (= "Vb1" (:document/author doc)))
-                    (expect (inst? (:document/created-at doc)))
+          (expect (= "Vb1" (:document/author doc)))
+          (expect (inst? (:document/created-at doc)))
 
           ;; Validate against spec
-                    (expect (pageindex-spec/valid-document? doc)))))
+          (expect (pageindex-spec/valid-document? doc)))))
 
-            (it "index! saves and load-index reads back (when LLM available)"
-                (when (integration-tests-enabled?)
-                  (let [output-path "resources-test/example-generated.pageindex"
-                        result (pageindex/index! TEST_PDF_PATH
-                                                 {:output output-path
-                                                  :config integration-config})
-                        loaded (pageindex/load-index output-path)]
-                    (try
+    (it "index! saves and load-index reads back (when LLM available)"
+      (when (integration-tests-enabled?)
+        (let [output-path "resources-test/example-generated.pageindex"
+              result (pageindex/index! TEST_PDF_PATH
+                       {:output output-path
+                        :config integration-config})
+              loaded (pageindex/load-index output-path)]
+          (try
             ;; Check result structure
-                      (expect (some? (:document result)))
-                      (expect (= output-path (:output-path result)))
+            (expect (some? (:document result)))
+            (expect (= output-path (:output-path result)))
 
             ;; Check loaded matches original
-                      (expect (= (:document/name (:document result))
-                                 (:document/name loaded)))
-                      (expect (= (:document/extension (:document result))
-                                 (:document/extension loaded)))
+            (expect (= (:document/name (:document result))
+                      (:document/name loaded)))
+            (expect (= (:document/extension (:document result))
+                      (:document/extension loaded)))
 
             ;; Validate loaded document
-                      (expect (pageindex-spec/valid-document? loaded))
-                      (finally
+            (expect (pageindex-spec/valid-document? loaded))
+            (finally
               ;; Cleanup
-                        (fs/delete-tree output-path))))))))
+              (fs/delete-tree output-path))))))))
 
 ;; =============================================================================
 ;; Fixture Loading Tests
@@ -361,11 +361,11 @@
 
 (defdescribe fixture-loading-test
   (describe "load saved index"
-            (it "loads fixture index when available"
-                (when (fs/exists? TEST_FIXTURE_PATH)
-                  (let [doc (pageindex/load-index TEST_FIXTURE_PATH)]
-                    (expect (= "example" (:document/name doc)))
-                    (expect (pageindex-spec/valid-document? doc)))))))
+    (it "loads fixture index when available"
+      (when (fs/exists? TEST_FIXTURE_PATH)
+        (let [doc (pageindex/load-index TEST_FIXTURE_PATH)]
+          (expect (= "example" (:document/name doc)))
+          (expect (pageindex-spec/valid-document? doc)))))))
 
 ;; =============================================================================
 ;; build-index Output Dir Tests (No LLM)
@@ -373,58 +373,58 @@
 
 (defdescribe build-index-output-dir-test
   (describe "build-index :path with output-dir"
-            (it "writes PNG files for visual nodes"
-                (let [output-dir (fs/create-temp-dir {:prefix "pageindex-output-"})
-                      fake-pages [{:page/index 0
-                                   :page/nodes [{:page.node/type :image
-                                                 :page.node/id "img-1"
-                                                 :page.node/image-data (byte-array [1 2 3])
-                                                 :page.node/description "diagram"}]}]]
-                  (try
-                    (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
-                                  com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
-                                  vision/infer-document-title (fn [_ _] nil)]
-                      (let [doc (pageindex/build-index TEST_PDF_PATH {:output-dir (str output-dir)})
-                            node-id (get-in doc [:document/pages 0 :page/nodes 0 :page.node/id])
-                            img-path (fs/path output-dir (str node-id ".png"))]
-                        (expect (fs/exists? img-path))))
-                    (finally
-                      (fs/delete-tree output-dir)))))
+    (it "writes PNG files for visual nodes"
+      (let [output-dir (fs/create-temp-dir {:prefix "pageindex-output-"})
+            fake-pages [{:page/index 0
+                         :page/nodes [{:page.node/type :image
+                                       :page.node/id "img-1"
+                                       :page.node/image-data (byte-array [1 2 3])
+                                       :page.node/description "diagram"}]}]]
+        (try
+          (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
+                        com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
+                        vision/infer-document-title (fn [_ _] nil)]
+            (let [doc (pageindex/build-index TEST_PDF_PATH {:output-dir (str output-dir)})
+                  node-id (get-in doc [:document/pages 0 :page/nodes 0 :page.node/id])
+                  img-path (fs/path output-dir (str node-id ".png"))]
+              (expect (fs/exists? img-path))))
+          (finally
+            (fs/delete-tree output-dir)))))
 
-            (it "throws when output-dir does not exist"
-                (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] [])
-                              com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
-                              vision/infer-document-title (fn [_ _] nil)]
-                  (expect (throws? clojure.lang.ExceptionInfo
-                                   #(pageindex/build-index TEST_PDF_PATH {:output-dir "does-not-exist"}))))))
+    (it "throws when output-dir does not exist"
+      (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] [])
+                    com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
+                    vision/infer-document-title (fn [_ _] nil)]
+        (expect (throws? clojure.lang.ExceptionInfo
+                  #(pageindex/build-index TEST_PDF_PATH {:output-dir "does-not-exist"}))))))
 
   (describe "build-index :path without output-dir"
-            (it "retains image bytes in returned structure"
-                (let [fake-pages [{:page/index 0
-                                   :page/nodes [{:page.node/type :image
-                                                 :page.node/id "img-1"
-                                                 :page.node/image-data (byte-array [9 9 9])
-                                                 :page.node/description "diagram"}]}]]
-                  (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
-                                com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
-                                vision/infer-document-title (fn [_ _] nil)]
-                    (let [doc (pageindex/build-index TEST_PDF_PATH)
-                          img-bytes (get-in doc [:document/pages 0 :page/nodes 0 :page.node/image-data])]
-                      (expect (bytes? img-bytes)))))))
+    (it "retains image bytes in returned structure"
+      (let [fake-pages [{:page/index 0
+                         :page/nodes [{:page.node/type :image
+                                       :page.node/id "img-1"
+                                       :page.node/image-data (byte-array [9 9 9])
+                                       :page.node/description "diagram"}]}]]
+        (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
+                      com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
+                      vision/infer-document-title (fn [_ _] nil)]
+          (let [doc (pageindex/build-index TEST_PDF_PATH)
+                img-bytes (get-in doc [:document/pages 0 :page/nodes 0 :page.node/image-data])]
+            (expect (bytes? img-bytes)))))))
 
   (describe "build-index :string ignores output-dir"
-            (it "does not fail when output-dir is set"
-                (with-redefs [vision/extract-text-from-string
-                              (fn [_ _] [{:page/index 0
-                                          :page/nodes [{:page.node/type :paragraph
-                                                        :page.node/id "p1"
-                                                        :page.node/content "hello"}]}])
-                              com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
-                              vision/infer-document-title (fn [_ _] nil)]
-                  (let [doc (pageindex/build-index "Hello" {:content-type :txt
-                                                            :doc-name "sample"
-                                                            :output-dir "missing"})]
-                    (expect (= "sample" (:document/name doc))))))))
+    (it "does not fail when output-dir is set"
+      (with-redefs [vision/extract-text-from-string
+                    (fn [_ _] [{:page/index 0
+                                :page/nodes [{:page.node/type :paragraph
+                                              :page.node/id "p1"
+                                              :page.node/content "hello"}]}])
+                    com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
+                    vision/infer-document-title (fn [_ _] nil)]
+        (let [doc (pageindex/build-index "Hello" {:content-type :txt
+                                                  :doc-name "sample"
+                                                  :output-dir "missing"})]
+          (expect (= "sample" (:document/name doc))))))))
 
 ;; =============================================================================
 ;; Table ASCII Content Tests (No LLM)
@@ -432,67 +432,67 @@
 
 (defdescribe table-ascii-content-test
   (describe "table nodes with :page.node/content"
-            (it "preserves ASCII table content through build-index pipeline"
-                (let [ascii-table "| Name  | Age |\n|-------|-----|\n| Alice | 30  |\n| Bob   | 25  |"
-                      fake-pages [{:page/index 0
-                                   :page/nodes [{:page.node/type :section
-                                                 :page.node/id "1"
-                                                 :page.node/description "Data section"}
-                                                {:page.node/type :heading
-                                                 :page.node/id "2"
-                                                 :page.node/parent-id "1"
-                                                 :page.node/level "h1"
-                                                 :page.node/content "Results"}
-                                                {:page.node/type :table
-                                                 :page.node/id "3"
-                                                 :page.node/parent-id "1"
-                                                 :page.node/kind "data"
-                                                 :page.node/bbox [10 20 300 200]
-                                                 :page.node/description "A table showing names and ages"
-                                                 :page.node/content ascii-table}]}]]
-                  (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
-                                com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
-                                vision/infer-document-title (fn [_ _] nil)]
-                    (let [doc (pageindex/build-index TEST_PDF_PATH)
-                          table-node (->> (get-in doc [:document/pages 0 :page/nodes])
-                                          (filter #(= :table (:page.node/type %)))
-                                          first)]
-                      (expect (some? table-node))
-                      (expect (= ascii-table (:page.node/content table-node)))
-                      (expect (= "A table showing names and ages" (:page.node/description table-node)))))))
+    (it "preserves ASCII table content through build-index pipeline"
+      (let [ascii-table "| Name  | Age |\n|-------|-----|\n| Alice | 30  |\n| Bob   | 25  |"
+            fake-pages [{:page/index 0
+                         :page/nodes [{:page.node/type :section
+                                       :page.node/id "1"
+                                       :page.node/description "Data section"}
+                                      {:page.node/type :heading
+                                       :page.node/id "2"
+                                       :page.node/parent-id "1"
+                                       :page.node/level "h1"
+                                       :page.node/content "Results"}
+                                      {:page.node/type :table
+                                       :page.node/id "3"
+                                       :page.node/parent-id "1"
+                                       :page.node/kind "data"
+                                       :page.node/bbox [10 20 300 200]
+                                       :page.node/description "A table showing names and ages"
+                                       :page.node/content ascii-table}]}]]
+        (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
+                      com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
+                      vision/infer-document-title (fn [_ _] nil)]
+          (let [doc (pageindex/build-index TEST_PDF_PATH)
+                table-node (->> (get-in doc [:document/pages 0 :page/nodes])
+                             (filter #(= :table (:page.node/type %)))
+                             first)]
+            (expect (some? table-node))
+            (expect (= ascii-table (:page.node/content table-node)))
+            (expect (= "A table showing names and ages" (:page.node/description table-node)))))))
 
-            (it "validates table node with content against spec"
-                (let [table-node {:page.node/type :table
-                                  :page.node/id "t1"
+    (it "validates table node with content against spec"
+      (let [table-node {:page.node/type :table
+                        :page.node/id "t1"
+                        :page.node/kind "data"
+                        :page.node/bbox [0 0 100 100]
+                        :page.node/description "Test table"
+                        :page.node/content "| A | B |\n|---|---|\n| 1 | 2 |"}]
+        (expect (s/valid? ::pageindex-spec/content-node table-node))))
+
+    (it "validates table node without content against spec"
+      (let [table-node {:page.node/type :table
+                        :page.node/id "t1"
+                        :page.node/kind "data"
+                        :page.node/bbox [0 0 100 100]
+                        :page.node/description "Test table"}]
+        (expect (s/valid? ::pageindex-spec/content-node table-node))))
+
+    (it "table content survives ID translation"
+      (let [ascii-table "| X | Y |\n|---|---|\n| 1 | 2 |"
+            pages [{:page/index 0
+                    :page/nodes [{:page.node/type :table
+                                  :page.node/id "1"
                                   :page.node/kind "data"
                                   :page.node/bbox [0 0 100 100]
-                                  :page.node/description "Test table"
-                                  :page.node/content "| A | B |\n|---|---|\n| 1 | 2 |"}]
-                  (expect (s/valid? ::pageindex-spec/content-node table-node))))
-
-            (it "validates table node without content against spec"
-                (let [table-node {:page.node/type :table
-                                  :page.node/id "t1"
-                                  :page.node/kind "data"
-                                  :page.node/bbox [0 0 100 100]
-                                  :page.node/description "Test table"}]
-                  (expect (s/valid? ::pageindex-spec/content-node table-node))))
-
-            (it "table content survives ID translation"
-                (let [ascii-table "| X | Y |\n|---|---|\n| 1 | 2 |"
-                      pages [{:page/index 0
-                              :page/nodes [{:page.node/type :table
-                                            :page.node/id "1"
-                                            :page.node/kind "data"
-                                            :page.node/bbox [0 0 100 100]
-                                            :page.node/description "Test"
-                                            :page.node/content ascii-table}]}]
-                      translated (pageindex/group-continuations
-                                  (#'com.blockether.svar.internal.rlm/translate-all-ids pages))
-                      table-node (first (:page/nodes (first translated)))]
-                  (expect (= ascii-table (:page.node/content table-node)))
+                                  :page.node/description "Test"
+                                  :page.node/content ascii-table}]}]
+            translated (pageindex/group-continuations
+                         (#'com.blockether.svar.internal.rlm/translate-all-ids pages))
+            table-node (first (:page/nodes (first translated)))]
+        (expect (= ascii-table (:page.node/content table-node)))
                   ;; ID should be translated to UUID
-                  (expect (not= "1" (:page.node/id table-node)))))))
+        (expect (not= "1" (:page.node/id table-node)))))))
 
 ;; =============================================================================
 ;; Cambridge Guide to Schema Therapy — Fixture Tests
@@ -522,168 +522,168 @@
   "Extracts all page nodes from a document."
   [doc]
   (->> (:document/pages doc)
-       (mapcat :page/nodes)
-       vec))
+    (mapcat :page/nodes)
+    vec))
 
 (defn- nodes-of-type
   "Filters all page nodes by type."
   [doc node-type]
   (->> (all-nodes doc)
-       (filter #(= node-type (:page.node/type %)))
-       vec))
+    (filter #(= node-type (:page.node/type %)))
+    vec))
 
 (defdescribe cambridge-toc-test
   (describe "toc.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "toc")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "toc")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has correct document metadata"
-                (when-let [doc (load-cambridge-fixture "toc")]
-                  (expect (= "toc" (:document/name doc)))
-                  (expect (= "pdf" (:document/extension doc)))))
+    (it "has correct document metadata"
+      (when-let [doc (load-cambridge-fixture "toc")]
+        (expect (= "toc" (:document/name doc)))
+        (expect (= "pdf" (:document/extension doc)))))
 
-            (it "has 2 pages"
-                (when-let [doc (load-cambridge-fixture "toc")]
-                  (expect (= 2 (count (:document/pages doc))))))
+    (it "has 2 pages"
+      (when-let [doc (load-cambridge-fixture "toc")]
+        (expect (= 2 (count (:document/pages doc))))))
 
-            (it "has non-empty TOC entries"
-                (when-let [doc (load-cambridge-fixture "toc")]
-                  (expect (pos? (count (:document/toc doc))))))
+    (it "has non-empty TOC entries"
+      (when-let [doc (load-cambridge-fixture "toc")]
+        (expect (pos? (count (:document/toc doc))))))
 
-            (it "TOC entries have required fields"
-                (when-let [doc (load-cambridge-fixture "toc")]
-                  (doseq [entry (:document/toc doc)]
-                    (expect (some? (:document.toc/id entry)))
-                    (expect (some? (:document.toc/title entry)))
-                    (expect (some? (:document.toc/level entry)))
-                    (expect (nat-int? (:document.toc/target-page entry))))))))
+    (it "TOC entries have required fields"
+      (when-let [doc (load-cambridge-fixture "toc")]
+        (doseq [entry (:document/toc doc)]
+          (expect (some? (:document.toc/id entry)))
+          (expect (some? (:document.toc/title entry)))
+          (expect (some? (:document.toc/level entry)))
+          (expect (nat-int? (:document.toc/target-page entry))))))))
 
 (defdescribe cambridge-box-multi-page-test
   (describe "box-multi-page.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "box-multi-page")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "box-multi-page")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has correct document metadata"
-                (when-let [doc (load-cambridge-fixture "box-multi-page")]
-                  (expect (= "box-multi-page" (:document/name doc)))
-                  (expect (= "pdf" (:document/extension doc)))))
+    (it "has correct document metadata"
+      (when-let [doc (load-cambridge-fixture "box-multi-page")]
+        (expect (= "box-multi-page" (:document/name doc)))
+        (expect (= "pdf" (:document/extension doc)))))
 
-            (it "has multiple pages"
-                (when-let [doc (load-cambridge-fixture "box-multi-page")]
-                  (expect (> (count (:document/pages doc)) 1))))
+    (it "has multiple pages"
+      (when-let [doc (load-cambridge-fixture "box-multi-page")]
+        (expect (> (count (:document/pages doc)) 1))))
 
-            (it "has section and heading nodes"
-                (when-let [doc (load-cambridge-fixture "box-multi-page")]
-                  (expect (pos? (count (nodes-of-type doc :section))))
-                  (expect (pos? (count (nodes-of-type doc :heading))))))))
+    (it "has section and heading nodes"
+      (when-let [doc (load-cambridge-fixture "box-multi-page")]
+        (expect (pos? (count (nodes-of-type doc :section))))
+        (expect (pos? (count (nodes-of-type doc :heading))))))))
 
 (defdescribe cambridge-box-conversations-test
   (describe "box-conversations.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "box-conversations")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "box-conversations")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has correct metadata"
-                (when-let [doc (load-cambridge-fixture "box-conversations")]
-                  (expect (= "box-conversations" (:document/name doc)))))
+    (it "has correct metadata"
+      (when-let [doc (load-cambridge-fixture "box-conversations")]
+        (expect (= "box-conversations" (:document/name doc)))))
 
-            (it "has paragraph content"
-                (when-let [doc (load-cambridge-fixture "box-conversations")]
-                  (expect (pos? (count (nodes-of-type doc :paragraph))))))))
+    (it "has paragraph content"
+      (when-let [doc (load-cambridge-fixture "box-conversations")]
+        (expect (pos? (count (nodes-of-type doc :paragraph))))))))
 
 (defdescribe cambridge-table-multi-page-test
   (describe "table-multi-page.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "table-multi-page")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "table-multi-page")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has table nodes"
-                (when-let [doc (load-cambridge-fixture "table-multi-page")]
-                  (expect (pos? (count (nodes-of-type doc :table))))))))
+    (it "has table nodes"
+      (when-let [doc (load-cambridge-fixture "table-multi-page")]
+        (expect (pos? (count (nodes-of-type doc :table))))))))
 
 (defdescribe cambridge-table-rotated-test
   (describe "table-multi-page-rotated.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "table-multi-page-rotated")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "table-multi-page-rotated")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has table nodes"
-                (when-let [doc (load-cambridge-fixture "table-multi-page-rotated")]
-                  (expect (pos? (count (nodes-of-type doc :table))))))))
+    (it "has table nodes"
+      (when-let [doc (load-cambridge-fixture "table-multi-page-rotated")]
+        (expect (pos? (count (nodes-of-type doc :table))))))))
 
 (defdescribe cambridge-chapter-test
   (describe "chapter.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "chapter")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "chapter")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has multiple pages"
-                (when-let [doc (load-cambridge-fixture "chapter")]
-                  (expect (> (count (:document/pages doc)) 1))))
+    (it "has multiple pages"
+      (when-let [doc (load-cambridge-fixture "chapter")]
+        (expect (> (count (:document/pages doc)) 1))))
 
-            (it "has sections, headings, and paragraphs"
-                (when-let [doc (load-cambridge-fixture "chapter")]
-                  (expect (pos? (count (nodes-of-type doc :section))))
-                  (expect (pos? (count (nodes-of-type doc :heading))))
-                  (expect (pos? (count (nodes-of-type doc :paragraph))))))
+    (it "has sections, headings, and paragraphs"
+      (when-let [doc (load-cambridge-fixture "chapter")]
+        (expect (pos? (count (nodes-of-type doc :section))))
+        (expect (pos? (count (nodes-of-type doc :heading))))
+        (expect (pos? (count (nodes-of-type doc :paragraph))))))
 
-            (it "has non-empty TOC"
-                (when-let [doc (load-cambridge-fixture "chapter")]
-                  (expect (pos? (count (:document/toc doc))))))))
+    (it "has non-empty TOC"
+      (when-let [doc (load-cambridge-fixture "chapter")]
+        (expect (pos? (count (:document/toc doc))))))))
 
 (defdescribe cambridge-figure-diagram-1-test
   (describe "figure-diagram-1.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "figure-diagram-1")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "figure-diagram-1")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has image nodes"
-                (when-let [doc (load-cambridge-fixture "figure-diagram-1")]
-                  (expect (pos? (count (nodes-of-type doc :image))))))))
+    (it "has image nodes"
+      (when-let [doc (load-cambridge-fixture "figure-diagram-1")]
+        (expect (pos? (count (nodes-of-type doc :image))))))))
 
 (defdescribe cambridge-figure-diagram-2-test
   (describe "figure-diagram-2.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "figure-diagram-2")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "figure-diagram-2")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has image nodes"
-                (when-let [doc (load-cambridge-fixture "figure-diagram-2")]
-                  (expect (pos? (count (nodes-of-type doc :image))))))))
+    (it "has image nodes"
+      (when-let [doc (load-cambridge-fixture "figure-diagram-2")]
+        (expect (pos? (count (nodes-of-type doc :image))))))))
 
 (defdescribe cambridge-illustration-test
   (describe "illustration.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "illustration")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "illustration")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has image nodes"
-                (when-let [doc (load-cambridge-fixture "illustration")]
-                  (expect (pos? (count (nodes-of-type doc :image))))))))
+    (it "has image nodes"
+      (when-let [doc (load-cambridge-fixture "illustration")]
+        (expect (pos? (count (nodes-of-type doc :image))))))))
 
 (defdescribe cambridge-figure-advanced-1-test
   (describe "figure-advanced-1.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "figure-advanced-1")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "figure-advanced-1")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has image nodes with descriptions"
-                (when-let [doc (load-cambridge-fixture "figure-advanced-1")]
-                  (let [imgs (nodes-of-type doc :image)]
-                    (expect (pos? (count imgs)))
-                    (expect (every? #(some? (:page.node/description %)) imgs)))))))
+    (it "has image nodes with descriptions"
+      (when-let [doc (load-cambridge-fixture "figure-advanced-1")]
+        (let [imgs (nodes-of-type doc :image)]
+          (expect (pos? (count imgs)))
+          (expect (every? #(some? (:page.node/description %)) imgs)))))))
 
 (defdescribe cambridge-figure-advanced-2-test
   (describe "figure-advanced-2.pdf fixture"
-            (it "passes spec validation"
-                (when-let [doc (load-cambridge-fixture "figure-advanced-2")]
-                  (expect (pageindex-spec/valid-document? doc))))
+    (it "passes spec validation"
+      (when-let [doc (load-cambridge-fixture "figure-advanced-2")]
+        (expect (pageindex-spec/valid-document? doc))))
 
-            (it "has image nodes"
-                (when-let [doc (load-cambridge-fixture "figure-advanced-2")]
-                  (expect (pos? (count (nodes-of-type doc :image))))))))
+    (it "has image nodes"
+      (when-let [doc (load-cambridge-fixture "figure-advanced-2")]
+        (expect (pos? (count (nodes-of-type doc :image))))))))
 
 ;; =============================================================================
 ;; Rotation Detection & Correction Tests (No LLM — pure image rotation)
@@ -691,76 +691,76 @@
 
 (defdescribe rotate-image-test
   (describe "rotate-image utility"
-            (it "0 degrees returns same image"
-                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
-                      rotated (#'vision/rotate-image img 0)]
-                  (expect (identical? img rotated))))
+    (it "0 degrees returns same image"
+      (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+            rotated (#'vision/rotate-image img 0)]
+        (expect (identical? img rotated))))
 
-            (it "90 degrees swaps width and height"
-                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
-                      rotated (#'vision/rotate-image img 90)]
-                  (expect (= 200 (.getWidth rotated)))
-                  (expect (= 100 (.getHeight rotated)))))
+    (it "90 degrees swaps width and height"
+      (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+            rotated (#'vision/rotate-image img 90)]
+        (expect (= 200 (.getWidth rotated)))
+        (expect (= 100 (.getHeight rotated)))))
 
-            (it "180 degrees preserves dimensions"
-                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
-                      rotated (#'vision/rotate-image img 180)]
-                  (expect (= 100 (.getWidth rotated)))
-                  (expect (= 200 (.getHeight rotated)))))
+    (it "180 degrees preserves dimensions"
+      (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+            rotated (#'vision/rotate-image img 180)]
+        (expect (= 100 (.getWidth rotated)))
+        (expect (= 200 (.getHeight rotated)))))
 
-            (it "270 degrees swaps width and height"
-                (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
-                      rotated (#'vision/rotate-image img 270)]
-                  (expect (= 200 (.getWidth rotated)))
-                  (expect (= 100 (.getHeight rotated)))))
+    (it "270 degrees swaps width and height"
+      (let [img (BufferedImage. 100 200 BufferedImage/TYPE_INT_RGB)
+            rotated (#'vision/rotate-image img 270)]
+        (expect (= 200 (.getWidth rotated)))
+        (expect (= 100 (.getHeight rotated)))))
 
-            (it "preserves pixel data through 90° rotation"
+    (it "preserves pixel data through 90° rotation"
                 ;; Paint top-left corner red, verify it moves to top-right after 90° CW
-                (let [img (BufferedImage. 4 2 BufferedImage/TYPE_INT_RGB)
-                      _ (.setRGB img 0 0 0xFF0000) ;; red at (0,0)
-                      rotated (#'vision/rotate-image img 90)]
+      (let [img (BufferedImage. 4 2 BufferedImage/TYPE_INT_RGB)
+            _ (.setRGB img 0 0 0xFF0000) ;; red at (0,0)
+            rotated (#'vision/rotate-image img 90)]
                   ;; After 90° CW: (0,0) in src → (1,0) in dst (top-right of 2×4 image)
                   ;; Height of rotated = src width = 4, Width of rotated = src height = 2
-                  (expect (= 2 (.getWidth rotated)))
-                  (expect (= 4 (.getHeight rotated)))))))
+        (expect (= 2 (.getWidth rotated)))
+        (expect (= 4 (.getHeight rotated)))))))
 
 (defdescribe cambridge-all-fixtures-common-test
   (describe "common invariants across all cambridge fixtures"
-            (it "all generated fixtures have non-empty pages with nodes"
-                (doseq [base-name ["toc" "box-multi-page" "box-conversations"
-                                   "table-multi-page" "table-multi-page-rotated"
-                                   "figure-diagram-1" "figure-diagram-2"
-                                   "illustration" "figure-advanced-1"
-                                   "chapter" "figure-advanced-2"]]
-                  (when-let [doc (load-cambridge-fixture base-name)]
-                    (expect (pos? (count (:document/pages doc)))
-                            (str base-name " should have pages"))
-                    (expect (pos? (count (all-nodes doc)))
-                            (str base-name " should have nodes")))))
+    (it "all generated fixtures have non-empty pages with nodes"
+      (doseq [base-name ["toc" "box-multi-page" "box-conversations"
+                         "table-multi-page" "table-multi-page-rotated"
+                         "figure-diagram-1" "figure-diagram-2"
+                         "illustration" "figure-advanced-1"
+                         "chapter" "figure-advanced-2"]]
+        (when-let [doc (load-cambridge-fixture base-name)]
+          (expect (pos? (count (:document/pages doc)))
+            (str base-name " should have pages"))
+          (expect (pos? (count (all-nodes doc)))
+            (str base-name " should have nodes")))))
 
-            (it "all nodes have required :page.node/type and :page.node/id"
-                (doseq [base-name ["toc" "box-multi-page" "box-conversations"
-                                   "table-multi-page" "table-multi-page-rotated"
-                                   "figure-diagram-1" "figure-diagram-2"
-                                   "illustration" "figure-advanced-1"
-                                   "chapter" "figure-advanced-2"]]
-                  (when-let [doc (load-cambridge-fixture base-name)]
-                    (doseq [node (all-nodes doc)]
-                      (expect (some? (:page.node/type node))
-                              (str base-name " node missing :page.node/type"))
-                      (expect (some? (:page.node/id node))
-                              (str base-name " node missing :page.node/id"))))))
+    (it "all nodes have required :page.node/type and :page.node/id"
+      (doseq [base-name ["toc" "box-multi-page" "box-conversations"
+                         "table-multi-page" "table-multi-page-rotated"
+                         "figure-diagram-1" "figure-diagram-2"
+                         "illustration" "figure-advanced-1"
+                         "chapter" "figure-advanced-2"]]
+        (when-let [doc (load-cambridge-fixture base-name)]
+          (doseq [node (all-nodes doc)]
+            (expect (some? (:page.node/type node))
+              (str base-name " node missing :page.node/type"))
+            (expect (some? (:page.node/id node))
+              (str base-name " node missing :page.node/id"))))))
 
-            (it "page indices are sequential starting from 0"
-                (doseq [base-name ["toc" "box-multi-page" "box-conversations"
-                                   "table-multi-page" "table-multi-page-rotated"
-                                   "figure-diagram-1" "figure-diagram-2"
-                                   "illustration" "figure-advanced-1"
-                                   "chapter" "figure-advanced-2"]]
-                  (when-let [doc (load-cambridge-fixture base-name)]
-                    (let [indices (mapv :page/index (:document/pages doc))]
-                      (expect (= (range (count indices)) indices)
-                              (str base-name " page indices not sequential"))))))))
+    (it "page indices are sequential starting from 0"
+      (doseq [base-name ["toc" "box-multi-page" "box-conversations"
+                         "table-multi-page" "table-multi-page-rotated"
+                         "figure-diagram-1" "figure-diagram-2"
+                         "illustration" "figure-advanced-1"
+                         "chapter" "figure-advanced-2"]]
+        (when-let [doc (load-cambridge-fixture base-name)]
+          (let [indices (mapv :page/index (:document/pages doc))]
+            (expect (= (range (count indices)) indices)
+              (str base-name " page indices not sequential"))))))))
 
 ;; =============================================================================
 ;; Page Range Support Tests (TDD Red Phase)
@@ -777,71 +777,71 @@
 
 (defdescribe normalize-page-spec-test
   (describe "happy paths"
-            (it "nil returns nil (all pages)"
-                (expect (nil? (pageindex/normalize-page-spec nil 10))))
+    (it "nil returns nil (all pages)"
+      (expect (nil? (pageindex/normalize-page-spec nil 10))))
 
-            (it "single integer converts 1-indexed to 0-indexed"
-                (expect (= #{2} (pageindex/normalize-page-spec 3 10))))
+    (it "single integer converts 1-indexed to 0-indexed"
+      (expect (= #{2} (pageindex/normalize-page-spec 3 10))))
 
-            (it "first page"
-                (expect (= #{0} (pageindex/normalize-page-spec 1 10))))
+    (it "first page"
+      (expect (= #{0} (pageindex/normalize-page-spec 1 10))))
 
-            (it "last page"
-                (expect (= #{9} (pageindex/normalize-page-spec 10 10))))
+    (it "last page"
+      (expect (= #{9} (pageindex/normalize-page-spec 10 10))))
 
-            (it "range vector expands to 0-indexed set"
-                (expect (= #{0 1 2} (pageindex/normalize-page-spec [1 3] 10))))
+    (it "range vector expands to 0-indexed set"
+      (expect (= #{0 1 2} (pageindex/normalize-page-spec [1 3] 10))))
 
-            (it "single-element range where start equals end"
-                (expect (= #{4} (pageindex/normalize-page-spec [5 5] 10))))
+    (it "single-element range where start equals end"
+      (expect (= #{4} (pageindex/normalize-page-spec [5 5] 10))))
 
-            (it "mixed vector of ranges and singles"
-                (expect (= #{0 1 2 4 6 7 8 9}
-                           (pageindex/normalize-page-spec [[1 3] 5 [7 10]] 10))))
+    (it "mixed vector of ranges and singles"
+      (expect (= #{0 1 2 4 6 7 8 9}
+                (pageindex/normalize-page-spec [[1 3] 5 [7 10]] 10))))
 
-            (it "multiple disjoint ranges"
-                (expect (= #{0 1 3 4}
-                           (pageindex/normalize-page-spec [[1 2] [4 5]] 10))))
+    (it "multiple disjoint ranges"
+      (expect (= #{0 1 3 4}
+                (pageindex/normalize-page-spec [[1 2] [4 5]] 10))))
 
-            (it "full range covering all pages"
-                (expect (= #{0 1 2 3 4 5 6 7 8 9}
-                           (pageindex/normalize-page-spec [1 10] 10)))))
+    (it "full range covering all pages"
+      (expect (= #{0 1 2 3 4 5 6 7 8 9}
+                (pageindex/normalize-page-spec [1 10] 10)))))
 
   (describe "validation errors"
-            (it "page number 0 throws invalid-page-spec"
-                (expect (throws-with-type?
-                         :svar.pageindex/invalid-page-spec
-                         #(pageindex/normalize-page-spec 0 10))))
+    (it "page number 0 throws invalid-page-spec"
+      (expect (throws-with-type?
+                :svar.pageindex/invalid-page-spec
+                #(pageindex/normalize-page-spec 0 10))))
 
-            (it "negative page number throws invalid-page-spec"
-                (expect (throws-with-type?
-                         :svar.pageindex/invalid-page-spec
-                         #(pageindex/normalize-page-spec -1 10))))
+    (it "negative page number throws invalid-page-spec"
+      (expect (throws-with-type?
+                :svar.pageindex/invalid-page-spec
+                #(pageindex/normalize-page-spec -1 10))))
 
-            (it "page beyond total throws page-out-of-bounds"
-                (expect (throws-with-type?
-                         :svar.pageindex/page-out-of-bounds
-                         #(pageindex/normalize-page-spec 11 10))))
+    (it "page beyond total throws page-out-of-bounds"
+      (expect (throws-with-type?
+                :svar.pageindex/page-out-of-bounds
+                #(pageindex/normalize-page-spec 11 10))))
 
-            (it "reversed range throws invalid-page-range"
-                (expect (throws-with-type?
-                         :svar.pageindex/invalid-page-range
-                         #(pageindex/normalize-page-spec [5 3] 10))))
+    (it "reversed range throws invalid-page-range"
+      (expect (throws-with-type?
+                :svar.pageindex/invalid-page-range
+                #(pageindex/normalize-page-spec [5 3] 10))))
 
-            (it "out-of-bounds page in mixed vector throws page-out-of-bounds"
-                (expect (throws-with-type?
-                         :svar.pageindex/page-out-of-bounds
-                         #(pageindex/normalize-page-spec [[1 3] 15] 10))))
+    (it "out-of-bounds page in mixed vector throws page-out-of-bounds"
+      (expect (throws-with-type?
+                :svar.pageindex/page-out-of-bounds
+                #(pageindex/normalize-page-spec [[1 3] 15] 10))))
 
-            (it "string input throws invalid-page-spec"
-                (expect (throws-with-type?
-                         :svar.pageindex/invalid-page-spec
-                         #(pageindex/normalize-page-spec "foo" 10))))
+    (it "string input throws invalid-page-spec"
+      (expect (throws-with-type?
+                :svar.pageindex/invalid-page-spec
+                #(pageindex/normalize-page-spec "foo" 10))))
 
-            (it "non-integer in range throws invalid-page-spec"
-                (expect (throws-with-type?
-                         :svar.pageindex/invalid-page-spec
-                         #(pageindex/normalize-page-spec [1 "foo"] 10))))))
+    (it "non-integer in range throws invalid-page-spec"
+      (expect (throws-with-type?
+                :svar.pageindex/invalid-page-spec
+                #(pageindex/normalize-page-spec [1 "foo"] 10))))))
 
 (def ^:private sample-pages
   "Sample page-list for filter-pages tests."
@@ -853,27 +853,27 @@
 
 (defdescribe filter-pages-test
   (describe "page filtering"
-            (it "nil page-set returns all pages"
-                (expect (= sample-pages
-                           (pageindex/filter-pages sample-pages nil))))
+    (it "nil page-set returns all pages"
+      (expect (= sample-pages
+                (pageindex/filter-pages sample-pages nil))))
 
-            (it "single page set returns matching page"
-                (expect (= [(first sample-pages)]
-                           (pageindex/filter-pages sample-pages #{0}))))
+    (it "single page set returns matching page"
+      (expect (= [(first sample-pages)]
+                (pageindex/filter-pages sample-pages #{0}))))
 
-            (it "multiple pages in set returns matching pages in order"
-                (expect (= [(nth sample-pages 0)
-                            (nth sample-pages 2)
-                            (nth sample-pages 4)]
-                           (pageindex/filter-pages sample-pages #{0 2 4}))))
+    (it "multiple pages in set returns matching pages in order"
+      (expect (= [(nth sample-pages 0)
+                  (nth sample-pages 2)
+                  (nth sample-pages 4)]
+                (pageindex/filter-pages sample-pages #{0 2 4}))))
 
-            (it "empty set returns empty vector"
-                (expect (= []
-                           (pageindex/filter-pages sample-pages #{}))))
+    (it "empty set returns empty vector"
+      (expect (= []
+                (pageindex/filter-pages sample-pages #{}))))
 
-            (it "empty page-list returns empty vector"
-                (expect (= []
-                           (pageindex/filter-pages [] #{0 1}))))))
+    (it "empty page-list returns empty vector"
+      (expect (= []
+                (pageindex/filter-pages [] #{0 1}))))))
 
 ;; =============================================================================
 ;; build-index :path with :pages option (TDD)
@@ -881,101 +881,101 @@
 
 (defdescribe build-index-pages-filter-test
   (describe "build-index :path with :pages option"
-            (it "filters pages from extraction output"
-                (let [fake-pages (mapv (fn [i] {:page/index i
-                                                :page/nodes [{:page.node/type :paragraph
-                                                              :page.node/id (str "p" i)
-                                                              :page.node/content (str "Page " i)}]})
-                                       (range 5))]
-                  (with-redefs [com.blockether.svar.internal.rlm/extract-text
-                                (fn [_ _] fake-pages)
-                                com.blockether.svar.internal.rlm/generate-document-abstract
-                                (fn [_ _] nil)
-                                com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
-                                (fn [_ _] nil)]
-                    (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages [2 4]})]
+    (it "filters pages from extraction output"
+      (let [fake-pages (mapv (fn [i] {:page/index i
+                                      :page/nodes [{:page.node/type :paragraph
+                                                    :page.node/id (str "p" i)
+                                                    :page.node/content (str "Page " i)}]})
+                         (range 5))]
+        (with-redefs [com.blockether.svar.internal.rlm/extract-text
+                      (fn [_ _] fake-pages)
+                      com.blockether.svar.internal.rlm/generate-document-abstract
+                      (fn [_ _] nil)
+                      com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
+                      (fn [_ _] nil)]
+          (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages [2 4]})]
             ;; Pages 2,3,4 (1-indexed) = indices 1,2,3 (0-indexed)
-                      (expect (= 3 (count (:document/pages doc))))
-                      (expect (= [1 2 3] (mapv :page/index (:document/pages doc))))))))
+            (expect (= 3 (count (:document/pages doc))))
+            (expect (= [1 2 3] (mapv :page/index (:document/pages doc))))))))
 
-            (it "single page integer works"
-                (let [fake-pages (mapv (fn [i] {:page/index i
-                                                :page/nodes [{:page.node/type :paragraph
-                                                              :page.node/id (str "p" i)
-                                                              :page.node/content (str "Page " i)}]})
-                                       (range 5))]
-                  (with-redefs [com.blockether.svar.internal.rlm/extract-text
-                                (fn [_ _] fake-pages)
-                                com.blockether.svar.internal.rlm/generate-document-abstract
-                                (fn [_ _] nil)
-                                com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
-                                (fn [_ _] nil)]
-                    (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages 3})]
-                      (expect (= 1 (count (:document/pages doc))))
-                      (expect (= [2] (mapv :page/index (:document/pages doc))))))))
+    (it "single page integer works"
+      (let [fake-pages (mapv (fn [i] {:page/index i
+                                      :page/nodes [{:page.node/type :paragraph
+                                                    :page.node/id (str "p" i)
+                                                    :page.node/content (str "Page " i)}]})
+                         (range 5))]
+        (with-redefs [com.blockether.svar.internal.rlm/extract-text
+                      (fn [_ _] fake-pages)
+                      com.blockether.svar.internal.rlm/generate-document-abstract
+                      (fn [_ _] nil)
+                      com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
+                      (fn [_ _] nil)]
+          (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages 3})]
+            (expect (= 1 (count (:document/pages doc))))
+            (expect (= [2] (mapv :page/index (:document/pages doc))))))))
 
-            (it "nil pages returns all pages (default behavior)"
-                (let [fake-pages (mapv (fn [i] {:page/index i
-                                                :page/nodes [{:page.node/type :paragraph
-                                                              :page.node/id (str "p" i)
-                                                              :page.node/content (str "Page " i)}]})
-                                       (range 3))]
-                  (with-redefs [com.blockether.svar.internal.rlm/extract-text
-                                (fn [_ _] fake-pages)
-                                com.blockether.svar.internal.rlm/generate-document-abstract
-                                (fn [_ _] nil)
-                                com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
-                                (fn [_ _] nil)]
-                    (let [doc (pageindex/build-index "resources-test/example.pdf")]
-                      (expect (= 3 (count (:document/pages doc))))))))
+    (it "nil pages returns all pages (default behavior)"
+      (let [fake-pages (mapv (fn [i] {:page/index i
+                                      :page/nodes [{:page.node/type :paragraph
+                                                    :page.node/id (str "p" i)
+                                                    :page.node/content (str "Page " i)}]})
+                         (range 3))]
+        (with-redefs [com.blockether.svar.internal.rlm/extract-text
+                      (fn [_ _] fake-pages)
+                      com.blockether.svar.internal.rlm/generate-document-abstract
+                      (fn [_ _] nil)
+                      com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
+                      (fn [_ _] nil)]
+          (let [doc (pageindex/build-index "resources-test/example.pdf")]
+            (expect (= 3 (count (:document/pages doc))))))))
 
-            (it "out-of-bounds pages throws"
-                (let [fake-pages [{:page/index 0
-                                   :page/nodes [{:page.node/type :paragraph
-                                                 :page.node/id "p0"
-                                                 :page.node/content "Only page"}]}]]
-                  (with-redefs [com.blockether.svar.internal.rlm/extract-text
-                                (fn [_ _] fake-pages)
-                                com.blockether.svar.internal.rlm/generate-document-abstract
-                                (fn [_ _] nil)
-                                com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
-                                (fn [_ _] nil)]
+    (it "out-of-bounds pages throws"
+      (let [fake-pages [{:page/index 0
+                         :page/nodes [{:page.node/type :paragraph
+                                       :page.node/id "p0"
+                                       :page.node/content "Only page"}]}]]
+        (with-redefs [com.blockether.svar.internal.rlm/extract-text
+                      (fn [_ _] fake-pages)
+                      com.blockether.svar.internal.rlm/generate-document-abstract
+                      (fn [_ _] nil)
+                      com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
+                      (fn [_ _] nil)]
            ;; Requesting page 5 of a 1-page document
-                    (expect (throws? clojure.lang.ExceptionInfo
-                                     #(pageindex/build-index "resources-test/example.pdf" {:pages 5}))))))))
+          (expect (throws? clojure.lang.ExceptionInfo
+                    #(pageindex/build-index "resources-test/example.pdf" {:pages 5}))))))))
 
 (defdescribe extract-text-from-pdf-page-set-test
   (describe "extract-text-from-pdf with :page-set"
-            (it "only sends selected pages to vision LLM"
+    (it "only sends selected pages to vision LLM"
       ;; Track which page indices hit the vision extractor
-                (let [extracted-pages (atom [])]
-                  (with-redefs [vision/extract-text-from-image
-                                (fn [_image page-index _opts]
-                                  (swap! extracted-pages conj page-index)
-                                  {:page/index page-index
-                                   :page/nodes [{:page.node/type :paragraph
-                                                 :page.node/id (str "p" page-index)
-                                                 :page.node/content (str "Page " page-index)}]})]
+      (let [extracted-pages (atom [])]
+        (with-redefs [vision/extract-text-from-image
+                      (fn [_image page-index _opts]
+                        (swap! extracted-pages conj page-index)
+                        {:page/index page-index
+                         :page/nodes [{:page.node/type :paragraph
+                                       :page.node/id (str "p" page-index)
+                                       :page.node/content (str "Page " page-index)}]})]
           ;; example.pdf has 1 page (index 0). Request only page 1 (1-indexed = index 0).
-                    (let [result (vision/extract-text-from-pdf TEST_PDF_PATH
-                                                               {:model "test"
-                                                                :objective "test"
-                                                                :page-set #{0}})]
-                      (expect (= 1 (count result)))
-                      (expect (= [0] @extracted-pages))
-                      (expect (= 0 (:page/index (first result))))))))
+          (let [result (vision/extract-text-from-pdf TEST_PDF_PATH
+                         {:model "test"
+                          :objective "test"
+                          :page-set #{0}})]
+            (expect (= 1 (count result)))
+            (expect (= [0] @extracted-pages))
+            (expect (= 0 (:page/index (first result))))))))
 
-            (it "nil page-set extracts all pages"
-                (let [extracted-pages (atom [])]
-                  (with-redefs [vision/extract-text-from-image
-                                (fn [_image page-index _opts]
-                                  (swap! extracted-pages conj page-index)
-                                  {:page/index page-index
-                                   :page/nodes [{:page.node/type :paragraph
-                                                 :page.node/id (str "p" page-index)
-                                                 :page.node/content (str "Page " page-index)}]})]
-                    (let [result (vision/extract-text-from-pdf TEST_PDF_PATH
-                                                               {:model "test"
-                                                                :objective "test"})]
-                      (expect (= 1 (count result)))
-                      (expect (= [0] @extracted-pages))))))))
+    (it "nil page-set extracts all pages"
+      (let [extracted-pages (atom [])]
+        (with-redefs [vision/extract-text-from-image
+                      (fn [_image page-index _opts]
+                        (swap! extracted-pages conj page-index)
+                        {:page/index page-index
+                         :page/nodes [{:page.node/type :paragraph
+                                       :page.node/id (str "p" page-index)
+                                       :page.node/content (str "Page " page-index)}]})]
+          (let [result (vision/extract-text-from-pdf TEST_PDF_PATH
+                         {:model "test"
+                          :objective "test"})]
+            (expect (= 1 (count result)))
+            (expect (= [0] @extracted-pages))))))))

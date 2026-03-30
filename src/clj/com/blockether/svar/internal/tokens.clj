@@ -26,11 +26,11 @@
   (:import
    (com.knuddels.jtokkit Encodings)
    (com.knuddels.jtokkit.api
-    Encoding
-    EncodingRegistry
-    EncodingType
-    IntArrayList
-    ModelType)
+     Encoding
+     EncodingRegistry
+     EncodingType
+     IntArrayList
+     ModelType)
    (java.io ByteArrayInputStream)
    (java.net HttpURLConnection URI)
    (java.util Base64 Locale)
@@ -100,11 +100,11 @@
   (^long [^String model context-limits]
    (or (get context-limits model)
        ;; Try partial matching for versioned model names
-       (some (fn [[k v]]
-               (when (and (string? k) (str/includes? model k))
-                 v))
-             context-limits)
-       (:default context-limits))))
+     (some (fn [[k v]]
+             (when (and (string? k) (str/includes? model k))
+               v))
+       context-limits)
+     (:default context-limits))))
 
 (defn max-input-tokens
   "Calculates maximum input tokens for a model, reserving space for output.
@@ -344,7 +344,7 @@
 
                    ;; Remote URL
                    (or (str/starts-with? url "http://")
-                       (str/starts-with? url "https://"))
+                     (str/starts-with? url "https://"))
                    (image-dimensions-from-url url)
 
                    :else nil)]
@@ -390,12 +390,12 @@
                       (and (map? block) (= "image_url" (:type block)))
                       {:texts texts
                        :image-tokens (+ (long image-tokens)
-                                        (long (estimate-image-block-tokens block)))}
+                                       (long (estimate-image-block-tokens block)))}
 
                       :else
                       {:texts texts :image-tokens image-tokens}))
-                  {:texts [] :image-tokens 0}
-                  content)]
+            {:texts [] :image-tokens 0}
+            content)]
       {:text (str/join "\n" texts) :image-tokens image-tokens})
 
     :else
@@ -430,9 +430,9 @@
         tpm (tokens-per-message model)
         tpn (tokens-per-name model)
         message-tokens (reduce
-                        (fn [^long acc {:keys [role content name] :as _message}]
-                          (let [{:keys [text image-tokens]} (extract-text-from-content content)]
-                            (+ acc
+                         (fn [^long acc {:keys [role content name] :as _message}]
+                           (let [{:keys [text image-tokens]} (extract-text-from-content content)]
+                             (+ acc
                                (long tpm)
                                (long (.countTokens encoding (or (some-> role clojure.core/name) "")))
                                (long (.countTokens encoding (or text "")))
@@ -440,8 +440,8 @@
                                (if name
                                  (+ (long tpn) (long (.countTokens encoding name)))
                                  0))))
-                        0
-                        messages)
+                         0
+                         messages)
         ;; Every reply is primed with <|start|>assistant<|message|>
         reply-priming 3]
     (+ (long message-tokens) reply-priming)))
@@ -463,11 +463,11 @@
   ([^String model pricing]
    (or (get pricing model)
        ;; Try partial matching for versioned model names
-       (some (fn [[k v]]
-               (when (and (string? k) (str/includes? model k))
-                 v))
-             pricing)
-       (:default pricing))))
+     (some (fn [[k v]]
+             (when (and (string? k) (str/includes? model k))
+               v))
+       pricing)
+     (:default pricing))))
 
 (defn estimate-cost
   "Estimates the cost in USD for a given token count.
@@ -546,7 +546,7 @@
          cached-tokens (long (or (get-in api-usage [:prompt_tokens_details :cached_tokens]) 0))
          total-tokens (+ input-tokens output-tokens)
          cost (estimate-cost model input-tokens output-tokens
-                             (or pricing DEFAULT_MODEL_PRICING))]
+                (or pricing DEFAULT_MODEL_PRICING))]
      {:input-tokens input-tokens
       :output-tokens output-tokens
       :reasoning-tokens reasoning-tokens
@@ -692,15 +692,15 @@
                                       new-total (+ used-tokens msg-tokens)]
                                   (if (<= new-total available-for-middle)
                                     (recur (rest remaining)
-                                           (conj selected msg)
-                                           new-total)
+                                      (conj selected msg)
+                                      new-total)
                                     ;; Skip this message, it doesn't fit
                                     (recur (rest remaining) selected used-tokens)))))]
         ;; Reconstruct message array
         (vec (concat
-              (when system-msg [system-msg])
-              selected-middle
-              (when last-user-msg [last-user-msg])))))))
+               (when system-msg [system-msg])
+               selected-middle
+               (when last-user-msg [last-user-msg])))))))
 
 ;; =============================================================================
 ;; Pre-flight Context Checking
@@ -759,12 +759,12 @@
                  :utilization (double (/ input-tokens max-input))
                  :error (when-not ok?
                           (format "Context overflow: %d tokens exceed limit of %d (model %s has %d context, reserving %d for output). Reduce input by %d tokens."
-                                  input-tokens max-input model ctx-limit effective-reserve overflow))}]
+                            input-tokens max-input model ctx-limit effective-reserve overflow))}]
      (when (and throw? (not ok?))
        (anomaly/incorrect! (:error result)
-                           {:type :svar.tokens/context-overflow
-                            :model model
-                            :input-tokens input-tokens
-                            :max-input-tokens max-input
-                            :overflow overflow}))
+         {:type :svar.tokens/context-overflow
+          :model model
+          :input-tokens input-tokens
+          :max-input-tokens max-input
+          :overflow overflow}))
      result)))

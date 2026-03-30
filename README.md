@@ -139,14 +139,16 @@ SVAR doesn't require your LLM to support structured output mode. Instead, `ask!`
                 svar/CARDINALITY svar/CARDINALITY_ONE
                 svar/DESCRIPTION "Age in years")))
 
-(def ask-result
-  (svar/ask! {:spec person-spec
-              :messages [(svar/system "Extract person information from the text.")
-                         (svar/user "John Smith is a 42-year-old engineer.")]
-              :model "gpt-4o"}))
+(comment
+  (def ask-result
+    (svar/ask! {:spec person-spec
+                :messages [(svar/system "Extract person information from the text.")
+                           (svar/user "John Smith is a 42-year-old engineer.")]
+                :model "gpt-4o"}))
 
-(:result ask-result)
-;; => {:name "John Smith", :age 42}
+  (:result ask-result)
+  ;; => {:name "John Smith", :age 42}
+  )
 ```
 
 Under the hood, `spec->prompt` translates the spec into a schema the LLM can follow:
@@ -233,11 +235,13 @@ LLM-based moderation checks content against policies. Combine with static guards
 
 ```clojure
 ;; Full guard chain: static first (fast, free), then LLM moderation
-(svar/guard "Hello, how are you?"
-  [(svar/static-guard)
-   (svar/moderation-guard {:ask-fn svar/ask!
-                           :policies #{:hate :violence :harassment}})])
-;; => "Hello, how are you?"
+(comment
+  (svar/guard "Hello, how are you?"
+    [(svar/static-guard)
+     (svar/moderation-guard {:ask-fn svar/ask!
+                             :policies #{:hate :violence :harassment}})])
+  ;; => "Hello, how are you?"
+  )
 ```
 
 Violent content is caught by the LLM moderation layer. The exception carries the full context — violation type, each violated policy with its confidence score, and the original input:
@@ -303,11 +307,12 @@ Spec-driven humanization — mark specific fields with `::spec/humanize?` and pa
                 svar/DESCRIPTION "Rating 1-10")))
 
 ;; :summary gets humanized, :score stays as-is
-(svar/ask! {:spec review-spec
-            :messages [(svar/system "Write a brief product review.")
-                       (svar/user "Review this laptop: fast, lightweight, great battery.")]
-            :model "gpt-4o"
-            :humanizer (svar/humanizer)})
+(comment
+  (svar/ask! {:spec review-spec
+              :messages [(svar/system "Write a brief product review.")
+                         (svar/user "Review this laptop: fast, lightweight, great battery.")]
+              :model "gpt-4o"
+              :humanizer (svar/humanizer)}))
 ```
 
 ### Summarization (`abstract!`)
@@ -397,28 +402,32 @@ With `:refine? true`, the final summary is verified against the source via CoVe 
 LLM self-evaluation — scores outputs on accuracy, completeness, relevance, coherence, fairness, and bias.
 
 ```clojure
-(def eval-result
-  (svar/eval! {:task "What is the capital of France?"
-               :output "The capital of France is Paris."
-               :model "gpt-4o"}))
+(comment
+  (def eval-result
+    (svar/eval! {:task "What is the capital of France?"
+                 :output "The capital of France is Paris."
+                 :model "gpt-4o"}))
 
-(:correct? eval-result)
-;; => true
+  (:correct? eval-result)
+  ;; => true
+  )
 ```
 
 Supports custom criteria and ground truths for domain-specific evaluation:
 
 ```clojure
-(def financial-eval
-  (svar/eval! {:task "Summarize the Q3 earnings report."
-               :output "Revenue grew 15% YoY to $2.3B, driven by cloud services."
-               :model "gpt-4o"
-               :criteria {:accuracy "Are the numbers correct?"
-                          :tone "Is the tone appropriate for a financial summary?"}
-               :ground-truths ["Q3 revenue was $2.3B" "YoY growth was 15%"]}))
+(comment
+  (def financial-eval
+    (svar/eval! {:task "Summarize the Q3 earnings report."
+                 :output "Revenue grew 15% YoY to $2.3B, driven by cloud services."
+                 :model "gpt-4o"
+                 :criteria {:accuracy "Are the numbers correct?"
+                            :tone "Is the tone appropriate for a financial summary?"}
+                 :ground-truths ["Q3 revenue was $2.3B" "YoY growth was 15%"]}))
 
-(:correct? financial-eval)
-;; => true
+  (:correct? financial-eval)
+  ;; => true
+  )
 ```
 
 Returns `{:correct? bool :overall-score 0.0-1.0 :summary "..." :criteria [...] :issues [...] :scores {...} :duration-ms N :tokens {...} :cost {...}}`.
@@ -428,16 +437,18 @@ Returns `{:correct? bool :overall-score 0.0-1.0 :summary "..." :criteria [...] :
 Decompose → Verify → Refine loop. Extracts claims from output, verifies each, and refines until score threshold is met.
 
 ```clojure
-(def refine-result
-  (svar/refine! {:spec person-spec
-                 :messages [(svar/system "Extract person information accurately.")
-                            (svar/user "John Smith, age 42, lives in San Francisco.")]
-                 :model "gpt-4o"
-                 :iterations 1
-                 :threshold 0.9}))
+(comment
+  (def refine-result
+    (svar/refine! {:spec person-spec
+                   :messages [(svar/system "Extract person information accurately.")
+                              (svar/user "John Smith, age 42, lives in San Francisco.")]
+                   :model "gpt-4o"
+                   :iterations 1
+                   :threshold 0.9}))
 
-(:name (:result refine-result))
-;; => "John Smith"
+  (:name (:result refine-result))
+  ;; => "John Smith"
+  )
 ```
 
 Returns `{:result <data> :iterations [...] :final-score 0.0-1.0 :converged? bool :iterations-count N :total-duration-ms N :gradient {...} :prompt-evolution [...] :window {...}}`.
@@ -447,11 +458,13 @@ Returns `{:result <data> :iterations [...] :final-score 0.0-1.0 :converged? bool
 Lists all models available from your LLM provider.
 
 ```clojure
-(def models (svar/models!))
+(comment
+  (def models (svar/models!))
 
-;; Every model has an :id field
-(every? :id models)
-;; => true
+  ;; Every model has an :id field
+  (every? :id models)
+  ;; => true
+  )
 ```
 
 ### Test Data Generation (`sample!`)
@@ -474,31 +487,35 @@ Generates realistic test data matching a spec, with quality evaluation and self-
                 svar/CARDINALITY svar/CARDINALITY_ONE
                 svar/DESCRIPTION "Age in years")))
 
-(def sample-result
-  (svar/sample! {:spec user-spec
-                 :count 3
-                 :model "gpt-4o"
-                 :iterations 1}))
+(comment
+  (def sample-result
+    (svar/sample! {:spec user-spec
+                   :count 3
+                   :model "gpt-4o"
+                   :iterations 1}))
 
-;; Exactly 3 samples generated
-(count (:samples sample-result))
-;; => 3
+  ;; Exactly 3 samples generated
+  (count (:samples sample-result))
+  ;; => 3
+  )
 ```
 
 Supports custom prompts via `:messages` and self-correction via `:iterations`/`:threshold`:
 
 ```clojure
-(def dating-profiles
-  (svar/sample! {:spec user-spec
-                 :count 2
-                 :messages [(svar/system "Generate realistic dating app profiles.")
-                            (svar/user "Create diverse profiles for users aged 25-40.")]
-                 :model "gpt-4o"
-                 :iterations 2
-                 :threshold 0.9}))
+(comment
+  (def dating-profiles
+    (svar/sample! {:spec user-spec
+                   :count 2
+                   :messages [(svar/system "Generate realistic dating app profiles.")
+                              (svar/user "Create diverse profiles for users aged 25-40.")]
+                   :model "gpt-4o"
+                   :iterations 2
+                   :threshold 0.9}))
 
-(count (:samples dating-profiles))
-;; => 2
+  (count (:samples dating-profiles))
+  ;; => 2
+  )
 ```
 
 Returns `{:samples [...] :scores {...} :final-score 0.0-1.0 :converged? bool :iterations-count N :duration-ms N}`.

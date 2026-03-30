@@ -73,14 +73,14 @@
                                    in-code-block?)
               ;; Parse heading only if not in code block and not toggling into one
               heading (when (and (not in-code-block?)
-                                 (not (re-matches CODE_BLOCK_PATTERN trimmed)))
+                              (not (re-matches CODE_BLOCK_PATTERN trimmed)))
                         (parse-heading-line line line-num))]
           (recur (rest remaining)
-                 (inc line-num)
-                 new-in-code-block?
-                 (if heading
-                   (conj headings heading)
-                   headings)))))))
+            (inc line-num)
+            new-in-code-block?
+            (if heading
+              (conj headings heading)
+              headings)))))))
 
 ;; =============================================================================
 ;; Section Content Extraction
@@ -108,8 +108,8 @@
                   section-lines (subvec lines start-line end-line)
                   text (str/join "\n" section-lines)]
               (assoc heading :text (str/trim text))))
-          headings
-          (concat (rest headings) [nil]))))  ;; nil marks last section
+      headings
+      (concat (rest headings) [nil]))))  ;; nil marks last section
 
 ;; =============================================================================
 ;; Tree Building
@@ -138,7 +138,7 @@
         (let [{:keys [level]} @node-atom]
           ;; Pop stack until we find a parent
           (while (and (seq @stack)
-                      (>= (long (second (peek @stack))) (long level)))
+                   (>= (long (second (peek @stack))) (long level)))
             (swap! stack pop))
 
           (if (empty? @stack)
@@ -155,8 +155,8 @@
       (letfn [(deref-tree [node-atom]
                 (let [node @node-atom]
                   (-> node
-                      (update :children #(mapv deref-tree %))
-                      (dissoc :level))))]  ;; Remove :level from output
+                    (update :children #(mapv deref-tree %))
+                    (dissoc :level))))]  ;; Remove :level from output
         (mapv deref-tree @roots)))))
 
 ;; =============================================================================
@@ -214,11 +214,11 @@
 
         ;; Recursively process children
         child-nodes (mapcat #(tree-node->page-nodes % id-counter section-id)
-                            (:children tree-node))]
+                      (:children tree-node))]
 
     (concat [section-node heading-node]
-            paragraph-nodes
-            child-nodes)))
+      paragraph-nodes
+      child-nodes)))
 
 (defn- determine-top-level
   "Determines the top heading level in the document.
@@ -251,10 +251,10 @@
   (when (seq sections)
     (let [;; Find indices where top-level sections start
           page-starts (keep-indexed
-                       (fn [idx section]
-                         (when (= (:level section) top-level)
-                           idx))
-                       sections)]
+                        (fn [idx section]
+                          (when (= (:level section) top-level)
+                            idx))
+                        sections)]
       (if (empty? page-starts)
         ;; No top-level headings - everything is one page
         [sections]
@@ -265,8 +265,8 @@
               ;; Group remaining sections
               page-groups (map (fn [start-idx end-idx]
                                  (subvec sections start-idx end-idx))
-                               page-starts
-                               (concat (rest page-starts) [(count sections)]))]
+                            page-starts
+                            (concat (rest page-starts) [(count sections)]))]
           (if pre-content
             (cons pre-content page-groups)
             page-groups))))))
@@ -310,19 +310,19 @@
 
     ;; Convert each page group to our page format
     (vec
-     (map-indexed
-      (fn [page-idx page-sections]
-        (let [id-counter (atom 0)
+      (map-indexed
+        (fn [page-idx page-sections]
+          (let [id-counter (atom 0)
                 ;; Build tree for this page's sections
-              tree-roots (build-tree-from-sections page-sections)
+                tree-roots (build-tree-from-sections page-sections)
                 ;; Convert tree to flat page nodes
-              nodes (vec (mapcat #(tree-node->page-nodes % id-counter nil)
-                                 tree-roots))]
-          (trove/log! {:level :debug :data {:page page-idx :nodes (count nodes)}
-                       :msg "Converted page sections to nodes"})
-          {:page/index page-idx
-           :page/nodes nodes}))
-      page-groups))))
+                nodes (vec (mapcat #(tree-node->page-nodes % id-counter nil)
+                             tree-roots))]
+            (trove/log! {:level :debug :data {:page page-idx :nodes (count nodes)}
+                         :msg "Converted page sections to nodes"})
+            {:page/index page-idx
+             :page/nodes nodes}))
+        page-groups))))
 
 (defn markdown-file->pages
   "Converts a markdown file to page-based format.
