@@ -669,22 +669,6 @@
 (s/def :toc/page
   (s/nilable nat-int?))
 
-;; Complete node specification
-(s/def ::node
-  (s/keys :req [:node/id
-                :node/title
-                :node/start-index
-                :node/end-index]
-    :opt [:node/parent-id
-          :node/physical-index
-          :node/text
-          :node/summary
-          :node/keywords
-          :node/abbreviations
-          :node/images
-          :node/structure
-          :toc/page]))
-
 ;;; ============================================================================
 ;;; Page Extraction Specs (Node-Based Structure)
 ;;; ============================================================================

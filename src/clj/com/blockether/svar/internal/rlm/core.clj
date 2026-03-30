@@ -13,7 +13,7 @@
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
             LEARNING_VOTE_SPEC AUTOLEARN_SPEC AUTOLEARN_ITERATION_THRESHOLD
-            INLINE_RESULT_THRESHOLD EVAL_TIMEOUT_MS
+            EVAL_TIMEOUT_MS
             MAX_ITERATIONS MAX_ITERATION_CAP
             bytes->base64 *max-recursion-depth* *rlm-ctx*]]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value]]
@@ -25,7 +25,7 @@
    [taoensso.trove :as trove]))
 
 (declare make-rlm-query-fn run-sub-rlm
-  build-system-prompt run-iteration auto-store-results! format-executions)
+  build-system-prompt run-iteration format-executions)
 
 (defn rlm-debug!
   "Logs at :info level only when :rlm-debug? is true in *rlm-ctx*.
@@ -33,86 +33,6 @@
   [data msg]
   (when (:rlm-debug? *rlm-ctx*)
     (trove/log! {:level :info :data (assoc data :rlm-phase (:rlm-phase *rlm-ctx*)) :msg msg})))
-
-(defn select-rlm-iteration-context
-  "Selects messages for an RLM iteration using recency-based selection.
-   
-   Optimized for RLM iteration loops:
-   1. ALWAYS preserves system prompt (first message)
-   2. ALWAYS preserves most recent messages (for conversation continuity)
-   3. Uses recency to select MIDDLE messages within budget
-    
-    This ensures the LLM maintains coherent conversation flow while having
-    access to recent past exploration.
-   
-   Params:
-   `db-info` - Map with :store key (or nil)
-   `current-messages` - Vector. Current messages array from iteration loop
-   `max-tokens` - Integer. Token budget
-   `opts` - Map, optional:
-     - :model - Model for token counting (default: gpt-4o)
-     - :preserve-recent - Number of recent messages to always keep (default: 4)"
-  ([db-info current-messages max-tokens]
-   (select-rlm-iteration-context db-info current-messages max-tokens {}))
-  ([db-info current-messages max-tokens
-    {:keys [model preserve-recent] :or {preserve-recent 4}}]
-   (assert model "model is required for select-rlm-iteration-context (resolve from router)")
-   (let [;; If no DB or not enough messages, just truncate normally
-         msg-count (count current-messages)]
-     (if (or (nil? db-info) (nil? (:conn db-info)) (<= msg-count (inc preserve-recent)))
-       (tokens/truncate-messages model current-messages max-tokens)
-
-       ;; Recency-based selection
-       (let [;; Always keep system prompt (first message)
-             system-msg (first current-messages)
-             system-tokens (tokens/count-messages model [system-msg])
-
-             ;; Always keep most recent N messages for continuity
-             recent-msgs (vec (take-last preserve-recent (rest current-messages)))
-             recent-tokens (tokens/count-messages model recent-msgs)
-
-             ;; Calculate budget for middle messages
-             fixed-overhead (+ system-tokens recent-tokens 100) ; 100 token buffer
-             history-budget (- max-tokens fixed-overhead)]
-
-         (if (<= history-budget 0)
-           ;; No room for history - just use system + recent
-           (vec (concat [system-msg] recent-msgs))
-
-           ;; Select recent past messages within budget
-           (let [;; Middle messages (not system, not recent)
-                 middle-count (- msg-count 1 preserve-recent)
-
-                 ;; Get recent messages (recency-based selection)
-                 similar (when (pos? middle-count)
-                           (let [msgs (get-recent-messages db-info (min 20 (* 2 middle-count)))]
-                             (->> (or msgs [])
-                               (remove #(= :system (:role %)))
-                               vec)))
-
-                 ;; Select within budget, sorted by recency (most recent first)
-                 selected-middle (loop [candidates (or similar [])
-                                        selected []
-                                        used-tokens 0]
-                                   (if (or (empty? candidates)
-                                         (>= used-tokens history-budget))
-                                     selected
-                                     (let [msg (first candidates)
-                                           msg-tokens (:tokens msg 50)] ; Default 50 if missing
-                                       (if (<= (+ used-tokens msg-tokens) history-budget)
-                                         (recur (rest candidates)
-                                           (conj selected {:role (name (:role msg))
-                                                           :content (:content msg)})
-                                           (+ used-tokens msg-tokens))
-                                         ;; Skip this one, try next
-                                         (recur (rest candidates) selected used-tokens)))))
-
-                 ;; Reverse to get chronological order (oldest first)
-                 ;; since messages are sorted by recency
-                 ordered-middle (vec (reverse selected-middle))]
-
-             ;; Combine: system + selected history + recent
-             (vec (concat [system-msg] ordered-middle recent-msgs)))))))))
 
 ;; =============================================================================
 ;; RLM Environment
@@ -805,46 +725,6 @@
        :response (when-not model-reasoning response)
        :thinking thinking :executions executions :final-result final-result
        :api-usage (:api-usage response-data)})))
-
-;; =============================================================================
-;; Auto-Store Large Results (RLM Paper §2: constant-size metadata in history)
-;; =============================================================================
-
-(defn auto-store-results!
-  "Auto-stores large execution results in SCI REPL variables.
-   Per Zhang et al. (2025) Algorithm 1: only constant-size metadata about stdout
-   goes into the model's history. Large results are stored as _rN variables that
-   the model can reference in subsequent code.
-
-   Mutates: locals-atom, sci-ctx (adds _rN / _stdoutN bindings).
-   Returns: executions with :auto-var and :auto-stdout-var keys added where stored."
-  [{:keys [sci-ctx locals-atom]} executions]
-  (mapv (fn [{:keys [id result stdout error] :as exec}]
-          (if error
-            exec
-            (let [result-str (pr-str (realize-value result))
-                  large-result? (and (not (fn? result))
-                                  (> (count result-str) INLINE_RESULT_THRESHOLD))
-                  large-stdout? (and (not (str/blank? stdout))
-                                  (> (count stdout) INLINE_RESULT_THRESHOLD))
-                  ;; Auto-store large result
-                  exec (if large-result?
-                         (let [var-name (str "_r" id)]
-                           (swap! locals-atom assoc (symbol var-name) (realize-value result))
-                           (try (sci/eval-string* sci-ctx (str "(def " var-name " (get-local '" var-name "))"))
-                                (catch Exception _ nil))
-                           (assoc exec :auto-var var-name))
-                         exec)
-                  ;; Auto-store large stdout
-                  exec (if large-stdout?
-                         (let [var-name (str "_stdout" id)]
-                           (swap! locals-atom assoc (symbol var-name) stdout)
-                           (try (sci/eval-string* sci-ctx (str "(def " var-name " (get-local '" var-name "))"))
-                                (catch Exception _ nil))
-                           (assoc exec :auto-stdout-var var-name))
-                         exec)]
-              exec)))
-    executions))
 
 (defn format-executions
   "Formats executions for LLM feedback as EDN.
