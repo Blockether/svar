@@ -130,6 +130,32 @@
                       result (eval-sanitized (str code "})"))]
                   (expect (true? (:rlm/final result))))))
 
+  (describe "eval — missing closing delimiters (auto-added)"
+            (it "missing )"             (expect (= 3 (eval-sanitized "(+ 1 2"))))
+            (it "missing ))"            (expect (= 6 (eval-sanitized "(+ 1 (+ 2 3"))))
+            (it "missing }"             (expect (= {:a 1} (eval-sanitized "{:a 1"))))
+            (it "missing ]"             (expect (= [1 2 3] (eval-sanitized "[1 2 3"))))
+            (it "missing ] and }"       (expect (= {:a [1 2]} (eval-sanitized "{:a [1 2"))))
+            (it "missing ) on FINAL"
+                (expect (true? (:rlm/final (eval-sanitized (str "(FINAL {:answer [" (q "hi") "]}"))))))
+            (it "missing ]) on FINAL"
+                (expect (true? (:rlm/final (eval-sanitized (str "(FINAL {:answer [" (q "hi")))))))
+            (it "missing ) on nested let"
+                (expect (= 3 (eval-sanitized "(let [x 1 y 2] (+ x y"))))
+            (it "missing ) on do block"
+                (let [result (eval-sanitized "(do (def x 5) x")]
+                  (expect (= 5 result))))
+            (it "missing }} on nested map"
+                (expect (= {:a {:b {:c 1}}} (eval-sanitized "{:a {:b {:c 1"))))
+            (it "missing ]] on nested vector"
+                (expect (= [[1] [2 3]] (eval-sanitized "[[1] [2 3"))))
+            (it "missing ) on ctx-add!"
+                (expect (= "Added: test" (eval-sanitized "(ctx-add! \"test\""))))
+            (it "missing }) on FINAL with learn"
+                (let [code (str "(FINAL {:answer [" (q "done") "] :learn [{:insight " (q "x") " :tags [" (q "t") "]")
+                      result (eval-sanitized code)]
+                  (expect (true? (:rlm/final result))))))
+
   (describe "eval — preserves valid code (no false stripping)"
             (it "balanced nested map"
                 (expect (= {:a {:b [1 2]}} (eval-sanitized "{:a {:b [1 2]}}"))))

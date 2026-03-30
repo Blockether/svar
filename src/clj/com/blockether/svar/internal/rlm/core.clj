@@ -173,27 +173,52 @@
 
 (defn- sanitize-code
   "Fix common delimiter mismatches from LLM-generated code.
-   Strips trailing unmatched } ] ) that cause parse errors.
+   1. Strips trailing unmatched } ] ) that cause parse errors.
+   2. Appends missing closing delimiters in correct order.
    Handles whitespace between valid code and extra delimiters.
-   Safe for multi-form code (def, if, do, defn etc.) — only counts global balance."
+   Safe for multi-form code (def, if, do, defn etc.)."
   [code]
   (let [s (str/trim code)]
     (if (str/blank? s)
       ""
-      (loop [s s]
-        (let [trimmed (str/trimr s)
-              last-ch (when (pos? (count trimmed)) (nth trimmed (dec (count trimmed))))
-              opens  (frequencies (filter #{\( \[ \{} trimmed))
-              closes (frequencies (filter #{\) \] \}} trimmed))
-              extra-close (fn [o c] (- (get closes c 0) (get opens o 0)))]
-          (cond
-            (and (= last-ch \}) (pos? (extra-close \{ \})))
-            (recur (subs trimmed 0 (dec (count trimmed))))
-            (and (= last-ch \]) (pos? (extra-close \[ \])))
-            (recur (subs trimmed 0 (dec (count trimmed))))
-            (and (= last-ch \)) (pos? (extra-close \( \))))
-            (recur (subs trimmed 0 (dec (count trimmed))))
-            :else trimmed))))))
+      (let [;; Phase 1: strip trailing unmatched closers
+            stripped (loop [s s]
+                      (let [trimmed (str/trimr s)
+                            last-ch (when (pos? (count trimmed)) (nth trimmed (dec (count trimmed))))
+                            opens  (frequencies (filter #{\( \[ \{} trimmed))
+                            closes (frequencies (filter #{\) \] \}} trimmed))
+                            extra-close (fn [o c] (- (get closes c 0) (get opens o 0)))]
+                        (cond
+                          (and (= last-ch \}) (pos? (extra-close \{ \})))
+                          (recur (subs trimmed 0 (dec (count trimmed))))
+                          (and (= last-ch \]) (pos? (extra-close \[ \])))
+                          (recur (subs trimmed 0 (dec (count trimmed))))
+                          (and (= last-ch \)) (pos? (extra-close \( \))))
+                          (recur (subs trimmed 0 (dec (count trimmed))))
+                          :else trimmed)))
+            ;; Phase 2: add missing closers by tracking open/close stack
+            closer-for {\( \) \[ \] \{ \}}
+            skip-string (fn [chars]
+                          ;; Consume chars until closing unescaped ", return remaining chars
+                          (loop [cs chars escaped? false]
+                            (if-not cs
+                              nil ;; unclosed string
+                              (let [ch (first cs)]
+                                (cond
+                                  escaped? (recur (next cs) false)
+                                  (= ch \\) (recur (next cs) true)
+                                  (= ch \") (next cs) ;; found closing quote, return rest
+                                  :else (recur (next cs) false))))))
+            missing (loop [chars (seq stripped) stack []]
+                      (if-not chars
+                        (apply str (map closer-for (reverse stack)))
+                        (let [c (first chars)]
+                          (cond
+                            (#{\( \[ \{} c) (recur (next chars) (conj stack c))
+                            (#{\) \] \}} c) (recur (next chars) (if (seq stack) (pop stack) stack))
+                            (= c \") (recur (skip-string (next chars)) stack)
+                            :else (recur (next chars) stack)))))]
+        (str stripped missing)))))
 
 (defn execute-code [{:keys [sci-ctx locals-atom hooks-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
