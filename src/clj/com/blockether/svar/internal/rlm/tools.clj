@@ -688,10 +688,7 @@
         ;; :last-iteration — auto-managed by system, last execution results
         ;; :context        — vector of strings, LLM-managed working memory
         ;; :learnings      — priority-ranked insights [{:text str :priority :high|:medium|:low}]
-        initial-context (if (and context-data (not= context-data ""))
-                          [(str "[initial] " (if (string? context-data) context-data (pr-str context-data)))]
-                          [])
-        p-atom (atom {:context initial-context
+        p-atom (atom {:context []
                       :learnings []})
         raw-text-bindings {'P-atom p-atom
                            'P p-atom
