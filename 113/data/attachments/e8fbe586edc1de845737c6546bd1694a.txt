@@ -1,0 +1,2 @@
+2026-03-30T13:55:21.439655532Z :warn com.blockether.svar.internal.llm [1060 13] ::cod-empty-entities CoD iteration returned zero entities 
+  data: {:iteration 2, :first? false}
