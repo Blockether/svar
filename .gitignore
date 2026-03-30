@@ -38,3 +38,4 @@ allure-results/
 allure-report/
 .allure-history.jsonl
 .verification/
+.omc/
