@@ -728,15 +728,16 @@
         all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
                             learning-bindings raw-text-bindings
                             (or custom-bindings {}))]
-    {:sci-ctx (sci/init {:namespaces {'user all-bindings}
-                         :classes {'java.util.regex.Pattern java.util.regex.Pattern
-                                   'java.util.regex.Matcher java.util.regex.Matcher
-                                   'java.time.LocalDate java.time.LocalDate
-                                   'java.time.Period java.time.Period
-                                   'java.util.UUID java.util.UUID}
-                         :deny '[require import ns eval load-string read-string]})
-     :p-atom p-atom
-     :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))}))
+    (let [sci-ctx (sci/init {:namespaces {'user all-bindings}
+                             :classes {'java.util.regex.Pattern java.util.regex.Pattern
+                                       'java.util.regex.Matcher java.util.regex.Matcher
+                                       'java.time.LocalDate java.time.LocalDate
+                                       'java.time.Period java.time.Period
+                                       'java.util.UUID java.util.UUID}
+                             :deny '[require import ns eval load-string read-string]})]
+      {:sci-ctx sci-ctx
+       :p-atom p-atom
+       :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))})))
 
 ;; =============================================================================
 ;; SCI Context Helpers
