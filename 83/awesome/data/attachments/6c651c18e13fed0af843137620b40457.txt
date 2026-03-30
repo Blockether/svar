@@ -1,0 +1,2 @@
+2026-03-30T02:12:10.127940939Z :info com.blockether.svar.internal.rlm [2277 5] Starting text extraction from file 
+  data: {:file "resources-test/example.pdf"}
