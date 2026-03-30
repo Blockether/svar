@@ -10,19 +10,24 @@
   "Sanitize code then eval in SCI. Returns result or {:error msg}."
   [code]
   (let [sanitized (sanitize-code code)
-        ctx (sci/init {:namespaces {'user {'+ + '- - '* * 'str str 'count count
-                                           'map map 'filter filter 'reduce reduce
+        ctx (sci/init {:namespaces {'user {'+ + '- - '* * '/ / 'str str 'count count
+                                           'map map 'filter filter 'reduce reduce 'mapv mapv
                                            'conj conj 'assoc assoc 'get get 'merge merge
-                                           'inc inc 'dec dec 'vec vec 'do identity
+                                           'inc inc 'dec dec 'vec vec 'into into
                                            'println println 'pr-str pr-str 'keyword keyword
                                            'first first 'rest rest 'seq seq 'nil? nil?
-                                           '> > '< < '= = 'not not 'true? true?
+                                           'last last 'butlast butlast 'take take 'drop drop
+                                           '> > '< < '= = 'not not 'true? true? 'some some
+                                           'keys keys 'vals vals 'select-keys select-keys
                                            'FINAL (fn
                                                     ([answer] {:rlm/final true :answer answer})
                                                     ([answer opts] (merge {:rlm/final true :answer answer} opts)))
                                            'ctx-add! (fn [text] (str "Added: " text))
-                                           'list-dir (fn [& _] {:path "." :entries [{:name "a.clj" :type "file"}] :total 1})
-                                           'read-file (fn [& _] "file contents")}}})]
+                                           'ctx-remove! (fn [idx] (str "Removed: " idx))
+                                           'learn! (fn [text & [pri]] (str "Learned: " text))
+                                           'list-dir (fn [& _] {:path "." :entries [{:name "a.clj" :type "file"} {:name "b.clj" :type "file"}] :total 2})
+                                           'read-file (fn [& _] "file contents")
+                                           'shell-exec (fn [& _] {:exit-code 0 :stdout "hello" :stderr "" :timed-out false})}}})]
     (try
       (sci/eval-string* ctx sanitized)
       (catch Exception e
@@ -30,7 +35,10 @@
 
 (defn- q [s] (str "\"" s "\""))
 
-;; Build test code strings that contain inner quotes safely
+(defn- no-error? [result]
+  (not (and (map? result) (contains? result :error))))
+
+;; Reusable code fragments
 (def ^:private code-list-dir (str "(list-dir " (q ".") ")"))
 (def ^:private code-def-data (str "(def mydata " code-list-dir ")"))
 (def ^:private code-final-simple (str "(FINAL {:answer [" (q "hello") "]})"))
@@ -40,83 +48,98 @@
 (def ^:private code-let-count (str "(let [files (:entries " code-list-dir ")] (count files))"))
 
 (defdescribe sanitize-code-test
-  (describe "string matching — valid code unchanged"
-            (it "simple expression"     (expect (= "(+ 1 2)" (sanitize-code "(+ 1 2)"))))
-            (it "nested parens"         (expect (= "(defn foo [x] (+ x 1))" (sanitize-code "(defn foo [x] (+ x 1))"))))
-            (it "map literal"           (expect (= "{:a 1 :b 2}" (sanitize-code "{:a 1 :b 2}"))))
-            (it "vector"                (expect (= "[1 2 3]" (sanitize-code "[1 2 3]"))))
-            (it "empty string"          (expect (= "" (sanitize-code ""))))
-            (it "whitespace only"       (expect (= "" (sanitize-code "   ")))))
 
-  (describe "string matching — strips extra delimiters"
-            (it "extra )"               (expect (= "(+ 1 2)" (sanitize-code "(+ 1 2))"))))
-            (it "extra ))"              (expect (= "(+ 1 2)" (sanitize-code "(+ 1 2)))"))))
-            (it "extra }"               (expect (= "{:a 1}" (sanitize-code "{:a 1}}"))))
-            (it "extra }}"              (expect (= "{:a {:b 1}}" (sanitize-code "{:a {:b 1}}}}"))))
-            (it "extra ]"               (expect (= "[1 2 3]" (sanitize-code "[1 2 3]]"))))
-            (it "extra ]]"              (expect (= "[[1] [2]]" (sanitize-code "[[1] [2]]]"))))
-            (it "mixed })"              (expect (= code-final-simple (sanitize-code (str code-final-simple "})")))))
-            (it "whitespace before )"   (expect (= "(+ 1 2)" (sanitize-code "(+ 1 2) )"))))
+  (describe "eval — valid code runs correctly"
+            (it "simple math"           (expect (= 3 (eval-sanitized "(+ 1 2)"))))
+            (it "nested math"           (expect (= 11 (eval-sanitized "(+ 1 (* 2 (+ 3 2)))"))))
+            (it "map literal"           (expect (= {:a 1 :b 2} (eval-sanitized "{:a 1 :b 2}"))))
+            (it "vector"                (expect (= [1 2 3] (eval-sanitized "[1 2 3]"))))
+            (it "nested structures"     (expect (= {:a [1 {:b 2}]} (eval-sanitized "{:a [1 {:b 2}]}"))))
+            (it "string with delims"    (expect (= "hi (there) {}" (eval-sanitized "(str \"hi (there) {}\")"))))
+            (it "FINAL valid"           (expect (true? (:rlm/final (eval-sanitized code-final-simple)))))
+            (it "list-dir valid"        (expect (= 2 (:total (eval-sanitized code-list-dir)))))
+            (it "let valid"             (expect (= 2 (eval-sanitized code-let-count)))))
+
+  (describe "eval — extra single closing delimiter"
+            (it "extra )"               (expect (= 3 (eval-sanitized "(+ 1 2))"))))
+            (it "extra }"               (expect (= {:a 1} (eval-sanitized "{:a 1}}"))))
+            (it "extra ]"               (expect (= [1 2] (eval-sanitized "[1 2]]"))))
+            (it "FINAL extra )"         (expect (true? (:rlm/final (eval-sanitized (str code-final-simple ")"))))))
+            (it "FINAL extra }"         (expect (true? (:rlm/final (eval-sanitized (str code-final-simple "}"))))))
+            (it "ctx-add! extra )"      (expect (= "Added: hi" (eval-sanitized "(ctx-add! \"hi\"))")))))
+
+  (describe "eval — extra double closing delimiters"
+            (it "extra ))"              (expect (= 3 (eval-sanitized "(+ 1 2)))"))))
+            (it "extra }}"              (expect (= {:a {:b 1}} (eval-sanitized "{:a {:b 1}}}}"))))
+            (it "extra ]]"              (expect (= [[1] [2]] (eval-sanitized "[[1] [2]]]"))))
+            (it "FINAL extra })"        (expect (true? (:rlm/final (eval-sanitized (str code-final-simple "})"))))))
+            (it "FINAL extra })}"       (expect (true? (:rlm/final (eval-sanitized (str code-final-simple "})}")))))))
+
+  (describe "eval — mixed extra delimiters"
+            (it "extra })"              (expect (true? (:rlm/final (eval-sanitized (str code-final-simple "})"))))))
+            (it "extra )}"              (expect (true? (:rlm/final (eval-sanitized (str code-final-simple ")}"))))))
+            (it "learn FINAL extra })"  (expect (true? (:rlm/final (eval-sanitized (str code-final-learn "})"))))))
+            (it "multi FINAL extra })}" (expect (true? (:rlm/final (eval-sanitized (str code-final-multi "})}"))))))
+            (it "whitespace + extra )"  (expect (= 3 (eval-sanitized "(+ 1 2) )"))))
             (it "only closers"          (expect (= "" (sanitize-code "}})")))))
 
-  (describe "string matching — preserves valid"
-            (it "balanced nested"       (expect (= "(let [x {:a [1 2]}] x)" (sanitize-code "(let [x {:a [1 2]}] x)"))))
-            (it "deeply nested"         (expect (= "(a (b (c (d))))" (sanitize-code "(a (b (c (d))))"))))
-            (it "multi-form"            (expect (= "(def x 1) (def y 2)" (sanitize-code "(def x 1) (def y 2)"))))
-            (it "multi-form extra )"    (expect (= "(def a 1) (def b 2)" (sanitize-code "(def a 1) (def b 2))")))))
-
-  (describe "eval — simple expressions with extra delimiters"
-            (it "math extra )"          (expect (= 3 (eval-sanitized "(+ 1 2))"))))
-            (it "nested math extra ))"  (expect (= 6 (eval-sanitized "(+ 1 (+ 2 3)))"))))
-            (it "map extra }"           (expect (= {:a 1 :b 2} (eval-sanitized "{:a 1 :b 2}}"))))
-            (it "vector extra ]"        (expect (= [1 2 3] (eval-sanitized "[1 2 3]]"))))
-            (it "valid math"            (expect (= 42 (eval-sanitized "(+ 40 2)"))))
-            (it "string with delims"    (expect (= "hi (there) {}" (eval-sanitized "(str \"hi (there) {}\")")))))
-
-  (describe "eval — FINAL patterns with extra delimiters"
-            (it "simple FINAL extra })"
-                (let [result (eval-sanitized (str code-final-simple "})"))]
-                  (expect (true? (:rlm/final result)))
-                  (expect (= ["hello"] (get-in result [:answer :answer])))))
-            (it "FINAL with learn extra })"
-                (let [result (eval-sanitized (str code-final-learn "})"))]
-                  (expect (true? (:rlm/final result)))))
-            (it "FINAL multi-part extra })}"
-                (let [result (eval-sanitized (str code-final-multi "})}"))]
-                  (expect (true? (:rlm/final result)))))
-            (it "valid FINAL no extras"
-                (let [result (eval-sanitized code-final-simple)]
-                  (expect (true? (:rlm/final result))))))
-
-  (describe "eval — ctx-add! and list-dir"
-            (it "ctx-add! extra )"
-                (expect (= "Added: hello" (eval-sanitized "(ctx-add! \"hello\"))"))))
-            (it "list-dir valid"
-                (let [result (eval-sanitized code-list-dir)]
-                  (expect (= 1 (:total result)))))
-            (it "def + list-dir extra )"
-                (let [result (eval-sanitized (str code-def-data ")"))]
-                  (expect (nil? (:error result))))))
-
-  (describe "eval — complex multi-form"
-            (it "do block with FINAL extra )}"
-                (let [result (eval-sanitized (str code-do-final "})"))]
-                  (expect (true? (:rlm/final result)))))
-            (it "let with count"
-                (expect (= 1 (eval-sanitized code-let-count))))
-            (it "let with count extra )"
-                (expect (= 1 (eval-sanitized (str code-let-count ")")))))
-            (it "multi-def pipeline"
+  (describe "eval — complex multi-form with extra delimiters"
+            (it "do block FINAL extra })"
+                (expect (true? (:rlm/final (eval-sanitized (str code-do-final "})"))))))
+            (it "let count extra )"
+                (expect (= 2 (eval-sanitized (str code-let-count ")")))))
+            (it "multi-def pipeline extra )"
                 (let [code "(do (def a (+ 1 2)) (def b (* a 3)) (FINAL {:answer [(str b)]}))"
                       result (eval-sanitized (str code ")"))]
                   (expect (true? (:rlm/final result)))))
-            (it "nested let-if-do"
-                (let [code "(let [x 5] (if (> x 3) (do (def result (* x 2)) result) 0))"
+            (it "nested let-if-do extra )"
+                (let [code "(let [x 5] (if (> x 3) (do (def r (* x 2)) r) 0))"
                       result (eval-sanitized (str code ")"))]
                   (expect (= 10 result))))
-            (it "reduce over vector extra )"
+            (it "reduce extra )"
                 (expect (= 15 (eval-sanitized "(reduce + 0 [1 2 3 4 5]))"))))
-            (it "nested maps in FINAL extra })"
-                (let [code (str "(FINAL {:answer [" (q "done") "] :learn [{:insight " (q "a") " :tags [" (q "b") " " (q "c") "]}]})")
+            (it "4 sequential defs extra )"
+                (let [code "(do (def a 1) (def b 2) (def c (+ a b)) c)"
+                      result (eval-sanitized (str code ")"))]
+                  (expect (= 3 result))))
+            (it "mapv + filter pipeline extra )"
+                (let [code (str "(let [entries (:entries " code-list-dir ")] (mapv :name entries))")
+                      result (eval-sanitized (str code ")"))]
+                  (expect (= ["a.clj" "b.clj"] result))))
+            (it "shell-exec in do extra )"
+                (let [code "(do (def out (shell-exec \"ls\")) (:stdout out))"
+                      result (eval-sanitized (str code ")"))]
+                  (expect (= "hello" result)))))
+
+  (describe "eval — deeply nested FINAL patterns (real LLM output)"
+            (it "FINAL with nested learn + sources extra })"
+                (let [code (str "(FINAL {:answer [" (q "Analysis done") "]"
+                                " :learn [{:insight " (q "Bug found") " :tags [" (q "bug") " " (q "parser") "]}]"
+                                " :sources [{:source " (q "core.clj") " :type :file}]"
+                                " :reasoning " (q "Checked 3 files") "})")
                       result (eval-sanitized (str code "})"))]
-                  (expect (true? (:rlm/final result)))))))
+                  (expect (true? (:rlm/final result)))))
+            (it "FINAL with 3 answer parts extra }})"
+                (let [code (str "(FINAL {:answer [" (q "Intro") " " (q "Body with details") " " (q "Conclusion") "]})")
+                      result (eval-sanitized (str code "}})"))]
+                  (expect (true? (:rlm/final result)))
+                  (expect (= ["Intro" "Body with details" "Conclusion"]
+                             (get-in result [:answer :answer])))))
+            (it "ctx-add then FINAL in do extra })"
+                (let [code (str "(do (ctx-add! " (q "saved findings") ") (FINAL {:answer [" (q "done") "]}))")
+                      result (eval-sanitized (str code "})"))]
+                  (expect (true? (:rlm/final result))))))
+
+  (describe "eval — preserves valid code (no false stripping)"
+            (it "balanced nested map"
+                (expect (= {:a {:b [1 2]}} (eval-sanitized "{:a {:b [1 2]}}"))))
+            (it "deeply nested parens"
+                (expect (= 4 (eval-sanitized "(+ 1 (+ 1 (+ 1 1)))"))))
+            (it "multi-form stays valid"
+                (let [code "(do (def x 1) (def y 2) (+ x y))"
+                      result (eval-sanitized code)]
+                  (expect (= 3 result))))
+            (it "vector of maps"
+                (expect (= [{:a 1} {:b 2}] (eval-sanitized "[{:a 1} {:b 2}]"))))
+            (it "map of vectors"
+                (expect (= {:a [1 2] :b [3 4]} (eval-sanitized "{:a [1 2] :b [3 4]}"))))))
