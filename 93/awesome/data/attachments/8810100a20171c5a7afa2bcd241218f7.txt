@@ -1,2 +1,0 @@
-2026-03-30T08:58:36.360047183Z :warn com.blockether.svar.internal.guard [271 14] Static guard detected prompt injection 
-  data: {:input-length 25, :pattern "developer mode", :type :privilege-escalation, :duration-ms 0.025278}
