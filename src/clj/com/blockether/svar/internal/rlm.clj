@@ -32,15 +32,12 @@
 (declare load-index)
 
 (def RLM_SCHEMA schema/RLM_SCHEMA)
-(def ENTITY_EXTRACTION_SPEC schema/ENTITY_EXTRACTION_SPEC)
 (def MAX_ITERATIONS schema/MAX_ITERATIONS)
 (def DEFAULT_RECURSION_DEPTH schema/DEFAULT_RECURSION_DEPTH)
-(def EVAL_TIMEOUT_MS schema/EVAL_TIMEOUT_MS)
 (def ^:dynamic *max-recursion-depth* schema/*max-recursion-depth*)
 (def ^:dynamic *rlm-ctx* schema/*rlm-ctx*)
 
 (def get-recent-messages rlm-db/get-recent-messages)
-(def db-learning-stats rlm-db/db-learning-stats)
 
 (def GENERATION_PERSONAS schema/GENERATION_PERSONAS)
 (def DEDUP_SPEC schema/DEDUP_SPEC)

@@ -305,10 +305,6 @@
    :trajectory/score       {:db/valueType :db.type/long    :db/doc "Quality score for filtering (computed on export)"}
    :trajectory/eval-score  {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0 (from refine!) — answer quality signal"}})
 
-(def LEARNING_SIMILARITY_THRESHOLD
-  "Minimum text similarity to consider a learning relevant."
-  0.6)
-
 ;; -----------------------------------------------------------------------------
 ;; Learning Tag CRUD
 ;; -----------------------------------------------------------------------------
@@ -689,10 +685,6 @@
           :node/structure
           :toc/page]))
 
-;; Flat structure: Vector of nodes
-(s/def ::flat-structure
-  (s/coll-of ::node :kind vector?))
-
 ;;; ============================================================================
 ;;; Page Extraction Specs (Node-Based Structure)
 ;;; ============================================================================
@@ -786,23 +778,6 @@
 ;;; ============================================================================
 ;;; TOC (Table of Contents) Detection Specs
 ;;; ============================================================================
-
-;; TOC detection result: "yes" (TOC found) or "no" (no TOC)
-;; Used to decide which of 3 processing paths to take
-(s/def :toc/detected
-  #{"yes" "no"})
-
-;; TOC pages: Vector of page indices where TOC appears
-;; Example: [0 1 2] means TOC spans pages 0, 1, and 2
-(s/def ::toc-pages
-  (s/coll-of nat-int? :kind vector?))
-
-;; Has page numbers: Does the TOC include page numbers after section titles?
-;; Example: "Chapter 1 ..... 5" (has page numbers)
-;; vs:      "Chapter 1" (no page numbers)
-;; Determines which TOC processing path to use
-(s/def :toc/has-page-numbers
-  boolean?)
 
 ;;; ============================================================================
 ;;; Document Specs (RLM output)

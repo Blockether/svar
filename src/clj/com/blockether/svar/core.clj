@@ -76,18 +76,22 @@
   "Creates a spec definition from field definitions. See spec namespace for details."
   spec/spec)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def build-ref-registry
   "Builds a registry of referenced specs. See spec namespace for details."
   spec/build-ref-registry)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def str->data
   "Parses LLM response string to Clojure data. See spec namespace for details."
   spec/str->data)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def str->data-with-spec
   "Parses LLM response with spec validation. See spec namespace for details."
   spec/str->data-with-spec)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def data->str
   "Serializes Clojure data to LLM-compatible string. See spec namespace for details."
   spec/data->str)
