@@ -226,7 +226,10 @@
                        (catch Exception e
                          (call-hook! (:hooks-atom env) :tool-call :post {:sym sym :args args :error (ex-message e)})
                          (throw e))))]
-    (swap! (:custom-bindings-atom env) assoc sym wrapped-fn))
+    (swap! (:custom-bindings-atom env) assoc sym wrapped-fn)
+    ;; Inject into live SCI ctx so tool is immediately available
+    (when-let [sci-ctx (:sci-ctx env)]
+      (rlm-tools/sci-update-binding! sci-ctx (:locals-atom env) sym wrapped-fn)))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :fn :sym sym))
   env)
 
@@ -255,6 +258,9 @@
   (when-not (map? tool-def)
     (anomaly/incorrect! "tool-def must be a map" {:type :rlm/invalid-tool-def}))
   (swap! (:custom-bindings-atom env) assoc sym value)
+  ;; Inject into live SCI ctx
+  (when-let [sci-ctx (:sci-ctx env)]
+    (rlm-tools/sci-update-binding! sci-ctx (:locals-atom env) sym value))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :def :sym sym))
   env)
 
