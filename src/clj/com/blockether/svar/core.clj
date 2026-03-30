@@ -68,10 +68,12 @@
 ;; Re-export spec DSL
 ;; =============================================================================
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def field
   "Creates a field definition for a spec. See spec namespace for details."
   spec/field)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def spec
   "Creates a spec definition from field definitions. See spec namespace for details."
   spec/spec)
@@ -96,10 +98,12 @@
   "Serializes Clojure data to LLM-compatible string. See spec namespace for details."
   spec/data->str)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def validate-data
   "Validates parsed data against a spec. See spec namespace for details."
   spec/validate-data)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def spec->prompt
   "Generates LLM prompt from a spec. See spec namespace for details."
   spec/spec->prompt)
@@ -111,42 +115,52 @@
 ;; These are the namespaced keywords used in field definitions.
 ;; Re-exported here for convenience so users can require only svar.core.
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def NAME
   "Field option: Field name as Datomic-style keyword (e.g., :user/name)."
   ::spec/name)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE
   "Field option: Field type (e.g., :spec.type/string, :spec.type/int)."
   ::spec/type)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def CARDINALITY
   "Field option: Field cardinality (:spec.cardinality/one or :spec.cardinality/many)."
   ::spec/cardinality)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def DESCRIPTION
   "Field option: Human-readable field description."
   ::spec/description)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def REQUIRED
   "Field option: Whether field is required (default: true). Set to false for optional."
   ::spec/required)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def VALUES
   "Field option: Enum values as map {value description}."
   ::spec/values)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TARGET
   "Field option: Reference target for :spec.type/ref fields."
   ::spec/target)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def UNION
   "Field option: Set of allowed nil types (used internally for optional fields)."
   ::spec/union)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def KEY-NS
   "Spec option: Namespace prefix to add to keys during parsing."
   ::spec/key-ns)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def HUMANIZE
   "Field option: When true, marks field for humanization via :humanizer in ask!."
   ::spec/humanize?)
@@ -156,88 +170,134 @@
 ;; =============================================================================
 
 ;; Base types
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING
   "Type: String value."
   :spec.type/string)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT
   "Type: Integer value."
   :spec.type/int)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_FLOAT
   "Type: Floating point value."
   :spec.type/float)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_BOOL
   "Type: Boolean value."
   :spec.type/bool)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DATE
   "Type: ISO date (YYYY-MM-DD)."
   :spec.type/date)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DATETIME
   "Type: ISO datetime."
   :spec.type/datetime)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_REF
   "Type: Reference to another spec."
   :spec.type/ref)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_KEYWORD
   "Type: Clojure keyword (rendered as string, keywordized on parse)."
   :spec.type/keyword)
 
 ;; Fixed-size integer vector types (1-12 elements)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_1 "Type: Fixed-size integer vector (1 element)." :spec.type/int-v-1)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_2 "Type: Fixed-size integer vector (2 elements)." :spec.type/int-v-2)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_3 "Type: Fixed-size integer vector (3 elements)." :spec.type/int-v-3)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_4 "Type: Fixed-size integer vector (4 elements)." :spec.type/int-v-4)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_5 "Type: Fixed-size integer vector (5 elements)." :spec.type/int-v-5)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_6 "Type: Fixed-size integer vector (6 elements)." :spec.type/int-v-6)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_7 "Type: Fixed-size integer vector (7 elements)." :spec.type/int-v-7)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_8 "Type: Fixed-size integer vector (8 elements)." :spec.type/int-v-8)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_9 "Type: Fixed-size integer vector (9 elements)." :spec.type/int-v-9)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_10 "Type: Fixed-size integer vector (10 elements)." :spec.type/int-v-10)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_11 "Type: Fixed-size integer vector (11 elements)." :spec.type/int-v-11)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_INT_V_12 "Type: Fixed-size integer vector (12 elements)." :spec.type/int-v-12)
 
 ;; Fixed-size string vector types (1-12 elements)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_1 "Type: Fixed-size string vector (1 element)." :spec.type/string-v-1)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_2 "Type: Fixed-size string vector (2 elements)." :spec.type/string-v-2)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_3 "Type: Fixed-size string vector (3 elements)." :spec.type/string-v-3)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_4 "Type: Fixed-size string vector (4 elements)." :spec.type/string-v-4)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_5 "Type: Fixed-size string vector (5 elements)." :spec.type/string-v-5)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_6 "Type: Fixed-size string vector (6 elements)." :spec.type/string-v-6)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_7 "Type: Fixed-size string vector (7 elements)." :spec.type/string-v-7)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_8 "Type: Fixed-size string vector (8 elements)." :spec.type/string-v-8)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_9 "Type: Fixed-size string vector (9 elements)." :spec.type/string-v-9)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_10 "Type: Fixed-size string vector (10 elements)." :spec.type/string-v-10)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_11 "Type: Fixed-size string vector (11 elements)." :spec.type/string-v-11)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_STRING_V_12 "Type: Fixed-size string vector (12 elements)." :spec.type/string-v-12)
 
 ;; Fixed-size double vector types (1-12 elements)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_1 "Type: Fixed-size double vector (1 element)." :spec.type/double-v-1)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_2 "Type: Fixed-size double vector (2 elements)." :spec.type/double-v-2)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_3 "Type: Fixed-size double vector (3 elements)." :spec.type/double-v-3)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_4 "Type: Fixed-size double vector (4 elements)." :spec.type/double-v-4)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_5 "Type: Fixed-size double vector (5 elements)." :spec.type/double-v-5)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_6 "Type: Fixed-size double vector (6 elements)." :spec.type/double-v-6)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_7 "Type: Fixed-size double vector (7 elements)." :spec.type/double-v-7)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_8 "Type: Fixed-size double vector (8 elements)." :spec.type/double-v-8)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_9 "Type: Fixed-size double vector (9 elements)." :spec.type/double-v-9)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_10 "Type: Fixed-size double vector (10 elements)." :spec.type/double-v-10)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_11 "Type: Fixed-size double vector (11 elements)." :spec.type/double-v-11)
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def TYPE_DOUBLE_V_12 "Type: Fixed-size double vector (12 elements)." :spec.type/double-v-12)
 
 ;; =============================================================================
 ;; Cardinality Keywords
 ;; =============================================================================
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def CARDINALITY_ONE
   "Cardinality: Single value."
   :spec.cardinality/one)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def CARDINALITY_MANY
   "Cardinality: Vector of values."
   :spec.cardinality/many)
@@ -246,31 +306,37 @@
 ;; Re-export humanize functions
 ;; =============================================================================
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def humanize-string
   "Removes AI-style phrases from text to make it sound more natural.
    See internal.humanize for details."
   humanize/humanize-string)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def humanize-data
   "Recursively humanizes all strings in a data structure.
    See internal.humanize for details."
   humanize/humanize-data)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def humanizer
   "Creates a humanization function with optional custom patterns.
    See internal.humanize for details."
   humanize/humanizer)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def HUMANIZE_DEFAULT_PATTERNS
   "Default patterns for AI phrase humanization (safe + aggressive combined).
    Preserved for backward compatibility."
   humanize/DEFAULT_PATTERNS)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def HUMANIZE_SAFE_PATTERNS
   "Safe humanization patterns: AI identity, refusal, knowledge, punctuation.
    These are unambiguously AI artifacts, safe for arbitrary text."
   humanize/SAFE_PATTERNS)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def HUMANIZE_AGGRESSIVE_PATTERNS
   "Aggressive humanization patterns: hedging, overused verbs/adjectives/nouns, cliches.
    May match valid English -- opt-in only via {:aggressive? true}."
@@ -280,24 +346,29 @@
 ;; Re-export guard functions
 ;; =============================================================================
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def static-guard
   "Creates a guard function that checks for prompt injection patterns.
    See internal.guard for details."
   guard/static)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def moderation-guard
   "Creates a guard function that uses LLM to check content against policies.
    See internal.guard for details."
   guard/moderation)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def guard
   "Runs guard(s) on input. See internal.guard for details."
   guard/guard)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def GUARD_DEFAULT_INJECTION_PATTERNS
   "Default patterns for prompt injection detection."
   guard/DEFAULT_INJECTION_PATTERNS)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def GUARD_DEFAULT_MODERATION_POLICIES
   "Default OpenAI moderation policies to check."
   guard/DEFAULT_MODERATION_POLICIES)
@@ -306,15 +377,18 @@
 ;; Re-export LLM client functions
 ;; =============================================================================
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def image
   "Creates an image attachment for use with `user` messages.
    See internal.llm for details."
   llm/image)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def system
   "Creates a system message. See internal.llm for details."
   llm/system)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def user
   "Creates a user message, optionally with images. See internal.llm for details."
   llm/user)
@@ -324,6 +398,7 @@
   "Creates an assistant message. See internal.llm for details."
   llm/assistant)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def ask!
   "Asks the LLM and returns structured Clojure data with token usage and cost.
    See internal.llm for details."
@@ -335,11 +410,13 @@
    See internal.llm for details."
   llm/abstract!)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def eval!
   "Evaluates an LLM output using LLM self-evaluation.
    See internal.llm for details."
   llm/eval!)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def refine!
   "Iteratively refines LLM output using decomposition and verification.
    See internal.llm for details."
@@ -361,16 +438,19 @@
 ;; Re-export RLM (Recursive Language Model) — direct requires, no requiring-resolve
 ;; =============================================================================
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def RLM_SCHEMA
   "Datalevin schema for RLM data. Merge into your app's schema for unified DB."
   rlm/RLM_SCHEMA)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def make-default-hooks
   "Build Datalevin-backed hook/data callbacks from a db-info atom.
    Use to create hooks backed by your own DB for unified storage.
    Pass the result as :hooks to create-env."
   rlm/make-default-hooks)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def create-env
   "Creates an RLM environment for processing large contexts via iterative code execution.
    Accepts :conn for unified DB, :path for standalone, or neither for temp DB.
@@ -389,36 +469,43 @@
    See internal.rlm for details."
   rlm/register-env-def!)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def ingest-to-env!
   "Ingests documents into an RLM environment for querying.
    See internal.rlm for details."
   rlm/ingest-to-env!)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def dispose-env!
   "Disposes an RLM environment and cleans up resources.
    See internal.rlm for details."
   rlm/dispose-env!)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def query-env!
   "Runs a query against an RLM environment using iterative code execution.
    See internal.rlm for details."
   rlm/query-env!)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def list-trajectories
   "Lists trajectory records from an RLM environment.
    See internal.rlm for details."
   rlm/list-trajectories)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def export-trajectories!
   "Exports filtered trajectories as JSONL for fine-tuning.
    See internal.rlm for details."
   rlm/export-trajectories!)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def pprint-trace
   "Pretty-prints an RLM trace to a string.
    See internal.rlm for details."
   rlm/pprint-trace)
 
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def print-trace
   "Pretty-prints an RLM trace to stdout.
    See internal.rlm for details."
