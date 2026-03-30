@@ -736,14 +736,9 @@
                                           'clojure.set {'union clojure.set/union 'intersection clojure.set/intersection
                                                         'difference clojure.set/difference 'subset? clojure.set/subset?
                                                         'superset? clojure.set/superset?}
-                                          'str {'split str/split 'join str/join 'replace str/replace
-                                                'trim str/trim 'lower-case str/lower-case 'upper-case str/upper-case
-                                                'starts-with? str/starts-with? 'ends-with? str/ends-with?
-                                                'includes? str/includes? 'blank? str/blank?
-                                                'split-lines str/split-lines}
-                                          'set {'union clojure.set/union 'intersection clojure.set/intersection
-                                                'difference clojure.set/difference 'subset? clojure.set/subset?
-                                                'superset? clojure.set/superset?}}
+}
+                             :ns-aliases {'str 'clojure.string
+                                        'set 'clojure.set}
                              :classes {'java.util.regex.Pattern java.util.regex.Pattern
                                        'java.util.regex.Matcher java.util.regex.Matcher
                                        'java.time.LocalDate java.time.LocalDate
