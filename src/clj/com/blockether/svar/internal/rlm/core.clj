@@ -707,7 +707,7 @@
           _ (when hooks-atom
               ((resolve 'com.blockether.svar.internal.rlm/call-hook!)
                hooks-atom :llm-call :pre {:prompt (some-> messages last :content) :opts nil}))
-          response-data (llm/routed-chat-completion (:router rlm-env) messages {:strategy :root})
+          response-data (llm/routed-chat-completion (:router rlm-env) messages {:strategy :root :json-mode? true})
           response (:content response-data)
           model-reasoning (:reasoning response-data)
           _ (when hooks-atom

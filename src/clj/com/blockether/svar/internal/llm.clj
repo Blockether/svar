@@ -670,7 +670,8 @@
                         :models [{:name model-name}]}]))))))
 
 (defn routed-chat-completion
-  "Routes a chat-completion across providers with fallback."
+  "Routes a chat-completion across providers with fallback.
+   Prefs may include :json-mode? true to force JSON response format."
   [router messages prefs]
   (with-provider-fallback router prefs
     (fn [provider model-map]
@@ -679,7 +680,11 @@
                        (:base-url provider)
                        (cond-> {}
                          (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
-                         (assoc :extra-body (:reasoning-params model-map)))))))
+                         (assoc :extra-body (merge (:reasoning-params model-map)
+                                                   (when (:json-mode? prefs)
+                                                     {:response_format {:type "json_object"}})))
+                         (and (:json-mode? prefs) (not (seq (:reasoning-params model-map))))
+                         (assoc :extra-body {:response_format {:type "json_object"}}))))))
 
 (defn sanitize-config
   [config]
