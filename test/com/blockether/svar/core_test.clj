@@ -873,10 +873,11 @@
   (describe "basic Chain of Density with Voyager text"
     (it "produces iterations with entities and summaries"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text VOYAGER_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 3
-                                      :target-length 80})]
+        (let [raw (svar/abstract! {:text VOYAGER_TEXT
+                                   :model "gpt-4o"
+                                   :iterations 3
+                                   :target-length 80})
+              result (:result raw)]
                     ;; Shape checks
           (expect (vector? result))
           (expect (= 3 (count result)))
@@ -925,10 +926,10 @@
 
     (it "later iterations accumulate more entities without re-extraction"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text VOYAGER_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 3
-                                      :target-length 80})
+        (let [result (:result (svar/abstract! {:text VOYAGER_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 3
+                                               :target-length 80}))
                         ;; Total entity count should grow across iterations
               cumulative-entities (reductions
                                     (fn [acc iter] (into acc (map :entity (:entities iter))))
@@ -947,10 +948,10 @@
   (describe "basic Chain of Density with CRISPR text"
     (it "handles technical scientific text"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text CRISPR_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 2
-                                      :target-length 60})]
+        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 2
+                                               :target-length 60}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -985,11 +986,11 @@
   (describe "with :eval? quality scoring"
     (it "each iteration gets a numeric score reflecting quality"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text CRISPR_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 2
-                                      :target-length 60
-                                      :eval? true})]
+        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 2
+                                               :target-length 60
+                                               :eval? true}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1009,12 +1010,12 @@
   (describe "with :refine? CoVe verification"
     (it "last iteration is marked as refined"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text CRISPR_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 2
-                                      :target-length 60
-                                      :refine? true
-                                      :threshold 0.9})]
+        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 2
+                                               :target-length 60
+                                               :refine? true
+                                               :threshold 0.9}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1034,13 +1035,13 @@
   (describe "with :eval? and :refine? combined"
     (it "produces scored iterations with refined final summary"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text CRISPR_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 2
-                                      :target-length 60
-                                      :eval? true
-                                      :refine? true
-                                      :threshold 0.9})]
+        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 2
+                                               :target-length 60
+                                               :eval? true
+                                               :refine? true
+                                               :threshold 0.9}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1054,11 +1055,11 @@
   (describe "with :special-instructions"
     (it "date-focused instructions produce mostly temporal entities"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text VOYAGER_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 2
-                                      :target-length 60
-                                      :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."})
+        (let [result (:result (svar/abstract! {:text VOYAGER_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 2
+                                               :target-length 60
+                                               :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."}))
                         ;; Collect all first-iteration entities (where special instructions have strongest effect)
               iter1-entities (:entities (first result))
               _iter1-names (mapv :entity iter1-entities)]
@@ -1078,10 +1079,10 @@
   (describe "target-length control"
     (it "produces summaries near the target word count"
       (when (integration-tests-enabled?)
-        (let [result (svar/abstract! {:text VOYAGER_TEXT
-                                      :model "gpt-4o"
-                                      :iterations 2
-                                      :target-length 50})
+        (let [result (:result (svar/abstract! {:text VOYAGER_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 2
+                                               :target-length 50}))
               word-count (fn [s] (count (str/split (str/trim s) #"\s+")))]
           (expect (vector? result))
                     ;; Summaries should be within reasonable range of target (50 words ± 50%)
