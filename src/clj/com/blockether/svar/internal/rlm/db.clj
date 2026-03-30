@@ -713,44 +713,6 @@
 ;; Page Node Storage & Search
 ;; -----------------------------------------------------------------------------
 
-(defn- db-store-page-node!
-  "Stores a page node (internal - called by db-store-pageindex-document!)."
-  [{:keys [conn]} node page-id doc-id]
-  (when conn
-    (let [node-id (str page-id "-node-" (or (:page.node/id node) (util/uuid)))
-          visual-node? (#{:image :table} (:page.node/type node))
-          img-bytes (:page.node/image-data node)
-          image-too-large? (and visual-node?
-                             img-bytes
-                             (> (alength ^bytes img-bytes) 5242880))
-          image-data (when (and visual-node?
-                             img-bytes
-                             (not image-too-large?))
-                       img-bytes)
-          entity (cond-> {:page.node/id node-id
-                          :page.node/page-id page-id
-                          :page.node/document-id doc-id
-                          :page.node/type (:page.node/type node)}
-                   (:page.node/id node) (assoc :page.node/local-id (:page.node/id node))
-                   (:page.node/parent-id node) (assoc :page.node/parent-id (:page.node/parent-id node))
-                   (:page.node/level node) (assoc :page.node/level (:page.node/level node))
-                   (and (not visual-node?) (:page.node/content node))
-                   (assoc :page.node/content (:page.node/content node))
-                   image-data (assoc :page.node/image-data image-data)
-                   (:page.node/description node) (assoc :page.node/description (:page.node/description node))
-                   (some? (:page.node/continuation? node)) (assoc :page.node/continuation? (:page.node/continuation? node))
-                   (:page.node/caption node) (assoc :page.node/caption (:page.node/caption node))
-                   (:page.node/kind node) (assoc :page.node/kind (:page.node/kind node))
-                   (:page.node/bbox node) (assoc :page.node/bbox (pr-str (:page.node/bbox node)))
-                   (:page.node/group-id node) (assoc :page.node/group-id (:page.node/group-id node)))]
-      (when image-too-large?
-        (trove/log! {:level :warn
-                     :data {:page-node-id node-id
-                            :bytes-size (alength ^bytes img-bytes)}
-                     :msg "Skipping page node image-data (exceeds 5MB limit)"}))
-      (d/transact! conn [entity])
-      node-id)))
-
 (defn- fulltext-page-nodes
   "Search page nodes via Datalevin fulltext index."
   [conn query]

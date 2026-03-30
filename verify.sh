@@ -115,7 +115,6 @@ _lint() {
   #   - unused-private-var on helpers kept for upcoming features
   local filtered
   filtered=$(echo "$output" | grep -E ": (error|warning):" \
-    | grep -v "unused-private-var.*db-store-page-node!" \
     || true)
 
   if [ -n "$filtered" ]; then
