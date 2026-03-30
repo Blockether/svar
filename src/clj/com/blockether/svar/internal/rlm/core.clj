@@ -173,20 +173,27 @@
 
 (defn- sanitize-code
   "Fix common delimiter mismatches from LLM-generated code.
-   Strips trailing unmatched } ] ) that cause parse errors."
+   Strips trailing unmatched } ] ) that cause parse errors.
+   Handles whitespace between valid code and extra delimiters.
+   Safe for multi-form code (def, if, do, defn etc.) — only counts global balance."
   [code]
-  (loop [s (str/trim code)]
-    (let [opens  (frequencies (filter #{\( \[ \{} s))
-          closes (frequencies (filter #{\) \] \}} s))
-          extra-close (fn [o c] (- (get closes c 0) (get opens o 0)))]
-      (cond
-        (and (str/ends-with? s "}") (pos? (extra-close \{ \})))
-        (recur (subs s 0 (dec (count s))))
-        (and (str/ends-with? s "]") (pos? (extra-close \[ \])))
-        (recur (subs s 0 (dec (count s))))
-        (and (str/ends-with? s ")") (pos? (extra-close \( \))))
-        (recur (subs s 0 (dec (count s))))
-        :else s))))
+  (let [s (str/trim code)]
+    (if (str/blank? s)
+      ""
+      (loop [s s]
+        (let [trimmed (str/trimr s)
+              last-ch (when (pos? (count trimmed)) (nth trimmed (dec (count trimmed))))
+              opens  (frequencies (filter #{\( \[ \{} trimmed))
+              closes (frequencies (filter #{\) \] \}} trimmed))
+              extra-close (fn [o c] (- (get closes c 0) (get opens o 0)))]
+          (cond
+            (and (= last-ch \}) (pos? (extra-close \{ \})))
+            (recur (subs trimmed 0 (dec (count trimmed))))
+            (and (= last-ch \]) (pos? (extra-close \[ \])))
+            (recur (subs trimmed 0 (dec (count trimmed))))
+            (and (= last-ch \)) (pos? (extra-close \( \))))
+            (recur (subs trimmed 0 (dec (count trimmed))))
+            :else trimmed))))))
 
 (defn execute-code [{:keys [sci-ctx locals-atom hooks-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
