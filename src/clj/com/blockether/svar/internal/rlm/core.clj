@@ -661,6 +661,7 @@
 - COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations. Example: [\"(def content (read-file path))\", \"(def summary (summarize content))\", \"(FINAL {:answer [summary]})\"]
 - LONG ANSWERS: Put each part as a separate string in the :answer vector: (FINAL {:answer [\"part 1\" \"part 2\"]}). Elements are auto-joined.
 - CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses. `(FINAL {:answer [...]})` terminates, `FINAL answer` does NOT.
+- VARS ARE VALUES: Use `my-var` to reference a stored value, NOT `(my-var)`. Maps/vectors are not callable with 0 args — `(my-map)` throws an error.
 - FAST PATH: If context already contains the answer, call (FINAL {:answer [\"your answer\"]}) IMMEDIATELY.
 - NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or FINAL with what you have.
 - ALWAYS call (FINAL {:answer [...]}) as soon as you have enough information. NEVER call (FINAL \"string\") directly — always use the {:answer [...]} map form.
