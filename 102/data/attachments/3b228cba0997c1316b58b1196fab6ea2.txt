@@ -1,2 +1,0 @@
-2026-03-30T10:55:31.263946640Z :warn com.blockether.svar.internal.llm [1031 13] ::cod-non-map-result SAP returned non-map for CoD spec — check jsonish/spec pipeline 
-  data: {:result-type clojure.lang.PersistentVector, :result "[{:entity \"Titan\", :rationale \"Detailed observations of Titan's atmosphere were a major scientific milestone discussed in the text.\", :score 0.9} []]"}
