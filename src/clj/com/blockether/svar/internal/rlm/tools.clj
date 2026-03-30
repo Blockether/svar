@@ -692,8 +692,7 @@
                           [(str "[initial] " (if (string? context-data) context-data (pr-str context-data)))]
                           [])
         p-atom (atom {:context initial-context
-                      :learnings []
-                      :vars {}})
+                      :learnings []})
         raw-text-bindings {'P-atom p-atom
                            'P p-atom
                            ;; Context management — stack of strings (newest last, oldest trimmed first)
@@ -737,3 +736,39 @@
                                    'java.util.UUID java.util.UUID}
                          :deny '[require import ns eval load-string read-string]})
      :p-atom p-atom}))
+
+;; =============================================================================
+;; SCI Context Helpers
+;; =============================================================================
+
+(def ^:private builtin-syms
+  "Symbols that are built-in tools, not user-defined vars."
+  #{'P 'P-atom 'P-len 'P-page 'P-page-count
+    'ctx-add! 'ctx-remove! 'ctx-clear! 'ctx-replace!
+    'learn! 'forget! 'context 'FINAL
+    'llm-query 'llm-query-batch 'rlm-query
+    'request-more-iterations 'list-locals 'get-local
+    'search-history 'get-history})
+
+(defn sci-user-vars
+  "Returns a vector of user-defined vars from a SCI context.
+   Excludes built-in tools and internal _rN auto-store vars.
+   Each entry: {:name str :value any :type str}"
+  [sci-ctx]
+  (when sci-ctx
+    (try
+      (let [ns-vars (sci/eval-string* sci-ctx "(ns-publics 'user)")]
+        (->> ns-vars
+             (remove (fn [[k _]]
+                       (or (clojure.string/starts-with? (str k) "_")
+                           (contains? builtin-syms k))))
+             (mapv (fn [[k v]]
+                     (let [val (try @v (catch Exception _ nil))]
+                       {:name (str k) :value val :type (str (type val))})))))
+      (catch Exception _ nil))))
+
+(defn sci-update-binding!
+  "Update a binding in an existing SCI context via locals-atom."
+  [sci-ctx locals-atom sym val]
+  (swap! locals-atom assoc sym val)
+  (sci/eval-string* sci-ctx (str "(def " sym " (get-local '" sym "))")))

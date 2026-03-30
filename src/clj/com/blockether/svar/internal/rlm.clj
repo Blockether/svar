@@ -150,7 +150,8 @@
         llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom rlm-router {:hooks-atom hooks-atom})
         sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router {:hooks-atom hooks-atom})
         rlm-query-fn (rlm-core/make-rlm-query-fn {:strategy :root} depth-atom rlm-router db-info-atom)
-        env-id (str (util/uuid))]
+        env-id (str (util/uuid))
+        {:keys [sci-ctx p-atom]} (rlm-tools/create-sci-context nil sub-llm-query-fn rlm-query-fn locals-atom db-info-atom nil)]
     {:env-id env-id
      :config (llm/sanitize-config config)
      :depth-atom depth-atom
@@ -159,7 +160,8 @@
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
-     :p-atom (atom {:context [] :learnings []})
+     :sci-ctx sci-ctx
+     :p-atom p-atom
      :hooks merged-hooks
      :router rlm-router
      :llm-query-fn llm-query-fn
@@ -438,27 +440,19 @@
                                                                          {:error (ex-message e)}))))
                                                                  prompts)]
                                                    (mapv async/<!! chs)))}
-         {:keys [sci-ctx p-atom]} (rlm-tools/create-sci-context context sub-llm-fn rlm-query-fn locals-atom db-info-atom
-                                               (merge custom-bindings cite-bindings budget-bindings llm-query-overrides))
-         ;; Carry over persistent context, learnings, and vars from previous queries
-         _ (when-let [prev-pa (:p-atom env)]
-             (let [prev-ctx (:context @prev-pa)
-                   prev-learnings (:learnings @prev-pa)
-                   prev-vars (:vars @prev-pa)]
-               (when (seq prev-ctx)
-                 (swap! p-atom assoc :context prev-ctx))
-               (when (seq prev-learnings)
-                 (swap! p-atom assoc :learnings prev-learnings))
-               (when (seq prev-vars)
-                 (swap! p-atom assoc :vars prev-vars)
-                 ;; Inject persisted vars back into SCI REPL
-                 (doseq [[var-name var-val] prev-vars]
-                   (try
-                     (swap! locals-atom assoc (symbol var-name) var-val)
-                     (sci/eval-string* sci-ctx (str "(def " var-name " (get-local '" var-name "))"))
-                     (catch Exception _ nil))))))
-         rlm-env (assoc env :sci-ctx sci-ctx :p-atom p-atom :context context :max-iterations-atom max-iterations-atom
-                        :locals-atom locals-atom :hooks-atom hooks-atom)
+         ;; Reuse env's SCI ctx — all def'd vars persist naturally across queries
+         sci-ctx (:sci-ctx env)
+         p-atom  (:p-atom env)
+         ;; Update per-query bindings in the existing SCI ctx
+         _ (let [per-query (merge {'llm-query sub-llm-fn}
+                                  budget-bindings cite-bindings
+                                  (or custom-bindings {}) llm-query-overrides)]
+             (doseq [[sym val] per-query]
+               (when val
+                 (try (rlm-tools/sci-update-binding! sci-ctx locals-atom sym val)
+                      (catch Exception _ nil)))))
+         rlm-env (assoc env :context context :max-iterations-atom max-iterations-atom
+                        :hooks-atom hooks-atom)
          env-id (:env-id env)]
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
        (binding [*max-recursion-depth* max-recursion-depth]
@@ -747,29 +741,7 @@
                                                         :status :success})
                    result-map))))
            (finally
-             ;; Auto-persist all user-defined SCI vars to P :vars
-             (when p-atom
-               (try
-                 (let [sci-ns (sci/eval-string* sci-ctx "(ns-publics 'user)")
-                       user-vars (->> sci-ns
-                                      (remove (fn [[k _]]
-                                                (or (str/starts-with? (str k) "_")
-                                                    ;; Skip built-in tools
-                                                    (contains? #{'P 'P-atom 'P-len 'P-page 'P-page-count
-                                                                 'ctx-add! 'ctx-remove! 'ctx-clear! 'ctx-replace!
-                                                                 'learn! 'forget! 'persist! 'recall 'persisted
-                                                                 'FINAL 'list-dir 'read-file 'write-file 'search
-                                                                 'llm-query 'rlm-query} k))))
-                                      (into {}))]
-                   (when (seq user-vars)
-                     (swap! p-atom assoc :vars
-                            (reduce-kv (fn [m k v]
-                                         (assoc m (str k) (try @v (catch Exception _ nil))))
-                                       {} user-vars))))
-                 (catch Exception _ nil)))
-             ;; Persist P workspace back to env for next query
-             (when-let [env-pa (:p-atom env)]
-               (reset! env-pa @p-atom))
+             ;; SCI ctx lives on env — vars persist naturally, no hack needed
              (when hooks-atom
                (reset! hooks-atom (or original-hooks {}))))))))))
 
