@@ -1131,15 +1131,21 @@
                             learning-nudge (when (and (pos? iteration) (zero? (mod (inc iteration) 10)))
                                              "\n[Tip: Consider (search-learnings \"your current topic\") for insights from prior sessions.]")
                             repetition-warning (detect-repetition executions)
+                            remaining-iters (- (effective-max-iterations) (inc iteration))
+                            budget-warning (when (<= remaining-iters 5)
+                                            (str "\n[SYSTEM_NUDGE] Only " remaining-iters " iterations left! "
+                                                 "Call (FINAL {:answer [\"your findings\"]}) NOW with what you have. DO NOT start new explorations."))
+                            force-final-nudge (when (> iteration 20)
+                                               (str "\n[SYSTEM_NUDGE] You have been running for " (inc iteration) " iterations. "
+                                                    "STOP exploring. Call (FINAL {:answer [...]}) IMMEDIATELY with your current findings."))
                             ctx-overflow-nudge (when-let [pa (:p-atom rlm-env)]
                                                  (let [ctx-count (count (:context @pa))]
                                                    (when (> ctx-count 12)
-                                                     (str "\n[SYSTEM_NUDGE] Your context has " ctx-count " entries. Manage it NOW. Options:\n"
-                                                          "  1. REMOVE stale entries: (ctx-remove! idx)\n"
-                                                          "  2. COMPACT a range into one summary: (ctx-replace! from-idx to-idx \"merged summary of entries from-to\")\n"
-                                                          "  3. KEEP if all entries are essential\n"
-                                                          "Decide which entries are least important for the current task and act."))))
-                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning ctx-overflow-nudge)]
+                                                     ;; Force-trim: keep last 10
+                                                     (swap! pa update :context (fn [ctx] (vec (take-last 10 ctx))))
+                                                     (str "\n[SYSTEM_NUDGE] Context trimmed to last 10 entries (was " ctx-count "). "
+                                                          "Use (ctx-replace! from to \"summary\") to compact further."))))
+                            user-feedback (str iteration-header "\n" exec-feedback learning-nudge repetition-warning ctx-overflow-nudge budget-warning force-final-nudge)]
                         (rlm-debug! {:iteration iteration
                                      :code-blocks (count executions)
                                      :errors (count (filter :error executions))
