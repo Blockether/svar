@@ -70,7 +70,7 @@
 
 (defn resolve-root-model
   "Resolves the root model name from a router, or falls back to a default.
-   Used for token counting (store-message!, truncate-messages)."
+   Used for token counting (store-message!)."
   [rlm-router]
   (when rlm-router
     (when-let [[_provider model-map] (llm/select-provider rlm-router {:strategy :root})]

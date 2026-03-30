@@ -12,7 +12,7 @@
    - `context-limit` - Get max context window for a model
    - `max-input-tokens` - Get max input tokens (context minus output reserve)
    - `truncate-text` - Token-aware text truncation
-    - `truncate-messages` - Smart message truncation with priority
+    - `check-context-limit` - Pre-flight context limit checking
     - `check-context-limit` - Pre-flight check before API calls
     - `format-cost` - Format USD cost for display
    - `get-model-pricing` - Look up per-model pricing info
@@ -77,11 +77,6 @@
    Override per-call via :output-reserve in check-context-limit or ask! opts."
   0)
 
-(def DEFAULT_TRIM_RATIO
-  "Default ratio of context to use (leaving room for output).
-   0.75 means use 75% for input, reserve 25% for output."
-  0.75)
-
 (defn context-limit
   "Returns the maximum context window size for a model.
    
@@ -135,8 +130,8 @@
    (let [limit (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS))
          effective-reserve (or output-reserve DEFAULT_OUTPUT_RESERVE)]
      (if trim-ratio
-       (long (* (long limit) (double trim-ratio)))
-       (- (long limit) (long effective-reserve))))))
+       (long (* limit (double trim-ratio)))
+       (- limit (long effective-reserve))))))
 
 ;; =============================================================================
 ;; Token Counting
@@ -389,8 +384,8 @@
 
                       (and (map? block) (= "image_url" (:type block)))
                       {:texts texts
-                       :image-tokens (+ (long image-tokens)
-                                       (long (estimate-image-block-tokens block)))}
+                       :image-tokens (+ image-tokens
+                                       (estimate-image-block-tokens block))}
 
                       :else
                       {:texts texts :image-tokens image-tokens}))
@@ -635,73 +630,6 @@
                          (str truncated-text truncation-marker))))
            truncated-text))))))
 
-(defn truncate-messages
-  "Truncates a message array to fit within a token limit.
-   
-   Strategy (priority-based):
-   1. ALWAYS preserve system message (index 0) if present
-   2. ALWAYS preserve the most recent user message
-   3. Trim from the MIDDLE (oldest conversation turns)
-   4. This respects LLM primacy/recency bias
-   
-   Params:
-   `model` - String. Model name.
-   `messages` - Vector. Chat messages [{:role :content}].
-   `max-tokens` - Integer. Maximum total tokens allowed.
-   
-   Returns:
-   Vector. Truncated messages that fit within limit.
-   
-   Example:
-   (truncate-messages \"gpt-4o\" messages 4000)"
-  [^String model messages ^long max-tokens]
-  (let [current-tokens (count-messages model messages)]
-    (if (<= current-tokens max-tokens)
-      messages
-      ;; Need to truncate
-      (let [has-system? (= "system" (some-> messages first :role name))
-            system-msg (when has-system? (first messages))
-            system-tokens (if system-msg (count-messages model [system-msg]) 0)
-
-            ;; Get the most recent user message
-            last-user-idx (loop [i (dec (count messages))]
-                            (cond
-                              (< i 0) nil
-                              (= "user" (some-> (get messages i) :role name)) i
-                              :else (recur (dec i))))
-            last-user-msg (when last-user-idx (get messages last-user-idx))
-            last-user-tokens (if last-user-msg (count-messages model [last-user-msg]) 0)
-
-            ;; Messages in the middle that can be trimmed
-            middle-start (if has-system? 1 0)
-            middle-end (or last-user-idx (count messages))
-            middle-msgs (subvec messages middle-start middle-end)
-
-            ;; Available budget for middle messages
-            fixed-tokens (+ system-tokens last-user-tokens 10) ; 10 token buffer
-            available-for-middle (- max-tokens fixed-tokens)
-
-            ;; Select middle messages from most recent, working backwards
-            selected-middle (loop [remaining (reverse middle-msgs)
-                                   selected []
-                                   used-tokens 0]
-                              (if (empty? remaining)
-                                (reverse selected)
-                                (let [msg (first remaining)
-                                      msg-tokens (count-messages model [msg])
-                                      new-total (+ used-tokens msg-tokens)]
-                                  (if (<= new-total available-for-middle)
-                                    (recur (rest remaining)
-                                      (conj selected msg)
-                                      new-total)
-                                    ;; Skip this message, it doesn't fit
-                                    (recur (rest remaining) selected used-tokens)))))]
-        ;; Reconstruct message array
-        (vec (concat
-               (when system-msg [system-msg])
-               selected-middle
-               (when last-user-msg [last-user-msg])))))))
-
 ;; =============================================================================
 ;; Pre-flight Context Checking
 ;; =============================================================================
@@ -744,10 +672,10 @@
   ([^String model messages]
    (check-context-limit model messages {}))
   ([^String model messages {:keys [output-reserve throw? context-limits] :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
-   (let [ctx-limit (long (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS)))
+   (let [ctx-limit (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS))
          effective-reserve (long output-reserve)
          max-input (- ctx-limit effective-reserve)
-         input-tokens (long (count-messages model messages))
+         input-tokens (count-messages model messages)
          ok? (<= input-tokens max-input)
          overflow (if ok? 0 (- input-tokens max-input))
          result {:ok? ok?
