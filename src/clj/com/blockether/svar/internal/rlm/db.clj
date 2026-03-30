@@ -128,36 +128,6 @@
       (d/transact! conn entities)
       (mapv :execution/id entities))))
 
-(defn store-tool-call!
-  "Records a tool invocation in the RLM database.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `env-id` - String. RLM environment ID.
-   `tool-name` - String. SCI symbol name of the tool.
-   `input` - Any. Tool input (will be pr-str'd).
-   `output` - Any. Tool output (will be pr-str'd, truncated to 2000 chars).
-   `error` - String or nil. Error message if call failed.
-   `duration-ms` - Long. Execution time.
-   `iteration` - Long. Which iteration this call happened in.
-
-   Returns:
-   UUID of the stored tool call."
-  [{:keys [conn]} env-id tool-name input output error duration-ms iteration]
-  (when conn
-    (let [call-id (util/uuid)
-          entity (cond-> {:tool-call/id call-id
-                          :tool-call/tool-name (str tool-name)
-                          :tool-call/input-edn (str-truncate (pr-str input) 2000)
-                          :tool-call/iteration (or iteration 0)
-                          :tool-call/timestamp (java.util.Date.)}
-                   env-id (assoc :tool-call/env-id env-id)
-                   output (assoc :tool-call/output-edn (str-truncate (pr-str output) 2000))
-                   error (assoc :tool-call/error (str error))
-                   duration-ms (assoc :tool-call/duration-ms (long duration-ms)))]
-      (d/transact! conn [entity])
-      call-id)))
-
 (defn store-trajectory!
   "Stores a trajectory record for training data collection.
    Called at the end of query-env! with the query outcome."
@@ -230,40 +200,6 @@
                          :executions (or execs [])}
                   (:message/thinking m) (assoc :thinking (:message/thinking m))
                   (:message/result-edn m) (assoc :result-edn (:message/result-edn m)))))))))
-
-(defn get-message-executions
-  "Gets ordered executions for a message by its UUID.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `msg-id` - UUID. The message's :message/id.
-
-   Returns:
-   Vector of execution maps sorted by :order, each with:
-   :id, :order, :code, :result-edn, :stdout, :stderr, :error, :time-ms."
-  [{:keys [conn]} msg-id]
-  (when conn
-    (let [msg-eid (d/q '[:find ?e .
-                         :in $ ?mid
-                         :where [?e :message/id ?mid]]
-                    (d/db conn) msg-id)]
-      (when msg-eid
-        (->> (d/q '[:find [(pull ?e [:execution/id :execution/order :execution/code
-                                     :execution/result-edn :execution/stdout :execution/stderr
-                                     :execution/error :execution/time-ms]) ...]
-                    :in $ ?msg
-                    :where [?e :execution/message ?msg]]
-               (d/db conn) msg-eid)
-          (sort-by :execution/order)
-          (mapv (fn [e]
-                  (cond-> {:id (:execution/id e)
-                           :order (:execution/order e)
-                           :code (:execution/code e)}
-                    (:execution/result-edn e) (assoc :result-edn (:execution/result-edn e))
-                    (:execution/stdout e) (assoc :stdout (:execution/stdout e))
-                    (:execution/stderr e) (assoc :stderr (:execution/stderr e))
-                    (:execution/error e) (assoc :error (:execution/error e))
-                    (:execution/time-ms e) (assoc :time-ms (:execution/time-ms e))))))))))
 
 (defn count-history-tokens
   "Counts total tokens in message history.
@@ -772,38 +708,6 @@
 ;; -----------------------------------------------------------------------------
 ;; Page Storage
 ;; -----------------------------------------------------------------------------
-
-(defn db-get-page
-  "Gets a page by ID.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `page-id` - String. Page ID.
-
-   Returns:
-   Page map or nil."
-  [{:keys [conn]} page-id]
-  (when conn
-    (let [e (d/pull (d/db conn) '[*] [:page/id page-id])]
-      (when (:db/id e) (dissoc e :db/id)))))
-
-(defn db-list-pages
-  "Lists pages for a document.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `doc-id` - String. Document ID.
-
-   Returns:
-   Vector of page maps sorted by index."
-  [{:keys [conn]} doc-id]
-  (when conn
-    (->> (d/q '[:find [(pull ?e [:page/id :page/index :page/document-id]) ...]
-                :in $ ?doc-id
-                :where [?e :page/document-id ?doc-id]]
-           (d/db conn) doc-id)
-      (sort-by :page/index)
-      vec)))
 
 ;; -----------------------------------------------------------------------------
 ;; Page Node Storage & Search
