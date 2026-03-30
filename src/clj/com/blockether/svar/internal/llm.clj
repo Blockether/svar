@@ -400,14 +400,23 @@
                   default-pricing)
         context-limits (if provider-id
                          (assoc default-context-limits model (providers/provider-model-context provider-id model))
-                         default-context-limits)]
+                         default-context-limits)
+        resolved-model (or model (:model config))
+        resolved-api-key (or api-key (:api-key config))
+        resolved-base-url (or base-url (:base-url config))
+        ;; Ensure config carries resolved credentials so downstream code
+        ;; that only passes :config still has api-key/base-url/model
+        config (cond-> config
+                 resolved-api-key (assoc :api-key resolved-api-key)
+                 resolved-base-url (assoc :base-url resolved-base-url)
+                 resolved-model (assoc :model resolved-model))]
     {:config config
-     :model (or model (:model config))
+     :model resolved-model
      :timeout-ms (or timeout-ms (:timeout-ms network) config/DEFAULT_TIMEOUT_MS)
      :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
      :output-reserve (or output-reserve (:output-reserve tokens))
-     :api-key (or api-key (:api-key config))
-     :base-url (or base-url (:base-url config))
+     :api-key resolved-api-key
+     :base-url resolved-base-url
      :provider-id provider-id
      :network network
      :pricing pricing
