@@ -810,23 +810,6 @@
 ;; Auto-Store Large Results (RLM Paper §2: constant-size metadata in history)
 ;; =============================================================================
 
-(defn- result-type-label
-  "Returns a human-readable type label for an execution result."
-  [v]
-  (cond
-    (nil? v) "nil"
-    (string? v) "string"
-    (number? v) "number"
-    (boolean? v) "boolean"
-    (keyword? v) "keyword"
-    (symbol? v) "symbol"
-    (map? v) (str "map (" (count v) " keys)")
-    (vector? v) (str "vector (" (count v) " items)")
-    (seq? v) (str "seq (" (count v) " items)")
-    (set? v) (str "set (" (count v) " items)")
-    (fn? v) "function"
-    :else (str (type v))))
-
 (defn auto-store-results!
   "Auto-stores large execution results in SCI REPL variables.
    Per Zhang et al. (2025) Algorithm 1: only constant-size metadata about stdout

@@ -59,17 +59,6 @@
    "claude-3-opus"  nil    ; Claude uses actual pixels
    "claude-3-sonnet" nil})
 
-(defn- get-bbox-scale
-  "Returns the bbox coordinate scale for a given model.
-   
-   Params:
-   `model` - String. Model name.
-   
-   Returns:
-   Integer scale factor (e.g., 1000 for GLM-4.6V), or nil if model uses actual pixels."
-  [model]
-  (get BBOX_COORDINATE_SCALES model))
-
 (def DEFAULT_VISION_OBJECTIVE
   "Default system prompt for vision-based text extraction."
   "You are an expert document analyzer. Extract document content as typed nodes with hierarchical structure.
@@ -218,71 +207,6 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
     (ImageIO/write image "PNG" baos)
     (.toByteArray baos)))
 
-;; =============================================================================
-;; Rotation Detection & Correction
-;; =============================================================================
-
-(def ^:private rotation-detection-spec
-  "Spec for page rotation detection response."
-  (spec/spec
-    (spec/field {::spec/name :rotation
-                 ::spec/type :spec.type/int
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Page rotation in degrees clockwise (0, 90, 180, or 270)"
-                 ::spec/values {"0" "Correct orientation, text reads left-to-right top-to-bottom"
-                                "90" "Rotated 90 degrees clockwise, text reads top-to-bottom"
-                                "180" "Upside down, text reads right-to-left bottom-to-top"
-                                "270" "Rotated 90 degrees counter-clockwise, text reads bottom-to-top"}})))
-
-(defn- detect-rotation
-  "Detects the rotation of a page image using vision LLM.
-   
-   Sends the image to the vision LLM and asks it to determine if the page
-   is rotated, and by how many degrees clockwise.
-   
-   Params:
-   `image` - BufferedImage. The page image to check.
-   `page-index` - Integer. The page index (for logging).
-   `opts` - Map with:
-     `:rlm-router` - Router instance (from llm/config->router or create-env).
-     `:timeout-ms` - Integer, optional. HTTP timeout (default: 60000ms / 1 min).
-   
-   Returns:
-   Integer. Rotation in degrees (0, 90, 180, or 270)."
-  [^BufferedImage image page-index {:keys [rlm-router timeout-ms]
-                                    :or {timeout-ms 60000}}]
-  (trove/log! {:level :debug :data {:page page-index}
-               :msg "Detecting page rotation"})
-  (let [base64-image (image->base64 image)
-        response (llm/ask! {:spec rotation-detection-spec
-                            :messages [(llm/system "You are a document orientation detector. Your ONLY job is to determine if this page image needs to be rotated to be read normally.
-
-CRITICAL: Look at the INDIVIDUAL CHARACTERS and LETTERS in the text:
-- If letters are upright and text flows left-to-right: rotation = 0
-- If letters are sideways and text flows top-to-bottom: rotation = 90
-- If letters are upside down: rotation = 180
-- If letters are sideways and text flows bottom-to-top: rotation = 270
-
-Pay special attention to:
-- Are table headers/column labels readable without tilting your head?
-- Are numbers and letters in their normal upright orientation?
-- Would you need to rotate the image to read the text comfortably?
-
-DO NOT assume 0. Actually examine the character orientation carefully.")
-                                       (llm/user "Look at the characters and text in this image. Are the letters upright (normal) or are they rotated sideways/upside down? Return the rotation needed to make text readable in normal left-to-right orientation."
-                                         (llm/image base64-image "image/png"))]
-                            :check-context? false
-                            :timeout-ms timeout-ms
-                            :router rlm-router
-                            :strategy :root})
-        rotation (get-in response [:result :rotation] 0)
-        ;; Clamp to valid values
-        valid-rotation (if (contains? #{0 90 180 270} rotation) rotation 0)]
-    (when (pos? valid-rotation)
-      (trove/log! {:level :info :data {:page page-index :rotation valid-rotation}
-                   :msg "Rotation detected on page"}))
-    valid-rotation))
-
 (defn- rotate-image
   "Rotates a BufferedImage by the specified degrees clockwise.
    
@@ -319,28 +243,6 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
       (.drawImage g2d image 0 0 nil)
       (.dispose g2d)
       rotated)))
-
-(defn- correct-page-rotation
-  "Detects and corrects page rotation for a single image.
-   
-   Sends the image to vision LLM for rotation detection, then rotates
-   the image if needed.
-   
-   Params:
-   `image` - BufferedImage. The page image.
-   `page-index` - Integer. The page index (for logging).
-   `opts` - Map with :model, :config, :timeout-ms.
-   
-   Returns:
-   BufferedImage. The corrected image (rotated if needed, original if already correct)."
-  [^BufferedImage image page-index opts]
-  (let [rotation (detect-rotation image page-index opts)]
-    (if (zero? rotation)
-      image
-      (do
-        (trove/log! {:level :info :data {:page page-index :rotation rotation}
-                     :msg "Correcting page rotation"})
-        (rotate-image image rotation)))))
 
 ;; =============================================================================
 ;; Spec for Vision Response (Union Node Types with parent-id)
@@ -849,23 +751,6 @@ DO NOT assume 0. Actually examine the character orientation carefully.")
   "Checks if a node is a visual node (Image or Table) by presence of :page.node/kind field."
   [node]
   (some? (:page.node/kind node)))
-
-(defn- extract-image-subregion
-  "Extracts a region from a BufferedImage and returns as a new BufferedImage.
-   
-   Params:
-   `image` - BufferedImage. The source image.
-   `bbox` - Vector of [xmin, ymin, xmax, ymax] in PIXEL coordinates (already scaled).
-   
-   Returns:
-   BufferedImage of the cropped region, or nil if bbox is invalid."
-  [^BufferedImage image bbox]
-  (when (and bbox (= 4 (count bbox)))
-    (let [[xmin ymin xmax ymax] (map int bbox)
-          width (- (long xmax) (long xmin))
-          height (- (long ymax) (long ymin))]
-      (when (and (pos? width) (pos? height))
-        (.getSubimage image (int xmin) (int ymin) (int width) (int height))))))
 
 (defn- enrich-visual-nodes
   "Enriches visual nodes (images/tables) with extracted image bytes from PDFBox.

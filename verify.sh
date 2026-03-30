@@ -116,10 +116,6 @@ _lint() {
   local filtered
   filtered=$(echo "$output" | grep -E ": (error|warning):" \
     | grep -v "unused-private-var.*db-store-page-node!" \
-    | grep -v "unused-private-var.*result-type-label" \
-    | grep -v "unused-private-var.*vision/get-bbox-scale" \
-    | grep -v "unused-private-var.*vision/correct-page-rotation" \
-    | grep -v "unused-private-var.*vision/extract-image-subregion" \
     || true)
 
   if [ -n "$filtered" ]; then
