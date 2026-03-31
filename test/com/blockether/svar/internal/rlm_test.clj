@@ -6,7 +6,6 @@
    [lazytest.core :refer [defdescribe describe expect it throws?]]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm :as sut]
-   [com.blockether.svar.internal.rlm.schema :as rlm-schema]
    [com.blockether.svar.internal.rlm.db :as rlm-db]
    [com.blockether.svar.internal.rlm.tools :as rlm-tools]
    [com.blockether.svar.internal.rlm.routing :as rlm-routing]
@@ -96,14 +95,14 @@
     (expect (= {:final? true :answer "done" :confidence :high}
               (#'rlm-core/check-result-for-final {:result {:rlm/final true :rlm/answer "done"}}))))
 
-  (it "extracts confidence and learn from FINAL result"
+  (it "extracts confidence from FINAL result"
     (expect (= {:final? true :answer {:result "done"} :confidence :low
-                :learn [{:insight "x" :tags ["t"]}]}
+                :sources [{:source "doc-1" :type :file :confidence :high}]}
               (#'rlm-core/check-result-for-final
                {:result {:rlm/final true
                          :rlm/answer {:result "done"}
                          :rlm/confidence :low
-                         :rlm/learn [{:insight "x" :tags ["t"]}]}}))))
+                         :rlm/sources [{:source "doc-1" :type :file :confidence :high}]}}))))
 
   (it "returns false when no FINAL marker"
     (expect (= {:final? false}
@@ -551,179 +550,21 @@
                              (expect (contains? (:result result) :total-tokens))
                              (expect (contains? (:result result) :by-role))))))))
 
-;; =============================================================================
-;; Learnings System Tests (DB-backed)
-;; =============================================================================
-
-(defdescribe learnings-test
-  (describe "db-store-learning!"
-    (it "stores a learning with insight"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [result (#'rlm-db/db-store-learning! db-info "Always verify data recency")]
-            (expect (some? (:learning/id result)))
-            (expect (= "Always verify data recency" (:learning/insight result)))
-            (expect (some? (:learning/timestamp result))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "stores learning with context"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [result (#'rlm-db/db-store-learning! db-info "Check for duplicates" {:context "aggregation tasks"})]
-            (expect (= "aggregation tasks" (:learning/context result))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
-
-  (describe "db-get-learnings"
-    (it "finds semantically similar learnings"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/db-store-learning! db-info "For date questions, always verify the year in the context")
-          (#'rlm-db/db-store-learning! db-info "Check database connection before queries")
-          ;; Search with related wording
-          (let [learnings (#'rlm-db/db-get-learnings db-info "verifying dates and years" {:top-k 2})]
-            (expect (<= (count learnings) 2))
-            (expect (every? #(contains? % :insight) learnings)))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
-
-  (describe "db-learning-stats"
-    (it "returns learning statistics including voting stats"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/db-store-learning! db-info "Insight without context")
-          (#'rlm-db/db-store-learning! db-info "Insight with context" {:context "some domain"})
-          (let [stats (#'rlm-db/db-learning-stats db-info)]
-            (expect (= 2 (:total-learnings stats)))
-            (expect (= 2 (:active-learnings stats)))
-            (expect (= 0 (:decayed-learnings stats)))
-            (expect (= 1 (:with-context stats)))
-            (expect (= 1 (:without-context stats)))
-            (expect (= 0 (:total-votes stats)))
-            (expect (= 0 (:total-applications stats))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
-
-  (describe "db-vote-learning!"
-    (it "records positive vote"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")
-                voted (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)]
-            (expect (= 1 (:learning/useful-count voted)))
-            (expect (= 0 (:learning/not-useful-count voted)))
-            (expect (false? (:learning/decayed? voted))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "records negative vote"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")
-                voted (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful)]
-            (expect (= 0 (:learning/useful-count voted)))
-            (expect (= 1 (:learning/not-useful-count voted))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "accumulates multiple votes"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")]
-            (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)
-            (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)
-            (let [voted (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful)]
-              (expect (= 2 (:learning/useful-count voted)))
-              (expect (= 1 (:learning/not-useful-count voted)))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
-
-  (describe "learning decay"
-    (it "marks learning as decayed after 5+ votes with >70% negative"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [stored (#'rlm-db/db-store-learning! db-info "Bad insight")]
-            ;; Vote 1 useful, 5 not-useful (>70% negative, 6 total votes)
-            (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :useful)
-            (dotimes [_ 5]
-              (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful))
-            (let [final-vote (#'rlm-db/db-vote-learning! db-info (:learning/id stored) :not-useful)]
-              (expect (true? (:learning/decayed? final-vote)))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "filters decayed learnings from search results"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          ;; Store two learnings
-          (let [_ (#'rlm-db/db-store-learning! db-info "Good insight about testing")
-                bad-learning (#'rlm-db/db-store-learning! db-info "Bad insight about testing")]
-            ;; Make 'bad' learning decay
-            (dotimes [_ 6]
-              (#'rlm-db/db-vote-learning! db-info (:learning/id bad-learning) :not-useful))
-            ;; Search should only return good learning
-            (let [results (#'rlm-db/db-get-learnings db-info "testing" {:top-k 10 :track-usage? false})]
-              (expect (= 1 (count results)))
-              (expect (= "Good insight about testing" (:insight (first results))))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
-
-  (describe "db-increment-applied-count!"
-    (it "increments applied count"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [stored (#'rlm-db/db-store-learning! db-info "Test insight")]
-            (expect (= 1 (#'rlm-db/db-increment-applied-count! db-info (:learning/id stored))))
-            (expect (= 2 (#'rlm-db/db-increment-applied-count! db-info (:learning/id stored)))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "search-learnings auto-increments applied count"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/db-store-learning! db-info "Test insight for tracking")
-          ;; Search twice - verify results are returned so we know tracking should work
-          (let [results1 (#'rlm-db/db-get-learnings db-info "insight for tracking" {:top-k 5})
-                results2 (#'rlm-db/db-get-learnings db-info "insight for tracking" {:top-k 5})]
-            ;; Verify searches actually returned results (otherwise tracking won't happen)
-            (expect (pos? (count results1)) "First search should return results")
-            (expect (pos? (count results2)) "Second search should return results")
-            ;; Check stats
-            (let [stats (#'rlm-db/db-learning-stats db-info)]
-              (expect (= 2 (:total-applications stats)))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))))
-
 (defdescribe learnings-sci-bindings-test
-  (it "search-learnings is available in SCI and returns learning/id"
+  (it "search-learnings is not available in SCI"
     (with-test-env* {} (fn [env]
-      ;; Store a learning via DB directly (not SCI — write ops are auto-only)
-                         (let [db-info @(:db-info-atom env)]
-                           (#'rlm-db/db-store-learning! db-info "Test insight for searching"))
                          (let [result (#'rlm-core/execute-code env "(search-learnings \"test searching\")")]
-                           (expect (nil? (:error result)))
-                           (expect (vector? (:result result)))
-                           (when (seq (:result result))
-                             (expect (some? (:learning/id (first (:result result))))))))))
+                           (expect (some? (:error result)))))))
 
-  (it "learning-stats is available in SCI"
+  (it "learning-stats is not available in SCI"
     (with-test-env* {} (fn [env]
-                         (let [db-info @(:db-info-atom env)]
-                           (#'rlm-db/db-store-learning! db-info "Test insight"))
                          (let [result (#'rlm-core/execute-code env "(learning-stats)")]
-                           (expect (nil? (:error result)))
-                           (expect (= 1 (:total-learnings (:result result))))
-                           (expect (= 1 (:active-learnings (:result result))))))))
+                           (expect (some? (:error result)))))))
 
-  (it "list-learning-tags is available in SCI"
+  (it "list-learning-tags is not available in SCI"
     (with-test-env* {} (fn [env]
-                         (let [db-info @(:db-info-atom env)]
-                           (#'rlm-db/db-upsert-tag! db-info "test-tag" "A test tag"))
                          (let [result (#'rlm-core/execute-code env "(list-learning-tags)")]
-                           (expect (nil? (:error result)))
-                           (expect (vector? (:result result)))
-                           (expect (= "test-tag" (:name (first (:result result)))))))))
+                           (expect (some? (:error result)))))))
 
   (it "write ops (store-learning, vote-learning) are NOT available in SCI"
     (with-test-env* {} (fn [env]
@@ -731,17 +572,6 @@
                                vote-result (#'rlm-core/execute-code env "(vote-learning #uuid \"00000000-0000-0000-0000-000000000000\" :useful)")]
                            (expect (some? (:error store-result)))
                            (expect (some? (:error vote-result))))))))
-
-(defdescribe reflect-extract-test
-  (it "does not extract for low-iteration queries"
-    (expect (nil? (#'rlm-core/reflect-extract! {:conn :fake}
-                                               :router
-                                               "query"
-                                               "answer"
-                                               rlm-schema/AUTOLEARN_ITERATION_THRESHOLD
-                                               []
-                                               nil
-                                               nil)))))
 
 ;; =============================================================================
 ;; Build System Prompt Tests
@@ -754,12 +584,12 @@
       (expect (str/includes? prompt "available_tools"))
       (expect (str/includes? prompt "FINAL"))))
 
-  (it "includes learnings and FINAL guidance in helpers"
+  (it "excludes learning helpers but keeps FINAL guidance"
     (let [prompt (#'rlm-core/build-system-prompt {})]
-      (expect (str/includes? prompt "search-learnings"))
-      (expect (str/includes? prompt "learning-stats"))
-      (expect (str/includes? prompt "list-learning-tags"))
-      (expect (str/includes? prompt ":learn"))
+      (expect (not (str/includes? prompt "search-learnings")))
+      (expect (not (str/includes? prompt "learning-stats")))
+      (expect (not (str/includes? prompt "list-learning-tags")))
+      (expect (not (str/includes? prompt ":learn")))
       (expect (str/includes? prompt ":sources"))
       (expect (str/includes? prompt ":reasoning"))))
 
@@ -2691,53 +2521,6 @@
           (let [results (#'rlm-db/db-search-entities db-info "shared" {:document-id "doc-2"})]
             (expect (= 1 (count results)))
             (expect (= "doc-2" (:entity/document-id (first results)))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))))
-
-;; =============================================================================
-;; T9: Learnings Text Search Tests
-;; =============================================================================
-
-(defdescribe learnings-text-search-test
-  (describe "db-get-learnings text filtering"
-    (it "filters learnings by query text"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/db-store-learning! db-info "Always verify date ranges in financial data")
-          (#'rlm-db/db-store-learning! db-info "Check network connectivity before API calls")
-          (let [results (#'rlm-db/db-get-learnings db-info "financial" {:top-k 10 :track-usage? false})]
-            (expect (= 1 (count results)))
-            (expect (str/includes? (:insight (first results)) "financial")))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "searches context text too"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/db-store-learning! db-info "Use pagination for large results" {:context "database queries"})
-          (let [results (#'rlm-db/db-get-learnings db-info "database" {:top-k 10 :track-usage? false})]
-            (expect (= 1 (count results)))
-            (expect (= "database queries" (:context (first results)))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "returns all when query is blank"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/db-store-learning! db-info "Insight one")
-          (#'rlm-db/db-store-learning! db-info "Insight two")
-          (#'rlm-db/db-store-learning! db-info "Insight three")
-          (let [results (#'rlm-db/db-get-learnings db-info "" {:top-k 10 :track-usage? false})]
-            (expect (= 3 (count results))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "case-insensitive search"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/db-store-learning! db-info "always validate input parameters")
-          (let [results (#'rlm-db/db-get-learnings db-info "VALIDATE INPUT" {:top-k 10 :track-usage? false})]
-            (expect (= 1 (count results))))
           (finally
             (#'rlm-db/dispose-rlm-conn! db-info)))))))
 

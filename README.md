@@ -889,7 +889,6 @@ substring matches over content, titles, names, and descriptions.
 | `(search-page-nodes query)` | Page node content and descriptions |
 | `(search-toc-entries query)` | TOC entry titles and descriptions |
 | `(search-entities query)` | Entity names and descriptions |
-| `(search-learnings query)` | Learning insights and context |
 | `(search-history n)` | Recent conversation messages |
 
 ### Debugging RLM Traces

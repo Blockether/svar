@@ -59,14 +59,10 @@
    Map of hooks/data callbacks."
   [db-info-atom]
   {;; === Read operations — consumers (vis, etc.) use these ===
-    ;; Messages: full entities with thinking + executions embedded
+     ;; Messages: full entities with thinking + executions embedded
    :get-recent-messages       (fn [limit] (get-recent-messages @db-info-atom limit))
    :count-history-tokens      (fn [] (rlm-db/count-history-tokens @db-info-atom))
-    ;; Learnings: read-only — store/vote are auto-managed by RLM internally
-   :search-learnings     (fn [query opts] (rlm-db/db-get-learnings @db-info-atom query
-                                            (assoc opts :track-usage? false)))
-   :learning-stats       (fn [] (rlm-db/db-learning-stats @db-info-atom))
-    ;; Documents: read-only access to ingested content
+     ;; Documents: read-only access to ingested content
    :list-documents       (fn [opts] (rlm-db/db-list-documents @db-info-atom opts))
    :get-document         (fn [doc-id] (rlm-db/db-get-document @db-info-atom doc-id))
    :search-page-nodes    (fn [query opts] (rlm-db/db-search-page-nodes @db-info-atom query opts))
@@ -100,7 +96,7 @@
   "Creates an RLM environment (component) for document ingestion and querying.
    
     The environment holds:
-    - In-memory store for documents, learnings, and conversation history
+    - In-memory store for documents and conversation history
     - LLM configuration for queries
     - SCI sandbox context with custom bindings
    
@@ -334,10 +330,6 @@
     - (search-history n) - Get recent messages
     - (get-history n) - Get recent messages
     
-    Learnings:
-    - (store-learning insight) - Store meta-insight
-    - (search-learnings query) - Search learnings
-    
     Params:
     `env` - RLM environment from create-env.
     `query-str` - String. The question to answer.
@@ -381,10 +373,10 @@
    (query-env! env query-str {}))
   ([env query-str {:keys [context spec model max-iterations max-refinements threshold
                           max-context-tokens max-recursion-depth verify?
-                          system-prompt plan? autolearn? debug? hooks]
+                          system-prompt plan? debug? hooks]
                    :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
                         max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
-                        plan? false autolearn? true debug? false}}]
+                        plan? false debug? false}}]
    (when-not (:db-info-atom env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
    (when-not query-str
@@ -392,8 +384,8 @@
    (let [rlm-router (:router env)
            ;; Resolve root model name for token counting / refine! config
          root-model (or (when rlm-router (rlm-routing/resolve-root-model rlm-router)) model)
-           ;; Query-scoped atoms — isolate concurrent queries on the same env
-         locals-atom (atom {})
+           ;; Reuse env's locals-atom so get-local (closed over at env creation) sees updates
+         locals-atom (:locals-atom env)
          depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
           ;; Hooks: snapshot from env, override per-query, restore after
@@ -432,7 +424,7 @@
          llm-query-overrides {'llm-query sub-llm-fn
                               'llm-query-batch (fn [prompts]
                                                  (let [chs (mapv (fn [p]
-                                                                   (when false
+                                                                   (async/thread
                                                                      (try
                                                                        (sub-llm-fn p)
                                                                        (catch Exception e
@@ -468,22 +460,7 @@
                                                       :plan? plan?}})
            (let [start-time (System/nanoTime)
                  db-info @db-info-atom
-                ;; Infer document names for scope-aware learning retrieval
-                 doc-names (when (:conn db-info)
-                             (try (->> (d/q '[:find [?n ...]
-                                              :where [?e :document/name ?n]]
-                                         (d/db (:conn db-info)))
-                                    (mapv (fn [n] (let [ext (when-let [i (str/last-index-of n ".")] (subs n i))]
-                                                    (or ext n)))))
-                                  (catch Exception _ [])))
-                 ;; Auto-fetch query-relevant learnings only (scope-filtered)
-                 active-learnings (when (:conn db-info)
-                                    (rlm-db/db-get-learnings db-info query-str
-                                      {:top-k 5 :track-usage? true :doc-names doc-names}))
-                 ;; Auto-fetch all tag definitions for context injection
-                 tag-definitions (when (:conn db-info)
-                                   (rlm-db/db-list-tags db-info))
-               ;; Optional planning phase — LLM outlines approach before code execution
+                ;; Optional planning phase — LLM outlines approach before code execution
                  plan-result (when plan?
                                (llm/ask! {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
                                                      (llm/user (str "Query: " query-str))]
@@ -495,8 +472,6 @@
                  iteration-result (rlm-core/iteration-loop rlm-env query-str
                                     {:max-iterations max-iterations
                                      :output-spec spec
-                                     :learnings active-learnings
-                                     :tag-definitions tag-definitions
                                      :max-context-tokens max-context-tokens
                                      :custom-docs (into (or custom-docs []) cite-docs)
                                      :system-prompt system-prompt
@@ -510,8 +485,7 @@
                   cost :cost
                   confidence :confidence
                   sources :sources
-                  reasoning :reasoning
-                  learn-items :learn} iteration-result
+                  reasoning :reasoning} iteration-result
                 ;; Mutable cost accumulator — iteration costs are the baseline,
                 ;; refinement + auto-vote costs get merged in
                  total-tokens-atom (atom (or tokens {}))
@@ -531,13 +505,9 @@
                  _ (when plan-result
                      (merge-cost! (:tokens plan-result) (:cost plan-result)))]
              (if status
-               ;; Execution hit max iterations - return with trace
+                ;; Execution hit max iterations - return with trace
                (let [duration-ms (util/elapsed-since start-time)]
-                  ;; Auto-vote via LLM: evaluate which learnings were relevant (even in failure)
-                 (when-let [{:keys [tokens cost]} (rlm-core/reflect-vote! db-info rlm-router active-learnings query-str :failure nil)]
-                   (merge-cost! tokens cost))
-                 (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms
-                                       :auto-voted (count active-learnings)} "RLM query-env! finished (max iterations)")
+                 (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms} "RLM query-env! finished (max iterations)")
                  (try
                    (rlm-db/store-trajectory! @db-info-atom
                      {:env-id env-id :query query-str :status status
@@ -662,47 +632,11 @@
                                                           :claim/verified? (boolean (get claim :claim/verified? true))})])
                          (catch Exception e
                            (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
-                 ;; Final answer is already stored as structured assistant message in iteration-loop
-                 ;; (with :thinking and linked :execution/* entities)
-                 ;; Auto-vote via LLM: evaluate which learnings actually helped
-                 (when-let [{:keys [tokens cost]} (rlm-core/reflect-vote! db-info rlm-router active-learnings query-str :success
-                                                    (rlm-db/str-truncate (pr-str final-answer) 300))]
-                   (merge-cost! tokens cost))
-                   ;; Auto-extract new learnings from successful multi-iteration queries
-                 (when autolearn?
-                   (let [inferred-scope (when (seq doc-names)
-                                          (let [exts (distinct (filter #(str/starts-with? % ".") doc-names))]
-                                            (when (= 1 (count exts))
-                                              (str "*" (first exts)))))]
-                     (async/thread
-                       (try
-                         (rlm-core/reflect-extract! db-info rlm-router query-str
-                           (rlm-db/str-truncate (pr-str final-answer) 300)
-                           iterations trace inferred-scope nil)
-                         (catch Exception e
-                           (trove/log! {:level :warn :data {:error (ex-message e)}
-                                        :msg "Auto-extract failed (async)"}))))))
-                 (when (seq learn-items)
-                   (let [model-scope (str "model:" root-model)
-                         inferred-scope (when (seq doc-names)
-                                          (let [exts (distinct (filter #(str/starts-with? % ".") doc-names))]
-                                            (when (= 1 (count exts))
-                                              (str "*" (first exts)))))]
-                     (doseq [{:keys [insight tags]} learn-items]
-                       (when (and insight (not (str/blank? insight)))
-                         (when (seq tags)
-                           (doseq [tag-name tags]
-                             (rlm-db/db-upsert-tag! db-info tag-name nil)))
-                         (rlm-db/db-store-learning! db-info
-                           {:learning/insight insight
-                            :learning/context (str "Query: " (rlm-db/str-truncate query-str 200))
-                            :learning/tags (vec tags)
-                            :learning/scope (or inferred-scope model-scope)})))))
+                  ;; Final answer is already stored as structured assistant message in iteration-loop
+                  ;; (with :thinking and linked :execution/* entities)
                  (rlm-core/rlm-debug! {:iterations iterations :duration-ms duration-ms
                                        :refinement-count refinement-count
                                        :confidence confidence
-                                       :learn-count (count learn-items)
-                                       :auto-voted (count active-learnings)
                                        :answer-preview (rlm-db/str-truncate (pr-str final-answer) 200)} "RLM query-env! finished (success)")
                  (try
                    (rlm-db/store-trajectory! @db-info-atom
@@ -729,7 +663,6 @@
                                     (some? confidence) (assoc :confidence confidence)
                                     (seq sources) (assoc :sources sources)
                                     (some? reasoning) (assoc :reasoning reasoning)
-                                    (seq learn-items) (assoc :learn learn-items)
                                     verify? (assoc :verified-claims (vec @claims-atom)))]
                    (call-hook! hooks-atom :query :post {:query query-str
                                                         :answer final-answer

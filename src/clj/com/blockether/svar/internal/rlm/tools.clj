@@ -4,9 +4,8 @@
    [clojure.string :as str]
    [com.blockether.svar.internal.rlm.db :as db
     :refer [count-history-tokens db-entity-stats db-get-document db-get-entity
-            db-get-learnings db-get-page-node db-get-toc-entry db-learning-stats
-            db-list-documents db-list-entities db-list-page-nodes db-list-relationships
-            db-list-tags db-list-toc-entries db-search-entities db-search-page-nodes
+            db-get-page-node db-get-toc-entry db-list-documents db-list-entities
+            db-list-page-nodes db-list-relationships db-list-toc-entries db-search-entities db-search-page-nodes
             db-search-toc-entries db-store-toc-entry! get-recent-messages
             str-includes? str-lower str-truncate]]
    [com.blockether.svar.internal.spec :as spec]
@@ -63,7 +62,8 @@
 
 (defn- str-join [sep coll] (str/join sep coll))
 
-(defn- str-split [s re] (when s (str/split s re)))
+(defn- str-split [s re]
+  (when s (str/split s (if (string? re) (re-pattern re) re))))
 
 (defn- str-replace [s match replacement] (when s (str/replace s match replacement)))
 
@@ -265,42 +265,6 @@
    String. Today's date in YYYY-MM-DD format."
   []
   (str (java.time.LocalDate/now)))
-
-;; =============================================================================
-;; Datalevin Schema and Connection Lifecycle
-;; =============================================================================
-
-(defn make-search-learnings-fn
-  "Creates a function for the LLM to search learnings semantically.
-   Returns learnings with :learning/id for voting. Supports optional tag filtering."
-  [db-info-atom]
-  (fn search-learnings
-    ([query] (search-learnings query 5))
-    ([query top-k] (search-learnings query top-k nil))
-    ([query top-k tags]
-     (if-let [db-info @db-info-atom]
-       (db-get-learnings db-info query (cond-> {:top-k top-k}
-                                         (seq tags) (assoc :tags tags)))
-       []))))
-
-(defn make-learning-stats-fn
-  "Creates a function for the LLM to get learning statistics."
-  [db-info-atom]
-  (fn learning-stats []
-    (if-let [db-info @db-info-atom]
-      (db-learning-stats db-info)
-      {:total-learnings 0 :active-learnings 0 :decayed-learnings 0
-       :with-context 0 :without-context 0
-       :total-votes 0 :total-applications 0
-       :all-tags []})))
-
-(defn make-list-learning-tags-fn
-  "Creates a function for the LLM to list all known tags with their definitions."
-  [db-info-atom]
-  (fn list-learning-tags []
-    (if-let [db-info @db-info-atom]
-      (or (db-list-tags db-info) [])
-      [])))
 
 ;; =============================================================================
 ;; PageIndex Document Storage System
@@ -617,8 +581,7 @@
                                    {:rlm/final true :rlm/answer {:result v :type (type v)}
                                     :rlm/confidence (if (map? answer) (get answer :confidence :high) :high)
                                     :rlm/sources (when (map? answer) (get answer :sources))
-                                    :rlm/reasoning (when (map? answer) (get answer :reasoning))
-                                    :rlm/learn (when (map? answer) (get answer :learn))}))
+                                    :rlm/reasoning (when (map? answer) (get answer :reasoning))}))
                                 ([answer opts]
                                  (let [v (realize-value answer)
                                        v (if (vector? v)
@@ -628,8 +591,7 @@
                                     :rlm/answer {:result v :type (type v)}
                                     :rlm/confidence (get opts :confidence :high)
                                     :rlm/sources (get opts :sources)
-                                    :rlm/reasoning (get opts :reasoning)
-                                    :rlm/learn (get opts :learn)})))
+                                    :rlm/reasoning (get opts :reasoning)})))
 
                        ;; Locals inspection tools - LLM can check its own state on demand
                        'list-locals (fn []
@@ -679,12 +641,6 @@
                        'list-document-entities (make-list-entities-fn db-info-atom)
                        'list-document-relationships (make-list-relationships-fn db-info-atom)
                        'document-entity-stats (make-entity-stats-fn db-info-atom)})
-        ;; Learnings functions - DB-backed with voting and tags (pass db-info-atom)
-        learning-bindings (if db-info-atom
-                            {'search-learnings (make-search-learnings-fn db-info-atom)
-                             'learning-stats (make-learning-stats-fn db-info-atom)
-                             'list-learning-tags (make-list-learning-tags-fn db-info-atom)}
-                            {})
         ;; Raw text access (RLM paper §3: symbolic handle to P)
         ;; P = the symbolic handle to the input. Per the paper: P lives as a variable
         ;; in the REPL, NOT in the context window. The LLM uses (subs P 0 1000),
@@ -693,9 +649,7 @@
         ;; P is the structured workspace — the ENTIRE context surface the LLM sees.
         ;; :last-iteration — auto-managed by system, last execution results
         ;; :context        — vector of strings, LLM-managed working memory
-        ;; :learnings      — priority-ranked insights [{:text str :priority :high|:medium|:low}]
-        p-atom (atom {:context []
-                      :learnings []})
+        p-atom (atom {:context []})
         raw-text-bindings {'P-atom p-atom
                            'P p-atom
                            ;; Context management — stack of strings (newest last, oldest trimmed first)
@@ -717,18 +671,9 @@
                                                               (subvec ctx (inc to-idx)))]
                                                  (into (conj before (str replacement))
                                                    (or after [])))))
-                                           (str "Replaced [" from-idx "-" to-idx "] (" (count (:context @p-atom)) " items)"))
-                           ;; Learnings — priority-based
-                           'learn! (fn
-                                     ([text] (swap! p-atom update :learnings conj {:text (str text) :priority :medium})
-                                             (str "Learned (" (count (:learnings @p-atom)) " total)"))
-                                     ([text priority] (swap! p-atom update :learnings conj {:text (str text) :priority priority})
-                                                      (str "Learned (" (count (:learnings @p-atom)) " total)")))
-                           'forget! (fn [idx] (swap! p-atom update :learnings
-                                                (fn [ls] (into (subvec ls 0 idx) (subvec ls (inc idx)))))
-                                      (str "Forgot learning (" (count (:learnings @p-atom)) " remaining)"))}
+                                           (str "Replaced [" from-idx "-" to-idx "] (" (count (:context @p-atom)) " items)"))}
         all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
-                       learning-bindings raw-text-bindings
+                       raw-text-bindings
                        (or custom-bindings {}))
         sci-ctx (sci/init {:namespaces {'user all-bindings
                                         'clojure.string {'split str/split 'join str/join 'replace str/replace
@@ -760,16 +705,18 @@
 (defn sci-user-vars
   "Returns a vector of user-defined vars from a SCI context.
    Only shows vars created AFTER initialization (excludes all built-ins).
-   Excludes internal _rN auto-store vars."
+   Excludes internal _rN auto-store vars, function bindings (tool fns),
+   and nil/unbound values."
   [sci-ctx initial-ns-keys]
   (when sci-ctx
     (try
       (let [ns-vars (sci/eval-string* sci-ctx "(ns-publics 'user)")]
         (->> ns-vars
           (remove (fn [[k _]] (contains? initial-ns-keys k)))
-          (mapv (fn [[k v]]
+          (keep (fn [[k v]]
                   (let [val (try @v (catch Exception _ nil))]
-                    {:name (str k) :value val :type (str (type val))})))))
+                    (when (and (some? val) (not (fn? val)))
+                      {:name (str k) :value val :type (str (type val))}))))))
       (catch Exception _ nil))))
 
 (defn sci-update-binding!

@@ -1,6 +1,6 @@
 (ns com.blockether.svar.internal.rlm.context-tools-test
   (:require
-   [lazytest.core :refer [defdescribe describe expect it]]
+   [lazytest.core :refer [defdescribe describe expect it throws?]]
    [sci.core :as sci]
    [com.blockether.svar.internal.rlm.tools :as tools]))
 
@@ -15,10 +15,9 @@
 
 (defdescribe context-tools-test
   (describe "initial state"
-    (it "starts with empty context and learnings"
+    (it "starts with empty context"
       (let [{:keys [p-atom]} (make-ctx)]
-        (expect (= [] (:context @p-atom)))
-        (expect (= [] (:learnings @p-atom))))))
+        (expect (= [] (:context @p-atom))))))
 
   (describe "ctx-add!"
     (it "adds a string to context"
@@ -110,22 +109,11 @@
         (eval-in ctx "(ctx-replace! 0 2 \"everything merged\")")
         (expect (= ["everything merged"] (:context @(:p-atom ctx)))))))
 
-  (describe "learn! and forget!"
-    (it "adds a learning with default priority"
+  (describe "removed learning tools"
+    (it "does not expose learn!"
       (let [ctx (make-ctx)]
-        (eval-in ctx "(learn! \"insight one\")")
-        (expect (= [{:text "insight one" :priority :medium}] (:learnings @(:p-atom ctx))))))
+        (expect (throws? Exception #(eval-in ctx "(learn! \"insight one\")")))))
 
-    (it "adds a learning with explicit priority"
+    (it "does not expose forget!"
       (let [ctx (make-ctx)]
-        (eval-in ctx "(learn! \"critical\" :high)")
-        (expect (= [{:text "critical" :priority :high}] (:learnings @(:p-atom ctx))))))
-
-    (it "forgets a learning by index"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(learn! \"a\")")
-        (eval-in ctx "(learn! \"b\")")
-        (eval-in ctx "(learn! \"c\")")
-        (eval-in ctx "(forget! 1)")
-        (expect (= [{:text "a" :priority :medium} {:text "c" :priority :medium}]
-                  (:learnings @(:p-atom ctx))))))))
+        (expect (throws? Exception #(eval-in ctx "(forget! 0)")))))))

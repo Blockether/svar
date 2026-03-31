@@ -291,29 +291,3 @@
 
       summary)))
 
-;; =============================================================================
-;; CLI entry point
-;; =============================================================================
-
-(defn -main
-  "Entry point for clojure -M:bench.
-   Parses --mode, --model, --limit, --offset from args."
-  [& args]
-  (let [arg-map (loop [remaining (vec args) acc {}]
-                  (if (< (count remaining) 2)
-                    acc
-                    (let [k (first remaining)
-                          v (second remaining)]
-                      (cond
-                        (= k "--mode")   (recur (drop 2 remaining) (assoc acc :mode (keyword v)))
-                        (= k "--model")  (recur (drop 2 remaining) (assoc acc :model v))
-                        (= k "--limit")  (recur (drop 2 remaining) (assoc acc :limit (Long/parseLong v)))
-                        (= k "--offset") (recur (drop 2 remaining) (assoc acc :offset (Long/parseLong v)))
-                        :else            (recur (rest remaining) acc)))))
-        opts (cond-> {:mode :ask :model "gpt-4o"}
-               (:mode arg-map)   (assoc :mode (:mode arg-map))
-               (:model arg-map)  (assoc :model (:model arg-map))
-               (:limit arg-map)  (assoc :limit (:limit arg-map))
-               (:offset arg-map) (assoc :offset (:offset arg-map)))]
-    (run-benchmark! opts)
-    (System/exit 0)))

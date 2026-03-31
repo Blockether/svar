@@ -159,7 +159,8 @@
             thinking-blocks (->> raw-content
                               (filter #(= "thinking" (:type %)))
                               (map :thinking)
-                              (clojure.string/join "\n"))]
+                              (clojure.string/join "\n")
+                              (clojure.string/trimr))]
         {:content (when-not (clojure.string/blank? text-blocks) text-blocks)
          :reasoning (or (when-not (clojure.string/blank? thinking-blocks) thinking-blocks)
                       raw-reasoning)

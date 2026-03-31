@@ -309,69 +309,6 @@
   "Minimum total votes before decay filtering applies."
   5)
 
-(def LEARNING_VOTE_ENTRY_SPEC
-  "Spec for a single learning vote entry."
-  (spec/spec
-    :vote-entry
-    {::spec/key-ns "vote_entry"}
-    (spec/field {::spec/name :id
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "The learning UUID being voted on"})
-    (spec/field {::spec/name :vote
-                 ::spec/type :spec.type/keyword
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/values {"useful" "Learning directly helped answer the query"
-                                "not_useful" "Learning was irrelevant or unhelpful for this query"}
-                 ::spec/description "Whether this learning was useful for the query"})
-    (spec/field {::spec/name :reason
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Brief explanation of why this learning was or wasn't useful"})))
-
-(def LEARNING_VOTE_SPEC
-  "Spec for LLM-based learning usefulness evaluation."
-  (spec/spec
-    {:refs [LEARNING_VOTE_ENTRY_SPEC]}
-    (spec/field {::spec/name :votes
-                 ::spec/type :spec.type/ref
-                 ::spec/target :vote-entry
-                 ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "One vote per learning that was injected"})))
-
-(def AUTOLEARN_ENTRY_SPEC
-  "Spec for a single auto-extracted learning."
-  (spec/spec
-    :autolearn-entry
-    {::spec/key-ns "learning"}
-    (spec/field {::spec/name :insight
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "A reusable insight about what strategy/approach worked. Must be general enough to help future queries, not specific to this exact query."})
-    (spec/field {::spec/name :context
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "When this insight applies (e.g. 'aggregation over large PDFs', 'entity extraction from contracts')"})
-    (spec/field {::spec/name :tags
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "1-3 short lowercase tags for categorization (e.g. 'aggregation', 'pdf', 'search')"})))
-
-(def AUTOLEARN_SPEC
-  "Spec for auto-extracted learnings from successful multi-iteration queries."
-  (spec/spec
-    {:refs [AUTOLEARN_ENTRY_SPEC]}
-    (spec/field {::spec/name :learnings
-                 ::spec/type :spec.type/ref
-                 ::spec/target :autolearn-entry
-                 ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "1-3 reusable insights extracted from this query's execution trace"})))
-
-(def AUTOLEARN_ITERATION_THRESHOLD
-  "Minimum iterations before auto-extracting learnings. Queries with fewer
-   iterations are considered trivial — no strategy worth capturing."
-  3)
-
 (def BLOOM_DIFFICULTIES
   "Bloom's taxonomy cognitive levels as difficulty progression."
   {"remember"    "Simple recall of facts, definitions, or terms directly stated in the text"
