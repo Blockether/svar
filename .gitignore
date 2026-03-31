@@ -34,6 +34,8 @@ lancedb
 
 /data/
 /debug/
+bench/data/
+bench/results/
 allure-results/
 allure-report/
 .allure-history.jsonl

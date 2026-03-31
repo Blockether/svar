@@ -60,3 +60,9 @@ allure-serve:
 	npx --yes allure@3.2.0 open allure-report
 
 allure: test-allure allure-serve
+
+bench-gsm8k: target/classes
+	clojure -M:bench
+
+bench-gsm8k-quick: target/classes
+	clojure -M:bench -- --limit 50

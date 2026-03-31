@@ -44,4 +44,7 @@
   :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.2"}}
            :exec-fn deps-deploy.deps-deploy/deploy
            :exec-args {:installer :remote
-                       :artifact "target/svar.jar"}}}}
+                       :artifact "target/svar.jar"}}
+
+  :bench {:extra-paths ["bench"]
+          :main-opts ["-m" "com.blockether.svar.bench.gsm8k"]}}}
