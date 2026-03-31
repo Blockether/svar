@@ -7,9 +7,24 @@
      clojure -M:bench -- --bench all --limit 50
      clojure -M:bench -- --list
 
-   Benchmarks:
-     gsm8k    - Grade School Math (1319 problems) — tests code execution + reasoning
-     all      - Run all benchmarks sequentially"
+   Every benchmark's run-fn MUST return a unified result map:
+     {:bench           \"gsm8k\"
+      :mode            :ask | :query-env
+      :model           \"gpt-4o\"
+      :total-questions 50
+      :total-dataset   1319
+      :correct         45
+      :incorrect       3
+      :errors          2
+      :accuracy        0.9
+      :avg-duration-ms 1200.0
+      :avg-iterations  nil | 2.3
+      :avg-tokens      {:input 120 :output 30}
+      :total-cost      0.42
+      :results         [{:q-num 1 :question \"...\" :gold 18 :predicted 18
+                         :correct? true :error nil :tokens {...} :cost {...}
+                         :duration-ms 1234 :iterations nil}]
+      :saved-to        \"bench/results/gsm8k-ask-gpt-4o-2026-03-31.edn\"}"
   (:require
    [com.blockether.svar.bench.gsm8k :as gsm8k]))
 
@@ -18,7 +33,6 @@
 ;; =============================================================================
 
 (def ^:private BENCHMARKS
-  "Available benchmarks. Each is a map with :name, :description, :run-fn."
   [{:name        "gsm8k"
     :description "Grade School Math 8K — 1319 math word problems (Cobbe et al., 2021)"
     :tests       "Code execution accuracy, iteration efficiency, cost"
@@ -26,6 +40,33 @@
 
 (defn- find-bench [name]
   (first (filter #(= name (:name %)) BENCHMARKS)))
+
+;; =============================================================================
+;; Unified summary printer
+;; =============================================================================
+
+(defn print-summary
+  "Prints a unified summary from any benchmark result map."
+  [{:keys [bench mode model total-questions total-dataset correct incorrect errors
+           accuracy avg-duration-ms avg-iterations avg-tokens total-cost]}]
+  (println)
+  (println (format "%s Benchmark Results" (or bench "?")))
+  (println "=======================")
+  (println (format "Mode:       %s" (case mode :ask "ask! (direct)" :query-env "query-env! (RLM)" (str mode))))
+  (println (format "Model:      %s" model))
+  (println (format "Questions:  %d/%d" total-questions total-dataset))
+  (println (format "Correct:    %d (%.1f%%)" correct (* 100.0 (double (or accuracy 0)))))
+  (println (format "Incorrect:  %d" incorrect))
+  (println (format "Errors:     %d" errors))
+  (println (format "Avg duration: %.1fs" (/ (double (or avg-duration-ms 0)) 1000.0)))
+  (when avg-iterations
+    (println (format "Avg iterations: %.1f" (double avg-iterations))))
+  (when avg-tokens
+    (println (format "Avg tokens: {input: %d, output: %d}"
+               (long (:input avg-tokens 0))
+               (long (:output avg-tokens 0)))))
+  (when total-cost
+    (println (format "Total cost: $%.4f" (double total-cost)))))
 
 ;; =============================================================================
 ;; CLI
@@ -58,9 +99,11 @@
 
 (defn- run-one! [bench-name opts]
   (if-let [bench (find-bench bench-name)]
-    (do
-      (println (format "\n━━━ %s ━━━" (:description bench)))
-      ((:run-fn bench) opts))
+    (let [result ((:run-fn bench) opts)]
+      (print-summary result)
+      (when-let [f (:saved-to result)]
+        (println (format "\nResults saved to: %s" f)))
+      result)
     (do
       (println (format "Unknown benchmark: %s" bench-name))
       (print-list)
@@ -73,13 +116,14 @@
                     (do
                       (println (format "──── %s ────" name))
                       {:bench name :result (run-one! name opts)})))]
-    (println "\n━━━ Summary ━━━\n")
+    (println "\n━━━ Combined Summary ━━━\n")
     (doseq [{:keys [bench result]} results]
-      (let [pct (if (pos? (:total-questions result 0))
-                  (/ (* 100.0 (:correct result 0)) (:total-questions result 1))
-                  0.0)]
-        (println (format "  %-12s %d/%d correct (%.1f%%)"
-                   bench (:correct result 0) (:total-questions result 0) pct))))
+      (println (format "  %-12s %d/%d correct (%.1f%%) | $%.4f"
+                 bench
+                 (:correct result 0)
+                 (:total-questions result 0)
+                 (* 100.0 (double (:accuracy result 0)))
+                 (double (:total-cost result 0)))))
     (println)
     results))
 

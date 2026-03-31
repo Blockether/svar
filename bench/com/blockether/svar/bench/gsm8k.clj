@@ -152,26 +152,6 @@
     (println (format "[%d/%d] correct: %d (%.1f%%)%s | avg-ms: %d"
                done total correct pct (or iter-str "") (long avg-ms)))))
 
-(defn- print-summary
-  [{:keys [mode model total-questions total-dataset correct incorrect errors
-           avg-duration-ms avg-tokens total-cost]}]
-  (let [pct (if (pos? total-questions) (/ (* 100.0 correct) total-questions) 0.0)]
-    (println)
-    (println "GSM8K Benchmark Results")
-    (println "=======================")
-    (println (format "Mode:      %s" (case mode :ask "ask! (direct)" :query-env "query-env! (RLM)" (name mode))))
-    (println (format "Model:     %s" model))
-    (println (format "Questions: %d/%d" total-questions total-dataset))
-    (println (format "Correct:   %d (%.1f%%)" correct pct))
-    (println (format "Incorrect: %d" incorrect))
-    (println (format "Errors:    %d" errors))
-    (println (format "Avg duration: %.1fs" (/ avg-duration-ms 1000.0)))
-    (when avg-tokens
-      (println (format "Avg tokens: {input: %d, output: %d}"
-                 (long (:input avg-tokens 0))
-                 (long (:output avg-tokens 0)))))
-    (when total-cost
-      (println (format "Total cost: $%.4f" (double (:total-cost total-cost 0.0)))))))
 
 ;; =============================================================================
 ;; Main runner
@@ -266,28 +246,29 @@
                 avg-iters  (if (pos? done) (/ (double (:total-iterations s)) done) 0.0)]
             (print-progress done total-q (:correct s) (:errors s) mode avg-iters avg-ms)))))
 
-    ;; Build final summary
+    ;; Build unified result
     (let [s         @state
           n         (max 1 total-q)
           avg-dur   (/ (double (:total-duration-ms s)) n)
-          avg-tokens {:input  (/ (double (:total-input-tokens s)) n)
-                      :output (/ (double (:total-output-tokens s)) n)}
-          total-cost {:total-cost (:total-cost s)}
-          summary   {:mode             mode
-                     :model            model
-                     :total-questions  total-q
-                     :total-dataset    total-ds
-                     :correct          (:correct s)
-                     :incorrect        (:incorrect s)
-                     :errors           (:errors s)
-                     :avg-duration-ms  avg-dur
-                     :avg-tokens       avg-tokens
-                     :total-cost       total-cost}]
-
-      (print-summary summary)
-
-      (let [saved (save-results! mode model (:results s) summary)]
-        (println (format "\nResults saved to: %s" saved)))
-
-      summary)))
+          avg-toks  {:input  (/ (double (:total-input-tokens s)) n)
+                     :output (/ (double (:total-output-tokens s)) n)}
+          accuracy  (if (pos? total-q) (/ (double (:correct s)) total-q) 0.0)
+          avg-iters (when (= mode :query-env)
+                      (if (pos? n) (/ (double (:total-iterations s)) n) 0.0))
+          saved     (save-results! mode model (:results s) nil)]
+      {:bench            "gsm8k"
+       :mode             mode
+       :model            model
+       :total-questions  total-q
+       :total-dataset    total-ds
+       :correct          (:correct s)
+       :incorrect        (:incorrect s)
+       :errors           (:errors s)
+       :accuracy         accuracy
+       :avg-duration-ms  avg-dur
+       :avg-iterations   avg-iters
+       :avg-tokens       avg-toks
+       :total-cost       (:total-cost s)
+       :results          (:results s)
+       :saved-to         saved})))
 
