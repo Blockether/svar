@@ -146,7 +146,7 @@
 ;; =============================================================================
 
 (defn- print-progress
-  [done total correct errors mode avg-iters avg-ms]
+  [done total correct _errors mode avg-iters avg-ms]
   (let [pct (if (pos? done) (/ (* 100.0 correct) done) 0.0)
         iter-str (when (= mode :query-env) (format " | avg-iter: %.1f" (double avg-iters)))]
     (println (format "[%d/%d] correct: %d (%.1f%%)%s | avg-ms: %d"
