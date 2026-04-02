@@ -1,0 +1,11 @@
+CHUNK 1 [7/7] event=French Revolution toll=40000
+CHUNK 2 [7/7] event=French Revolution toll=40000
+CHUNK 3 [7/7] event=French Revolution toll=40000
+CHUNK 4 [7/7] event=French Revolution toll=40000
+
+=== COMPLEX STREAMING ===
+Total chunks: 4
+Final: {:event French Revolution, :date 1789-1799, :location Versailles and throughout France, :key-figures [Louis XVI Marie Antoinette Maximilien Robespierre Georges Danton Marquis de Lafayette], :causes [Fiscal crisis in the monarchy Crop failures leading to food shortages Influence of Enlightenment ideals promoting liberty and equality Widespread anger against the monarchy's perceived excesses and incompetence], :consequences [Abolition of feudalism Enactment of the Declaration of the Rights of Man and of the Citizen Execution of Louis XVI and Marie Antoinette Period of the Reign of Terror resulting in mass executions Rise of Napoleon Bonaparte and the eventual establishment of the French Empire Transformation of French society with ideas of equality and citizenship Inspiration for democratic movements worldwide Introduction of the metric system], :death-toll 40000}
+Tokens: {:input 261, :output 250, :reasoning 0, :total 511} Cost: {:input-cost 6.525E-4, :output-cost 0.0025, :total-cost 0.0031525}
+=========================
+
