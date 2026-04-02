@@ -22,7 +22,7 @@
 ;; =============================================================================
 
 (def ^:private dataset-path
-  "bench/data/gsm8k-test.jsonl")
+  "bench/data/gsm8k/gsm8k-test.jsonl")
 
 (defn- load-dataset
   "Loads GSM8K test JSONL. Returns vector of {:question :answer} maps."
@@ -42,15 +42,17 @@
   "Extracts the numeric answer after '####' from a GSM8K gold answer string.
    Strips commas. Returns a number or nil."
   [answer-str]
-  (when (string? answer-str)
-    (when-let [m (re-find #"####\s*(-?[\d,]+\.?\d*)" answer-str)]
+  (if (string? answer-str)
+    (if-let [m (re-find #"####\s*(-?[\d,]+\.?\d*)" answer-str)]
       (let [num-str (-> (second m)
-                        (str/replace "," ""))]
+                      (str/replace "," ""))]
         (try
           (if (str/includes? num-str ".")
             (Double/parseDouble num-str)
             (Long/parseLong num-str))
-          (catch Exception _ nil))))))
+          (catch Exception _ nil)))
+      nil)
+    nil))
 
 (defn parse-number-from-answer
   "Extracts a number from a free-form answer value.
@@ -61,28 +63,29 @@
     (nil? v)    nil
     :else
     (let [s (-> (str v)
-                (str/replace "$" "")
-                (str/replace "," "")
-                str/trim)]
+              (str/replace "$" "")
+              (str/replace "," "")
+              str/trim)]
       ;; Try last number in the string
-      (when-let [m (last (re-seq #"-?[\d]+\.?\d*" s))]
+      (if-let [m (last (re-seq #"-?[\d]+\.?\d*" s))]
         (try
           (if (str/includes? m ".")
             (Double/parseDouble m)
             (Long/parseLong m))
-          (catch Exception _ nil))))))
+          (catch Exception _ nil))
+        nil))))
 
 (defn answers-match?
   "Returns true if predicted and gold answers are equal.
    Integers compared as longs; decimals compared with tolerance 1e-6."
   [predicted gold]
   (and (some? predicted)
-       (some? gold)
-       (let [p (if (integer? predicted) (long predicted) (double predicted))
-             g (if (integer? gold) (long gold) (double gold))]
-         (if (and (integer? predicted) (integer? gold))
-           (= (long predicted) (long gold))
-           (< (Math/abs (- (double p) (double g))) 1e-6)))))
+    (some? gold)
+    (let [p (if (integer? predicted) (long predicted) (double predicted))
+          g (if (integer? gold) (long gold) (double gold))]
+      (if (and (integer? predicted) (integer? gold))
+        (= (long predicted) (long gold))
+        (< (Math/abs (- (double p) (double g))) 1e-6)))))
 
 ;; =============================================================================
 ;; Evaluation modes
@@ -91,16 +94,16 @@
 (defn eval-ask!
   "Evaluates a single GSM8K question via svar/ask! (direct structured prompting).
    Returns {:answer :tokens :cost :duration-ms}."
-  [question model]
+  [router question model]
   (let [spec (svar/spec
                (svar/field svar/NAME :answer
                  svar/TYPE svar/TYPE_INT
                  svar/CARDINALITY svar/CARDINALITY_ONE
                  svar/DESCRIPTION "The numeric answer to the math problem"))
-        result (svar/ask! {:spec     spec
-                           :messages [(svar/system "Solve this math problem step by step. Return the final numeric answer.")
-                                      (svar/user question)]
-                           :model    model})]
+        result (svar/ask! router {:spec     spec
+                                  :messages [(svar/system "Solve this math problem step by step. Return the final numeric answer.")
+                                             (svar/user question)]
+                                  :model    model})]
     {:answer      (get-in result [:result :answer])
      :tokens      (:tokens result)
      :cost        (:cost result)
@@ -109,17 +112,18 @@
 (defn eval-query-env!
   "Evaluates a single GSM8K question via svar/query-env! (full RLM with code execution).
    Returns {:answer :iterations :tokens :cost :duration-ms}."
-  [question model]
-  (let [config (svar/make-config {:model model})
-        env    (svar/create-env {:config config})
-        start  (System/currentTimeMillis)
-        result (svar/query-env! env question {:max-iterations 10})]
-    (svar/dispose-env! env)
-    {:answer      (parse-number-from-answer (:answer result))
-     :iterations  (:iterations result)
-     :tokens      (:tokens result)
-     :cost        (:cost result)
-     :duration-ms (- (System/currentTimeMillis) start)}))
+  [router question model]
+  (let [env   (svar/create-env router {})
+        start (System/currentTimeMillis)]
+    (try
+      (let [result (svar/query-env! env question {:model model :max-iterations 10})]
+        {:answer      (parse-number-from-answer (:answer result))
+         :iterations  (:iterations result)
+         :tokens      (:tokens result)
+         :cost        (:cost result)
+         :duration-ms (- (System/currentTimeMillis) start)})
+      (finally
+        (svar/dispose-env! env)))))
 
 ;; =============================================================================
 ;; Results persistence
@@ -129,15 +133,19 @@
   (.mkdirs (io/file "bench/results")))
 
 (defn- save-results!
-  "Saves benchmark results to bench/results/gsm8k-{mode}-{model}-{ts}.edn"
-  [mode model results summary]
+  "Saves benchmark results to bench/results/gsm8k-{mode}-{model}-{ts}.ednl"
+  [bench mode model results summary]
   (ensure-results-dir!)
   (let [ts       (.toString (Instant/now))
         ts-safe  (str/replace ts ":" "-")
         model-safe (str/replace model "/" "-")
-        filename (str "bench/results/gsm8k-" (name mode) "-" model-safe "-" ts-safe ".edn")
-        data     {:mode mode :model model :summary summary :results results}]
-    (spit filename (pr-str data))
+        run-id (str bench "-" (name mode) "-" model-safe "-" ts-safe)
+        filename (str "bench/results/bench-" run-id ".ednl")
+        _summary summary
+        base {:bench bench :mode mode :model model :run-id run-id}
+        result-lines (map #(merge base {:type :result} %) results)
+        content (str/join "\n" (map pr-str result-lines))]
+    (spit filename content)
     (trove/log! {:level :info :id ::bench-saved :data {:file filename} :msg "Benchmark results saved"})
     filename))
 
@@ -148,11 +156,10 @@
 (defn- print-progress
   [done total correct errors mode avg-iters avg-ms]
   (let [pct (if (pos? done) (/ (* 100.0 correct) done) 0.0)
-        err-str (when (pos? errors) (format " | errors: %d" errors))
-        iter-str (when (= mode :query-env) (format " | avg-iter: %.1f" (double avg-iters)))]
+        err-str (if (pos? errors) (format " | errors: %d" errors) nil)
+        iter-str (if (= mode :query-env) (format " | avg-iter: %.1f" (double avg-iters)) nil)]
     (println (format "[%d/%d] correct: %d (%.1f%%)%s%s | avg-ms: %d"
                done total correct pct (or err-str "") (or iter-str "") (long avg-ms)))))
-
 
 ;; =============================================================================
 ;; Main runner
@@ -170,13 +177,18 @@
   [opts]
   (let [mode      (get opts :mode :ask)
         model     (get opts :model "gpt-4o")
+        router    (if-let [r (:router opts)]
+                    r
+                    (throw (ex-info "Missing :router in benchmark opts"
+                             {:type :bench/missing-router
+                              :hint "Construct router in bench runner and pass via opts"})))
         offset    (get opts :offset 0)
         limit     (get opts :limit nil)
         _parallel (get opts :parallel 1) ;; reserved for future use
 
         _        (trove/log! {:level :info :id ::bench-start
-                               :data {:mode mode :model model :offset offset :limit limit}
-                               :msg "Starting GSM8K benchmark"})
+                              :data {:mode mode :model model :offset offset :limit limit}
+                              :msg "Starting GSM8K benchmark"})
 
         dataset  (load-dataset)
         total-ds (count dataset)
@@ -186,8 +198,8 @@
         total-q   (count questions)
 
         eval-fn  (case mode
-                   :ask       eval-ask!
-                   :query-env eval-query-env!
+                   :ask       (fn [question model-name] (eval-ask! router question model-name))
+                   :query-env (fn [question model-name] (eval-query-env! router question model-name))
                    (throw (ex-info (str "Unknown mode: " mode) {:mode mode})))
 
         ;; Accumulator state
@@ -209,8 +221,8 @@
                           (eval-fn question model)
                           (catch Exception e
                             (trove/log! {:level :warn :id ::bench-error
-                                          :data {:q-num q-num :error (ex-message e)}
-                                          :msg "Question evaluation failed"})
+                                         :data {:q-num q-num :error (ex-message e)}
+                                         :msg "Question evaluation failed"})
                             {:error (ex-message e) :answer nil :duration-ms 0}))
             predicted  (:answer eval-result)
             correct?   (answers-match? predicted gold)
@@ -229,23 +241,25 @@
         (swap! state
           (fn [s]
             (-> s
-                (update :correct + (if (and correct? (not error?)) 1 0))
-                (update :incorrect + (if (and (not correct?) (not error?)) 1 0))
-                (update :errors + (if error? 1 0))
-                (update :results conj result-rec)
-                (update :total-duration-ms + (or (:duration-ms eval-result) 0))
-                (update :total-input-tokens + (or (get-in eval-result [:tokens :input]) 0))
-                (update :total-output-tokens + (or (get-in eval-result [:tokens :output]) 0))
-                (update :total-cost + (or (get-in eval-result [:cost :total-cost]) 0.0))
-                (update :total-iterations + (or (:iterations eval-result) 0)))))
+              (update :correct + (if (and correct? (not error?)) 1 0))
+              (update :incorrect + (if (and (not correct?) (not error?)) 1 0))
+              (update :errors + (if error? 1 0))
+              (update :results conj result-rec)
+              (update :total-duration-ms + (or (:duration-ms eval-result) 0))
+              (update :total-input-tokens + (or (get-in eval-result [:tokens :input]) 0))
+              (update :total-output-tokens + (or (get-in eval-result [:tokens :output]) 0))
+              (update :total-cost + (or (get-in eval-result [:cost :total-cost]) 0.0))
+              (update :total-iterations + (or (:iterations eval-result) 0)))))
 
-        ;; Print progress every 10 questions
-        (when (or (zero? (mod q-num 10)) (= q-num total-q))
+        ;; Print progress after first question, then every 10, then final
+        (if (or (= q-num 1) (zero? (mod q-num 10)) (= q-num total-q))
           (let [s          @state
                 done       q-num
                 avg-ms     (/ (double (:total-duration-ms s)) done)
                 avg-iters  (if (pos? done) (/ (double (:total-iterations s)) done) 0.0)]
-            (print-progress done total-q (:correct s) (:errors s) mode avg-iters avg-ms)))))
+            (print-progress done total-q (:correct s) (:errors s) mode avg-iters avg-ms)
+            (flush))
+          nil)))
 
     ;; Build unified result
     (let [s         @state
@@ -254,9 +268,10 @@
           avg-toks  {:input  (/ (double (:total-input-tokens s)) n)
                      :output (/ (double (:total-output-tokens s)) n)}
           accuracy  (if (pos? total-q) (/ (double (:correct s)) total-q) 0.0)
-          avg-iters (when (= mode :query-env)
-                      (if (pos? n) (/ (double (:total-iterations s)) n) 0.0))
-          saved     (save-results! mode model (:results s) nil)]
+          avg-iters (if (= mode :query-env)
+                      (if (pos? n) (/ (double (:total-iterations s)) n) 0.0)
+                      nil)
+          saved     (save-results! "gsm8k" mode model (:results s) nil)]
       {:bench            "gsm8k"
        :mode             mode
        :model            model
@@ -272,4 +287,3 @@
        :total-cost       (:total-cost s)
        :results          (:results s)
        :saved-to         saved})))
-
