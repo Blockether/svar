@@ -87,11 +87,10 @@
         llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom router)
         sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom router)
         env-id (str (util/uuid))
-        {:keys [sci-ctx inject-atom initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
+        {:keys [sci-ctx initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
     {:env-id env-id
      :depth-atom depth-atom
      :locals-atom locals-atom
-     :inject-atom inject-atom
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
@@ -152,7 +151,7 @@
     (swap! (:custom-bindings-atom env) assoc sym f)
     ;; Inject into live SCI ctx so tool is immediately available
     (when-let [sci-ctx (:sci-ctx env)]
-      (rlm-tools/sci-update-binding! sci-ctx (:inject-atom env) sym f)))
+      (rlm-tools/sci-update-binding! sci-ctx sym f)))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :fn :sym sym))
   env)
 
@@ -183,7 +182,7 @@
   (swap! (:custom-bindings-atom env) assoc sym value)
   ;; Inject into live SCI ctx
   (when-let [sci-ctx (:sci-ctx env)]
-    (rlm-tools/sci-update-binding! sci-ctx (:inject-atom env) sym value))
+    (rlm-tools/sci-update-binding! sci-ctx sym value))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :def :sym sym))
   env)
 
@@ -361,7 +360,7 @@
                              (or custom-bindings {}) llm-query-overrides)]
              (doseq [[sym val] per-query]
                (when val
-                 (rlm-tools/sci-update-binding! sci-ctx (:inject-atom env) sym val))))
+                 (rlm-tools/sci-update-binding! sci-ctx sym val))))
          rlm-env (assoc env :context context :max-iterations-atom max-iterations-atom)
          env-id (:env-id env)]
      (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]

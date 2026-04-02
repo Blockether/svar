@@ -50,7 +50,7 @@
 
    Returns:
    Map with :sci-ctx, :context, :llm-query-fn, :locals-atom,
-   :inject-atom, :db-info-atom, :router."
+   :db-info-atom, :router."
   ([context-data depth-atom router]
    (create-rlm-env context-data depth-atom router {}))
   ([context-data depth-atom router {:keys [db path documents]}]
@@ -66,9 +66,9 @@
              (doseq [doc documents]
                (db-store-pageindex-document! @db-info-atom doc)))
          llm-query-fn (make-routed-llm-query-fn {:strategy :root} depth-atom router)
-         {:keys [sci-ctx inject-atom initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil)]
+         {:keys [sci-ctx initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil)]
      {:sci-ctx sci-ctx :initial-ns-keys initial-ns-keys :context context-data
-      :llm-query-fn llm-query-fn :inject-atom inject-atom
+      :llm-query-fn llm-query-fn
       :locals-atom locals-atom :db-info-atom db-info-atom
       :router router})))
 
@@ -868,7 +868,8 @@
                                                  :thinking (or (:thinking partial) accumulated-text)
                                                  :code (when-let [c (:code partial)]
                                                          (if (sequential? c) (vec c) nil))
-                                                 :final nil}))))
+                                                 :final nil
+                                                 :done? false}))))
                   iteration-result (try
                                      (run-iteration rlm-env effective-messages
                                        (cond-> {:iteration-spec (if has-reasoning?
@@ -914,7 +915,8 @@
                                              :confidence (:confidence final-result)
                                              :summary (:summary final-result)
                                              :iterations (inc iteration)
-                                             :status :success}}))
+                                             :status :success}
+                                     :done? true}))
                         ;; Persist final result to Datalevin for cross-session access
                         (db-store-final-result! db-info
                           {:answer (answer-str (:answer final-result))

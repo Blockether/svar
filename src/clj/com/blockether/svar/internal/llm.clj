@@ -362,12 +362,9 @@
                    base-url
                    (str base-url "/chat/completions"))]
     (try
-      (with-retry
-        (fn []
-          (http-post-stream! chat-url request-body api-key timeout-ms
-            (fn [{:keys [content-acc reasoning-acc]}]
-              (on-chunk {:content content-acc :reasoning reasoning-acc}))))
-        retry-opts)
+      (http-post-stream! chat-url request-body api-key timeout-ms
+        (fn [{:keys [content-acc reasoning-acc]}]
+          (on-chunk {:content content-acc :reasoning reasoning-acc :done? false})))
       (catch Exception e
         (let [ex-data-map (ex-data e)
               response-body (let [b (:body ex-data-map)]
@@ -647,19 +644,19 @@
 
 (defn- budget-record!
   "Records token usage and cost against the router's budget."
-  [router provider-id model-name token-count]
+  [router provider-id model-name api-usage]
   (when (:budget-state router)
-    (let [pricing (defaults/provider-model-pricing provider-id model-name)
-          ;; Rough split: assume 70% input, 30% output for cost estimation
-          input-tokens (long (* 0.7 (double token-count)))
-          output-tokens (- token-count input-tokens)
+    (let [input-tokens (or (:prompt_tokens api-usage) 0)
+          output-tokens (or (:completion_tokens api-usage) 0)
+          total-tokens (+ input-tokens output-tokens)
+          pricing (defaults/provider-model-pricing provider-id model-name)
           input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing 5.0)))
           output-cost (* (/ (double output-tokens) 1000000.0) (double (:output pricing 15.0)))
           total-cost (+ input-cost output-cost)]
       (swap! (:budget-state router)
         (fn [bs]
           (-> bs
-            (update :total-tokens + token-count)
+            (update :total-tokens + total-tokens)
             (update :total-cost + total-cost)))))))
 
 ;; =============================================================================
@@ -804,6 +801,11 @@
                               (if (router-transient-error? router e)
                                 (do (cb-record-failure! router pid
                                       (= 429 (:status (ex-data e))))
+                                    (when-let [on-chunk (:on-chunk prefs)]
+                                      (on-chunk {:reset? true
+                                                 :reason :provider-fallback
+                                                 :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                                 :new-provider nil}))
                                     ::transient-error)
                                 (throw e))))]
             (if (= result ::transient-error)
@@ -815,7 +817,7 @@
                 (record-tokens! router pid token-count)
                 (cb-record-success! router pid)
                 (record-cumulative! router pid token-count latency-ms)
-                (budget-record! router pid (:name model-map) token-count)
+                (budget-record! router pid (:name model-map) (or (:api-usage result) {:prompt_tokens 0 :completion_tokens 0}))
                 (assoc result
                   :routed/provider-id pid
                   :routed/model (:name model-map)
@@ -1103,7 +1105,8 @@
                                    (on-chunk {:result coerced
                                               :reasoning reasoning
                                               :tokens nil
-                                              :cost nil})))))
+                                              :cost nil
+                                              :done? false})))))
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk))
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
@@ -1117,7 +1120,17 @@
           ;; Apply spec-driven humanization if humanizer fn provided
         result (if humanizer
                  (apply-spec-humanizer raw-result spec humanizer)
-                 raw-result)]
+                 raw-result)
+          ;; Fire final done callback with tokens and cost
+        _ (when on-chunk
+            (on-chunk {:result result
+                       :reasoning reasoning
+                       :tokens {:input (:input-tokens token-stats)
+                                :output (:output-tokens token-stats)
+                                :reasoning (:reasoning-tokens token-stats)
+                                :total (:total-tokens token-stats)}
+                       :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+                       :done? true}))]
     (cond-> {:result result
              :tokens {:input (:input-tokens token-stats)
                       :output (:output-tokens token-stats)

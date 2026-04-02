@@ -512,10 +512,8 @@
                        'list-document-entities (make-list-entities-fn db-info-atom)
                        'list-document-relationships (make-list-relationships-fn db-info-atom)
                        'document-entity-stats (make-entity-stats-fn db-info-atom)})
-        inject-atom (atom nil)
         all-bindings (merge SAFE_BINDINGS base-bindings db-bindings
-                       (or custom-bindings {})
-                       {'__inject__ inject-atom})
+                       (or custom-bindings {}))
         sci-ctx (sci/init {:namespaces {'user all-bindings
                                         'clojure.string {'split str/split 'join str/join 'replace str/replace
                                                          'trim str/trim 'lower-case str/lower-case 'upper-case str/upper-case
@@ -536,7 +534,6 @@
                                      'java.util.UUID java.util.UUID}
                            :deny '[require import ns eval load-string read-string]})]
     {:sci-ctx sci-ctx
-     :inject-atom inject-atom
      :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))}))
 
 ;; =============================================================================
@@ -597,8 +594,8 @@
 ;; =============================================================================
 
 (defn sci-update-binding!
-  "Update a binding in an existing SCI context via inject-atom.
-   Sets the inject-atom to val, then evals (def sym @__inject__) in SCI."
-  [sci-ctx inject-atom sym val]
-  (reset! inject-atom val)
-  (sci/eval-string* sci-ctx (str "(def " sym " @__inject__)")))
+  "Update a binding in an existing SCI context via sci/intern.
+   Directly injects the value — no eval string, no user-visible symbol."
+  [sci-ctx sym val]
+  (let [ns-obj (sci/find-ns sci-ctx 'user)]
+    (sci/intern sci-ctx ns-obj sym val)))
