@@ -14,6 +14,8 @@
   (:import
    [java.util UUID]))
 
+(declare test-ingest-router)
+
 ;; =============================================================================
 ;; Test Helpers
 ;; =============================================================================
@@ -138,13 +140,11 @@
 
   (it "creates database by default"
     (with-test-env* {} (fn [env]
-                         (expect (some? (:db-info-atom env)))
-                         (expect (true? (:history-enabled? env))))))
+                         (expect (some? (:db-info-atom env))))))
 
   (it "can disable database with :db false"
     (with-test-env* {} {:db false} (fn [env]
-                                     (expect (nil? (:db-info-atom env)))
-                                     (expect (false? (:history-enabled? env)))))))
+                                     (expect (nil? (:db-info-atom env)))))))
 
 (defdescribe get-locals-test
   (it "returns empty map initially"
@@ -250,69 +250,6 @@
       (with-test-env* {} (fn [env]
                            (let [result (#'rlm-core/execute-code env "(vec (re-seq #\"\\d+\" \"a1b2c3\"))")]
                              (expect (= ["1" "2" "3"] (:result result)))))))))
-
-;; =============================================================================
-;; Locals Inspection Tests (SCI Bindings)
-;; =============================================================================
-
-(defdescribe locals-inspection-test
-  (describe "list-locals"
-    (it "returns empty map when no locals defined"
-      (with-test-env* {} (fn [env]
-                           (let [result (#'rlm-core/execute-code env "(list-locals)")]
-                             (expect (= {} (:result result)))))))
-
-    (it "shows defined variables"
-      (with-test-env* {} (fn [env]
-                           (#'rlm-core/execute-code env "(def x 42)")
-                           (#'rlm-core/execute-code env "(def y \"hello\")")
-                           (let [result (#'rlm-core/execute-code env "(list-locals)")]
-                             (expect (= {'x 42 'y "hello"} (:result result)))))))
-
-    (it "shows functions as <fn>"
-      (with-test-env* {} (fn [env]
-                           (#'rlm-core/execute-code env "(defn my-fn [x] (* x 2))")
-                           (let [result (#'rlm-core/execute-code env "(list-locals)")]
-                             (expect (= '<fn> (get (:result result) 'my-fn)))))))
-
-    (it "summarizes large collections"
-      (with-test-env* {} (fn [env]
-                           (#'rlm-core/execute-code env "(def big-list (range 100))")
-                           (let [result (#'rlm-core/execute-code env "(list-locals)")
-                                 big-list-summary (get (:result result) 'big-list)]
-                             (expect (string? big-list-summary))
-                             (expect (clojure.string/includes? big-list-summary "100 items"))))))
-
-    (it "shows small collections in full"
-      (with-test-env* {} (fn [env]
-                           (#'rlm-core/execute-code env "(def small-vec [1 2 3])")
-                           (let [result (#'rlm-core/execute-code env "(list-locals)")]
-                             (expect (= [1 2 3] (get (:result result) 'small-vec))))))))
-
-  (describe "get-local"
-    (it "returns nil for undefined variable"
-      (with-test-env* {} (fn [env]
-                           (let [result (#'rlm-core/execute-code env "(get-local 'undefined)")]
-                             (expect (nil? (:result result)))))))
-
-    (it "returns full value of defined variable"
-      (with-test-env* {} (fn [env]
-                           (#'rlm-core/execute-code env "(def x 42)")
-                           (let [result (#'rlm-core/execute-code env "(get-local 'x)")]
-                             (expect (= 42 (:result result)))))))
-
-    (it "returns full value of large collection (not summarized)"
-      (with-test-env* {} (fn [env]
-                           (#'rlm-core/execute-code env "(def big-list (vec (range 100)))")
-                           (let [result (#'rlm-core/execute-code env "(get-local 'big-list)")]
-                             (expect (= (vec (range 100)) (:result result)))))))
-
-    (it "returns actual function (can be called)"
-      (with-test-env* {} (fn [env]
-                           (#'rlm-core/execute-code env "(defn double-it [n] (* n 2))")
-        ;; Can't test the function directly, but can verify it exists and works
-                           (let [result (#'rlm-core/execute-code env "(double-it 5)")]
-                             (expect (= 10 (:result result)))))))))
 
 ;; =============================================================================
 ;; String Helper Tests (SCI Bindings)
@@ -423,132 +360,8 @@
                              (expect (true? (:result result)))))))))
 
 ;; =============================================================================
-;; Message History Tests
-;; =============================================================================
-
-(defdescribe message-history-test
-  (describe "store-message!"
-    (it "stores a message with generated id"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [result (#'rlm-db/store-message! db-info :user "Hello, world!")]
-            (expect (some? (:id result)))
-            (expect (= :user (:role result)))
-            (expect (= "Hello, world!" (:content result)))
-            (expect (some? (:tokens result)))
-            (expect (some? (:timestamp result))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "stores iteration number when provided"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [result (#'rlm-db/store-message! db-info :assistant "Response" {:iteration 3})]
-            (expect (= :assistant (:role result))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "returns nil for nil db-info"
-      (expect (nil? (#'rlm-db/store-message! nil :user "test")))))
-
-  (describe "get-recent-messages"
-    (it "returns messages in reverse chronological order"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/store-message! db-info :user "First")
-          (Thread/sleep 10) ; Ensure different timestamps
-          (#'rlm-db/store-message! db-info :assistant "Second")
-          (Thread/sleep 10)
-          (#'rlm-db/store-message! db-info :user "Third")
-          (let [results (#'rlm-db/get-recent-messages db-info 10)]
-            (expect (= 3 (count results)))
-            (expect (= "Third" (:content (first results))))
-            (expect (= "First" (:content (last results)))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "respects limit parameter"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (doseq [i (range 5)]
-            (#'rlm-db/store-message! db-info :user (str "Message " i)))
-          (let [results (#'rlm-db/get-recent-messages db-info 2)]
-            (expect (= 2 (count results))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
-
-  (describe "count-history-tokens"
-    (it "counts total tokens across messages"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/store-message! db-info :user "Hello")
-          (#'rlm-db/store-message! db-info :assistant "World")
-          (let [total (#'rlm-db/count-history-tokens db-info)]
-            (expect (pos? total)))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))
-
-    (it "returns 0 for empty history"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (expect (= 0 (#'rlm-db/count-history-tokens db-info)))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
-
-  (describe "get-recent-messages retrieval"
-    (it "returns messages with expected keys"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (#'rlm-db/store-message! db-info :user "How do I bake chocolate cookies?")
-          (#'rlm-db/store-message! db-info :assistant "Mix flour, sugar, chocolate chips and bake at 350F")
-          (let [results (#'rlm-db/get-recent-messages db-info 2)]
-            (expect (= 2 (count results)))
-            (expect (every? #(contains? % :content) results))
-            (expect (every? #(contains? % :role) results)))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))))
-
-;; =============================================================================
 ;; History Query Functions Tests (SCI Bindings)
 ;; =============================================================================
-
-(defdescribe history-query-functions-test
-  (describe "search-history SCI binding"
-    (it "gets recent history from within SCI"
-      (with-test-env* {} (fn [env]
-        ;; Store some messages first
-                           (let [db-info @(:db-info-atom env)]
-                             (#'rlm-db/store-message! db-info :user "How do I sort a list in Clojure?")
-                             (#'rlm-db/store-message! db-info :assistant "Use (sort coll) or (sort-by key-fn coll)"))
-        ;; search-history now takes n (number of messages) instead of query string
-                           (let [result (#'rlm-core/execute-code env "(search-history 5)")]
-                             (expect (nil? (:error result)))
-                             (expect (vector? (:result result)))
-                             (expect (= 2 (count (:result result)))))))))
-
-  (describe "get-history SCI binding"
-    (it "gets recent history from within SCI"
-      (with-test-env* {} (fn [env]
-                           (let [db-info @(:db-info-atom env)]
-                             (#'rlm-db/store-message! db-info :user "First message")
-                             (#'rlm-db/store-message! db-info :assistant "First response"))
-                           (let [result (#'rlm-core/execute-code env "(get-history 10)")]
-                             (expect (nil? (:error result)))
-                             (expect (vector? (:result result)))
-                             (expect (= 2 (count (:result result)))))))))
-
-  (describe "history-stats SCI binding"
-    (it "returns history statistics from within SCI"
-      (with-test-env* {} (fn [env]
-                           (let [db-info @(:db-info-atom env)]
-                             (#'rlm-db/store-message! db-info :user "Test message")
-                             (#'rlm-db/store-message! db-info :assistant "Test response"))
-                           (let [result (#'rlm-core/execute-code env "(history-stats)")]
-                             (expect (nil? (:error result)))
-                             (expect (map? (:result result)))
-                             (expect (contains? (:result result) :total-messages))
-                             (expect (contains? (:result result) :total-tokens))
-                             (expect (contains? (:result result) :by-role))))))))
 
 (defdescribe learnings-sci-bindings-test
   (it "search-learnings is not available in SCI"
@@ -589,18 +402,7 @@
       (expect (not (str/includes? prompt "search-learnings")))
       (expect (not (str/includes? prompt "learning-stats")))
       (expect (not (str/includes? prompt "list-learning-tags")))
-      (expect (not (str/includes? prompt ":learn")))
-      (expect (str/includes? prompt ":sources"))
-      (expect (str/includes? prompt ":reasoning"))))
-
-  (it "does not include history tools (removed — locals injected in feedback)"
-    (let [prompt (#'rlm-core/build-system-prompt {:history-enabled? true})]
-      (expect (not (str/includes? prompt "search-history")))
-      (expect (not (str/includes? prompt "get-history")))))
-
-  (it "excludes history tools when disabled"
-    (let [prompt (#'rlm-core/build-system-prompt {:history-enabled? false})]
-      (expect (not (str/includes? prompt "history_tools")))))
+      (expect (not (str/includes? prompt ":learn")))))
 
   (it "includes document entity tools section when has-documents?"
     (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true})]
@@ -636,133 +438,10 @@
       (expect (str/includes? prompt "expected_output_schema")))))
 
 ;; =============================================================================
-;; Hooks System Tests
+;; System Prompt Tests
 ;; =============================================================================
 
-(defdescribe hooks-system-test
-  (describe "call-hook!"
-    (it "calls hook function with payload"
-      (let [captured (atom nil)
-            hooks-atom (atom {:iteration {:post (fn [data] (reset! captured data))}})]
-        (sut/call-hook! hooks-atom :iteration :post {:iteration 3 :final? false})
-        (expect (= {:iteration 3 :final? false} @captured))))
-
-    (it "does not throw when hook is missing"
-      (let [hooks-atom (atom {})]
-        (expect (nil? (sut/call-hook! hooks-atom :iteration :pre {:iteration 1}))))))
-
-  (describe "create-env stores hooks"
-    (it "exposes merged hooks map on env"
-      (let [env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
-                                                       :models [{:name "gpt-4o"}]}]}
-                                 :hooks {:iteration {:post (fn [_] nil)}}})]
-        (try
-          (expect (map? (:hooks env)))
-          (expect (fn? (get-in (:hooks env) [:get-recent-messages])))
-          (expect (fn? (get-in @(:hooks-atom env) [:iteration :post])))
-          (finally
-            (sut/dispose-env! env))))))
-
-  (describe "query hooks scoping"
-    (it "restores env hooks after per-query hooks override"
-      (let [base-pre (fn [_] nil)
-            override-pre (fn [_] nil)
-            env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
-                                                       :models [{:name "gpt-4o"}]}]}
-                                 :hooks {:query {:pre base-pre}}})
-            original-hooks @(:hooks-atom env)]
-        (try
-          (with-redefs [rlm-core/iteration-loop (fn [& _] (throw (Exception. "forced failure")))]
-            (expect (throws? Exception
-                      #(sut/query-env! env "test query"
-                         {:hooks {:query {:pre override-pre}}})))
-            (expect (= original-hooks @(:hooks-atom env)))
-            (expect (identical? base-pre (get-in @(:hooks-atom env) [:query :pre])))
-            (expect (not (identical? override-pre (get-in @(:hooks-atom env) [:query :pre])))))
-          (finally
-            (sut/dispose-env! env))))))
-
-  (describe "code-exec hooks"
-    (it "fires pre and post around execute-code"
-      (let [pre-calls (atom [])
-            post-calls (atom [])
-            env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
-                                                       :models [{:name "gpt-4o"}]}]}
-                                 :hooks {:code-exec {:pre  (fn [data] (swap! pre-calls conj data))
-                                                     :post (fn [data] (swap! post-calls conj data))}}})]
-        (try
-          (let [{:keys [sci-ctx]} (rlm-tools/create-sci-context {} (fn [_] {:content "ok"}) nil (atom {}) (:db-info-atom env) nil)
-                local-env {:sci-ctx sci-ctx :locals-atom (atom {}) :hooks-atom (:hooks-atom env)}
-                result (#'rlm-core/execute-code local-env "(+ 1 2)")]
-            (expect (= 3 (:result result)))
-            (expect (= 1 (count @pre-calls)))
-            (expect (= "(+ 1 2)" (:code (first @pre-calls))))
-            (expect (= 1 (count @post-calls)))
-            (expect (= 3 (:result (first @post-calls))))
-            (expect (nil? (:error (first @post-calls)))))
-          (finally
-            (sut/dispose-env! env))))))
-
-  (describe "tool-call hooks"
-    (it "fires pre/post when wrapped tool is invoked"
-      (let [pre-calls (atom [])
-            post-calls (atom [])
-            env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
-                                                       :models [{:name "gpt-4o"}]}]}
-                                 :hooks {:tool-call {:pre  (fn [data] (swap! pre-calls conj data))
-                                                     :post (fn [data] (swap! post-calls conj data))}}})]
-        (try
-          (sut/register-env-fn! env 'double-it (fn [x] (* x 2))
-            {:doc "Doubles a number"
-             :params [{:name "x" :type :int}]
-             :returns {:type :int}})
-          (let [f (get @(:custom-bindings-atom env) 'double-it)]
-            (expect (= 42 (f 21)))
-            (expect (= 1 (count @pre-calls)))
-            (expect (= 'double-it (:sym (first @pre-calls))))
-            (expect (= [21] (:args (first @pre-calls))))
-            (expect (= 1 (count @post-calls)))
-            (expect (= 42 (:result (first @post-calls))))
-            (expect (nil? (:error (first @post-calls)))))
-          (finally
-            (sut/dispose-env! env)))))
-
-    (it "fires post hook with error when tool throws"
-      (let [post-calls (atom [])
-            env (sut/create-env {:config {:providers [{:id :test :api-key "test" :base-url "http://localhost"
-                                                       :models [{:name "gpt-4o"}]}]}
-                                 :hooks {:tool-call {:post (fn [data] (swap! post-calls conj data))}}})]
-        (try
-          (sut/register-env-fn! env 'boom (fn [] (throw (Exception. "kaboom")))
-            {:doc "Always fails" :params [] :returns {:type :any}})
-          (let [f (get @(:custom-bindings-atom env) 'boom)]
-            (expect (throws? Exception #(f)))
-            (expect (= 1 (count @post-calls)))
-            (expect (= "kaboom" (:error (first @post-calls)))))
-          (finally
-            (sut/dispose-env! env))))))
-
-  (describe "llm-call hooks"
-    (it "fires pre and post around routed llm call"
-      (let [pre-calls (atom [])
-            post-calls (atom [])
-            hooks-atom (atom {:llm-call {:pre  (fn [data] (swap! pre-calls conj data))
-                                         :post (fn [data] (swap! post-calls conj data))}})
-            depth-atom (atom 0)
-            router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
-                                      :models [{:name "gpt-4o"}]}])]
-        (with-redefs [llm/routed-chat-completion (fn [_router _messages _prefs]
-                                                   {:content "ok" :reasoning nil})]
-          (let [q (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom router
-                                                          {:hooks-atom hooks-atom})
-                res (q "hello")]
-            (expect (= "ok" (:content res)))
-            (expect (= 1 (count @pre-calls)))
-            (expect (= "hello" (:prompt (first @pre-calls))))
-            (expect (= 1 (count @post-calls)))
-            (expect (= "hello" (:prompt (first @post-calls))))
-            (expect (= "ok" (:response (first @post-calls)))))))))
-
+(defdescribe system-prompt-injection-test
   (describe "system prompt injection"
     (it "includes <agent_instructions> when provided"
       (let [prompt (#'rlm-core/build-system-prompt {:system-prompt "You are a code reviewer"})]
@@ -774,41 +453,7 @@
 ;; Sub-RLM Tests
 ;; =============================================================================
 
-(defdescribe sub-rlm-test
-  (describe "rlm-query SCI binding"
-    (it "is available when database is enabled"
-      (with-test-env* {} (fn [env]
-        ;; rlm-query should be defined
-                           (let [result (#'rlm-core/execute-code env "(fn? rlm-query)")]
-                             (expect (nil? (:error result)))
-          ;; May return true or false depending on binding
-                             (expect (boolean? (:result result)))))))
-
-    (it "is not available when database is disabled"
-      (with-test-env* {} {:db false} (fn [env]
-        ;; rlm-query should not be defined
-                                       (let [result (#'rlm-core/execute-code env "(bound? #'rlm-query)")]
-          ;; Should error since rlm-query is not defined
-                                         (expect (some? (:error result))))))))
-
-  (describe "make-rlm-query-fn"
-    (it "enforces max recursion depth"
-      (let [depth-atom (atom 5)
-            db-info (#'rlm-db/create-rlm-conn nil)]
-        (try
-          (let [db-info-atom (atom db-info)
-                test-router (llm/make-router [{:id :test :api-key "t" :base-url "http://x"
-                                               :models [{:name "gpt-4o"}
-                                                        {:name "gpt-4o-mini"}]}])
-                rlm-query-fn (#'rlm-core/make-rlm-query-fn {:strategy :root} depth-atom test-router db-info-atom)]
-            ;; Should return error when at max depth
-            (binding [sut/*max-recursion-depth* 5]
-              (let [result (rlm-query-fn {:data "test"} "What is this?")]
-                (expect (map? result))
-                (expect (some? (:error result)))
-                (expect (str/includes? (str (:error result)) "recursion")))))
-          (finally
-            (#'rlm-db/dispose-rlm-conn! db-info)))))))
+;; Sub-RLM tests removed — rlm-query and make-rlm-query-fn no longer exist
 
 ;; =============================================================================
 ;; Format Execution Results Tests
@@ -844,25 +489,29 @@
 ;; Integration Tests (real LLM calls)
 ;; =============================================================================
 
-(def ^:private test-config
-  "LLM config for integration tests."
-  {:providers [{:id :openai
-                :api-key (System/getenv "OPENAI_API_KEY")
-                :base-url (or (System/getenv "OPENAI_BASE_URL")
-                            "https://api.openai.com/v1")
-                :models [{:name "gpt-4o"}
-                         {:name "gpt-4o-mini"}]}]})
+(def ^:private test-providers
+  "LLM providers for integration tests."
+  [{:id :openai
+    :api-key (System/getenv "OPENAI_API_KEY")
+    :base-url (or (System/getenv "OPENAI_BASE_URL")
+                "https://api.openai.com/v1")
+    :models [{:name "gpt-4o"}
+             {:name "gpt-4o-mini"}]}])
+
+(def ^:private test-router
+  "Router for integration tests."
+  (llm/make-router test-providers))
 
 (defn- integration-tests-enabled?
   "Returns true if LLM integration tests should run.
-   Checks if test-config has a valid API key from environment."
+   Checks if test-providers has a valid API key from environment."
   []
-  (some? (get-in test-config [:providers 0 :api-key])))
+  (some? (:api-key (first test-providers))))
 
 (defn- with-integration-env*
   "Creates an RLM environment for integration tests, executes f, then disposes."
   [f]
-  (let [env (sut/create-env {:config test-config})]
+  (let [env (sut/create-env test-router {})]
     (try
       (f env)
       (finally
@@ -930,20 +579,6 @@
               (when-not (:status result)
                 (expect (some? (:eval-scores result)))
                 (expect (number? (:eval-scores result))))))))))
-
-  (describe "history tracking"
-    (it "tracks history tokens when enabled"
-      (when (integration-tests-enabled?)
-        (with-integration-env*
-          (fn [env]
-            (let [result (sut/query-env! env "Echo the context"
-                           {:context "Test context"
-                            :max-iterations 5
-                            :refine? false})]
-              (expect (map? result))
-              (when-not (:status result)
-                (expect (contains? result :history-tokens))
-                (expect (number? (:history-tokens result))))))))))
 
   (describe "validation"
     (it "throws when env is invalid"
@@ -1291,10 +926,10 @@
    
    For multi-call scenarios, use an atom to sequence responses:
    (let [calls (atom [response1 response2 response3])]
-     (with-mock-ask! (fn [_] (let [r (first @calls)] (swap! calls rest) r))
+     (with-mock-ask! (fn [_ _] (let [r (first @calls)] (swap! calls rest) r))
        (svar/refine! opts)))"
   [response-fn & body]
-  `(with-redefs [llm/ask!* (fn [opts#] (~response-fn opts#))]
+  `(with-redefs [llm/ask!* (fn [_router# opts#] (~response-fn _router# opts#))]
      ~@body))
 
 (defn make-mock-eval-response
@@ -1336,8 +971,8 @@
      (fn [opts] (make-mock-eval-response 0.95))
      (svar/refine! ...))"
   [ask-fn eval-fn & body]
-  `(with-redefs [llm/ask! (fn [opts#] (~ask-fn opts#))
-                 llm/eval!* (fn [opts#] (~eval-fn opts#))]
+  `(with-redefs [llm/ask! (fn [_router# opts#] (~ask-fn _router# opts#))
+                 llm/eval!* (fn [_router# opts#] (~eval-fn _router# opts#))]
      ~@body))
 
 ;; =============================================================================
@@ -1645,8 +1280,8 @@
 
   (describe "with-mock-ask!"
     (it "intercepts ask! calls with canned response"
-      (with-mock-ask! (fn [_opts] (make-mock-ask-response {:answer 42}))
-        (let [result (llm/ask! {:spec nil :objective "test" :task "test" :model "gpt-4o"})]
+      (with-mock-ask! (fn [_router _opts] (make-mock-ask-response {:answer 42}))
+        (let [result (llm/ask!* test-ingest-router {:spec nil :objective "test" :task "test" :model "gpt-4o"})]
           (expect (= {:answer 42} (:result result)))
           (expect (= 0 (:duration-ms result)))))))
 
@@ -1661,10 +1296,10 @@
   (describe "with-mock-ask-and-eval!"
     (it "intercepts both ask! and eval! calls"
       (with-mock-ask-and-eval!
-        (fn [_opts] (make-mock-ask-response {:data "mocked"}))
-        (fn [_opts] (make-mock-eval-response 0.9))
-        (let [ask-result (llm/ask! {:spec nil :objective "t" :task "t" :model "gpt-4o"})
-              eval-result (llm/eval! {:task "t" :output "t" :model "gpt-4o"})]
+        (fn [_router _opts] (make-mock-ask-response {:data "mocked"}))
+        (fn [_router _opts] (make-mock-eval-response 0.9))
+        (let [ask-result (llm/ask! test-ingest-router {:spec nil :objective "t" :task "t" :model "gpt-4o"})
+              eval-result (llm/eval! test-ingest-router {:task "t" :output "t" :model "gpt-4o"})]
           (expect (= {:data "mocked"} (:result ask-result)))
           (expect (= 0.9 (:overall-score eval-result))))))))
 
@@ -1789,12 +1424,12 @@
 ;; Entity Extraction Ingestion Tests (RED)
 ;; =============================================================================
 
-(def ^:private test-ingest-config
-  {:providers [{:id :test
-                :api-key "test"
-                :base-url "https://api.openai.com/v1"
-                :models [{:name "gpt-4o"}
-                         {:name "gpt-4o-mini"}]}]})
+(def ^:private test-ingest-router
+  (llm/make-router [{:id :test
+                     :api-key "test"
+                     :base-url "https://api.openai.com/v1"
+                     :models [{:name "gpt-4o"}
+                              {:name "gpt-4o-mini"}]}]))
 
 (defn- make-test-image-with-description-document
   "Creates a doc with an image node that has description but no image-data."
@@ -1810,7 +1445,7 @@
 (defdescribe entity-extraction-ingest-test
   (it "extracts entities from text nodes when enabled"
     (let [calls (atom [])]
-      (with-mock-ask! (fn [opts]
+      (with-mock-ask! (fn [_router opts]
                         (swap! calls conj opts)
                         (make-mock-ask-response
                           {:entities [{:entity/name "Acme Corp"
@@ -1819,7 +1454,7 @@
                                        :entity/section "s1"
                                        :entity/page 0}]
                            :relationships []}))
-        (let [env (sut/create-env {:config test-ingest-config})
+        (let [env (sut/create-env test-ingest-router {})
               result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 1 (count @calls)))
@@ -1827,11 +1462,11 @@
 
   (it "re-scans image nodes with vision model"
     (let [calls (atom [])]
-      (with-mock-ask! (fn [opts]
+      (with-mock-ask! (fn [_router opts]
                         (swap! calls conj opts)
                         (make-mock-ask-response
                           {:entities [] :relationships []}))
-        (let [env (sut/create-env {:config test-ingest-config})
+        (let [env (sut/create-env test-ingest-router {})
               result (sut/ingest-to-env! env [(make-test-image-only-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 2 (count @calls)))
@@ -1845,28 +1480,28 @@
 
   (it "uses :extraction-model when provided (calls are routed)"
     (let [calls (atom [])]
-      (with-mock-ask! (fn [opts]
+      (with-mock-ask! (fn [_router opts]
                         (swap! calls conj opts)
                         (make-mock-ask-response
                           {:entities [] :relationships []}))
-        (let [env (sut/create-env {:config test-ingest-config})
+        (let [env (sut/create-env test-ingest-router {})
               _result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true :extraction-model "gpt-4o-mini"})]
           (sut/dispose-env! env)
           (expect (pos? (count @calls)))))))
 
   (it "respects :max-vision-rescan-nodes cap"
     (let [calls (atom [])]
-      (with-mock-ask! (fn [opts]
+      (with-mock-ask! (fn [_router opts]
                         (swap! calls conj opts)
                         (make-mock-ask-response {:entities [] :relationships []}))
-        (let [env (sut/create-env {:config test-ingest-config})
+        (let [env (sut/create-env test-ingest-router {})
               result (sut/ingest-to-env! env [(make-test-image-only-document)] {:extract-entities? true :max-vision-rescan-nodes 1})]
           (sut/dispose-env! env)
           (expect (= 1 (count @calls)))
           (expect (= 1 (get-in result [0 :visual-nodes-scanned])))))))
 
   (it "returns zero counts for empty document"
-    (let [env (sut/create-env {:config test-ingest-config})
+    (let [env (sut/create-env test-ingest-router {})
           result (sut/ingest-to-env! env [(make-test-empty-document)] {:extract-entities? true})]
       (sut/dispose-env! env)
       (expect (= 0 (get-in result [0 :entities-extracted])))
@@ -1874,11 +1509,11 @@
 
   (it "falls back to description-only extraction when image-data missing"
     (let [calls (atom [])]
-      (with-mock-ask! (fn [opts]
+      (with-mock-ask! (fn [_router opts]
                         (swap! calls conj opts)
                         (make-mock-ask-response
                           {:entities [] :relationships []}))
-        (let [env (sut/create-env {:config test-ingest-config})
+        (let [env (sut/create-env test-ingest-router {})
               _result (sut/ingest-to-env! env [(make-test-image-with-description-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 1 (count @calls)))
@@ -1886,10 +1521,10 @@
 
   (it "handles page extraction failures gracefully"
     (let [calls (atom 0)]
-      (with-mock-ask! (fn [_opts]
+      (with-mock-ask! (fn [_router _opts]
                         (swap! calls inc)
                         (throw (ex-info "boom" {})))
-        (let [env (sut/create-env {:config test-ingest-config})
+        (let [env (sut/create-env test-ingest-router {})
               result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 1 @calls))
@@ -2034,7 +1669,7 @@
   `(let [v# (var com.blockether.svar.internal.llm/refine!)
          orig# (deref v#)]
      (try
-       (alter-var-root v# (constantly (fn [opts#]
+       (alter-var-root v# (constantly (fn [_router# opts#]
                                         (let [msgs# (:messages opts#)
                                               answer# (some-> msgs# last :content)]
                                           {:result answer# :final-score 0.9
@@ -2047,42 +1682,8 @@
 (def ^:private final-response-low-confidence "{\"thinking\": \"Answering directly\", \"code\": [\"(FINAL \\\"test answer\\\" {:confidence :low})\"]}")
 
 (defdescribe knowledge-engine-integration-test
-  (it "backward compat - query without opt-in flags returns standard shape"
-    (let [env (sut/create-env {:config test-ingest-config})]
-      (try
-        (with-mock-chat! (fn [& _] final-response)
-          (with-mock-refine!
-            (let [result (sut/query-env! env "What is X?")]
-              (expect (contains? result :answer))
-              (expect (contains? result :eval-scores))
-              (expect (contains? result :refinement-count))
-              (expect (not (contains? result :verified-claims)))
-              (expect (some? (:answer result))))))
-        (finally (sut/dispose-env! env)))))
-
-  (it "verify? true includes :verified-claims in result"
-    (let [env (sut/create-env {:config test-ingest-config})]
-      (try
-        (with-mock-chat! (fn [& _] final-response)
-          (with-mock-refine!
-            (let [result (sut/query-env! env "Find claims" {:verify? true})]
-              (expect (contains? result :verified-claims))
-              (expect (vector? (:verified-claims result)))
-              (expect (= [] (:verified-claims result))))))
-        (finally (sut/dispose-env! env)))))
-
-  (it "query on small docs returns answer"
-    (let [env (sut/create-env {:config test-ingest-config})]
-      (try
-        (sut/ingest-to-env! env [(make-test-single-page-document)])
-        (with-mock-chat! (fn [& _] final-response)
-          (with-mock-refine!
-            (let [result (sut/query-env! env "test")]
-              (expect (some? (:answer result))))))
-        (finally (sut/dispose-env! env)))))
-
   (it "ingest with extract-entities? returns extraction stats"
-    (with-mock-ask! (fn [_opts]
+    (with-mock-ask! (fn [_router _opts]
                       (make-mock-ask-response
                         {:entities [{:entity/name "Test Entity"
                                      :entity/type "party"
@@ -2090,45 +1691,11 @@
                                      :entity/section "s1"
                                      :entity/page 0}]
                          :relationships []}))
-      (let [env (sut/create-env {:config test-ingest-config})
+      (let [env (sut/create-env test-ingest-router {})
             result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
         (sut/dispose-env! env)
         (expect (pos? (get-in result [0 :entities-extracted])))
         (expect (number? (get-in result [0 :visual-nodes-scanned]))))))
-
-  (it "empty DB query with all flags returns gracefully"
-    (let [env (sut/create-env {:config test-ingest-config})]
-      (try
-        (with-mock-chat! (fn [& _] final-response)
-          (with-mock-refine!
-            (let [result (sut/query-env! env "anything" {:verify? true})]
-              (expect (some? (:answer result)))
-              (expect (contains? result :verified-claims))
-              (expect (vector? (:verified-claims result))))))
-        (finally (sut/dispose-env! env)))))
-
-  (it "ingest without extraction then query with all flags works"
-    (let [env (sut/create-env {:config test-ingest-config})]
-      (try
-        (sut/ingest-to-env! env [(make-test-single-page-document)])
-        (with-mock-chat! (fn [& _] final-response)
-          (with-mock-refine!
-            (let [result (sut/query-env! env "test query" {:verify? true})]
-              (expect (some? (:answer result)))
-              (expect (contains? result :verified-claims)))))
-        (finally (sut/dispose-env! env)))))
-
-  (it "FINAL low confidence triggers refinement"
-    (let [env (sut/create-env {:config test-ingest-config})]
-      (try
-        (with-mock-chat! (fn [& _] final-response-low-confidence)
-          (with-mock-refine!
-            (let [result (sut/query-env! env "test" {:verify? false})]
-              (expect (some? (:answer result)))
-              (expect (number? (:eval-scores result)))
-              (expect (number? (:refinement-count result)))
-              (expect (>= (:refinement-count result) 0)))))
-        (finally (sut/dispose-env! env)))))
 
   (it "CITE functions compose in full lifecycle"
     (let [claims-atom (atom [])
@@ -2640,14 +2207,14 @@
 (defdescribe deduplicate-questions-test
   (describe "deduplicate-questions"
     (it "keeps unique questions when LLM returns all indices"
-      (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices [0 1 2]}))
+      (with-mock-ask! (fn [_ _] (make-mock-ask-response {:keep-indices [0 1 2]}))
         (let [questions [{:question "What is the capital of France?"}
                          {:question "How does photosynthesis work?"}
                          {:question "What year was the company founded?"}]
               result (#'sut/deduplicate-questions questions test-dedup-router)]
           (expect (= 3 (count result))))))
     (it "removes duplicates when LLM identifies them"
-      (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices [0 2]}))
+      (with-mock-ask! (fn [_ _] (make-mock-ask-response {:keep-indices [0 2]}))
         (let [questions [{:question "What is the minimum capital requirement for banks?"}
                          {:question "What is the minimum capital requirement for the banks?"}
                          {:question "How does photosynthesis produce oxygen?"}]
@@ -2663,7 +2230,7 @@
       (let [result (#'sut/deduplicate-questions [{:question "Solo question"}] test-dedup-router)]
         (expect (= 1 (count result)))))
     (it "falls back to all questions when LLM returns empty"
-      (with-mock-ask! (fn [_] (make-mock-ask-response {:keep-indices []}))
+      (with-mock-ask! (fn [_ _] (make-mock-ask-response {:keep-indices []}))
         (let [questions [{:question "Q1"} {:question "Q2"}]
               result (#'sut/deduplicate-questions questions test-dedup-router)]
           (expect (= 2 (count result))))))))

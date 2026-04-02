@@ -7,7 +7,7 @@
    Run `make compile-java` in the svar package before running tests."
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.internal.tokens :as sut]))
+   [com.blockether.svar.internal.defaults :as sut]))
 
 ;; =============================================================================
 ;; Context Limits Tests

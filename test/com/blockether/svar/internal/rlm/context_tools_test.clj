@@ -1,119 +1,39 @@
 (ns com.blockether.svar.internal.rlm.context-tools-test
   (:require
+   [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
    [sci.core :as sci]
    [com.blockether.svar.internal.rlm.tools :as tools]))
 
 (defn- make-ctx
-  "Create a sci context and return the p-atom for testing."
+  "Create a sci context for testing."
   []
-  (let [{:keys [p-atom sci-ctx]} (tools/create-sci-context nil (fn [_] {:content "ok"}) nil (atom {}) nil nil)]
-    {:p-atom p-atom :sci-ctx sci-ctx}))
+  (let [{:keys [sci-ctx initial-ns-keys]} (tools/create-sci-context nil (fn [_] {:content "ok"}) nil nil)]
+    {:sci-ctx sci-ctx :initial-ns-keys initial-ns-keys}))
 
 (defn- eval-in [ctx code]
-  (sci.core/eval-string* (:sci-ctx ctx) code))
+  (sci/eval-string* (:sci-ctx ctx) code))
 
-(defdescribe context-tools-test
-  (describe "initial state"
-    (it "starts with empty context"
-      (let [{:keys [p-atom]} (make-ctx)]
-        (expect (= [] (:context @p-atom))))))
-
-  (describe "ctx-add!"
-    (it "adds a string to context"
+(defdescribe var-based-state-test
+  (describe "def with docstrings"
+    (it "def creates a var accessible in SCI"
       (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"hello world\")")
-        (expect (= ["hello world"] (:context @(:p-atom ctx))))))
+        (eval-in ctx "(def results \"search results\" [1 2 3])")
+        (expect (= [1 2 3] (eval-in ctx "results")))))
 
-    (it "appends multiple entries"
+    (it "docstring is accessible via meta"
       (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"first\")")
-        (eval-in ctx "(ctx-add! \"second\")")
-        (eval-in ctx "(ctx-add! \"third\")")
-        (expect (= ["first" "second" "third"] (:context @(:p-atom ctx)))))))
+        (eval-in ctx "(def results \"search results\" [1 2 3])")
+        (expect (= "search results" (eval-in ctx "(:doc (meta (var results)))"))))))
 
-  (describe "ctx-remove!"
-    (it "removes by index"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-add! \"c\")")
-        (eval-in ctx "(ctx-remove! 1)")
-        (expect (= ["a" "c"] (:context @(:p-atom ctx))))))
+  (describe "var index"
+    (it "build-var-index returns nil when no user vars"
+      (let [{:keys [sci-ctx initial-ns-keys]} (make-ctx)]
+        (expect (nil? (tools/build-var-index sci-ctx initial-ns-keys))))))
 
-    (it "removes first entry"
+  (describe "vars persist across evaluations"
+    (it "def'd vars persist across eval calls"
       (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-remove! 0)")
-        (expect (= ["b"] (:context @(:p-atom ctx))))))
-
-    (it "removes last entry"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-add! \"c\")")
-        (eval-in ctx "(ctx-remove! 2)")
-        (expect (= ["a" "b"] (:context @(:p-atom ctx)))))))
-
-  (describe "ctx-clear!"
-    (it "removes all entries"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-clear!)")
-        (expect (= [] (:context @(:p-atom ctx)))))))
-
-  (describe "ctx-replace!"
-    (it "replaces a single entry"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-add! \"c\")")
-        (eval-in ctx "(ctx-replace! 1 1 \"B-replaced\")")
-        (expect (= ["a" "B-replaced" "c"] (:context @(:p-atom ctx))))))
-
-    (it "replaces a range of entries with one summary"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-add! \"c\")")
-        (eval-in ctx "(ctx-add! \"d\")")
-        (eval-in ctx "(ctx-add! \"e\")")
-        (eval-in ctx "(ctx-replace! 1 3 \"b+c+d summary\")")
-        (expect (= ["a" "b+c+d summary" "e"] (:context @(:p-atom ctx))))))
-
-    (it "replaces from start"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-add! \"c\")")
-        (eval-in ctx "(ctx-add! \"d\")")
-        (eval-in ctx "(ctx-replace! 0 2 \"a+b+c merged\")")
-        (expect (= ["a+b+c merged" "d"] (:context @(:p-atom ctx))))))
-
-    (it "replaces to end"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-add! \"c\")")
-        (eval-in ctx "(ctx-add! \"d\")")
-        (eval-in ctx "(ctx-replace! 2 3 \"c+d merged\")")
-        (expect (= ["a" "b" "c+d merged"] (:context @(:p-atom ctx))))))
-
-    (it "replaces all entries"
-      (let [ctx (make-ctx)]
-        (eval-in ctx "(ctx-add! \"a\")")
-        (eval-in ctx "(ctx-add! \"b\")")
-        (eval-in ctx "(ctx-add! \"c\")")
-        (eval-in ctx "(ctx-replace! 0 2 \"everything merged\")")
-        (expect (= ["everything merged"] (:context @(:p-atom ctx)))))))
-
-  (describe "removed learning tools"
-    (it "does not expose learn!"
-      (let [ctx (make-ctx)]
-        (expect (throws? Exception #(eval-in ctx "(learn! \"insight one\")")))))
-
-    (it "does not expose forget!"
-      (let [ctx (make-ctx)]
-        (expect (throws? Exception #(eval-in ctx "(forget! 0)")))))))
+        (eval-in ctx "(def x \"first var\" 42)")
+        (eval-in ctx "(def y \"second var\" (* x 2))")
+        (expect (= 84 (eval-in ctx "y")))))))

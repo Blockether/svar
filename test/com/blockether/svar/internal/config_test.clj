@@ -1,90 +1,165 @@
 (ns com.blockether.svar.internal.config-test
-  "Tests for LLM configuration management."
+  "Tests for router creation and defaults."
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.internal.config :as config]))
+   [com.blockether.svar.internal.defaults :as defaults]
+   [com.blockether.svar.internal.llm :as llm]))
 
-(defdescribe make-config-test
-  "Tests for make-config function"
+(defdescribe make-router-test
+  "Tests for make-router function"
 
-  (describe "with explicit params"
-    (it "creates config with api-key and base-url"
-      (let [cfg (config/make-config {:api-key "sk-test-key"
-                                     :base-url "https://api.openai.com/v1"
-                                     :model "test-model"})]
-        (expect (= "sk-test-key" (:api-key cfg)))
-        (expect (= "https://api.openai.com/v1" (:base-url cfg)))
-        (expect (= "test-model" (:model cfg)))))
+  (describe "with explicit providers"
+    (it "creates router with a single provider"
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}])]
+        (expect (= 1 (count (:providers r))))
+        (expect (some? (:state r)))
+        (expect (= :openai (:id (first (:providers r)))))))
 
-    (it "allows custom model"
-      (let [cfg (config/make-config {:api-key "sk-test"
-                                     :base-url "https://api.example.com"
-                                     :model "gpt-4o-mini"})]
-        (expect (= "gpt-4o-mini" (:model cfg)))))
+    (it "creates router with multiple providers"
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}
+                                {:id :anthropic :api-key "sk-test2"
+                                 :models [{:name "claude-sonnet-4-6"}]}])]
+        (expect (= 2 (count (:providers r))))))
 
-    (it "sets default timeout-ms in :network"
-      (let [cfg (config/make-config {:api-key "sk-test"
-                                     :base-url "https://api.example.com"})]
-        (expect (= config/DEFAULT_TIMEOUT_MS (get-in cfg [:network :timeout-ms])))))
+    (it "sets default network timeout-ms"
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}])]
+        (expect (= defaults/DEFAULT_TIMEOUT_MS (get-in r [:network :timeout-ms])))))
 
     (it "allows custom timeout-ms via :network"
-      (let [cfg (config/make-config {:api-key "sk-test"
-                                     :base-url "https://api.example.com"
-                                     :network {:timeout-ms 300000}})]
-        (expect (= 300000 (get-in cfg [:network :timeout-ms])))))
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}]
+                {:network {:timeout-ms 300000}})]
+        (expect (= 300000 (get-in r [:network :timeout-ms])))))
 
     (it "sets check-context? to true by default in :tokens"
-      (let [cfg (config/make-config {:api-key "sk-test"})]
-        (expect (true? (get-in cfg [:tokens :check-context?])))))
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}])]
+        (expect (true? (get-in r [:tokens :check-context?])))))
 
     (it "allows disabling check-context? via :tokens"
-      (let [cfg (config/make-config {:api-key "sk-test"
-                                     :tokens {:check-context? false}})]
-        (expect (false? (get-in cfg [:tokens :check-context?])))))
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}]
+                {:tokens {:check-context? false}})]
+        (expect (false? (get-in r [:tokens :check-context?])))))
 
     (it "merges network over defaults"
-      (let [cfg (config/make-config {:api-key "sk-test"
-                                     :network {:max-retries 10}})]
-        (expect (= 10 (get-in cfg [:network :max-retries])))
-                  ;; Other defaults preserved
-        (expect (= 1000 (get-in cfg [:network :initial-delay-ms])))))
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}]
+                {:network {:max-retries 10}})]
+        (expect (= 10 (get-in r [:network :max-retries])))
+        ;; Other defaults preserved
+        (expect (= 1000 (get-in r [:network :initial-delay-ms])))))
 
     (it "merges pricing over defaults in :tokens"
-      (let [cfg (config/make-config {:api-key "sk-test"
-                                     :tokens {:pricing {"my-model" {:input 1.0 :output 2.0}}}})]
-        (expect (= {:input 1.0 :output 2.0} (get-in cfg [:tokens :pricing "my-model"])))
-                  ;; Built-in defaults still present
-        (expect (some? (get-in cfg [:tokens :pricing "gpt-4o"])))))
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}]
+                {:tokens {:pricing {"my-model" {:input 1.0 :output 2.0}}}})]
+        (expect (= {:input 1.0 :output 2.0} (get-in r [:tokens :pricing "my-model"])))
+        ;; Built-in defaults still present
+        (expect (some? (get-in r [:tokens :pricing "gpt-4o"])))))
 
     (it "merges context-limits over defaults in :tokens"
-      (let [cfg (config/make-config {:api-key "sk-test"
-                                     :tokens {:context-limits {"my-model" 65536}}})]
-        (expect (= 65536 (get-in cfg [:tokens :context-limits "my-model"])))
-                  ;; Built-in defaults still present
-        (expect (some? (get-in cfg [:tokens :context-limits "gpt-4o"]))))))
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}]
+                {:tokens {:context-limits {"my-model" 65536}}})]
+        (expect (= 65536 (get-in r [:tokens :context-limits "my-model"])))
+        ;; Built-in defaults still present
+        (expect (some? (get-in r [:tokens :context-limits "gpt-4o"]))))))
 
-  (describe "with missing params"
-    (it "throws on missing api-key when no env var set"
-      (if (or (System/getenv "BLOCKETHER_LLM_API_KEY")
-            (System/getenv "BLOCKETHER_OPENAI_API_KEY")
-            (System/getenv "OPENAI_API_KEY"))
-        (expect true) ;; Skip when any api-key env var is set
-        (try
-          (config/make-config {})
-          (expect false "Should have thrown")
-          (catch clojure.lang.ExceptionInfo e
-            (expect (= :svar/missing-api-key (:type (ex-data e))))))))
+  (describe "with invalid params"
+    (it "throws on empty providers"
+      (try
+        (llm/make-router [])
+        (expect false "Should have thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (expect (= :svar/no-providers (:type (ex-data e)))))))
 
-    (it "falls back to env var for base-url"
-      (let [cfg (config/make-config {:api-key "sk-test"})
-            expected-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
-                           (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
-                           (System/getenv "OPENAI_BASE_URL")
-                           config/DEFAULT_BASE_URL)]
-        (expect (= expected-url (:base-url cfg)))))))
+    (it "throws on non-sequential providers"
+      (try
+        (llm/make-router {:id :openai})
+        (expect false "Should have thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (expect (= :svar/invalid-providers (:type (ex-data e))))))))
+
+  (describe "budget configuration"
+    (it "creates router with budget"
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}]
+                {:budget {:max-tokens 1000000 :max-cost 5.0}})]
+        (expect (= {:max-tokens 1000000 :max-cost 5.0} (:budget r)))
+        (expect (some? (:budget-state r)))))
+
+    (it "creates router without budget by default"
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}])]
+        (expect (nil? (:budget r)))
+        (expect (nil? (:budget-state r))))))
+
+  (describe "circuit breaker configuration"
+    (it "uses default CB thresholds"
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}])]
+        (expect (= 5 (:cb-failure-threshold r)))
+        (expect (= 60000 (:cb-recovery-ms r)))))
+
+    (it "allows custom CB thresholds"
+      (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                                 :models [{:name "gpt-4o"}]}]
+                {:cb-failure-threshold 3 :cb-recovery-ms 30000})]
+        (expect (= 3 (:cb-failure-threshold r)))
+        (expect (= 30000 (:cb-recovery-ms r)))))))
+
+(defdescribe router-stats-test
+  "Tests for router-stats function"
+
+  (it "returns empty stats for fresh router"
+    (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                               :models [{:name "gpt-4o"}]}])
+          stats (llm/router-stats r)]
+      (expect (= 0 (get-in stats [:total :requests])))
+      (expect (= 0 (get-in stats [:total :tokens])))
+      (expect (= :closed (get-in stats [:providers :openai :circuit-breaker])))))
+
+  (it "includes budget info when budget configured"
+    (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                               :models [{:name "gpt-4o"}]}]
+              {:budget {:max-tokens 1000 :max-cost 1.0}})
+          stats (llm/router-stats r)]
+      (expect (some? (:budget stats)))
+      (expect (= 0 (get-in stats [:budget :spent :total-tokens]))))))
+
+(defdescribe reset-budget-test
+  "Tests for reset-budget! function"
+
+  (it "resets budget counters"
+    (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                               :models [{:name "gpt-4o"}]}]
+              {:budget {:max-tokens 1000 :max-cost 1.0}})]
+      ;; Simulate spend
+      (swap! (:budget-state r) assoc :total-tokens 500 :total-cost 0.5)
+      (llm/reset-budget! r)
+      (expect (= 0 (:total-tokens @(:budget-state r))))
+      (expect (= 0.0 (:total-cost @(:budget-state r)))))))
+
+(defdescribe reset-provider-test
+  "Tests for reset-provider! function"
+
+  (it "resets circuit breaker to closed"
+    (let [r (llm/make-router [{:id :openai :api-key "sk-test"
+                               :models [{:name "gpt-4o"}]}])]
+      ;; Simulate open CB
+      (swap! (:state r) assoc-in [:openai :cb-state] :open)
+      (swap! (:state r) assoc-in [:openai :cb-failures] 5)
+      (llm/reset-provider! r :openai)
+      (let [ps (get @(:state r) :openai)]
+        (expect (= :closed (:cb-state ps)))
+        (expect (= 0 (:cb-failures ps)))))))
 
 (defdescribe default-model-test
-  "Tests for DEFAULT_MODEL — reads from env var, no hardcoded fallback"
+  "Tests for DEFAULT_MODEL — no hardcoded fallback"
 
   (it "DEFAULT_MODEL is nil (no hardcoded fallback)"
-    (expect (nil? config/DEFAULT_MODEL))))
+    (expect (nil? defaults/DEFAULT_MODEL))))

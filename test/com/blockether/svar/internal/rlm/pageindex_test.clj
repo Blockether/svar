@@ -12,6 +12,7 @@
    [clojure.java.io :as io]
    [clojure.spec.alpha :as s]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
+   [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
    [com.blockether.svar.internal.rlm :as pageindex]
    [com.blockether.svar.internal.rlm.schema :as pageindex-spec]
@@ -274,6 +275,17 @@
       (expect (vector? (:document/toc EXAMPLE_PDF_FIXTURE))))))
 
 ;; =============================================================================
+;; Test Router
+;; =============================================================================
+
+(defn- make-test-router
+  "Creates a stub router for tests that don't need real LLM calls."
+  []
+  (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                     :models [{:name "gpt-4o"}
+                              {:name "gpt-4o-mini"}]}]))
+
+;; =============================================================================
 ;; Core API Tests (No LLM - file detection only)
 ;; =============================================================================
 
@@ -285,29 +297,28 @@
     (it "throws for non-existent file"
       ;; Test via the build-index error path - file exists check
       (expect (throws? clojure.lang.ExceptionInfo
-                #(pageindex/build-index "non-existent.pdf"))))))
+                #(pageindex/build-index (make-test-router) "non-existent.pdf"))))))
 
 ;; =============================================================================
 ;; Integration Tests (Requires LLM - marked for conditional execution)
 ;; =============================================================================
 
-(def ^:private integration-config
-  "LLM config for integration tests."
-  {:api-key (System/getenv "OPENAI_API_KEY")
-   :base-url (or (System/getenv "OPENAI_BASE_URL")
-               "https://api.openai.com/v1")})
-
-(defn- integration-tests-enabled?
-  "Returns true if LLM integration tests should run."
+(defn- make-integration-router
+  "Creates a router for integration tests from env vars. Returns nil if no API key."
   []
-  (some? (:api-key integration-config)))
+  (when-let [api-key (System/getenv "OPENAI_API_KEY")]
+    (llm/make-router [{:id :openai
+                       :api-key api-key
+                       :base-url (or (System/getenv "OPENAI_BASE_URL")
+                                   "https://api.openai.com/v1")
+                       :models [{:name "gpt-4o"}
+                                {:name "gpt-4o-mini"}]}])))
 
 (defdescribe build-index-integration-test
   (describe "build-index for example.pdf"
     (it "produces valid document structure (when LLM available)"
-      (when (integration-tests-enabled?)
-        (let [doc (pageindex/build-index TEST_PDF_PATH
-                    {:config integration-config})]
+      (when-let [router (make-integration-router)]
+        (let [doc (pageindex/build-index router TEST_PDF_PATH)]
           ;; Check required fields
           (expect (= "example" (:document/name doc)))
           (expect (= "pdf" (:document/extension doc)))
@@ -332,11 +343,10 @@
           (expect (pageindex-spec/valid-document? doc)))))
 
     (it "index! saves and load-index reads back (when LLM available)"
-      (when (integration-tests-enabled?)
+      (when-let [router (make-integration-router)]
         (let [output-path "resources-test/example-generated.pageindex"
-              result (pageindex/index! TEST_PDF_PATH
-                       {:output output-path
-                        :config integration-config})
+              result (pageindex/index! router TEST_PDF_PATH
+                       {:output output-path})
               loaded (pageindex/load-index output-path)]
           (try
             ;; Check result structure
@@ -384,7 +394,7 @@
           (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
                         com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
                         vision/infer-document-title (fn [_ _] nil)]
-            (let [doc (pageindex/build-index TEST_PDF_PATH {:output-dir (str output-dir)})
+            (let [doc (pageindex/build-index nil TEST_PDF_PATH {:output-dir (str output-dir)})
                   node-id (get-in doc [:document/pages 0 :page/nodes 0 :page.node/id])
                   img-path (fs/path output-dir (str node-id ".png"))]
               (expect (fs/exists? img-path))))
@@ -396,7 +406,7 @@
                     com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
                     vision/infer-document-title (fn [_ _] nil)]
         (expect (throws? clojure.lang.ExceptionInfo
-                  #(pageindex/build-index TEST_PDF_PATH {:output-dir "does-not-exist"}))))))
+                  #(pageindex/build-index nil TEST_PDF_PATH {:output-dir "does-not-exist"}))))))
 
   (describe "build-index :path without output-dir"
     (it "retains image bytes in returned structure"
@@ -408,7 +418,7 @@
         (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
                       com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
                       vision/infer-document-title (fn [_ _] nil)]
-          (let [doc (pageindex/build-index TEST_PDF_PATH)
+          (let [doc (pageindex/build-index nil TEST_PDF_PATH)
                 img-bytes (get-in doc [:document/pages 0 :page/nodes 0 :page.node/image-data])]
             (expect (bytes? img-bytes)))))))
 
@@ -421,9 +431,9 @@
                                               :page.node/content "hello"}]}])
                     com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
                     vision/infer-document-title (fn [_ _] nil)]
-        (let [doc (pageindex/build-index "Hello" {:content-type :txt
-                                                  :doc-name "sample"
-                                                  :output-dir "missing"})]
+        (let [doc (pageindex/build-index nil "Hello" {:content-type :txt
+                                                      :doc-name "sample"
+                                                      :output-dir "missing"})]
           (expect (= "sample" (:document/name doc))))))))
 
 ;; =============================================================================
@@ -453,7 +463,7 @@
         (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
                       com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
                       vision/infer-document-title (fn [_ _] nil)]
-          (let [doc (pageindex/build-index TEST_PDF_PATH)
+          (let [doc (pageindex/build-index nil TEST_PDF_PATH)
                 table-node (->> (get-in doc [:document/pages 0 :page/nodes])
                              (filter #(= :table (:page.node/type %)))
                              first)]
@@ -893,7 +903,7 @@
                       (fn [_ _] nil)
                       com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
                       (fn [_ _] nil)]
-          (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages [2 4]})]
+          (let [doc (pageindex/build-index nil "resources-test/example.pdf" {:pages [2 4]})]
             ;; Pages 2,3,4 (1-indexed) = indices 1,2,3 (0-indexed)
             (expect (= 3 (count (:document/pages doc))))
             (expect (= [1 2 3] (mapv :page/index (:document/pages doc))))))))
@@ -910,7 +920,7 @@
                       (fn [_ _] nil)
                       com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
                       (fn [_ _] nil)]
-          (let [doc (pageindex/build-index "resources-test/example.pdf" {:pages 3})]
+          (let [doc (pageindex/build-index nil "resources-test/example.pdf" {:pages 3})]
             (expect (= 1 (count (:document/pages doc))))
             (expect (= [2] (mapv :page/index (:document/pages doc))))))))
 
@@ -926,7 +936,7 @@
                       (fn [_ _] nil)
                       com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
                       (fn [_ _] nil)]
-          (let [doc (pageindex/build-index "resources-test/example.pdf")]
+          (let [doc (pageindex/build-index nil "resources-test/example.pdf")]
             (expect (= 3 (count (:document/pages doc))))))))
 
     (it "out-of-bounds pages throws"
@@ -942,7 +952,7 @@
                       (fn [_ _] nil)]
            ;; Requesting page 5 of a 1-page document
           (expect (throws? clojure.lang.ExceptionInfo
-                    #(pageindex/build-index "resources-test/example.pdf" {:pages 5}))))))))
+                    #(pageindex/build-index nil "resources-test/example.pdf" {:pages 5}))))))))
 
 (defdescribe extract-text-from-pdf-page-set-test
   (describe "extract-text-from-pdf with :page-set"

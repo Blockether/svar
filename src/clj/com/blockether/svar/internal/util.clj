@@ -1,6 +1,5 @@
 (ns com.blockether.svar.internal.util
   "Shared internal utilities."
-  (:refer-clojure :exclude [parse-uuid])
   (:import
    [java.util UUID]))
 
@@ -25,10 +24,3 @@
   "Returns a new random UUID."
   ^UUID []
   (UUID/randomUUID))
-
-(defn parse-uuid
-  "Parses a string into a UUID. Returns nil on invalid input."
-  ^UUID [^String s]
-  (when s
-    (try (UUID/fromString s)
-         (catch IllegalArgumentException _ nil))))

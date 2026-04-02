@@ -110,7 +110,12 @@
     (spec/field {::spec/name :code
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})))
+                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})
+    (spec/field {::spec/name :carry
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/required false
+                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})))
 
 (def ITERATION_SPEC_CODE_ONLY
   "Spec for RLM iteration response when the provider has native reasoning.
@@ -120,7 +125,12 @@
     (spec/field {::spec/name :code
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})))
+                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})
+    (spec/field {::spec/name :carry
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/required false
+                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})))
 
 (defn bytes->base64
   "Converts raw bytes to a base64 string.
@@ -148,44 +158,7 @@
 
 (def RLM_SCHEMA
   "Datalevin schema for all RLM data. Public so callers can merge into their own DB."
-  {;; Messages (tagged by env-id to distinguish parent vs sub-RLM)
-   ;; :message/content is clean displayable text (user query or final answer).
-   ;; Reasoning lives in :message/thinking. Code + results live in :execution/* entities.
-   :message/id        {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
-   :message/env-id    {:db/valueType :db.type/string :db/doc "RLM environment that wrote this message"}
-   :message/role      {:db/valueType :db.type/keyword}
-   :message/content   {:db/valueType :db.type/string :db/fulltext true}
-   :message/thinking  {:db/valueType :db.type/string :db/doc "Reasoning/thinking content (native model reasoning or spec-parsed)"}
-   :message/tokens    {:db/valueType :db.type/long}
-   :message/timestamp {:db/valueType :db.type/instant}
-   :message/iteration {:db/valueType :db.type/long}
-   :message/result-edn {:db/valueType :db.type/string :db/doc "Full query result as EDN (trace, tokens, cost, answer)"}
-
-   ;; Executions (ordered code blocks + results, linked to assistant messages)
-   ;; One message → N executions. Order preserved via :execution/order.
-   ;; Replaces storing raw response strings — full structure is queryable.
-   :execution/id         {:db/valueType :db.type/uuid   :db/unique :db.unique/identity}
-   :execution/message    {:db/valueType :db.type/ref    :db/doc "Parent message entity"}
-   :execution/order      {:db/valueType :db.type/long   :db/doc "0-based sequence within the message"}
-   :execution/code       {:db/valueType :db.type/string :db/doc "Clojure source code that was executed"}
-   :execution/result-edn {:db/valueType :db.type/string :db/doc "EDN-encoded execution result"}
-   :execution/stdout     {:db/valueType :db.type/string :db/doc "Captured stdout during execution"}
-   :execution/stderr     {:db/valueType :db.type/string :db/doc "Captured stderr during execution"}
-   :execution/error      {:db/valueType :db.type/string :db/doc "Error message if execution failed"}
-   :execution/time-ms    {:db/valueType :db.type/long   :db/doc "Execution time in milliseconds"}
-
-   ;; Tool Calls (recorded during SCI code execution)
-   :tool-call/id          {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
-   :tool-call/env-id      {:db/valueType :db.type/string :db/doc "RLM environment that invoked this tool"}
-   :tool-call/tool-name   {:db/valueType :db.type/string :db/doc "SCI symbol name of the tool called"}
-   :tool-call/input-edn   {:db/valueType :db.type/string :db/doc "EDN-encoded input parameters"}
-   :tool-call/output-edn  {:db/valueType :db.type/string :db/doc "EDN-encoded output (truncated)"}
-   :tool-call/error       {:db/valueType :db.type/string :db/doc "Error message if call failed"}
-   :tool-call/duration-ms {:db/valueType :db.type/long   :db/doc "Execution time in ms"}
-   :tool-call/iteration   {:db/valueType :db.type/long   :db/doc "Which iteration this call happened in"}
-   :tool-call/timestamp   {:db/valueType :db.type/instant}
-
-   ;; Documents
+  {;; Documents
    :document/id         {:db/valueType :db.type/string :db/unique :db.unique/identity}
    :document/name       {:db/valueType :db.type/string}
    :document/title      {:db/valueType :db.type/string :db/fulltext true}
@@ -248,24 +221,6 @@
    :relationship/description      {:db/valueType :db.type/string}
    :relationship/document-id      {:db/valueType :db.type/string}
 
-   ;; Learning Tags (first-class entities with definitions)
-   :learning-tag/name         {:db/valueType :db.type/string :db/unique :db.unique/identity}
-   :learning-tag/definition   {:db/valueType :db.type/string :db/fulltext true}
-   :learning-tag/created-at   {:db/valueType :db.type/instant}
-
-   ;; Learnings
-   :learning/id               {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
-   :learning/insight          {:db/valueType :db.type/string :db/fulltext true}
-   :learning/context          {:db/valueType :db.type/string :db/fulltext true}
-   :learning/tags             {:db/valueType :db.type/string :db/cardinality :db.cardinality/many}
-   :learning/scope            {:db/valueType :db.type/string :db/doc "Glob pattern scoping this learning (nil = global). E.g. *.pdf, contracts/*"}
-   :learning/source           {:db/valueType :db.type/keyword :db/doc "How this learning was created: :manual (LLM stored it) or :auto (auto-extracted)"}
-   :learning/timestamp        {:db/valueType :db.type/instant}
-   :learning/useful-count     {:db/valueType :db.type/long}
-   :learning/not-useful-count {:db/valueType :db.type/long}
-   :learning/applied-count    {:db/valueType :db.type/long}
-   :learning/last-evaluated   {:db/valueType :db.type/instant}
-
    ;; Claims
    :claim/id                   {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
    :claim/text                 {:db/valueType :db.type/string}
@@ -278,6 +233,16 @@
    :claim/verified?            {:db/valueType :db.type/boolean}
    :claim/verification-verdict {:db/valueType :db.type/string}
    :claim/created-at           {:db/valueType :db.type/instant}
+
+   ;; Final Results — persisted across sessions, available as final-result-N vars
+   :final-result/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :final-result/env-id      {:db/valueType :db.type/string  :db/doc "RLM environment that produced this result"}
+   :final-result/index       {:db/valueType :db.type/long    :db/doc "Sequential index (the N in final-result-N)"}
+   :final-result/answer      {:db/valueType :db.type/string  :db/fulltext true :db/doc "The final answer text"}
+   :final-result/confidence  {:db/valueType :db.type/keyword :db/doc ":high, :medium, or :low"}
+   :final-result/summary     {:db/valueType :db.type/string  :db/doc "One-line summary (used as var index docstring)"}
+   :final-result/query       {:db/valueType :db.type/string  :db/fulltext true :db/doc "The user query that produced this result"}
+   :final-result/timestamp   {:db/valueType :db.type/instant}
 
    ;; Raw documents (PageIndex source of truth, stored as EDN string)
    :raw-document/id      {:db/valueType :db.type/string :db/unique :db.unique/identity}
@@ -296,18 +261,6 @@
    :trajectory/timestamp   {:db/valueType :db.type/instant}
    :trajectory/score       {:db/valueType :db.type/long    :db/doc "Quality score for filtering (computed on export)"}
    :trajectory/eval-score  {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0 (from refine!) — answer quality signal"}})
-
-;; -----------------------------------------------------------------------------
-;; Learning Tag CRUD
-;; -----------------------------------------------------------------------------
-
-(def DECAY_THRESHOLD
-  "Learnings with negative vote ratio above this threshold (after min votes) are decayed."
-  0.7)
-
-(def DECAY_MIN_VOTES
-  "Minimum total votes before decay filtering applies."
-  5)
 
 (def BLOOM_DIFFICULTIES
   "Bloom's taxonomy cognitive levels as difficulty progression."

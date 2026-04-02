@@ -18,59 +18,38 @@
         {:content (str "ERROR: " (ex-message e)) :error true})
       (finally (swap! depth-atom dec)))))
 
-(defn- call-hook!
-  [hooks-atom hook-name phase data]
-  (when-let [hooks (some-> hooks-atom deref)]
-    (when-let [hook-fn (get-in hooks [hook-name phase])]
-      (try (hook-fn data) (catch Exception _ nil)))))
-
 (defn make-routed-llm-query-fn
   "Creates an llm-query function that routes across providers via a router.
    Errors are caught and returned as {:content \"ERROR: ...\" :error true} so the
    LLM can see them and adapt (e.g., retry with different approach, call FINAL).
 
    `prefs` — preferences map, e.g. {:strategy :root} or {:prefer :cost :capabilities #{:chat}}"
-  [prefs depth-atom rlm-router & [{:keys [hooks-atom]}]]
+  [prefs depth-atom rlm-router]
   (fn llm-query
     ([prompt]
      (with-depth-tracking depth-atom prefs
        (fn []
-         (call-hook! hooks-atom :llm-call :pre {:prompt prompt :opts nil})
          (let [result (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] prefs)]
-           (call-hook! hooks-atom :llm-call :post {:prompt prompt
-                                                   :response (:content result)
-                                                   :reasoning (:reasoning result)
-                                                   :provider-id (:routed/provider-id result)
-                                                   :model (:routed/model result)
-                                                   :base-url (:routed/base-url result)})
            result))))
     ([prompt opts]
      (with-depth-tracking depth-atom prefs
        (fn []
-         (call-hook! hooks-atom :llm-call :pre {:prompt prompt :opts opts})
          (let [result (if-let [spec (:spec opts)]
-                        (let [r (llm/ask! {:spec spec
-                                           :messages [(llm/user prompt)]
-                                           :router rlm-router
-                                           :prefer (:prefer prefs)
-                                           :strategy (:strategy prefs)
-                                           :capabilities (:capabilities prefs)})]
+                        (let [r (llm/ask! rlm-router {:spec spec
+                                                      :messages [(llm/user prompt)]
+                                                      :prefer (:prefer prefs)
+                                                      :strategy (:strategy prefs)
+                                                      :capabilities (:capabilities prefs)})]
                           {:content (pr-str (:result r))
                            :routed/provider-id (:routed/provider-id r)
                            :routed/model (:routed/model r)
                            :routed/base-url (:routed/base-url r)})
                         (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] prefs))]
-           (call-hook! hooks-atom :llm-call :post {:prompt prompt
-                                                   :response (:content result)
-                                                   :reasoning (:reasoning result)
-                                                   :provider-id (:routed/provider-id result)
-                                                   :model (:routed/model result)
-                                                   :base-url (:routed/base-url result)})
            result))))))
 
 (defn resolve-root-model
   "Resolves the root model name from a router, or falls back to a default.
-   Used for token counting (store-message!)."
+   Used for token counting and cost estimation."
   [rlm-router]
   (when rlm-router
     (when-let [[_provider model-map] (llm/select-provider rlm-router {:strategy :root})]

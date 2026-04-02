@@ -86,3 +86,19 @@
         ^JsonishParser$ParseCandidate best (first candidates)]
     {:value (java->clojure (.value best))
      :warnings (vec (.fixes best))}))
+
+(defn parse-partial
+  "Parses potentially truncated JSON from streaming. Returns the best-effort
+   parsed value or nil if the input can't be parsed at all yet.
+
+   Unlike parse-json, this never throws — it returns nil for unparseable input.
+   Useful for streaming where accumulated text may be mid-token or mid-value."
+  [input]
+  (when (and input (not (str/blank? input)))
+    (try
+      (let [parser (JsonishParser.)
+            result (.parse parser input)
+            value (get result "value")]
+        (when (and value (instance? Map value))
+          (java->clojure value)))
+      (catch Exception _ nil))))

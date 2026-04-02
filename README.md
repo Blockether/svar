@@ -79,13 +79,12 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 ```clojure
 (require '[com.blockether.svar.core :as svar])
 
-;; Configuration reads from OPENAI_API_KEY and OPENAI_BASE_URL env vars.
-;; All API functions create a default config automatically when :config is omitted.
+;; Create a router — the single entry point for all LLM calls.
+;; Every function takes the router as its first argument.
 (comment
-  ;; Explicit config when you need custom settings:
-  (def config (svar/make-config {:api-key "sk-..."
-                                 :base-url "https://api.openai.com/v1"
-                                 :model "gpt-4o"})))
+  (def router (svar/make-router [{:id :openai
+                                  :api-key (System/getenv "OPENAI_API_KEY")
+                                  :models [{:name "gpt-4o"}]}])))
 ```
 
 ## Usage
@@ -141,10 +140,10 @@ SVAR doesn't require your LLM to support structured output mode. Instead, `ask!`
 
 (comment
   (def ask-result
-    (svar/ask! {:spec person-spec
-                :messages [(svar/system "Extract person information from the text.")
-                           (svar/user "John Smith is a 42-year-old engineer.")]
-                :model "gpt-4o"}))
+    (svar/ask! router {:spec person-spec
+                       :messages [(svar/system "Extract person information from the text.")
+                                  (svar/user "John Smith is a 42-year-old engineer.")]
+                       :model "gpt-4o"}))
 
   (:result ask-result)
   ;; => {:name "John Smith", :age 42}
@@ -238,7 +237,7 @@ LLM-based moderation checks content against policies. Combine with static guards
 (comment
   (svar/guard "Hello, how are you?"
     [(svar/static-guard)
-     (svar/moderation-guard {:ask-fn svar/ask!
+     (svar/moderation-guard {:ask-fn (partial svar/ask! router)
                              :policies #{:hate :violence :harassment}})])
   ;; => "Hello, how are you?"
   )
@@ -250,7 +249,7 @@ Violent content is caught by the LLM moderation layer. The exception carries the
 (try
   (svar/guard "I am going to kill you"
     [(svar/static-guard)
-     (svar/moderation-guard {:ask-fn svar/ask!
+     (svar/moderation-guard {:ask-fn (partial svar/ask! router)
                              :policies #{:hate :violence :harassment}})])
   (catch clojure.lang.ExceptionInfo e
     (ex-message e)
@@ -308,11 +307,11 @@ Spec-driven humanization — mark specific fields with `::spec/humanize?` and pa
 
 ;; :summary gets humanized, :score stays as-is
 (comment
-  (svar/ask! {:spec review-spec
-              :messages [(svar/system "Write a brief product review.")
-                         (svar/user "Review this laptop: fast, lightweight, great battery.")]
-              :model "gpt-4o"
-              :humanizer (svar/humanizer)}))
+  (svar/ask! router {:spec review-spec
+                     :messages [(svar/system "Write a brief product review.")
+                                (svar/user "Review this laptop: fast, lightweight, great battery.")]
+                     :model "gpt-4o"
+                     :humanizer (svar/humanizer)}))
 ```
 
 ### Summarization (`abstract!`)
@@ -341,10 +340,10 @@ Basic usage — returns a vector of iterations, each denser than the last:
 (comment
   ;; Live LLM call — produces 3 iterations of progressively denser summaries
   (def result
-    (svar/abstract! {:text "Voyager 1, launched by NASA on September 5, 1977..."
-                     :model "gpt-4o"
-                     :iterations 3
-                     :target-length 80}))
+    (svar/abstract! router {:text "Voyager 1, launched by NASA on September 5, 1977..."
+                            :model "gpt-4o"
+                            :iterations 3
+                            :target-length 80}))
 
   (count result)            ;; => 3
   (-> result first :entities count)  ;; typically 5-10 entities in first pass
@@ -362,10 +361,10 @@ With `:eval? true`, each iteration is scored against the source for faithfulness
 ```clojure
 (comment
   (def scored
-    (svar/abstract! {:text "..."
-                     :model "gpt-4o"
-                     :iterations 3
-                     :eval? true}))
+    (svar/abstract! router {:text "..."
+                            :model "gpt-4o"
+                            :iterations 3
+                            :eval? true}))
 
   ;; Each iteration gets :score (0.0-1.0) — quality typically improves across iterations
   ;; (:score (first scored))  => 0.75
@@ -377,12 +376,12 @@ With `:refine? true`, the final summary is verified against the source via CoVe 
 
 ```clojure
 (comment
-  (svar/abstract! {:text "..."
-                   :model "gpt-4o"
-                   :iterations 3
-                   :eval? true           ;; quality gradient per iteration
-                   :refine? true         ;; CoVe faithfulness verification
-                   :threshold 0.9})      ;; min eval score to trigger refinement
+  (svar/abstract! router {:text "..."
+                          :model "gpt-4o"
+                          :iterations 3
+                          :eval? true           ;; quality gradient per iteration
+                          :refine? true         ;; CoVe faithfulness verification
+                          :threshold 0.9})      ;; min eval score to trigger refinement
   ;; Last iteration includes :refined? true and :refinement-score
   )
 ```
@@ -404,9 +403,9 @@ LLM self-evaluation — scores outputs on accuracy, completeness, relevance, coh
 ```clojure
 (comment
   (def eval-result
-    (svar/eval! {:task "What is the capital of France?"
-                 :output "The capital of France is Paris."
-                 :model "gpt-4o"}))
+    (svar/eval! router {:task "What is the capital of France?"
+                        :output "The capital of France is Paris."
+                        :model "gpt-4o"}))
 
   (:correct? eval-result)
   ;; => true
@@ -418,12 +417,12 @@ Supports custom criteria and ground truths for domain-specific evaluation:
 ```clojure
 (comment
   (def financial-eval
-    (svar/eval! {:task "Summarize the Q3 earnings report."
-                 :output "Revenue grew 15% YoY to $2.3B, driven by cloud services."
-                 :model "gpt-4o"
-                 :criteria {:accuracy "Are the numbers correct?"
-                            :tone "Is the tone appropriate for a financial summary?"}
-                 :ground-truths ["Q3 revenue was $2.3B" "YoY growth was 15%"]}))
+    (svar/eval! router {:task "Summarize the Q3 earnings report."
+                        :output "Revenue grew 15% YoY to $2.3B, driven by cloud services."
+                        :model "gpt-4o"
+                        :criteria {:accuracy "Are the numbers correct?"
+                                   :tone "Is the tone appropriate for a financial summary?"}
+                        :ground-truths ["Q3 revenue was $2.3B" "YoY growth was 15%"]}))
 
   (:correct? financial-eval)
   ;; => true
@@ -439,12 +438,12 @@ Decompose → Verify → Refine loop. Extracts claims from output, verifies each
 ```clojure
 (comment
   (def refine-result
-    (svar/refine! {:spec person-spec
-                   :messages [(svar/system "Extract person information accurately.")
-                              (svar/user "John Smith, age 42, lives in San Francisco.")]
-                   :model "gpt-4o"
-                   :iterations 1
-                   :threshold 0.9}))
+    (svar/refine! router {:spec person-spec
+                          :messages [(svar/system "Extract person information accurately.")
+                                     (svar/user "John Smith, age 42, lives in San Francisco.")]
+                          :model "gpt-4o"
+                          :iterations 1
+                          :threshold 0.9}))
 
   (:name (:result refine-result))
   ;; => "John Smith"
@@ -459,7 +458,7 @@ Lists all models available from your LLM provider.
 
 ```clojure
 (comment
-  (def models (svar/models!))
+  (def models (svar/models! router))
 
   ;; Every model has an :id field
   (every? :id models)
@@ -489,10 +488,10 @@ Generates realistic test data matching a spec, with quality evaluation and self-
 
 (comment
   (def sample-result
-    (svar/sample! {:spec user-spec
-                   :count 3
-                   :model "gpt-4o"
-                   :iterations 1}))
+    (svar/sample! router {:spec user-spec
+                          :count 3
+                          :model "gpt-4o"
+                          :iterations 1}))
 
   ;; Exactly 3 samples generated
   (count (:samples sample-result))
@@ -505,13 +504,13 @@ Supports custom prompts via `:messages` and self-correction via `:iterations`/`:
 ```clojure
 (comment
   (def dating-profiles
-    (svar/sample! {:spec user-spec
-                   :count 2
-                   :messages [(svar/system "Generate realistic dating app profiles.")
-                              (svar/user "Create diverse profiles for users aged 25-40.")]
-                   :model "gpt-4o"
-                   :iterations 2
-                   :threshold 0.9}))
+    (svar/sample! router {:spec user-spec
+                          :count 2
+                          :messages [(svar/system "Generate realistic dating app profiles.")
+                                     (svar/user "Create diverse profiles for users aged 25-40.")]
+                          :model "gpt-4o"
+                          :iterations 2
+                          :threshold 0.9}))
 
   (count (:samples dating-profiles))
   ;; => 2
@@ -797,7 +796,7 @@ RLM enables an LLM to iteratively write and execute Clojure code to examine, fil
 ```clojure
 (comment
   ;; 1. Create environment
-  (def env (svar/create-env {:config config :path "/tmp/my-rlm"}))
+  (def env (svar/create-env router {:path "/tmp/my-rlm"}))
 
   ;; 2. Ingest documents (PageIndex format)
   (svar/ingest-to-env! env documents)

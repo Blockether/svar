@@ -10,12 +10,13 @@
    [clojure.core.async :as async]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.internal.config :as config]
-   [com.blockether.svar.internal.providers :as providers]
+   [com.blockether.svar.internal.defaults :as defaults]
+   [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.spec :as spec]
-   [com.blockether.svar.internal.tokens :as tokens]
    [com.blockether.svar.internal.util :as util]
-   [taoensso.trove :as trove]))
+   [taoensso.trove :as trove])
+  (:import
+   (java.io BufferedReader InputStreamReader)))
 
 ;; =============================================================================
 ;; HTTP Utilities
@@ -272,6 +273,114 @@
                                         :llm-request sanitized-request})
               api-key-error (assoc :api-key-error api-key-error))))))))
 
+;; =============================================================================
+;; SSE Streaming
+;; =============================================================================
+
+(defn- parse-sse-data
+  "Parses a single SSE data line. Returns parsed JSON map or nil for [DONE]."
+  [^String data-str]
+  (let [trimmed (str/trim data-str)]
+    (when-not (or (= trimmed "[DONE]") (str/blank? trimmed))
+      (try
+        (json/read-json trimmed :key-fn keyword)
+        (catch Exception _ nil)))))
+
+(defn- extract-stream-delta
+  "Extracts content and reasoning deltas from a streaming SSE chunk."
+  [chunk]
+  (let [delta (get-in chunk [:choices 0 :delta])
+        raw-content (:content delta)
+        reasoning (or (:reasoning_content delta) (:reasoning delta))]
+    {:content-delta (when (string? raw-content) raw-content)
+     :reasoning-delta (when (string? reasoning) reasoning)
+     :api-usage (:usage chunk)}))
+
+(defn- slurp-input-stream
+  "Safely reads an InputStream to string. Returns nil on failure."
+  [is]
+  (try (slurp is) (catch Exception _ nil)))
+
+(defn- http-post-stream!
+  "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta for each.
+   Returns {:content str :reasoning str :api-usage map}."
+  [url body api-key timeout-ms on-delta]
+  (let [response (try
+                   (http/post url
+                     {:headers {"Authorization" (str "Bearer " api-key)
+                                "Content-Type" "application/json"}
+                      :body (json/write-json-str body)
+                      :timeout timeout-ms
+                      :as :stream})
+                   (catch clojure.lang.ExceptionInfo e
+                     ;; Convert InputStream body to string for error handling
+                     (let [ed (ex-data e)
+                           body-str (when (instance? java.io.InputStream (:body ed))
+                                      (slurp-input-stream (:body ed)))]
+                       (throw (ex-info (ex-message e)
+                                (cond-> (dissoc ed :body)
+                                  body-str (assoc :body body-str))
+                                (ex-cause e))))))
+        input-stream (:body response)]
+    (try
+      (with-open [reader (BufferedReader. (InputStreamReader. input-stream "UTF-8"))]
+        (let [content-acc (StringBuilder.)
+              reasoning-acc (StringBuilder.)
+              usage-atom (atom nil)]
+          (loop []
+            (let [line (.readLine reader)]
+              (when (some? line)
+                (when (str/starts-with? line "data: ")
+                  (let [data-str (subs line 6)]
+                    (when-let [chunk (parse-sse-data data-str)]
+                      (let [{:keys [content-delta reasoning-delta api-usage]} (extract-stream-delta chunk)]
+                        (when content-delta (.append content-acc content-delta))
+                        (when reasoning-delta (.append reasoning-acc reasoning-delta))
+                        (when api-usage (reset! usage-atom api-usage))
+                        (when on-delta
+                          (on-delta {:content-delta content-delta
+                                     :reasoning-delta reasoning-delta
+                                     :content-acc (str content-acc)
+                                     :reasoning-acc (str reasoning-acc)}))))))
+                (recur))))
+          {:content (let [s (str content-acc)] (when-not (str/blank? s) s))
+           :reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
+           :api-usage @usage-atom}))
+      (catch Exception e
+        (throw (ex-info "Stream connection error"
+                 {:type :svar.core/http-error :stream? true :url url}
+                 e))))))
+
+(defn- chat-completion-streaming
+  "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
+   fires on-chunk with accumulated text. Returns same shape as non-streaming."
+  [messages model api-key base-url retry-opts timeout-ms extra-body on-chunk]
+  (let [request-body (-> (build-request-body messages model extra-body)
+                       (assoc :stream true
+                              :stream_options {:include_usage true}))
+        chat-url (if (str/ends-with? base-url "/chat/completions")
+                   base-url
+                   (str base-url "/chat/completions"))]
+    (try
+      (with-retry
+        (fn []
+          (http-post-stream! chat-url request-body api-key timeout-ms
+            (fn [{:keys [content-acc reasoning-acc]}]
+              (on-chunk {:content content-acc :reasoning reasoning-acc}))))
+        retry-opts)
+      (catch Exception e
+        (let [ex-data-map (ex-data e)
+              response-body (let [b (:body ex-data-map)]
+                              (when (string? b) b))
+              api-key-error (detect-api-key-error response-body)
+              error-message (if api-key-error
+                              (str api-key-error " (Original: " (ex-message e) ")")
+                              (ex-message e))]
+          (anomaly/fault! error-message
+            (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
+                                                        :llm-request {:model model :base-url base-url}})
+              api-key-error (assoc :api-key-error api-key-error))))))))
+
 ;; PUBLIC — rlm.clj accesses this directly
 (defn chat-completion
   "Calls the LLM API (OpenAI compatible) with the given messages.
@@ -281,10 +390,11 @@
    `model` - String. Model name.
    `api-key` - String. Bearer token.
    `base-url` - String. API base URL.
-   `opts` - Map, optional. Retry and request options:
-     - :timeout-ms - Integer. Request timeout (default: config/DEFAULT_TIMEOUT_MS).
-     - :extra-body - Map. Additional params to merge into the API request body,
-                     e.g. {:reasoning_effort \"medium\"} for reasoning-capable providers.
+   `opts` - Map, optional:
+     - :timeout-ms - Integer. Request timeout (default: defaults/DEFAULT_TIMEOUT_MS).
+     - :extra-body - Map. Additional params for the API request body.
+     - :on-chunk - Function. When provided, enables SSE streaming. Callback receives
+                   accumulated text string after each chunk.
      - :max-retries, :initial-delay-ms, :max-delay-ms, :multiplier — retry config.
 
    Returns:
@@ -292,10 +402,14 @@
   ([messages model api-key base-url]
    (chat-completion messages model api-key base-url {}))
   ([messages model api-key base-url opts]
-   (let [timeout-ms (get opts :timeout-ms config/DEFAULT_TIMEOUT_MS)
-         extra-body (:extra-body opts)]
-     (chat-completion-with-retry
-       messages model api-key base-url opts timeout-ms extra-body))))
+   (let [timeout-ms (get opts :timeout-ms defaults/DEFAULT_TIMEOUT_MS)
+         extra-body (:extra-body opts)
+         on-chunk (:on-chunk opts)]
+     (if on-chunk
+       (chat-completion-streaming
+         messages model api-key base-url opts timeout-ms extra-body on-chunk)
+       (chat-completion-with-retry
+         messages model api-key base-url opts timeout-ms extra-body)))))
 
 (defn- build-system-prompt
   "Builds the system prompt with the objective wrapped in XML tags."
@@ -386,38 +500,25 @@
 ;; =============================================================================
 
 (defn- resolve-opts
-  "Extracts effective config values from opts, falling back to config defaults.
-   When router already injected :api-key/:base-url/:model, skips config creation.
+  "Extracts effective values from router + opts.
+   Router provides network/tokens defaults. Opts provides per-call overrides.
    If :provider-id is present, uses provider-scoped pricing/context overlays."
-  [{:keys [config model timeout-ms check-context? output-reserve api-key base-url provider-id]}]
-  (let [config (if (and api-key base-url model)
-                 (or config {})
-                 (or config (config/make-config)))
-        {:keys [network tokens]} config
-        default-pricing (or (:pricing tokens) tokens/DEFAULT_MODEL_PRICING)
-        default-context-limits (or (:context-limits tokens) tokens/DEFAULT_CONTEXT_LIMITS)
+  [router {:keys [model timeout-ms check-context? output-reserve api-key base-url provider-id]}]
+  (let [{:keys [network tokens]} router
+        default-pricing (or (:pricing tokens) defaults/DEFAULT_MODEL_PRICING)
+        default-context-limits (or (:context-limits tokens) defaults/DEFAULT_CONTEXT_LIMITS)
         pricing (if provider-id
-                  (assoc default-pricing model (providers/provider-model-pricing provider-id model))
+                  (assoc default-pricing model (defaults/provider-model-pricing provider-id model))
                   default-pricing)
         context-limits (if provider-id
-                         (assoc default-context-limits model (providers/provider-model-context provider-id model))
-                         default-context-limits)
-        resolved-model (or model (:model config))
-        resolved-api-key (or api-key (:api-key config))
-        resolved-base-url (or base-url (:base-url config))
-        ;; Ensure config carries resolved credentials so downstream code
-        ;; that only passes :config still has api-key/base-url/model
-        config (cond-> config
-                 resolved-api-key (assoc :api-key resolved-api-key)
-                 resolved-base-url (assoc :base-url resolved-base-url)
-                 resolved-model (assoc :model resolved-model))]
-    {:config config
-     :model resolved-model
-     :timeout-ms (or timeout-ms (:timeout-ms network) config/DEFAULT_TIMEOUT_MS)
+                         (assoc default-context-limits model (defaults/provider-model-context provider-id model))
+                         default-context-limits)]
+    {:model model
+     :timeout-ms (or timeout-ms (:timeout-ms network) defaults/DEFAULT_TIMEOUT_MS)
      :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
      :output-reserve (or output-reserve (:output-reserve tokens))
-     :api-key resolved-api-key
-     :base-url resolved-base-url
+     :api-key api-key
+     :base-url base-url
      :provider-id provider-id
      :network network
      :pricing pricing
@@ -435,7 +536,10 @@
   {:window-ms              60000
    :cooldown-ms            60000
    :max-wait-ms            30000
-   :transient-status-codes #{429 500 502 503 504}})
+   :transient-status-codes #{429 500 502 503 504}
+   ;; Circuit breaker defaults
+   :cb-failure-threshold   5
+   :cb-recovery-ms         60000})
 
 (def ^:private INTELLIGENCE_ORDER
   {:frontier 4 :high 3 :medium 2 :low 1})
@@ -459,12 +563,125 @@
 (defn- tpm-count [router ps]
   (reduce + 0 (map :n (router-prune-window router (:tokens ps [])))))
 
-(defn- in-cooldown? [router ps]
-  (when-let [until (:cooldown-until ps)]
-    (> until (router-now-ms router))))
+;; =============================================================================
+;; Circuit Breaker — three-state: :closed → :open → :half-open → :closed
+;; =============================================================================
+
+(defn- cb-state
+  "Returns the effective circuit breaker state for a provider, accounting for
+   time-based open→half-open transitions."
+  [router ps]
+  (let [state (or (:cb-state ps) :closed)]
+    (if (and (= state :open)
+          (:cb-open-until ps)
+          (>= (router-now-ms router) (:cb-open-until ps)))
+      :half-open
+      state)))
+
+(defn- cb-available?
+  "Returns true if the circuit breaker allows a request."
+  [router ps]
+  (let [state (cb-state router ps)]
+    (or (= state :closed)
+      (= state :half-open))))
+
+(defn- cb-record-failure!
+  "Records a failure. Transitions closed→open after threshold, half-open→open immediately."
+  [router provider-id is-rate-limit?]
+  (let [now (router-now-ms router)
+        recovery-ms (if is-rate-limit?
+                      (:cooldown-ms router)
+                      (:cb-recovery-ms router))
+        threshold (:cb-failure-threshold router)]
+    (swap! (:state router) update provider-id
+      (fn [ps]
+        (let [current-state (cb-state router ps)
+              new-failures (inc (or (:cb-failures ps) 0))]
+          (if (or (= current-state :half-open)
+                (>= new-failures threshold))
+            (do (trove/log! {:level :warn
+                             :data {:provider provider-id :cb-state :open
+                                    :recovery-ms recovery-ms :failures new-failures
+                                    :trigger (if is-rate-limit? :rate-limit :transient-error)}
+                             :msg "Circuit breaker opened"})
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
+            (assoc ps :cb-failures new-failures)))))))
+
+(defn- cb-record-success!
+  "Records a success. Transitions half-open→closed, resets failure count."
+  [router provider-id]
+  (swap! (:state router) update provider-id
+    (fn [ps]
+      (let [current-state (cb-state router ps)]
+        (if (= current-state :half-open)
+          (do (trove/log! {:level :info :data {:provider provider-id}
+                           :msg "Circuit breaker closed (probe succeeded)"})
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+          ;; In closed state, reset consecutive failures on success
+          (assoc ps :cb-failures 0))))))
+
+;; =============================================================================
+;; Budget — pre-flight rejection when cumulative spend exceeds limits
+;; =============================================================================
+
+(defn- budget-check!
+  "Throws if the router's token budget is exhausted. Called before each request."
+  [router]
+  (when-let [budget (:budget router)]
+    (let [{:keys [total-tokens total-cost]} @(:budget-state router)
+          max-tokens (:max-tokens budget)
+          max-cost (:max-cost budget)]
+      (when (and max-tokens (>= total-tokens max-tokens))
+        (throw (ex-info "Token budget exhausted"
+                 {:type :svar/budget-exhausted
+                  :budget budget
+                  :spent {:tokens total-tokens :cost total-cost}})))
+      (when (and max-cost (>= total-cost max-cost))
+        (throw (ex-info "Cost budget exhausted"
+                 {:type :svar/budget-exhausted
+                  :budget budget
+                  :spent {:tokens total-tokens :cost total-cost}}))))))
+
+(defn- budget-record!
+  "Records token usage and cost against the router's budget."
+  [router provider-id model-name token-count]
+  (when (:budget-state router)
+    (let [pricing (defaults/provider-model-pricing provider-id model-name)
+          ;; Rough split: assume 70% input, 30% output for cost estimation
+          input-tokens (long (* 0.7 (double token-count)))
+          output-tokens (- token-count input-tokens)
+          input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing 5.0)))
+          output-cost (* (/ (double output-tokens) 1000000.0) (double (:output pricing 15.0)))
+          total-cost (+ input-cost output-cost)]
+      (swap! (:budget-state router)
+        (fn [bs]
+          (-> bs
+            (update :total-tokens + token-count)
+            (update :total-cost + total-cost)))))))
+
+;; =============================================================================
+;; Cumulative stats recording
+;; =============================================================================
+
+(defn- record-cumulative!
+  "Records cumulative stats for a provider after a successful request."
+  [router provider-id token-count latency-ms]
+  (swap! (:state router) update provider-id
+    (fn [ps]
+      (-> ps
+        (update-in [:cum :requests] (fnil inc 0))
+        (update-in [:cum :total-tokens] (fnil + 0) (or token-count 0))
+        (update-in [:cum :latencies] (fnil conj []) latency-ms)))))
+
+;; =============================================================================
+;; Provider availability + model selection
+;; =============================================================================
 
 (defn- provider-available? [router provider ps]
-  (and (not (in-cooldown? router ps))
+  (and (cb-available? router ps)
     (< (rpm-count router ps) (:rpm provider Long/MAX_VALUE))
     (< (tpm-count router ps) (:tpm provider Long/MAX_VALUE))))
 
@@ -498,7 +715,6 @@
                           (keyword? prefer) [prefer]
                           :else nil)]
           (if (seq prefs-vec)
-            ;; Multi-criteria sort: build composite key [cost-val speed-val ...]
             (let [key-fns (keep preference-sort-key prefs-vec)]
               (first (sort-by (fn [m] (mapv #(% m) key-fns)) candidates)))
             (first candidates)))))))
@@ -542,14 +758,15 @@
       (filter #(some? (resolve-model % prefs)))
       (keep (fn [p]
               (let [ps (get current-state (:id p) {})
-                    cd (:cooldown-until ps)
-                    cooldown-ready (when (and cd (> cd ts)) cd)
+                    ;; For circuit breaker: use open-until as earliest time
+                    cb-ready (when (= :open (or (:cb-state ps) :closed))
+                               (:cb-open-until ps))
                     requests (sort (mapv #(if (map? %) (:ts %) %)
                                      (router-prune-window router (:requests ps []))))
                     rpm-ready (when (and (seq requests)
                                       (>= (count requests) (:rpm p Long/MAX_VALUE)))
                                 (+ (long (first requests)) window-ms))
-                    times (remove nil? [cooldown-ready rpm-ready])]
+                    times (remove nil? [cb-ready rpm-ready])]
                 (when (seq times) (apply max times)))))
       sort first)))
 
@@ -558,20 +775,6 @@
     (swap! (:state router) update-in [provider-id :tokens]
       (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
 
-(defn- record-rate-limit! [router provider-id]
-  (let [cooldown-ms (:cooldown-ms router)]
-    (trove/log! {:level :warn :data {:provider provider-id :cooldown-ms cooldown-ms}
-                 :msg "Provider rate-limited, entering cooldown"})
-    (swap! (:state router) assoc-in [provider-id :cooldown-until]
-      (+ (router-now-ms router) cooldown-ms))))
-
-(defn- record-transient-error! [router provider-id]
-  (let [short-cooldown-ms (max 5000 (quot (:cooldown-ms router) 4))]
-    (trove/log! {:level :warn :data {:provider provider-id :cooldown-ms short-cooldown-ms}
-                 :msg "Provider transient error, short cooldown"})
-    (swap! (:state router) assoc-in [provider-id :cooldown-until]
-      (+ (router-now-ms router) short-cooldown-ms))))
-
 (defn- router-transient-error? [router e]
   (let [status (:status (ex-data e))
         etype (:type (ex-data e))
@@ -579,7 +782,6 @@
         msg (ex-message e)]
     (boolean
       (or (and status (contains? codes status))
-         ;; HTTP errors with timeout-like messages
         (and (= etype :svar.core/http-error)
           (some-> msg (clojure.string/includes? "timed out")))
         (instance? java.net.ConnectException e)
@@ -589,30 +791,35 @@
                      (instance? java.net.SocketTimeoutException c)))))))))
 
 (defn- with-provider-fallback [router prefs f]
+  (budget-check! router)
   (let [tried (atom #{})
         max-wait-ms (:max-wait-ms router)]
     (loop [attempts 0]
       (if-let [[provider model-map] (select-and-claim! router prefs)]
-        (let [pid (:id provider)]
+        (let [pid (:id provider)
+              start-ms (router-now-ms router)]
           (swap! tried conj pid)
           (let [result (try (f provider model-map)
                             (catch Exception e
                               (if (router-transient-error? router e)
-                                (do (if (= 429 (:status (ex-data e)))
-                                      (record-rate-limit! router pid)
-                                      (record-transient-error! router pid))
+                                (do (cb-record-failure! router pid
+                                      (= 429 (:status (ex-data e))))
                                     ::transient-error)
                                 (throw e))))]
             (if (= result ::transient-error)
               (recur (inc attempts))
-              (do (record-tokens! router pid
-                    (or (get-in result [:api-usage :total_tokens])
-                      (get-in result [:tokens :total])
-                      0))
-                  (assoc result
-                    :routed/provider-id pid
-                    :routed/model (:name model-map)
-                    :routed/base-url (:base-url provider))))))
+              (let [token-count (or (get-in result [:api-usage :total_tokens])
+                                  (get-in result [:tokens :total])
+                                  0)
+                    latency-ms (- (router-now-ms router) start-ms)]
+                (record-tokens! router pid token-count)
+                (cb-record-success! router pid)
+                (record-cumulative! router pid token-count latency-ms)
+                (budget-record! router pid (:name model-map) token-count)
+                (assoc result
+                  :routed/provider-id pid
+                  :routed/model (:name model-map)
+                  :routed/base-url (:base-url provider))))))
         (let [earliest (earliest-available router prefs)]
           (if (and earliest (< attempts 3))
             (let [wait-ms (min (- earliest (router-now-ms router)) max-wait-ms)]
@@ -625,63 +832,129 @@
                      {:type :svar.llm/all-providers-exhausted
                       :prefs prefs :tried @tried}))))))))
 
+;; =============================================================================
+;; Router creation
+;; =============================================================================
+
 (defn make-router
   "Creates a router from a vector of provider maps.
 
    Vector order = priority (first provider is highest priority).
    First model in provider vector = root model.
-   Provider :base-url auto-resolved from providers/KNOWN_PROVIDERS for known IDs.
+   Provider :base-url auto-resolved from defaults/KNOWN_PROVIDERS for known IDs.
    Model metadata auto-inferred from :name and merged with provider-scoped pricing/context.
    Duplicate provider :id values are a hard error.
+
+   `opts` - Optional map:
+     :network   - {:timeout-ms N :max-retries N ...} router-level network defaults
+     :tokens    - {:check-context? bool :pricing {} :context-limits {}} token defaults
+     :budget    - {:max-tokens N :max-cost N} spend limits (nil = no limit)
+     :cb-failure-threshold - Int. Failures before circuit opens (default: 5)
+     :cb-recovery-ms       - Int. Ms before open→half-open (default: 60000)
 
    Example:
      (make-router [{:id :blockether :api-key <key>
                     :models [{:name <model-a>} {:name <model-b>}]}
                    {:id :openai :api-key <key>
-                    :models [{:name <model-a>} {:name <model-b>}]}])"
+                    :models [{:name <model-a>} {:name <model-b>}]}]
+                  {:budget {:max-tokens 1000000 :max-cost 5.0}})"
   ([providers] (make-router providers {}))
   ([providers opts]
    (when-not (sequential? providers)
      (throw (ex-info "make-router expects a vector of provider maps" {:type :svar/invalid-providers :got (type providers)})))
    (when (empty? providers)
      (throw (ex-info "make-router requires at least one provider" {:type :svar/no-providers})))
-   (let [normalized (vec (map-indexed providers/normalize-provider providers))
+   (let [normalized (vec (map-indexed defaults/normalize-provider providers))
          ids (map :id normalized)
          dupes (keys (filter (fn [[_ n]] (> n 1)) (frequencies ids)))
-         merged (merge router-default-opts opts)]
+         merged (merge router-default-opts opts)
+         budget (:budget opts)
+         init-provider-state {:requests [] :tokens []
+                              :cb-state :closed :cb-failures 0 :cb-open-until nil
+                              :cum {:requests 0 :total-tokens 0 :latencies []}}]
      (when (seq dupes)
        (throw (ex-info (str "Duplicate provider IDs: " (str/join ", " (map name dupes)))
                 {:type :svar/duplicate-provider-ids :ids dupes})))
      {:providers              normalized
-      :state                  (atom (zipmap ids (repeat {:requests [] :tokens [] :cooldown-until nil})))
+      :state                  (atom (zipmap ids (repeat init-provider-state)))
+      :budget                 budget
+      :budget-state           (when budget (atom {:total-tokens 0 :total-cost 0.0}))
+      :network                (merge defaults/DEFAULT_RETRY
+                                {:timeout-ms defaults/DEFAULT_TIMEOUT_MS}
+                                (:network opts))
+      :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
+                                                 (if (some? cc) cc true))
+                               :pricing (merge defaults/DEFAULT_MODEL_PRICING
+                                          (:pricing (:tokens opts)))
+                               :context-limits (merge defaults/DEFAULT_CONTEXT_LIMITS
+                                                 (:context-limits (:tokens opts)))
+                               :output-reserve (:output-reserve (:tokens opts))}
       :clock                  (get opts :clock #(System/currentTimeMillis))
       :window-ms              (:window-ms merged)
       :cooldown-ms            (:cooldown-ms merged)
       :max-wait-ms            (:max-wait-ms merged)
+      :cb-failure-threshold   (:cb-failure-threshold merged)
+      :cb-recovery-ms         (:cb-recovery-ms merged)
       :transient-status-codes (:transient-status-codes merged)})))
 
-(defn config->router
-  "Creates a router from a config map.
-   - Config with :providers -> make-router
-   - Simple config or nil -> wraps as single-provider router from env vars"
-  ([] (config->router nil))
-  ([config]
-   (let [config (if (and config (seq (:providers config)))
-                  config  ;; Full provider config — use as-is
-                  (config/make-config (or config {})))]  ;; Simple/empty config — resolve from env vars
-     (if (seq (:providers config))
-       (make-router (:providers config))
-       (let [model-name (or (:model config)
-                          (throw (ex-info "Model name required — pass :model in config or set BLOCKETHER_LLM_DEFAULT_MODEL env var"
-                                   {:type :svar/missing-model})))]
-         (make-router [{:id :default
-                        :api-key (:api-key config)
-                        :base-url (:base-url config)
-                        :models [{:name model-name}]}]))))))
+;; =============================================================================
+;; Router observability + management
+;; =============================================================================
+
+(defn router-stats
+  "Returns cumulative + windowed stats for the router.
+
+   Returns map with :total and :providers keys.
+   :total - Aggregate across all providers.
+   :providers - Map of provider-id to per-provider stats."
+  [router]
+  (let [current-state @(:state router)
+        budget-state (when (:budget-state router) @(:budget-state router))
+        provider-stats
+        (reduce-kv
+          (fn [acc pid ps]
+            (let [windowed-requests (router-prune-window router (:requests ps []))
+                  windowed-tokens (router-prune-window router (:tokens ps []))
+                  cum (or (:cum ps) {})
+                  latencies (or (:latencies cum) [])
+                  avg-latency (if (seq latencies)
+                                (double (/ (reduce + 0 latencies) (count latencies)))
+                                0.0)]
+              (assoc acc pid
+                {:circuit-breaker (cb-state router ps)
+                 :cb-failures (or (:cb-failures ps) 0)
+                 :windowed {:requests (count windowed-requests)
+                            :tokens (reduce + 0 (map :n windowed-tokens))}
+                 :cumulative {:requests (or (:requests cum) 0)
+                              :total-tokens (or (:total-tokens cum) 0)
+                              :avg-latency-ms avg-latency}})))
+          {} current-state)
+        total-requests (reduce + 0 (map #(get-in % [1 :cumulative :requests]) provider-stats))
+        total-tokens (reduce + 0 (map #(get-in % [1 :cumulative :total-tokens]) provider-stats))]
+    (cond-> {:total {:requests total-requests
+                     :tokens total-tokens}
+             :providers provider-stats}
+      budget-state (assoc :budget {:limit (:budget router)
+                                   :spent budget-state}))))
+
+(defn reset-budget!
+  "Resets the router's token/cost budget counters to zero."
+  [router]
+  (when-let [bs (:budget-state router)]
+    (reset! bs {:total-tokens 0 :total-cost 0.0}))
+  router)
+
+(defn reset-provider!
+  "Manually resets a provider's circuit breaker to :closed."
+  [router provider-id]
+  (swap! (:state router) update provider-id
+    (fn [ps]
+      (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil)))
+  router)
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
-   Prefs may include :json-mode? true to force JSON response format."
+   Prefs may include :on-chunk fn for streaming."
   [router messages prefs]
   (with-provider-fallback router prefs
     (fn [provider model-map]
@@ -689,12 +962,10 @@
         (:api-key provider)
         (:base-url provider)
         (cond-> {}
+          (:on-chunk prefs)
+          (assoc :on-chunk (:on-chunk prefs))
           (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
-          (assoc :extra-body (merge (:reasoning-params model-map)
-                               (when (:json-mode? prefs)
-                                 {:response_format {:type "json_object"}})))
-          (and (:json-mode? prefs) (not (seq (:reasoning-params model-map))))
-          (assoc :extra-body {:response_format {:type "json_object"}}))))))
+          (assoc :extra-body (:reasoning-params model-map)))))))
 
 (defn sanitize-config
   [config]
@@ -715,25 +986,22 @@
 
 (defn ask!
   "Structured output with automatic provider routing, fallback, and rate limiting.
-   
-   Accepts all opts that ask!* accepts, plus:
-     :router - Router instance (from make-router or config->router). Auto-created if absent.
+
+   Params:
+   `router` - Router instance from make-router. Required.
+   `opts` - Map. Accepts all opts that ask!* accepts, plus:
      :strategy - :root (use provider's root model, default)
      :prefer - :cost, :intelligence, or :speed (model selection preference)
-     :capabilities - #{:chat :vision ...} (required model capabilities)
-   
-   When no :router is provided, creates one from :config or env vars."
-  [opts]
-  (let [router (or (:router opts)
-                 (config->router (:config opts)))
-        prefs (cond
+     :capabilities - #{:chat :vision ...} (required model capabilities)"
+  [router opts]
+  (let [prefs (cond
                 (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                 :else {:strategy :root})]
     (with-provider-fallback
       router prefs
       (fn [provider model-map]
-        (ask!*
+        (ask!* router
           (assoc opts
             :model (:name model-map)
             :api-key (:api-key provider)
@@ -788,7 +1056,6 @@
      - :spec - Spec definition, required.
      - :messages - Vector of message maps, required.
      - :model - String, required. LLM model to use.
-     - :config - Map, optional. LLM config from make-config.
      - :humanizer - Function, optional. Applied to ::spec/humanize? fields.
      - :output-reserve - Integer, optional.
      - :check-context? - Boolean, optional.
@@ -796,8 +1063,8 @@
    
    Returns:
    Map with :result, :tokens, :cost, :duration-ms."
-  [{:keys [spec messages humanizer] :as opts}]
-  (let [{:keys [model api-key base-url timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts opts)
+  [router {:keys [spec messages humanizer] :as opts}]
+  (let [{:keys [model api-key base-url timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts router opts)
         chat-url (str base-url "/chat/completions")
         schema-prompt (spec/spec->prompt spec)
         ;; Process messages: wrap system content with build-system-prompt
@@ -812,7 +1079,7 @@
         check-opts (cond-> {:context-limits context-limits}
                      output-reserve (assoc :output-reserve output-reserve))
         context-check (when check-context?
-                        (let [check (tokens/check-context-limit model messages check-opts)]
+                        (let [check (defaults/check-context-limit model messages check-opts)]
                           (when-not (:ok? check)
                             (anomaly/incorrect! (:error check)
                               {:type :svar.core/context-overflow
@@ -825,12 +1092,24 @@
                                              (int (* (double (:overflow check)) 0.75)) " words, "
                                              "or use a larger context model.")}))
                           check))
-          ;; API call
-        retry-opts (merge network {:timeout-ms timeout-ms})
+          ;; API call — streaming if :on-chunk provided
+        on-chunk (:on-chunk opts)
+        streaming-on-chunk (when on-chunk
+                             (fn [{:keys [content reasoning]}]
+                               (when-let [partial-map (jsonish/parse-partial content)]
+                                 (let [coerced (try (spec/str->data-with-spec
+                                                      (json/write-json-str partial-map) spec)
+                                                 (catch Exception _ partial-map))]
+                                   (on-chunk {:result coerced
+                                              :reasoning reasoning
+                                              :tokens nil
+                                              :cost nil})))))
+        retry-opts (cond-> (merge network {:timeout-ms timeout-ms})
+                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk))
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
                                                               (chat-completion messages model api-key chat-url retry-opts))
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
-        token-stats (tokens/count-and-estimate model messages content
+        token-stats (defaults/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}
                         context-check (assoc :input-tokens (:input-tokens context-check))))
           ;; Parse response
@@ -861,15 +1140,14 @@
 
 (defn abstract!
   "Routed abstract! — provider fallback + rate limiting."
-  [opts]
-  (let [router (or (:router opts) (config->router (:config opts)))
-        prefs (cond (:strategy opts) (select-keys opts [:strategy])
+  [router opts]
+  (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
     (with-provider-fallback
       router prefs
       (fn [provider model-map]
-        (abstract!*
+        (abstract!* router
           (assoc opts
             :model (:name model-map)
             :api-key (:api-key provider)
@@ -1025,17 +1303,17 @@
 (defn- cod-iteration-step
   "Performs a single Chain of Density iteration step.
    Tracks accumulated entity names across iterations to prevent re-extraction."
-  [source-text target-length resolved-opts special-instructions eval?
+  [router source-text target-length resolved-opts special-instructions eval?
    {:keys [iterations previous-summary accumulated-entities] :as _state}]
   (let [first-iteration? (nil? previous-summary)
         objective (if first-iteration?
                     (build-cod-first-iteration-objective target-length special-instructions)
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary accumulated-entities)
-        ask-resp (ask!* (merge (select-keys resolved-opts [:model :config :api-key :base-url :provider-id])
-                          {:spec (build-cod-spec)
-                           :messages [(system objective)
-                                      (user task)]}))
+        ask-resp (ask!* router (merge (select-keys resolved-opts [:model :api-key :base-url :provider-id])
+                                 {:spec (build-cod-spec)
+                                  :messages [(system objective)
+                                             (user task)]}))
         result (:result ask-resp)
         _ (when-not (map? result)
             (trove/log! {:level :warn
@@ -1050,10 +1328,10 @@
                  (nil? (:summary result))
                  (assoc :summary previous-summary))
         eval-resp (when eval?
-                    (eval!* (merge (select-keys resolved-opts [:model :config :api-key :base-url :provider-id])
-                              {:task (str "Summarize the following text:\n\n" source-text)
-                               :output (:summary result)
-                               :criteria COD_EVAL_CRITERIA})))
+                    (eval!* router (merge (select-keys resolved-opts [:model :api-key :base-url :provider-id])
+                                     {:task (str "Summarize the following text:\n\n" source-text)
+                                      :output (:summary result)
+                                      :criteria COD_EVAL_CRITERIA})))
         result (if eval-resp
                  (assoc result :score (:overall-score eval-resp))
                  result)
@@ -1100,21 +1378,20 @@
    Opts:
      :text - String. Source text to summarize.
      :model - String. LLM model to use.
-     :config - Map, optional. LLM config.
      :iterations - Integer. Number of CoD densification iterations (default: 5).
      :target-length - Integer. Target summary length in words (default: 80).
      :special-instructions - String, optional. Additional instructions for the LLM.
      :eval? - Boolean. Score each iteration for a quality gradient (default: false).
      :refine? - Boolean. Run CoVe faithfulness verification on final summary (default: false).
      :threshold - Float. Min eval score for refinement early stop, 0.0-1.0 (default: 0.9)."
-  [{:keys [text iterations target-length special-instructions eval? refine? threshold] :as opts
-    :or {iterations DEFAULT_ITERATIONS
-         target-length DEFAULT_TARGET_LENGTH
-         eval? false
-         refine? false
-         threshold 0.9}}]
-  (let [resolved (resolve-opts opts)
-        step-fn (partial cod-iteration-step text target-length resolved special-instructions eval?)
+  [router {:keys [text iterations target-length special-instructions eval? refine? threshold] :as opts
+           :or {iterations DEFAULT_ITERATIONS
+                target-length DEFAULT_TARGET_LENGTH
+                eval? false
+                refine? false
+                threshold 0.9}}]
+  (let [resolved (resolve-opts router opts)
+        step-fn (partial cod-iteration-step router text target-length resolved special-instructions eval?)
         initial-state {:iterations [] :previous-summary nil :accumulated-entities []
                        :total-tokens {} :total-cost {}}
         final-state (loop [state initial-state
@@ -1136,18 +1413,18 @@
         [result duration-ms] (util/with-elapsed
                                (if (and refine? (seq cod-iterations))
                                  (let [final-summary (:summary (last cod-iterations))
-                                       refine-result (refine!* (merge (select-keys resolved [:model :config :api-key :base-url :provider-id])
-                                                                 {:spec (build-cod-refinement-spec)
-                                                                  :messages [(system (str "You are verifying and refining a summary for faithfulness. "
-                                                                                       "Every claim in the summary must be grounded in the source text. "
-                                                                                       "Remove any meta-commentary, interpretive framing, or information not present in the source. "
-                                                                                       "Preserve entity density and the ~" target-length " word length constraint."))
-                                                                             (user (str "<source_text>\n" text "\n</source_text>\n\n"
-                                                                                     "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
-                                                                  :iterations 1
-                                                                  :threshold threshold
-                                                                  :documents [{:id "source"
-                                                                               :pages [{:page "0" :text text}]}]}))
+                                       refine-result (refine!* router (merge (select-keys resolved [:model :api-key :base-url :provider-id])
+                                                                        {:spec (build-cod-refinement-spec)
+                                                                         :messages [(system (str "You are verifying and refining a summary for faithfulness. "
+                                                                                              "Every claim in the summary must be grounded in the source text. "
+                                                                                              "Remove any meta-commentary, interpretive framing, or information not present in the source. "
+                                                                                              "Preserve entity density and the ~" target-length " word length constraint."))
+                                                                                    (user (str "<source_text>\n" text "\n</source_text>\n\n"
+                                                                                            "<summary_to_verify>\n" final-summary "\n</summary_to_verify>"))]
+                                                                         :iterations 1
+                                                                         :threshold threshold
+                                                                         :documents [{:id "source"
+                                                                                      :pages [{:page "0" :text text}]}]}))
                                        refined-summary (get-in refine-result [:result :summary]
                                                          (:result refine-result))]
                                    (conj (vec (butlast cod-iterations))
@@ -1316,15 +1593,14 @@
 
 (defn eval!
   "Routed eval! — provider fallback + rate limiting."
-  [opts]
-  (let [router (or (:router opts) (config->router (:config opts)))
-        prefs (cond (:strategy opts) (select-keys opts [:strategy])
+  [router opts]
+  (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
     (with-provider-fallback
       router prefs
       (fn [provider model-map]
-        (eval!*
+        (eval!* router
           (assoc opts
             :model (:name model-map)
             :api-key (:api-key provider)
@@ -1333,10 +1609,10 @@
 
 (defn eval!*
   "Low-level eval — calls ask!* directly without routing. Use eval! instead."
-  [{:keys [task output messages criteria ground-truths context]
-    :as opts
-    :or {criteria EVAL_CRITERIA}}]
-  (let [{:keys [config model]} (resolve-opts opts)
+  [router {:keys [task output messages criteria ground-truths context]
+           :as opts
+           :or {criteria EVAL_CRITERIA}}]
+  (let [{:keys [model]} (resolve-opts router opts)
         ;; Resolve task: explicit :task wins, else extract from :messages
         effective-task (or task
                          (when messages
@@ -1350,11 +1626,10 @@
         eval-task (build-eval-task effective-task output context)
         [{:keys [result tokens cost]} duration-ms]
         (util/with-elapsed
-          (ask!* {:spec eval-spec
-                  :messages [(system objective)
-                             (user eval-task)]
-                  :model model
-                  :config config}))
+          (ask!* router {:spec eval-spec
+                         :messages [(system objective)
+                                    (user eval-task)]
+                         :model model}))
         scores (build-scores result)]
     (assoc result
       :scores scores
@@ -1445,12 +1720,11 @@
 
 (defn- decompose-output
   "Extracts verifiable claims from an LLM output using DuTy-inspired decomposition."
-  [output original-task original-objective model config]
-  (:result (ask!* {:spec (build-decomposition-spec)
-                   :messages [(system (build-decomposition-objective original-objective))
-                              (user (build-decomposition-task original-task output))]
-                   :model model
-                   :config config})))
+  [output original-task original-objective model router]
+  (:result (ask!* router {:spec (build-decomposition-spec)
+                          :messages [(system (build-decomposition-objective original-objective))
+                                     (user (build-decomposition-task original-task output))]
+                          :model model})))
 
 ;; Verification helper functions (truncation, source documents, claim formatting)
 
@@ -1566,12 +1840,11 @@
 
 (defn- plan-verification-questions
   "Step 1 of Factored CoVe: Generate verification questions without answers."
-  [claims original-task original-objective model config]
-  (:result (ask!* {:spec (build-question-planning-spec)
-                   :messages [(system (build-question-planning-objective original-objective))
-                              (user (build-question-planning-task original-task claims))]
-                   :model model
-                   :config config})))
+  [claims original-task original-objective model router]
+  (:result (ask!* router {:spec (build-question-planning-spec)
+                          :messages [(system (build-question-planning-objective original-objective))
+                                     (user (build-question-planning-task original-task claims))]
+                          :model model})))
 
 (defn- build-single-verification-spec
   "Builds the spec for independently verifying a single claim."
@@ -1685,12 +1958,11 @@
 
 (defn- verify-single-claim
   "Step 2 of Factored CoVe: Answer a single verification question independently."
-  [claim-text question model config documents]
-  (:result (ask!* {:spec (build-single-verification-spec (boolean (seq documents)))
-                   :messages [(system (build-single-verification-objective documents))
-                              (user (build-single-verification-task claim-text question documents))]
-                   :model model
-                   :config config})))
+  [claim-text question model router documents]
+  (:result (ask!* router {:spec (build-single-verification-spec (boolean (seq documents)))
+                          :messages [(system (build-single-verification-objective documents))
+                                     (user (build-single-verification-task claim-text question documents))]
+                          :model model})))
 
 (defn- verifiable-claim?
   "Returns true if a claim should be sent to verification."
@@ -1707,7 +1979,7 @@
 
 (defn- verify-claims
   "Verifies extracted claims using Factored CoVe (independent per-claim verification)."
-  [claims original-task original-objective model config documents]
+  [claims original-task original-objective model router documents]
   (let [{:keys [verifiable non-verifiable]} (filter-verifiable-claims claims)]
     (if (empty? verifiable)
       ;; All claims are non-verifiable — return as uncertain
@@ -1721,7 +1993,7 @@
       ;; Factored CoVe
       (let [;; Step 1: Plan verification questions (one LLM call — sees all claims)
             planning-result (plan-verification-questions verifiable original-task
-                              original-objective model config)
+                              original-objective model router)
             planned-questions (:questions planning-result)
 
             ;; Step 2: Answer each question independently (one LLM call per question)
@@ -1729,7 +2001,7 @@
             (mapv (fn [planned-q]
                     (let [claim-text (:claim planned-q)
                           question (:question planned-q)
-                          result (verify-single-claim claim-text question model config documents)]
+                          result (verify-single-claim claim-text question model router documents)]
                       (merge {:claim claim-text :question question} result)))
               planned-questions)
 
@@ -1834,15 +2106,14 @@
 
 (defn- detect-inconsistencies
   "Step 3 of Factor+Revise CoVe: Explicit cross-claim inconsistency detection."
-  [current-output verifications original-objective model config]
+  [current-output verifications original-objective model router]
   (if (< (long (count verifications)) 2)
     ;; Need at least 2 verified claims to detect cross-claim inconsistencies
     {:inconsistencies []}
-    (:result (ask!* {:spec (build-inconsistency-detection-spec)
-                     :messages [(system (build-inconsistency-detection-objective original-objective))
-                                (user (build-inconsistency-detection-task current-output verifications))]
-                     :model model
-                     :config config}))))
+    (:result (ask!* router {:spec (build-inconsistency-detection-spec)
+                            :messages [(system (build-inconsistency-detection-objective original-objective))
+                                       (user (build-inconsistency-detection-task current-output verifications))]
+                            :model model}))))
 
 ;; Refinement functions
 (defn- format-verifications-for-refinement
@@ -1950,7 +2221,7 @@
 (defn- refinement-iteration-step
   "Performs a single refinement iteration:
    decompose -> verify -> detect inconsistencies -> evaluate -> refine."
-  [spec original-objective original-task model config eval-criteria documents
+  [spec original-objective original-task model router eval-criteria documents
    {:keys [current-output iterations iteration-num prompt-evolution] :as _state}]
   (let [iteration (inc (long iteration-num))
 
@@ -1959,35 +2230,33 @@
         (util/with-elapsed
           (let [;; Step 1: Decompose - extract claims from current output
                 decomposition (decompose-output current-output original-task original-objective
-                                model config)
+                                model router)
                 claims (:claims decomposition)
 
                 ;; Step 2: Verify - check claims with independent per-claim verification
-                verification (verify-claims claims original-task original-objective model config documents)
+                verification (verify-claims claims original-task original-objective model router documents)
                 verifications (:verifications verification)
 
                 ;; Step 3: Detect cross-claim inconsistencies (Factor+Revise)
                 inconsistency-result (detect-inconsistencies current-output verifications
-                                       original-objective model config)
+                                       original-objective model router)
                 inconsistencies (or (:inconsistencies inconsistency-result) [])
 
                 ;; Step 4: Evaluate - get quality assessment
-                evaluation (eval!* {:task original-task
-                                    :output current-output
-                                    :model model
-                                    :criteria eval-criteria
-                                    :config config})
+                evaluation (eval!* router {:task original-task
+                                           :output current-output
+                                           :model model
+                                           :criteria eval-criteria})
 
                 ;; Step 5: Refine - generate improved output incorporating all feedback
                 refinement-objective (build-refinement-objective original-objective iteration)
                 refinement-task (build-refinement-task original-task current-output
                                   verifications (:issues evaluation)
                                   inconsistencies)
-                {:keys [result]} (ask!* {:spec spec
-                                         :messages [(system refinement-objective)
-                                                    (user refinement-task)]
-                                         :model model
-                                         :config config})]
+                {:keys [result]} (ask!* router {:spec spec
+                                                :messages [(system refinement-objective)
+                                                           (user refinement-task)]
+                                                :model model})]
             {:claims claims :verifications verifications
              :inconsistencies inconsistencies :evaluation evaluation
              :refined-output result :refinement-objective refinement-objective
@@ -2060,23 +2329,22 @@
    
    Implements the Factor+Revise variant of Chain of Verification (CoVe)
    from Dhuliawala et al. (2023), combined with DuTy decomposition."
-  [{:keys [spec messages iterations threshold stop-strategy
-           window-size criteria documents]
-    :as opts
-    :or {iterations DEFAULT_REFINE_ITERATIONS
-         threshold DEFAULT_REFINE_THRESHOLD
-         stop-strategy :both
-         window-size 3
-         criteria EVAL_CRITERIA}}]
-  (let [{:keys [config model]} (resolve-opts opts)
+  [router {:keys [spec messages iterations threshold stop-strategy
+                  window-size criteria documents]
+           :as opts
+           :or {iterations DEFAULT_REFINE_ITERATIONS
+                threshold DEFAULT_REFINE_THRESHOLD
+                stop-strategy :both
+                window-size 3
+                criteria EVAL_CRITERIA}}]
+  (let [{:keys [model]} (resolve-opts router opts)
          ;; Extract objective/task from messages for internal decompose/verify/eval pipeline
         original-objective (or (->> messages (filter #(= "system" (:role %))) first :content) "")
         original-task (or (->> messages (filter #(= "user" (:role %))) first :content) "")
          ;; Phase 1: Generate initial output
-        {:keys [result]} (ask!* {:spec spec
-                                 :messages messages
-                                 :model model
-                                 :config config})
+        {:keys [result]} (ask!* router {:spec spec
+                                        :messages messages
+                                        :model model})
         initial-output result
 
           ;; Phase 2: Iterative refinement loop
@@ -2087,7 +2355,7 @@
                        :prompt-evolution []}
 
         step-fn (partial refinement-iteration-step
-                  spec original-objective original-task model config criteria documents)
+                  spec original-objective original-task model router criteria documents)
 
           ;; Run iterations until stopping condition met
         [final-state total-duration-ms]
@@ -2102,11 +2370,10 @@
 
           ;; Phase 3: Final evaluation
         final-output (:current-output final-state)
-        final-evaluation (eval!* {:task original-task
-                                  :output final-output
-                                  :model model
-                                  :criteria criteria
-                                  :config config})
+        final-evaluation (eval!* router {:task original-task
+                                         :output final-output
+                                         :model model
+                                         :criteria criteria})
         final-score (:overall-score final-evaluation)
 
           ;; Phase 4: Compute gradient and window
@@ -2137,9 +2404,9 @@
 
 (defn models!
   "Fetches available models from the LLM API."
-  ([] (models! {}))
-  ([opts]
-   (let [{:keys [api-key base-url]} (resolve-opts opts)
+  ([router] (models! router {}))
+  ([router opts]
+   (let [{:keys [api-key base-url]} (resolve-opts router opts)
          models-url (str base-url "/models")
          body (http-get! models-url api-key)
          models (or (:data body) [])]
@@ -2192,15 +2459,14 @@
 
 (defn sample!
   "Routed sample! — provider fallback + rate limiting."
-  [opts]
-  (let [router (or (:router opts) (config->router (:config opts)))
-        prefs (cond (:strategy opts) (select-keys opts [:strategy])
+  [router opts]
+  (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
     (with-provider-fallback
       router prefs
       (fn [provider model-map]
-        (sample!*
+        (sample!* router
           (assoc opts
             :model (:name model-map)
             :api-key (:api-key provider)
@@ -2209,12 +2475,12 @@
 
 (defn sample!*
   "Low-level sample — generates test data without routing. Use sample! instead."
-  [{:keys [spec messages criteria iterations threshold]
-    :as opts
-    n :count
-    :or {criteria SAMPLE_CRITERIA
-         iterations DEFAULT_SAMPLE_ITERATIONS
-         threshold DEFAULT_SAMPLE_THRESHOLD}}]
+  [router {:keys [spec messages criteria iterations threshold]
+           :as opts
+           n :count
+           :or {criteria SAMPLE_CRITERIA
+                iterations DEFAULT_SAMPLE_ITERATIONS
+                threshold DEFAULT_SAMPLE_THRESHOLD}}]
   (if (zero? (long n))
     {:samples []
      :scores {}
@@ -2223,7 +2489,7 @@
      :iterations-count 0
      :duration-ms 0.0}
 
-    (let [{:keys [config model]} (resolve-opts opts)
+    (let [{:keys [model]} (resolve-opts router opts)
 
           ;; Build items spec wrapping user's spec
           item-spec (assoc spec ::spec/spec-name :Item)
@@ -2253,18 +2519,16 @@
                    current-messages generation-messages
                    best-samples nil
                    best-score 0.0]
-              (let [{:keys [result]} (ask!* {:spec items-spec
-                                             :messages current-messages
-                                             :model model
-                                             :config config})
+              (let [{:keys [result]} (ask!* router {:spec items-spec
+                                                    :messages current-messages
+                                                    :model model})
                     current-samples (vec (:items result))
 
                     ;; Evaluate generated samples
-                    evaluation (eval!* {:messages generation-messages
-                                        :output result
-                                        :model model
-                                        :criteria criteria
-                                        :config config})
+                    evaluation (eval!* router {:messages generation-messages
+                                               :output result
+                                               :model model
+                                               :criteria criteria})
                     score (double (:overall-score evaluation))
                     better? (> score (double best-score))
                     new-best-samples (if better? current-samples (or best-samples current-samples))
@@ -2301,18 +2565,16 @@
 
 (defn refine!
   "Routed refine — iterative refinement with provider fallback and rate limiting.
-   Accepts all opts that refine!* accepts, plus :router, :strategy, :prefer, :capabilities."
-  [opts]
-  (let [router (or (:router opts)
-                 (config->router (:config opts)))
-        prefs (cond
+   Accepts all opts that refine!* accepts, plus :strategy, :prefer, :capabilities."
+  [router opts]
+  (let [prefs (cond
                 (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                 :else {:strategy :root})]
     (with-provider-fallback
       router prefs
       (fn [provider model-map]
-        (refine!*
+        (refine!* router
           (assoc opts
             :model (:name model-map)
             :api-key (:api-key provider)

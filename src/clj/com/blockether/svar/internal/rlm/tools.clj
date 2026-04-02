@@ -3,10 +3,10 @@
    [clojure.set :as set]
    [clojure.string :as str]
    [com.blockether.svar.internal.rlm.db :as db
-    :refer [count-history-tokens db-entity-stats db-get-document db-get-entity
+    :refer [db-entity-stats db-get-document db-get-entity
             db-get-page-node db-get-toc-entry db-list-documents db-list-entities
             db-list-page-nodes db-list-relationships db-list-toc-entries db-search-entities db-search-page-nodes
-            db-search-toc-entries db-store-toc-entry! get-recent-messages
+            db-search-toc-entries db-store-toc-entry!
             str-includes? str-lower str-truncate]]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
@@ -76,51 +76,6 @@
 (defn- str-starts-with? [s prefix] (when s (str/starts-with? s prefix)))
 
 (defn- str-ends-with? [s suffix] (when s (str/ends-with? s suffix)))
-
-;; =============================================================================
-;; Stdout Truncation (RLM Paper §3: constant-size metadata)
-;; =============================================================================
-
-(defn truncate-for-history
-  "Truncates output for conversation history, adding length metadata."
-  [s max-chars]
-  (if (or (nil? s) (<= (count s) max-chars))
-    s
-    (str (subs s 0 max-chars)
-      "\n... [" (- (count s) max-chars) " more chars — store in a variable with (def my-var ...)]")))
-
-;; =============================================================================
-;; Raw Text Access (RLM Paper §3: symbolic handle to prompt P)
-;; =============================================================================
-
-(defn build-raw-text
-  "Concatenates all page node content from Datalevin conn into a single string."
-  [conn]
-  (when conn
-    (->> (d/q '[:find [(pull ?e [:page.node/content :page.node/document-id :page.node/page-id :page.node/id]) ...]
-                :where [?e :page.node/id _]]
-           (d/db conn))
-      (sort-by (juxt :page.node/document-id :page.node/page-id :page.node/id))
-      (keep :page.node/content)
-      (str/join "\n"))))
-
-(defn build-page-texts
-  "Builds a vector of page texts indexed by page number across all documents."
-  [conn]
-  (when conn
-    (let [page-nodes (d/q '[:find [(pull ?e [:page.node/content :page.node/page-id :page.node/id]) ...]
-                            :where [?e :page.node/id _]]
-                       (d/db conn))
-          pages (d/q '[:find [(pull ?e [:page/id :page/document-id :page/index]) ...]
-                       :where [?e :page/id _]]
-                  (d/db conn))
-          nodes-by-page (group-by :page.node/page-id page-nodes)
-          sorted-pages (sort-by (juxt :page/document-id :page/index) pages)]
-      (mapv (fn [page]
-              (let [nodes (get nodes-by-page (:page/id page) [])
-                    sorted-nodes (sort-by :page.node/id nodes)]
-                (str/join "\n" (keep :page.node/content sorted-nodes))))
-        sorted-pages))))
 
 ;; =============================================================================
 ;; Debug Logging
@@ -513,97 +468,20 @@
     (vec @claims-atom)))
 
 ;; =============================================================================
-;; History Query Functions (for LLM to call)
-;; =============================================================================
-
-(defn make-search-history-fn
-  "Creates a function for the LLM to get recent conversation history.
-   Takes a number of messages to return (default 5)."
-  [db-info-atom]
-  (fn search-history
-    ([] (search-history 5))
-    ([n]
-     (if-let [db-info @db-info-atom]
-       (let [results (get-recent-messages db-info (or n 5))]
-         (mapv (fn [{:keys [content role tokens]}]
-                 {:role (name role) :content content :tokens tokens})
-           results))
-       []))))
-
-(defn make-get-history-fn
-  "Creates a function for the LLM to get recent conversation history."
-  [db-info-atom]
-  (fn get-history
-    ([] (get-history 10))
-    ([n]
-     (if-let [db-info @db-info-atom]
-       (let [results (get-recent-messages db-info n)]
-         (mapv (fn [{:keys [content role tokens]}]
-                 {:role (name role) :content content :tokens tokens})
-           results))
-       []))))
-
-(defn make-history-stats-fn
-  "Creates a function for the LLM to get history statistics."
-  [db-info-atom]
-  (fn history-stats []
-    (if-let [db-info @db-info-atom]
-      (let [total-tokens (count-history-tokens db-info)
-            recent (get-recent-messages db-info 100)]
-        {:total-messages (count recent)
-         :total-tokens total-tokens
-         :by-role (frequencies (map :role recent))})
-      {:total-messages 0 :total-tokens 0 :by-role {}})))
-
-;; =============================================================================
 ;; SCI Context Creation
 ;; =============================================================================
 
 (defn create-sci-context
   "Creates the SCI sandbox context with all available bindings.
-   
+
    Params:
    `context-data` - The data context to analyze
    `llm-query-fn` - Function for simple LLM text queries
-   `rlm-query-fn` - Function for sub-RLM queries (shares DB) - can be nil
-   `locals-atom` - Atom for storing local variables
    `db-info-atom` - Atom with database info (can be nil)
    `custom-bindings` - Map of symbol->value for custom bindings (can be nil)"
-  [context-data llm-query-fn rlm-query-fn locals-atom db-info-atom custom-bindings]
+  [context-data llm-query-fn db-info-atom custom-bindings]
   (let [base-bindings {'context context-data
                        'llm-query llm-query-fn
-                       'FINAL (fn
-                                ([answer]
-                                 (let [v (realize-value answer)
-                                       v (if (and (map? v) (vector? (:answer v)))
-                                           (clojure.string/join (map str (:answer v)))
-                                           v)]
-                                   {:rlm/final true :rlm/answer {:result v :type (type v)}
-                                    :rlm/confidence (if (map? answer) (get answer :confidence :high) :high)
-                                    :rlm/sources (when (map? answer) (get answer :sources))
-                                    :rlm/reasoning (when (map? answer) (get answer :reasoning))}))
-                                ([answer opts]
-                                 (let [v (realize-value answer)
-                                       v (if (vector? v)
-                                           (clojure.string/join (map str v))
-                                           v)]
-                                   {:rlm/final true
-                                    :rlm/answer {:result v :type (type v)}
-                                    :rlm/confidence (get opts :confidence :high)
-                                    :rlm/sources (get opts :sources)
-                                    :rlm/reasoning (get opts :reasoning)})))
-
-                       ;; Locals inspection tools - LLM can check its own state on demand
-                       'list-locals (fn []
-                                      (into {}
-                                        (map (fn [[k v]]
-                                               [k (cond
-                                                    (fn? v) '<fn>
-                                                    (and (coll? v) (> (count v) 10))
-                                                    (str "<" (type v) " with " (count v) " items>")
-                                                    :else v)])
-                                          @locals-atom)))
-                       'get-local (fn [var-name] (get @locals-atom var-name))
                        'spec spec/spec
                        'field spec/field
                        'str-join str-join 'str-split str-split 'str-replace str-replace
@@ -615,15 +493,8 @@
                        'parse-date parse-date 'date-before? date-before? 'date-after? date-after?
                        'days-between days-between 'date-plus-days date-plus-days
                        'date-minus-days date-minus-days 'date-format date-format 'today-str today-str}
-        ;; Add rlm-query if available (for sub-RLM queries sharing the same DB)
-        rlm-bindings (when rlm-query-fn
-                       {'rlm-query rlm-query-fn})
         db-bindings (when db-info-atom
-                      {;; History query functions - let LLM access its own conversation
-                       'search-history (make-search-history-fn db-info-atom)
-                       'get-history (make-get-history-fn db-info-atom)
-                       'history-stats (make-history-stats-fn db-info-atom)
-                       ;; Document functions - list/get stored documents
+                      {;; Document functions - list/get stored documents
                        'list-documents (make-list-documents-fn db-info-atom)
                        'get-document (make-get-document-fn db-info-atom)
                        ;; Document page functions - search returns brief metadata, P-add! fetches full content
@@ -641,40 +512,10 @@
                        'list-document-entities (make-list-entities-fn db-info-atom)
                        'list-document-relationships (make-list-relationships-fn db-info-atom)
                        'document-entity-stats (make-entity-stats-fn db-info-atom)})
-        ;; Raw text access (RLM paper §3: symbolic handle to P)
-        ;; P = the symbolic handle to the input. Per the paper: P lives as a variable
-        ;; in the REPL, NOT in the context window. The LLM uses (subs P 0 1000),
-        ;; (re-seq #"pattern" P), (P-page n), etc. to explore it programmatically.
-        ;;
-        ;; P is the structured workspace — the ENTIRE context surface the LLM sees.
-        ;; :last-iteration — auto-managed by system, last execution results
-        ;; :context        — vector of strings, LLM-managed working memory
-        p-atom (atom {:context []})
-        raw-text-bindings {'P-atom p-atom
-                           'P p-atom
-                           ;; Context management — stack of strings (newest last, oldest trimmed first)
-                           'ctx-add! (fn [text]
-                                       (swap! p-atom update :context conj (str text))
-                                       (str "Added to context (" (count (:context @p-atom)) " items)"))
-                           'ctx-remove! (fn [idx]
-                                          (swap! p-atom update :context
-                                            (fn [ctx]
-                                              (let [i (if (neg? idx) (+ (count ctx) idx) idx)]
-                                                (into (subvec ctx 0 i) (subvec ctx (inc i))))))
-                                          (str "Removed from context (" (count (:context @p-atom)) " items)"))
-                           'ctx-clear! (fn [] (swap! p-atom assoc :context []) "Context cleared")
-                           'ctx-replace! (fn [from-idx to-idx replacement]
-                                           (swap! p-atom update :context
-                                             (fn [ctx]
-                                               (let [before (subvec ctx 0 from-idx)
-                                                     after  (when (< (inc to-idx) (count ctx))
-                                                              (subvec ctx (inc to-idx)))]
-                                                 (into (conj before (str replacement))
-                                                   (or after [])))))
-                                           (str "Replaced [" from-idx "-" to-idx "] (" (count (:context @p-atom)) " items)"))}
-        all-bindings (merge SAFE_BINDINGS base-bindings rlm-bindings db-bindings
-                       raw-text-bindings
-                       (or custom-bindings {}))
+        inject-atom (atom nil)
+        all-bindings (merge SAFE_BINDINGS base-bindings db-bindings
+                       (or custom-bindings {})
+                       {'__inject__ inject-atom})
         sci-ctx (sci/init {:namespaces {'user all-bindings
                                         'clojure.string {'split str/split 'join str/join 'replace str/replace
                                                          'trim str/trim 'lower-case str/lower-case 'upper-case str/upper-case
@@ -695,32 +536,69 @@
                                      'java.util.UUID java.util.UUID}
                            :deny '[require import ns eval load-string read-string]})]
     {:sci-ctx sci-ctx
-     :p-atom p-atom
+     :inject-atom inject-atom
      :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))}))
+
+;; =============================================================================
+;; Var Index
+;; =============================================================================
+
+(defn build-var-index
+  "Builds a formatted var index table from user-def'd vars in the SCI context.
+   Filters out initial bindings (tools, helpers) using initial-ns-keys.
+   Returns nil if no user vars exist.
+
+   Each row shows: name | type | size | doc
+   Doc comes from Clojure docstrings on def."
+  [sci-ctx initial-ns-keys]
+  (try
+    (let [var-info (sci/eval-string* sci-ctx
+                     "(into {} (for [[s v] (ns-publics 'user)] [s {:val @v :doc (:doc (meta v))}]))")
+          entries (->> var-info
+                    (remove (fn [[sym _]] (contains? initial-ns-keys sym)))
+                    (remove (fn [[_ {:keys [val]}]] (fn? val)))
+                    (sort-by key)
+                    (mapv (fn [[sym {:keys [val doc]}]]
+                            (let [type-label (cond
+                                               (nil? val) "nil"
+                                               (map? val) "map"
+                                               (vector? val) "vector"
+                                               (set? val) "set"
+                                               (sequential? val) "seq"
+                                               (string? val) "string"
+                                               (integer? val) "int"
+                                               (float? val) "float"
+                                               (boolean? val) "bool"
+                                               (keyword? val) "keyword"
+                                               (symbol? val) "symbol"
+                                               :else (.getSimpleName (class val)))
+                                  size (cond
+                                         (nil? val) "\u2014"
+                                         (string? val) (str (count val) " chars")
+                                         (coll? val) (str (count val) " items")
+                                         :else "\u2014")]
+                              {:name (str sym) :type type-label :size size
+                               :doc (if doc (str-truncate doc 80) "\u2014")}))))]
+      (when (seq entries)
+        (let [max-name (max 4 (apply max (map #(count (:name %)) entries)))
+              max-type (max 4 (apply max (map #(count (:type %)) entries)))
+              max-size (max 4 (apply max (map #(count (:size %)) entries)))
+              pad (fn [s n] (str s (apply str (repeat (max 0 (- n (count s))) \space))))
+              header (str "  " (pad "name" max-name) " | " (pad "type" max-type) " | " (pad "size" max-size) " | doc")
+              sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+----")
+              rows (map (fn [{:keys [name type size doc]}]
+                          (str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc))
+                     entries)]
+          (str/join "\n" (concat [header sep] rows)))))
+    (catch Exception _ nil)))
 
 ;; =============================================================================
 ;; SCI Context Helpers
 ;; =============================================================================
 
-(defn sci-user-vars
-  "Returns a vector of user-defined vars from a SCI context.
-   Only shows vars created AFTER initialization (excludes all built-ins).
-   Excludes internal _rN auto-store vars, function bindings (tool fns),
-   and nil/unbound values."
-  [sci-ctx initial-ns-keys]
-  (when sci-ctx
-    (try
-      (let [ns-vars (sci/eval-string* sci-ctx "(ns-publics 'user)")]
-        (->> ns-vars
-          (remove (fn [[k _]] (contains? initial-ns-keys k)))
-          (keep (fn [[k v]]
-                  (let [val (try @v (catch Exception _ nil))]
-                    (when (and (some? val) (not (fn? val)))
-                      {:name (str k) :value val :type (str (type val))}))))))
-      (catch Exception _ nil))))
-
 (defn sci-update-binding!
-  "Update a binding in an existing SCI context via locals-atom."
-  [sci-ctx locals-atom sym val]
-  (swap! locals-atom assoc sym val)
-  (sci/eval-string* sci-ctx (str "(def " sym " (get-local '" sym "))")))
+  "Update a binding in an existing SCI context via inject-atom.
+   Sets the inject-atom to val, then evals (def sym @__inject__) in SCI."
+  [sci-ctx inject-atom sym val]
+  (reset! inject-atom val)
+  (sci/eval-string* sci-ctx (str "(def " sym " @__inject__)")))

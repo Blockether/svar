@@ -30,7 +30,7 @@
      RLM (`create-env`, `register-env-fn!`, `register-env-def!`, `ingest-to-env!`, `dispose-env!`,
      `query-env!`, `pprint-trace`, `print-trace`, `generate-qa-env!`),
      PageIndex (`index!`, `load-index`), and
-     `make-config` so users can require only this namespace.
+     `make-router` so users can require only this namespace.
    
    Configuration:
    LLM calls route automatically by default. You can still pass :config for backward compatibility,
@@ -48,7 +48,6 @@
    - DuTy: https://learnprompting.org/docs/advanced/decomposition/duty-distinct-chain-of-thought
    - CoVe: https://learnprompting.org/docs/advanced/self_criticism/chain_of_verification"
   (:require
-   [com.blockether.svar.internal.config :as config]
    [com.blockether.svar.internal.guard :as guard]
    [com.blockether.svar.internal.humanize :as humanize]
    [com.blockether.svar.internal.llm :as llm]
@@ -56,13 +55,28 @@
    [com.blockether.svar.internal.spec :as spec]))
 
 ;; =============================================================================
-;; Re-export config functions
+;; Re-export router functions
 ;; =============================================================================
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def make-config
-  "Creates an LLM configuration map. See internal.config for details."
-  config/make-config)
+(def make-router
+  "Creates a router from a vector of provider maps. See internal.llm for details."
+  llm/make-router)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def router-stats
+  "Returns cumulative + windowed stats for the router."
+  llm/router-stats)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def reset-budget!
+  "Resets the router's token/cost budget counters to zero."
+  llm/reset-budget!)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def reset-provider!
+  "Manually resets a provider's circuit breaker to :closed."
+  llm/reset-provider!)
 
 ;; =============================================================================
 ;; Re-export spec DSL
@@ -444,13 +458,6 @@
   rlm/RLM_SCHEMA)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def make-default-hooks
-  "Build Datalevin-backed hook/data callbacks from a db-info atom.
-   Use to create hooks backed by your own DB for unified storage.
-   Pass the result as :hooks to create-env."
-  rlm/make-default-hooks)
-
-#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def create-env
   "Creates an RLM environment for processing large contexts via iterative code execution.
    Accepts :conn for unified DB, :path for standalone, or neither for temp DB.
@@ -536,7 +543,6 @@
      images/      — extracted images as PNG files
    
    Opts:
-     :config          - LLM config override
      :pages           - Page selector (1-indexed). Limits which pages are indexed.
                         Supports: integer, [from to] range, or [[1 3] 5 [7 10]] mixed.
                         nil = all pages (default).

@@ -1,10 +1,8 @@
 (ns com.blockether.svar.internal.rlm.db
   (:require
    [babashka.fs :as fs]
-   [clojure.edn :as edn]
    [clojure.string :as str]
    [com.blockether.svar.internal.rlm.schema :refer [RLM_SCHEMA]]
-   [com.blockether.svar.internal.tokens :as tokens]
    [datalevin.core :as d]
    [com.blockether.svar.internal.util :as util]
    [taoensso.trove :as trove]))
@@ -27,7 +25,7 @@
    - path: persistent DB at given path. Svar owns and closes it.
    - neither: temp DB (deleted on dispose).
 
-   For unified storage, pass :conn AND :hooks callbacks to create-env."
+   For unified storage, pass :conn to create-env."
   [{:keys [conn path]}]
   (if conn
     {:conn conn :path nil :owned? false}
@@ -48,85 +46,9 @@
       (catch Exception e
         (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to delete temp RLM DB"})))))
 
-(declare get-recent-messages)
 (declare db-list-page-nodes)
 (declare db-list-toc-entries)
 (declare db-list-entities)
-
-;; =============================================================================
-;; Message History (Datalevin-backed)
-;; =============================================================================
-
-(defn store-message!
-  "Stores a conversation message.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `role` - Keyword. :user, :assistant, or :system.
-   `content` - String. Clean displayable content (user query text or final answer).
-   `opts` - Map, optional:
-     - :iteration - Integer. Which iteration this message is from.
-     - :thinking - String. Reasoning/thinking content (native or spec-parsed).
-     - :tokens - Integer. Pre-computed token count (computed if not provided).
-     - :model - String. Model for token counting (default: gpt-4o).
-     - :env-id - String. RLM environment ID (distinguishes parent vs sub-RLM).
-
-   Returns:
-   Map with :id, :role, :content, :tokens, :timestamp, :thinking."
-  ([db-info role content]
-   (store-message! db-info role content {}))
-  ([{:keys [conn]} role content {:keys [iteration thinking tokens model env-id result-edn]}]
-   (when (and conn (not (str/blank? content)))
-     (let [msg-id (util/uuid)
-           token-count (or tokens
-                         (try
-                           (tokens/count-tokens model content)
-                           (catch Exception _ (quot (count content) 4))))
-           timestamp (java.util.Date.)
-           msg (cond-> {:message/id msg-id
-                        :message/role role
-                        :message/content content
-                        :message/tokens token-count
-                        :message/timestamp timestamp
-                        :message/iteration (or iteration 0)}
-                 env-id (assoc :message/env-id env-id)
-                 (not (str/blank? thinking)) (assoc :message/thinking thinking)
-                 (not (str/blank? result-edn)) (assoc :message/result-edn result-edn))]
-       (d/transact! conn [msg])
-       {:id msg-id :role role :content content :tokens token-count :timestamp timestamp
-        :thinking thinking}))))
-
-(defn store-executions!
-  "Stores ordered execution entities linked to a message.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `msg-id` - UUID. The parent message's :message/id.
-   `executions` - Vector of execution maps from run-iteration, each with:
-     :id (order), :code, :result, :stdout, :stderr, :error, :execution-time-ms
-
-   Returns:
-   Vector of execution UUIDs."
-  [{:keys [conn]} msg-id executions]
-  (when (and conn (seq executions))
-    (let [;; Look up the message entity db-id by its :message/id UUID
-          msg-eid (d/q '[:find ?e .
-                         :in $ ?mid
-                         :where [?e :message/id ?mid]]
-                    (d/db conn) msg-id)
-          entities (mapv (fn [{:keys [id code result stdout stderr error execution-time-ms]}]
-                           (cond-> {:execution/id (util/uuid)
-                                    :execution/order (long id)
-                                    :execution/code (or code "")}
-                             msg-eid       (assoc :execution/message msg-eid)
-                             result        (assoc :execution/result-edn (pr-str result))
-                             (seq stdout)  (assoc :execution/stdout stdout)
-                             (seq stderr)  (assoc :execution/stderr stderr)
-                             error         (assoc :execution/error error)
-                             execution-time-ms (assoc :execution/time-ms (long execution-time-ms))))
-                     executions)]
-      (d/transact! conn entities)
-      (mapv :execution/id entities))))
 
 (defn store-trajectory!
   "Stores a trajectory record for training data collection.
@@ -146,80 +68,6 @@
                                   :trajectory/timestamp (java.util.Date.)}
                            eval-score (assoc :trajectory/eval-score (float eval-score)))])
       traj-id)))
-
-(defn format-execution
-  "Converts a raw Datalevin execution entity to a clean map.
-   Parses :result-edn back into :result so consumers get the proper
-   data structure (including :rlm/final detection) without manual parsing."
-  [e]
-  (let [result-edn (:execution/result-edn e)
-        result     (when result-edn
-                     (try (edn/read-string result-edn) (catch Exception _ nil)))]
-    (cond-> {:id (:execution/id e)
-             :order (:execution/order e)
-             :code (:execution/code e)}
-      result     (assoc :result result)
-      (:execution/stdout e)     (assoc :stdout (:execution/stdout e))
-      (:execution/stderr e)     (assoc :stderr (:execution/stderr e))
-      (:execution/error e)      (assoc :error (:execution/error e))
-      (:execution/time-ms e)    (assoc :time-ms (:execution/time-ms e)))))
-
-(defn get-recent-messages
-  "Gets the most recent messages by timestamp, with executions embedded.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `limit` - Integer. Maximum messages to return.
-
-   Returns:
-   Vector of full message maps sorted most-recent first, each with:
-   :id, :content, :thinking, :role, :tokens, :timestamp, :iteration, :executions.
-   :executions is a vector of ordered execution maps (empty for non-assistant messages)."
-  [{:keys [conn]} limit]
-  (when conn
-    (->> (d/q '[:find [(pull ?e [:message/id :message/content :message/thinking
-                                 :message/role :message/tokens :message/timestamp
-                                 :message/iteration :message/result-edn
-                                 {:execution/_message [:execution/id :execution/order :execution/code
-                                                       :execution/result-edn :execution/stdout
-                                                       :execution/stderr :execution/error
-                                                       :execution/time-ms]}]) ...]
-                :where [?e :message/id _]]
-           (d/db conn))
-         ;; Filter out system messages — they contain the full system prompt
-      (remove #(= :system (:message/role %)))
-      (sort-by :message/timestamp #(compare %2 %1))
-      (take limit)
-      (mapv (fn [m]
-              (let [raw-execs (:execution/_message m)
-                    execs (when (seq raw-execs)
-                            (->> raw-execs
-                              (sort-by :execution/order)
-                              (mapv format-execution)))]
-                (cond-> {:id (:message/id m)
-                         :content (:message/content m)
-                         :role (:message/role m)
-                         :tokens (:message/tokens m)
-                         :timestamp (:message/timestamp m)
-                         :iteration (:message/iteration m)
-                         :executions (or execs [])}
-                  (:message/thinking m) (assoc :thinking (:message/thinking m))
-                  (:message/result-edn m) (assoc :result-edn (:message/result-edn m)))))))))
-
-(defn count-history-tokens
-  "Counts total tokens in message history.
-
-   Params:
-   `db-info` - Map with :conn key.
-
-   Returns:
-   Integer. Total tokens across all stored messages."
-  [{:keys [conn]}]
-  (when conn
-    (let [tokens (d/q '[:find ?tokens
-                        :where [?e :message/tokens ?tokens]]
-                   (d/db conn))]
-      (reduce + 0 (map first tokens)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Document Storage
@@ -709,6 +557,60 @@
        :types types-map
        :total-relationships rel-count})
     {:total-entities 0 :types {} :total-relationships 0}))
+
+;; -----------------------------------------------------------------------------
+;; Final Result Persistence
+;; -----------------------------------------------------------------------------
+
+(defn db-store-final-result!
+  "Stores a final result in Datalevin for cross-session persistence.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `result` - Map with :answer, :confidence, :summary keys.
+   `query` - String. The user query that produced this result.
+   `env-id` - String. RLM environment ID.
+
+   Returns:
+   Map with :final-result/id and :final-result/index."
+  [{:keys [conn]} result query env-id]
+  (when conn
+    (let [;; Count existing final results to determine next index
+          existing (d/q '[:find (count ?e) .
+                          :where [?e :final-result/id _]]
+                     (d/db conn))
+          idx (inc (or existing 0))
+          id (util/uuid)
+          entity {:final-result/id id
+                  :final-result/env-id (or env-id "unknown")
+                  :final-result/index idx
+                  :final-result/answer (str (:answer result))
+                  :final-result/confidence (or (:confidence result) :high)
+                  :final-result/summary (or (:summary result) "")
+                  :final-result/query (or query "")
+                  :final-result/timestamp (java.util.Date.)}]
+      (d/transact! conn [entity])
+      {:final-result/id id :final-result/index idx})))
+
+(defn db-list-final-results
+  "Lists all final results from Datalevin, ordered by index.
+
+   Params:
+   `db-info` - Map with :conn key.
+
+   Returns:
+   Vector of maps with :final-result/* keys."
+  [{:keys [conn]}]
+  (if conn
+    (->> (d/q '[:find [(pull ?e [:final-result/id :final-result/index
+                                 :final-result/answer :final-result/confidence
+                                 :final-result/summary :final-result/query
+                                 :final-result/timestamp]) ...]
+                :where [?e :final-result/id _]]
+           (d/db conn))
+      (sort-by :final-result/index)
+      vec)
+    []))
 
 ;; -----------------------------------------------------------------------------
 ;; High-Level Document Storage

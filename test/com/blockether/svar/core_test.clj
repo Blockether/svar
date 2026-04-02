@@ -13,6 +13,14 @@
    [com.blockether.svar.internal.spec :as spec]))
 
 ;; =============================================================================
+;; Test Router (replaces make-config)
+;; =============================================================================
+
+(def ^:private test-router
+  "Router for unit tests — mocked LLM calls never reach the network."
+  (svar/make-router [{:id :test :api-key "sk-test" :base-url "http://test" :models [{:name "gpt-4o"}]}]))
+
+;; =============================================================================
 ;; Test Helpers (local to this file)
 ;; =============================================================================
 
@@ -83,7 +91,7 @@
    Function suitable for with-redefs on ask!."
   [initial-result refined-result]
   (let [call-count (atom 0)]
-    (fn [{:keys [messages]}]
+    (fn [_router {:keys [messages]}]
       (swap! call-count inc)
       (let [objective (extract-system-content messages)]
         (cond
@@ -123,13 +131,14 @@
   (describe "return shape"
     (it "returns map with required keys: :result, :final-score, :converged?, :iterations-count"
       (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "Paris"} {:answer "Paris"})
-                      :eval (fn [_opts] (make-mock-eval-response 0.95))}
-        (let [result (svar/refine! {:spec test-spec
-                                    :messages [(svar/system "Answer geography questions.")
-                                               (svar/user "What is the capital of France?")]
-                                    :model "gpt-4o"
-                                    :iterations 1
-                                    :threshold 0.9})]
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.95))}
+        (let [result (svar/refine! test-router
+                       {:spec test-spec
+                        :messages [(svar/system "Answer geography questions.")
+                                   (svar/user "What is the capital of France?")]
+                        :model "gpt-4o"
+                        :iterations 1
+                        :threshold 0.9})]
           (expect (map? result))
           (expect (contains? result :result))
           (expect (contains? result :final-score))
@@ -146,17 +155,18 @@
     (it "runs up to max iterations with default settings (3)"
       (let [eval-call-count (atom 0)]
         (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "v1"} {:answer "v2"})
-                        :eval (fn [_opts]
+                        :eval (fn [_router _opts]
                                 (swap! eval-call-count inc)
                                  ;; Return low score so it never converges
                                 (make-mock-eval-response 0.3))}
 
-          (let [result (svar/refine! {:spec test-spec
-                                      :messages [(svar/system "Test objective.")
-                                                 (svar/user "Test task.")]
-                                      :model "gpt-4o"
+          (let [result (svar/refine! test-router
+                         {:spec test-spec
+                          :messages [(svar/system "Test objective.")
+                                     (svar/user "Test task.")]
+                          :model "gpt-4o"
                                        ;; Use defaults: iterations=3, threshold=0.9
-                                      })]
+                          })]
             ;; Default is 3 iterations
             (expect (= 3 (:iterations-count result)))
             (expect (false? (:converged? result)))))))
@@ -164,17 +174,18 @@
     (it "early-stops when score >= threshold (0.9)"
       (let [eval-scores (atom [0.95])] ;; First eval returns high score
         (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "perfect"} {:answer "perfect"})
-                        :eval (fn [_opts]
+                        :eval (fn [_router _opts]
                                 (let [score (or (first @eval-scores) 0.95)]
                                   (swap! eval-scores rest)
                                   (make-mock-eval-response score)))}
 
-          (let [result (svar/refine! {:spec test-spec
-                                      :messages [(svar/system "Test objective.")
-                                                 (svar/user "Test task.")]
-                                      :model "gpt-4o"
-                                      :iterations 5
-                                      :threshold 0.9})]
+          (let [result (svar/refine! test-router
+                         {:spec test-spec
+                          :messages [(svar/system "Test objective.")
+                                     (svar/user "Test task.")]
+                          :model "gpt-4o"
+                          :iterations 5
+                          :threshold 0.9})]
             ;; Should converge after 0 refinement iterations because
             ;; the initial eval score (0.95) already meets threshold.
             ;; After initial ask!, the loop checks should-stop? with score=0 first,
@@ -186,13 +197,13 @@
   (describe "backward compatibility"
     (it "works without :documents key (baseline for future extension)"
       (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "42"} {:answer "42"})
-                      :eval (fn [_opts] (make-mock-eval-response 0.85))}
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.85))}
 
-        (let [result (svar/refine! {:spec test-spec
-                                    :messages [(svar/system "Answer math questions.")
-                                               (svar/user "What is 6 * 7?")]
-                                    :model "gpt-4o"
-                                    :iterations 1})]
+        (let [result (svar/refine! test-router {:spec test-spec
+                                                :messages [(svar/system "Answer math questions.")
+                                                           (svar/user "What is 6 * 7?")]
+                                                :model "gpt-4o"
+                                                :iterations 1})]
           ;; refine! should work without :documents parameter
           (expect (map? result))
           (expect (some? (:result result)))
@@ -203,38 +214,38 @@
   (describe "result content"
     (it "final result is the last refined output"
       (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "initial"} {:answer "refined"})
-                      :eval (fn [_opts] (make-mock-eval-response 0.5))}
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.5))}
 
-        (let [result (svar/refine! {:spec test-spec
-                                    :messages [(svar/system "Test.")
-                                               (svar/user "Test.")]
-                                    :model "gpt-4o"
-                                    :iterations 1})]
+        (let [result (svar/refine! test-router {:spec test-spec
+                                                :messages [(svar/system "Test.")
+                                                           (svar/user "Test.")]
+                                                :model "gpt-4o"
+                                                :iterations 1})]
           ;; The result should be the refined version, not the initial
           (expect (= {:answer "refined"} (:result result))))))
 
     (it "final-score is a number between 0 and 1"
       (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "test"} {:answer "test"})
-                      :eval (fn [_opts] (make-mock-eval-response 0.75))}
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.75))}
 
-        (let [result (svar/refine! {:spec test-spec
-                                    :messages [(svar/system "Test.")
-                                               (svar/user "Test.")]
-                                    :model "gpt-4o"
-                                    :iterations 1})]
+        (let [result (svar/refine! test-router {:spec test-spec
+                                                :messages [(svar/system "Test.")
+                                                           (svar/user "Test.")]
+                                                :model "gpt-4o"
+                                                :iterations 1})]
           (expect (number? (:final-score result)))
           (expect (>= (:final-score result) 0.0))
           (expect (<= (:final-score result) 1.0)))))
 
     (it "iterations vector tracks refinement history"
       (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "v1"} {:answer "v2"})
-                      :eval (fn [_opts] (make-mock-eval-response 0.6))}
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.6))}
 
-        (let [result (svar/refine! {:spec test-spec
-                                    :messages [(svar/system "Test.")
-                                               (svar/user "Test.")]
-                                    :model "gpt-4o"
-                                    :iterations 2})]
+        (let [result (svar/refine! test-router {:spec test-spec
+                                                :messages [(svar/system "Test.")
+                                                           (svar/user "Test.")]
+                                                :model "gpt-4o"
+                                                :iterations 2})]
           (expect (vector? (:iterations result)))
           (expect (= (:iterations-count result) (count (:iterations result))))
           ;; Each iteration record should have expected keys
@@ -253,15 +264,15 @@
 (defdescribe abstract!-baseline-test
   (describe "return shape"
     (it "returns a map with :result vector of iteration maps"
-      (with-mock-llm {:ask (fn [{:keys [_objective]}]
+      (with-mock-llm {:ask (fn [_router {:keys [_objective]}]
                              (make-mock-ask-response
                                {:entities [{:entity "Test Entity" :rationale "Central topic" :score 0.9}]
                                 :summary "A test summary."}))}
 
-        (let [response (svar/abstract! {:text "Some article text for summarization."
-                                        :model "gpt-4o"
-                                        :iterations 2
-                                        :target-length 80})
+        (let [response (svar/abstract! test-router {:text "Some article text for summarization."
+                                                    :model "gpt-4o"
+                                                    :iterations 2
+                                                    :target-length 80})
               result (:result response)]
           (expect (map? response))
           (expect (contains? response :tokens))
@@ -270,15 +281,15 @@
           (expect (= 2 (count result))))))
 
     (it "each iteration has :entities and :summary keys"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:entities [{:entity "Alpha" :rationale "Key concept" :score 0.85}
                                            {:entity "Beta" :rationale "Supporting concept" :score 0.6}]
                                 :summary "Iteration summary."}))}
 
-        (let [response (svar/abstract! {:text "Article text."
-                                        :model "gpt-4o"
-                                        :iterations 1})
+        (let [response (svar/abstract! test-router {:text "Article text."
+                                                    :model "gpt-4o"
+                                                    :iterations 1})
               iter (first (:result response))]
           (expect (contains? iter :entities))
           (expect (contains? iter :summary))
@@ -287,15 +298,15 @@
 
   (describe "entity structure"
     (it "entities are maps with :entity, :rationale, and :score"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:entities [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
                                            {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
                                 :summary "Summary."}))}
 
-        (let [response (svar/abstract! {:text "ACME Corp reported earnings."
-                                        :model "gpt-4o"
-                                        :iterations 1})
+        (let [response (svar/abstract! test-router {:text "ACME Corp reported earnings."
+                                                    :model "gpt-4o"
+                                                    :iterations 1})
               entities (:entities (first (:result response)))]
           (expect (= [{:entity "ACME Corp" :rationale "Main company discussed" :score 0.95}
                       {:entity "earnings report" :rationale "Key financial document" :score 0.7}]
@@ -307,16 +318,16 @@
   (describe "iteration progression"
     (it "passes previous summary and accumulated entities to subsequent iterations"
       (let [call-log (atom [])]
-        (with-mock-llm {:ask (fn [{:keys [messages]}]
+        (with-mock-llm {:ask (fn [_router {:keys [messages]}]
                                (let [user-content (->> messages (filter #(= "user" (:role %))) first :content)]
                                  (swap! call-log conj user-content))
                                (make-mock-ask-response
                                  {:entities [{:entity "Entity A" :rationale "Salient" :score 0.8}]
                                   :summary "Dense summary."}))}
 
-          (svar/abstract! {:text "Source text."
-                           :model "gpt-4o"
-                           :iterations 2})
+          (svar/abstract! test-router {:text "Source text."
+                                       :model "gpt-4o"
+                                       :iterations 2})
                     ;; First call has no previous_summary tag
           (expect (not (re-find #"previous_summary" (first @call-log))))
                     ;; Second call includes previous_summary
@@ -331,7 +342,7 @@
 (defdescribe eval!-baseline-test
   (describe "return shape"
     (it "returns map with required keys"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:correct? true
                                 :overall-score 0.92
@@ -342,9 +353,9 @@
                                             :reasoning "Correct."}]
                                 :issues []}))}
 
-        (let [result (llm/eval! {:task "What is 2+2?"
-                                 :output "4"
-                                 :model "gpt-4o"})]
+        (let [result (llm/eval! test-router {:task "What is 2+2?"
+                                             :output "4"
+                                             :model "gpt-4o"})]
           (expect (boolean? (:correct? result)))
           (expect (number? (:overall-score result)))
           (expect (string? (:summary result)))
@@ -353,7 +364,7 @@
           (expect (number? (:duration-ms result))))))
 
     (it "builds scores map from criteria"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:correct? true
                                 :overall-score 0.88
@@ -362,7 +373,7 @@
                                            {:name "completeness" :score 0.80 :confidence 0.85 :reasoning "OK"}]
                                 :issues []}))}
 
-        (let [result (llm/eval! {:task "Test" :output "Test" :model "gpt-4o"})]
+        (let [result (llm/eval! test-router {:task "Test" :output "Test" :model "gpt-4o"})]
           (expect (= 0.95 (:accuracy (:scores result))))
           (expect (= 0.80 (:completeness (:scores result))))
           (expect (= 0.88 (:overall (:scores result))))))))
@@ -370,7 +381,7 @@
   (describe "custom criteria"
     (it "passes custom criteria through to objective"
       (let [ask-args (atom nil)]
-        (with-mock-llm {:ask (fn [opts]
+        (with-mock-llm {:ask (fn [_router opts]
                                (reset! ask-args opts)
                                (make-mock-ask-response
                                  {:correct? true
@@ -379,17 +390,17 @@
                                   :criteria [{:name "tone" :score 0.9 :confidence 0.8 :reasoning "OK"}]
                                   :issues []}))}
 
-          (llm/eval! {:task "Summarize report."
-                      :output "Revenue grew 15%."
-                      :model "gpt-4o"
-                      :criteria {:tone "Is the tone appropriate?"}})
+          (llm/eval! test-router {:task "Summarize report."
+                                  :output "Revenue grew 15%."
+                                  :model "gpt-4o"
+                                  :criteria {:tone "Is the tone appropriate?"}})
                     ;; System message should mention the custom criterion
           (expect (some? (re-find #"tone" (extract-system-content (:messages @ask-args)))))))))
 
   (describe "ground truths"
     (it "includes ground truths in objective when provided"
       (let [ask-args (atom nil)]
-        (with-mock-llm {:ask (fn [opts]
+        (with-mock-llm {:ask (fn [_router opts]
                                (reset! ask-args opts)
                                (make-mock-ask-response
                                  {:correct? true
@@ -398,10 +409,10 @@
                                   :criteria []
                                   :issues []}))}
 
-          (llm/eval! {:task "What is 2+2?"
-                      :output "4"
-                      :model "gpt-4o"
-                      :ground-truths ["2+2 equals 4"]})
+          (llm/eval! test-router {:task "What is 2+2?"
+                                  :output "4"
+                                  :model "gpt-4o"
+                                  :ground-truths ["2+2 equals 4"]})
                     ;; System message should contain ground_truths section
           (let [sys-content (extract-system-content (:messages @ask-args))]
             (expect (some? (re-find #"ground_truths" sys-content)))
@@ -409,7 +420,7 @@
 
   (describe "issues reporting"
     (it "includes issues when present"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:correct? false
                                 :overall-score 0.3
@@ -420,9 +431,9 @@
                                           :confidence 0.95
                                           :reasoning "2+2 is not 5"}]}))}
 
-        (let [result (llm/eval! {:task "What is 2+2?"
-                                 :output "5"
-                                 :model "gpt-4o"})]
+        (let [result (llm/eval! test-router {:task "What is 2+2?"
+                                             :output "5"
+                                             :model "gpt-4o"})]
           (expect (false? (:correct? result)))
           (expect (= 1 (count (:issues result))))
           (expect (= "high" (:severity (first (:issues result))))))))))
@@ -508,7 +519,7 @@
   (describe "messages as task source"
     (it "extracts task from user message when :messages provided"
       (let [ask-args (atom nil)]
-        (with-mock-llm {:ask (fn [opts]
+        (with-mock-llm {:ask (fn [_router opts]
                                (reset! ask-args opts)
                                (make-mock-ask-response
                                  {:correct? true
@@ -517,9 +528,9 @@
                                   :criteria []
                                   :issues []}))}
 
-          (llm/eval! {:messages [(svar/user "What is the capital of France?")]
-                      :output "Paris"
-                      :model "gpt-4o"})
+          (llm/eval! test-router {:messages [(svar/user "What is the capital of France?")]
+                                  :output "Paris"
+                                  :model "gpt-4o"})
                     ;; The user message content from eval task should contain the task text
           (let [user-msg (->> (:messages @ask-args)
                            (filter #(= "user" (:role %)))
@@ -528,7 +539,7 @@
 
     (it "extracts from system + user messages (non-assistant, joined)"
       (let [ask-args (atom nil)]
-        (with-mock-llm {:ask (fn [opts]
+        (with-mock-llm {:ask (fn [_router opts]
                                (reset! ask-args opts)
                                (make-mock-ask-response
                                  {:correct? true
@@ -537,10 +548,10 @@
                                   :criteria []
                                   :issues []}))}
 
-          (llm/eval! {:messages [(svar/system "You are a geography expert.")
-                                 (svar/user "What is the capital of France?")]
-                      :output "Paris"
-                      :model "gpt-4o"})
+          (llm/eval! test-router {:messages [(svar/system "You are a geography expert.")
+                                             (svar/user "What is the capital of France?")]
+                                  :output "Paris"
+                                  :model "gpt-4o"})
                     ;; Both system and user content should appear in the eval task
           (let [user-msg (->> (:messages @ask-args)
                            (filter #(= "user" (:role %)))
@@ -551,7 +562,7 @@
   (describe "backward compatibility"
     (it ":task still works without :messages"
       (let [ask-args (atom nil)]
-        (with-mock-llm {:ask (fn [opts]
+        (with-mock-llm {:ask (fn [_router opts]
                                (reset! ask-args opts)
                                (make-mock-ask-response
                                  {:correct? true
@@ -560,9 +571,9 @@
                                   :criteria []
                                   :issues []}))}
 
-          (llm/eval! {:task "What is 2+2?"
-                      :output "4"
-                      :model "gpt-4o"})
+          (llm/eval! test-router {:task "What is 2+2?"
+                                  :output "4"
+                                  :model "gpt-4o"})
           (let [user-msg (->> (:messages @ask-args)
                            (filter #(= "user" (:role %)))
                            first :content)]
@@ -570,7 +581,7 @@
 
     (it ":task takes precedence when both :task and :messages provided"
       (let [ask-args (atom nil)]
-        (with-mock-llm {:ask (fn [opts]
+        (with-mock-llm {:ask (fn [_router opts]
                                (reset! ask-args opts)
                                (make-mock-ask-response
                                  {:correct? true
@@ -579,10 +590,10 @@
                                   :criteria []
                                   :issues []}))}
 
-          (llm/eval! {:task "explicit task text"
-                      :messages [(svar/user "message task text")]
-                      :output "some output"
-                      :model "gpt-4o"})
+          (llm/eval! test-router {:task "explicit task text"
+                                  :messages [(svar/user "message task text")]
+                                  :output "some output"
+                                  :model "gpt-4o"})
           (let [user-msg (->> (:messages @ask-args)
                            (filter #(= "user" (:role %)))
                            first :content)]
@@ -593,7 +604,7 @@
 
   (describe "return shape preserved"
     (it "returns all expected keys when using :messages"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:correct? true
                                 :overall-score 0.92
@@ -601,9 +612,9 @@
                                 :criteria [{:name "accuracy" :score 0.95 :confidence 0.9 :reasoning "OK"}]
                                 :issues []}))}
 
-        (let [result (llm/eval! {:messages [(svar/user "Test task")]
-                                 :output "Test output"
-                                 :model "gpt-4o"})]
+        (let [result (llm/eval! test-router {:messages [(svar/user "Test task")]
+                                             :output "Test output"
+                                             :model "gpt-4o"})]
           (expect (boolean? (:correct? result)))
           (expect (number? (:overall-score result)))
           (expect (string? (:summary result)))
@@ -619,9 +630,9 @@
 
   (describe "zero count edge case"
     (it "returns empty result with zero count"
-      (let [result (svar/sample! {:spec test-spec
-                                  :count 0
-                                  :model "gpt-4o"})]
+      (let [result (svar/sample! test-router {:spec test-spec
+                                              :count 0
+                                              :model "gpt-4o"})]
         (expect (= [] (:samples result)))
         (expect (= {} (:scores result)))
         (expect (= 0.0 (:final-score result)))
@@ -631,14 +642,14 @@
 
   (describe "return shape"
     (it "returns map with all expected keys"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:items [{:answer "alpha"} {:answer "beta"}]}))
-                      :eval (fn [_] (make-mock-eval-response 0.95))}
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.95))}
 
-        (let [result (svar/sample! {:spec test-spec
-                                    :count 2
-                                    :model "gpt-4o"})]
+        (let [result (svar/sample! test-router {:spec test-spec
+                                                :count 2
+                                                :model "gpt-4o"})]
           (expect (contains? result :samples))
           (expect (contains? result :scores))
           (expect (contains? result :final-score))
@@ -648,14 +659,14 @@
 
   (describe "basic generation"
     (it "returns generated samples when score meets threshold"
-      (with-mock-llm {:ask (fn [_]
+      (with-mock-llm {:ask (fn [_router _opts]
                              (make-mock-ask-response
                                {:items [{:answer "one"} {:answer "two"} {:answer "three"}]}))
-                      :eval (fn [_] (make-mock-eval-response 0.95))}
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.95))}
 
-        (let [result (svar/sample! {:spec test-spec
-                                    :count 3
-                                    :model "gpt-4o"})]
+        (let [result (svar/sample! test-router {:spec test-spec
+                                                :count 3
+                                                :model "gpt-4o"})]
           (expect (= 3 (count (:samples result))))
           (expect (= "one" (:answer (first (:samples result)))))
           (expect (true? (:converged? result)))
@@ -665,39 +676,39 @@
     (it "runs multiple iterations when score below threshold"
       (let [ask-call-count (atom 0)
             eval-scores (atom [0.3 0.95])]
-        (with-mock-llm {:ask (fn [_]
+        (with-mock-llm {:ask (fn [_router _opts]
                                (swap! ask-call-count inc)
                                (make-mock-ask-response
                                  {:items [{:answer (str "v" @ask-call-count)}]}))
-                        :eval (fn [_]
+                        :eval (fn [_router _opts]
                                 (let [score (first @eval-scores)]
                                   (swap! eval-scores rest)
                                   (make-mock-eval-response (or score 0.95))))}
 
-          (let [result (svar/sample! {:spec test-spec
-                                      :count 1
-                                      :model "gpt-4o"
-                                      :iterations 3
-                                      :threshold 0.9})]
+          (let [result (svar/sample! test-router {:spec test-spec
+                                                  :count 1
+                                                  :model "gpt-4o"
+                                                  :iterations 3
+                                                  :threshold 0.9})]
                       ;; Should have run 2 iterations (first low, second high)
             (expect (= 2 (:iterations-count result)))
             (expect (true? (:converged? result)))))))
 
     (it "keeps best samples across iterations"
       (let [eval-call-count (atom 0)]
-        (with-mock-llm {:ask (fn [_]
+        (with-mock-llm {:ask (fn [_router _opts]
                                (make-mock-ask-response
                                  {:items [{:answer "sample"}]}))
-                        :eval (fn [_]
+                        :eval (fn [_router _opts]
                                 (swap! eval-call-count inc)
                                            ;; All low scores — never converges
                                 (make-mock-eval-response 0.3))}
 
-          (let [result (svar/sample! {:spec test-spec
-                                      :count 1
-                                      :model "gpt-4o"
-                                      :iterations 2
-                                      :threshold 0.99})]
+          (let [result (svar/sample! test-router {:spec test-spec
+                                                  :count 1
+                                                  :model "gpt-4o"
+                                                  :iterations 2
+                                                  :threshold 0.99})]
             (expect (= 2 (:iterations-count result)))
             (expect (false? (:converged? result)))
                       ;; Should still have samples (best from all iterations)
@@ -706,17 +717,17 @@
   (describe "custom messages"
     (it "passes user messages to ask! with count instruction appended"
       (let [captured-messages (atom nil)]
-        (with-mock-llm {:ask (fn [{:keys [messages]}]
+        (with-mock-llm {:ask (fn [_router {:keys [messages]}]
                                (reset! captured-messages messages)
                                (make-mock-ask-response
                                  {:items [{:answer "x"}]}))
-                        :eval (fn [_] (make-mock-eval-response 0.95))}
+                        :eval (fn [_router _opts] (make-mock-eval-response 0.95))}
 
-          (svar/sample! {:spec test-spec
-                         :count 3
-                         :messages [(svar/system "Generate dating profiles.")
-                                    (svar/user "Make them diverse.")]
-                         :model "gpt-4o"})
+          (svar/sample! test-router {:spec test-spec
+                                     :count 3
+                                     :messages [(svar/system "Generate dating profiles.")
+                                                (svar/user "Make them diverse.")]
+                                     :model "gpt-4o"})
           (let [msgs @captured-messages
                           ;; First message is system from user, second is user from user,
                           ;; third is appended count instruction, then schema prompt from ask!
@@ -731,17 +742,17 @@
   (describe "iteration control"
     (it "respects :iterations 1 — runs exactly once"
       (let [ask-call-count (atom 0)]
-        (with-mock-llm {:ask (fn [_]
+        (with-mock-llm {:ask (fn [_router _opts]
                                (swap! ask-call-count inc)
                                (make-mock-ask-response
                                  {:items [{:answer "only"}]}))
-                        :eval (fn [_] (make-mock-eval-response 0.1))}
+                        :eval (fn [_router _opts] (make-mock-eval-response 0.1))}
 
-          (let [result (svar/sample! {:spec test-spec
-                                      :count 1
-                                      :model "gpt-4o"
-                                      :iterations 1
-                                      :threshold 0.99})]
+          (let [result (svar/sample! test-router {:spec test-spec
+                                                  :count 1
+                                                  :model "gpt-4o"
+                                                  :iterations 1
+                                                  :threshold 0.99})]
             (expect (= 1 (:iterations-count result)))
             (expect (= 1 @ask-call-count))))))))
 
@@ -794,12 +805,27 @@
 ;; =============================================================================
 
 (defn- integration-tests-enabled?
-  "Returns true if LLM integration tests should run.
-   SVAR's make-config auto-reads BLOCKETHER_LLM_API_KEY (primary)
-   and OPENAI_API_KEY (fallback)."
+  "Returns true if LLM integration tests should run."
   []
   (or (some? (System/getenv "BLOCKETHER_LLM_API_KEY"))
     (some? (System/getenv "OPENAI_API_KEY"))))
+
+(defn- make-integration-router
+  "Creates a router for real LLM calls from env vars.
+   Asserts if no API key — integration tests must have credentials."
+  []
+  (let [api-key (or (System/getenv "BLOCKETHER_LLM_API_KEY")
+                  (System/getenv "BLOCKETHER_OPENAI_API_KEY")
+                  (System/getenv "OPENAI_API_KEY"))
+        _ (assert api-key "Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY to run integration tests")
+        base-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
+                   (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
+                   (System/getenv "OPENAI_BASE_URL")
+                   "https://api.openai.com/v1")]
+    (svar/make-router [{:id :integration
+                         :api-key api-key
+                         :base-url base-url
+                         :models [{:name "gpt-4o"}]}])))
 
 ;; =============================================================================
 ;; Chain of Density — Unit Tests (no API key needed)
@@ -873,10 +899,10 @@
   (describe "basic Chain of Density with Voyager text"
     (it "produces iterations with entities and summaries"
       (when (integration-tests-enabled?)
-        (let [raw (svar/abstract! {:text VOYAGER_TEXT
-                                   :model "gpt-4o"
-                                   :iterations 3
-                                   :target-length 80})
+        (let [raw (svar/abstract! test-router {:text VOYAGER_TEXT
+                                               :model "gpt-4o"
+                                               :iterations 3
+                                               :target-length 80})
               result (:result raw)]
                     ;; Shape checks
           (expect (vector? result))
@@ -926,10 +952,10 @@
 
     (it "later iterations accumulate more entities without re-extraction"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! {:text VOYAGER_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 3
-                                               :target-length 80}))
+        (let [result (:result (svar/abstract! test-router {:text VOYAGER_TEXT
+                                                           :model "gpt-4o"
+                                                           :iterations 3
+                                                           :target-length 80}))
                         ;; Total entity count should grow across iterations
               cumulative-entities (reductions
                                     (fn [acc iter] (into acc (map :entity (:entities iter))))
@@ -948,10 +974,10 @@
   (describe "basic Chain of Density with CRISPR text"
     (it "handles technical scientific text"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 2
-                                               :target-length 60}))]
+        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
+                                                           :model "gpt-4o"
+                                                           :iterations 2
+                                                           :target-length 60}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -986,11 +1012,11 @@
   (describe "with :eval? quality scoring"
     (it "each iteration gets a numeric score reflecting quality"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 2
-                                               :target-length 60
-                                               :eval? true}))]
+        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
+                                                           :model "gpt-4o"
+                                                           :iterations 2
+                                                           :target-length 60
+                                                           :eval? true}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1010,12 +1036,12 @@
   (describe "with :refine? CoVe verification"
     (it "last iteration is marked as refined"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 2
-                                               :target-length 60
-                                               :refine? true
-                                               :threshold 0.9}))]
+        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
+                                                           :model "gpt-4o"
+                                                           :iterations 2
+                                                           :target-length 60
+                                                           :refine? true
+                                                           :threshold 0.9}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1035,13 +1061,13 @@
   (describe "with :eval? and :refine? combined"
     (it "produces scored iterations with refined final summary"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! {:text CRISPR_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 2
-                                               :target-length 60
-                                               :eval? true
-                                               :refine? true
-                                               :threshold 0.9}))]
+        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
+                                                           :model "gpt-4o"
+                                                           :iterations 2
+                                                           :target-length 60
+                                                           :eval? true
+                                                           :refine? true
+                                                           :threshold 0.9}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1055,11 +1081,11 @@
   (describe "with :special-instructions"
     (it "date-focused instructions produce mostly temporal entities"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! {:text VOYAGER_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 2
-                                               :target-length 60
-                                               :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."}))
+        (let [result (:result (svar/abstract! test-router {:text VOYAGER_TEXT
+                                                           :model "gpt-4o"
+                                                           :iterations 2
+                                                           :target-length 60
+                                                           :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."}))
                         ;; Collect all first-iteration entities (where special instructions have strongest effect)
               iter1-entities (:entities (first result))
               _iter1-names (mapv :entity iter1-entities)]
@@ -1079,10 +1105,10 @@
   (describe "target-length control"
     (it "produces summaries near the target word count"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! {:text VOYAGER_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 2
-                                               :target-length 50}))
+        (let [result (:result (svar/abstract! test-router {:text VOYAGER_TEXT
+                                                           :model "gpt-4o"
+                                                           :iterations 2
+                                                           :target-length 50}))
               word-count (fn [s] (count (str/split (str/trim s) #"\s+")))]
           (expect (vector? result))
                     ;; Summaries should be within reasonable range of target (50 words ± 50%)
@@ -1113,10 +1139,10 @@
                               svar/TYPE svar/TYPE_INT
                               svar/CARDINALITY svar/CARDINALITY_ONE
                               svar/DESCRIPTION "Age in years"))
-              result (svar/ask! {:spec person-spec
-                                 :messages [(svar/system "Extract person data from the text.")
-                                            (svar/user "Alexander is 18 years old.")]
-                                 :model "claude-opus-4-6"})]
+              result (svar/ask! test-router {:spec person-spec
+                                             :messages [(svar/system "Extract person data from the text.")
+                                                        (svar/user "Alexander is 18 years old.")]
+                                             :model "claude-opus-4-6"})]
           ;; ask! returns {:result <data> :tokens :cost :duration-ms}
           (expect (map? result))
           (expect (some? (:result result)))
@@ -1128,3 +1154,80 @@
           (let [data (:result result)]
             (expect (= "Alexander" (:name data)))
             (expect (= 18 (:age data)))))))))
+
+
+;; =============================================================================
+;; Streaming Integration Tests (real LLM calls)
+;; =============================================================================
+
+(def ^:private streaming-spec
+  (svar/spec
+    (svar/field svar/NAME :title       svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_ONE svar/DESCRIPTION "Title of the discovery")
+    (svar/field svar/NAME :scientist   svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_ONE svar/DESCRIPTION "Name of the scientist")
+    (svar/field svar/NAME :year        svar/TYPE svar/TYPE_INT    svar/CARDINALITY svar/CARDINALITY_ONE svar/DESCRIPTION "Year of discovery")
+    (svar/field svar/NAME :significance svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_ONE svar/DESCRIPTION "Why this discovery matters")
+    (svar/field svar/NAME :related-fields svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_MANY svar/DESCRIPTION "Scientific fields impacted")))
+
+(def ^:private event-spec
+  (svar/spec
+    (svar/field svar/NAME :event        svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_ONE  svar/DESCRIPTION "Name of the historical event")
+    (svar/field svar/NAME :date         svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_ONE  svar/DESCRIPTION "Date or date range")
+    (svar/field svar/NAME :location     svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_ONE  svar/DESCRIPTION "Geographic location")
+    (svar/field svar/NAME :key-figures  svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_MANY svar/DESCRIPTION "Important people involved")
+    (svar/field svar/NAME :causes       svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_MANY svar/DESCRIPTION "Main causes or triggers")
+    (svar/field svar/NAME :consequences svar/TYPE svar/TYPE_STRING svar/CARDINALITY svar/CARDINALITY_MANY svar/DESCRIPTION "Major consequences and lasting impact")
+    (svar/field svar/NAME :death-toll   svar/TYPE svar/TYPE_INT    svar/CARDINALITY svar/CARDINALITY_ONE  svar/DESCRIPTION "Estimated number of casualties")))
+
+(defdescribe streaming-integration-test
+  (describe "streaming penicillin extraction"
+    (it "streams partial spec fields progressively"
+      (let [router (make-integration-router)
+            chunks (atom [])
+            result (svar/ask! router
+                     {:spec streaming-spec
+                      :messages [(svar/system "Extract the requested information.")
+                                 (svar/user "In 1928, Alexander Fleming discovered penicillin when mold contaminated his petri dish and killed bacteria. This revolutionized medicine with antibiotics, saving millions. It impacted microbiology, pharmacology, infectious disease medicine, and public health.")]
+                      :model "gpt-4o"
+                      :on-chunk (fn [chunk]
+                                  (swap! chunks conj chunk)
+                                  (println "CHUNK" (count @chunks) "=>" (:result chunk)))})]
+        (println "\n=== STREAMING RESULT ===")
+        (println "Total chunks:" (count @chunks))
+        (println "Final:" (:result result))
+        (println "Tokens:" (:tokens result) "Cost:" (:cost result))
+        (println "========================\n")
+        (expect (some? (:result result)))
+        (expect (string? (get-in result [:result :title])))
+        (expect (integer? (get-in result [:result :year])))
+        (expect (pos? (count @chunks)))
+        (expect (every? :result @chunks)))))
+
+  (describe "streaming French Revolution extraction (7 fields)"
+    (it "streams a complex multi-field spec"
+      (let [router (make-integration-router)
+            chunks (atom [])
+            result (svar/ask! router
+                     {:spec event-spec
+                      :messages [(svar/system "Extract detailed structured information about the historical event.")
+                                 (svar/user "The French Revolution began in 1789 at Versailles. Fiscal crisis, crop failures, and Enlightenment ideals fueled anger against the monarchy. Key figures: Louis XVI, Marie Antoinette, Robespierre, Danton, Lafayette. The Bastille fell July 14 1789. Results: abolition of feudalism, Declaration of Rights of Man, execution of Louis XVI in 1793, Reign of Terror (~17,000 executions), Napoleon's rise. Total death toll ~40,000. It transformed French society, inspired democracy worldwide, created the metric system and modern citizenship.")]
+                      :model "gpt-4o"
+                      :on-chunk (fn [chunk]
+                                  (swap! chunks conj chunk)
+                                  (let [r (:result chunk)
+                                        filled (count (filter some? (vals r)))]
+                                    (println (str "CHUNK " (count @chunks)
+                                               " [" filled "/7] "
+                                               "event=" (:event r)
+                                               " toll=" (:death-toll r)))))})]
+        (println "\n=== COMPLEX STREAMING ===")
+        (println "Total chunks:" (count @chunks))
+        (println "Final:" (:result result))
+        (println "Tokens:" (:tokens result) "Cost:" (:cost result))
+        (println "=========================\n")
+        (expect (some? (:result result)))
+        (expect (string? (get-in result [:result :event])))
+        (expect (vector? (get-in result [:result :key-figures])))
+        (expect (vector? (get-in result [:result :consequences])))
+        (expect (integer? (get-in result [:result :death-toll])))
+        (expect (pos? (count @chunks)))
+        (expect (every? #(map? (:result %)) @chunks))))))

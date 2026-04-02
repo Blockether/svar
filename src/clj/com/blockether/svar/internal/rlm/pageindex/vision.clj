@@ -854,15 +854,14 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
         page-index (:page/index page)]
     (trove/log! {:level :info :data {:page page-index}
                  :msg "Evaluating page extraction quality"})
-    (let [result (llm/eval! {:task (str "Extract all visible content from document page " page-index
-                                     " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
-                                     "Image, Table) with correct parent-id hierarchy. Every piece of visible "
-                                     "text should be captured. Section descriptions should be meaningful "
-                                     "2-3 sentence summaries.")
-                             :output serialized
-                             :router rlm-router
-                             :strategy :root
-                             :criteria PAGE_EVAL_CRITERIA})]
+    (let [result (llm/eval! rlm-router {:task (str "Extract all visible content from document page " page-index
+                                                " into structured typed nodes (Section, Heading, Paragraph, ListItem, "
+                                                "Image, Table) with correct parent-id hierarchy. Every piece of visible "
+                                                "text should be captured. Section descriptions should be meaningful "
+                                                "2-3 sentence summaries.")
+                                        :output serialized
+                                        :strategy :root
+                                        :criteria PAGE_EVAL_CRITERIA})]
       (trove/log! {:level :info :data {:page page-index
                                        :score (:overall-score result)
                                        :correct? (:correct? result)}
@@ -910,14 +909,13 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                  "")
           task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.%s"
                  embedded-images-hint)
-          refine-result (llm/refine! {:spec vision-response-spec
-                                      :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
-                                                 (llm/user task (llm/image base64-image "image/png"))]
-                                      :router rlm-router
-                                      :strategy :root
-                                      :iterations refine-iterations
-                                      :threshold refine-threshold
-                                      :criteria PAGE_EVAL_CRITERIA})
+          refine-result (llm/refine! rlm-router {:spec vision-response-spec
+                                                 :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
+                                                            (llm/user task (llm/image base64-image "image/png"))]
+                                                 :strategy :root
+                                                 :iterations refine-iterations
+                                                 :threshold refine-threshold
+                                                 :criteria PAGE_EVAL_CRITERIA})
           raw-nodes (get-in refine-result [:result :nodes] [])
           nodes (enrich-visual-nodes raw-nodes page-pdf-images page-index)]
       (trove/log! {:level :info :data {:page page-index
@@ -945,16 +943,15 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   (trove/log! {:level :info :data {:page page-index
                                    :content-length (count content)}
                :msg "Refining page extraction (text)"})
-  (let [refine-result (llm/refine! {:spec vision-response-spec
-                                    :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
-                                               (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                           "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                                           "<document_content>\n" content "\n</document_content>"))]
-                                    :router rlm-router
-                                    :strategy :root
-                                    :iterations refine-iterations
-                                    :threshold refine-threshold
-                                    :criteria PAGE_EVAL_CRITERIA})
+  (let [refine-result (llm/refine! rlm-router {:spec vision-response-spec
+                                               :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
+                                                          (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
+                                                                      "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                                      "<document_content>\n" content "\n</document_content>"))]
+                                               :strategy :root
+                                               :iterations refine-iterations
+                                               :threshold refine-threshold
+                                               :criteria PAGE_EVAL_CRITERIA})
         nodes (get-in refine-result [:result :nodes] [])]
     (trove/log! {:level :info :data {:page page-index
                                      :nodes (count nodes)
@@ -1148,13 +1145,12 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                  "")
           task (format "Extract all content from this document page as typed nodes with parent-id hierarchy. Create Section nodes for headings, and link content to sections via parent-id. For Image and Table nodes, description is REQUIRED.%s"
                  embedded-images-hint)
-          response (llm/ask! {:spec vision-response-spec
-                              :messages [(llm/system objective)
-                                         (llm/user task (llm/image base64-image "image/png"))]
-                              :check-context? false
-                              :timeout-ms timeout-ms
-                              :router rlm-router
-                              :strategy :root})
+          response (llm/ask! rlm-router {:spec vision-response-spec
+                                         :messages [(llm/system objective)
+                                                    (llm/user task (llm/image base64-image "image/png"))]
+                                         :check-context? false
+                                         :timeout-ms timeout-ms
+                                         :strategy :root})
           raw-nodes (get-in response [:result :nodes] [])
           ;; Enrich visual nodes with PDFBox-extracted images by index
           nodes (enrich-visual-nodes raw-nodes page-pdf-images page-index)
@@ -1353,15 +1349,14 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                        :or {timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
   (trove/log! {:level :info :data {:page page-index :content-length (count content)}
                :msg "Extracting nodes from text content"})
-  (let [response (llm/ask! {:spec vision-response-spec
-                            :messages [(llm/system objective)
-                                       (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                   "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                                   "<document_content>\n" content "\n</document_content>"))]
-                            :router rlm-router
-                            :strategy :root
-                            :check-context? false
-                            :timeout-ms timeout-ms})
+  (let [response (llm/ask! rlm-router {:spec vision-response-spec
+                                       :messages [(llm/system objective)
+                                                  (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
+                                                              "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                              "<document_content>\n" content "\n</document_content>"))]
+                                       :strategy :root
+                                       :check-context? false
+                                       :timeout-ms timeout-ms})
         nodes (get-in response [:result :nodes] [])
         section-count (count (filter :page.node/description nodes))
         heading-count (count (filter :page.node/level nodes))]
@@ -1563,14 +1558,13 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                         :sections (count sections)
                                         :metadata (count metadata)}
                    :msg "Inferring document title"})
-      (let [response (llm/ask! {:spec title-inference-spec
-                                :messages [(llm/system "You are a document analyst. Infer the most appropriate title for a document based on its structure and content.")
-                                           (llm/user (str "Based on the following document content, infer the document's title. "
-                                                       "Return the most likely title - it should be concise and descriptive.\n\n"
-                                                       context))]
-                                :router rlm-router
-                                :prefer :cost
-                                :capabilities #{:chat}
-                                :check-context? false
-                                :timeout-ms timeout-ms})]
+      (let [response (llm/ask! rlm-router {:spec title-inference-spec
+                                           :messages [(llm/system "You are a document analyst. Infer the most appropriate title for a document based on its structure and content.")
+                                                      (llm/user (str "Based on the following document content, infer the document's title. "
+                                                                  "Return the most likely title - it should be concise and descriptive.\n\n"
+                                                                  context))]
+                                           :prefer :cost
+                                           :capabilities #{:chat}
+                                           :check-context? false
+                                           :timeout-ms timeout-ms})]
         (get-in response [:result :title])))))
