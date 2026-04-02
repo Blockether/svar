@@ -823,9 +823,9 @@
                    (System/getenv "OPENAI_BASE_URL")
                    "https://api.openai.com/v1")]
     (svar/make-router [{:id :integration
-                         :api-key api-key
-                         :base-url base-url
-                         :models [{:name "gpt-4o"}]}])))
+                        :api-key api-key
+                        :base-url base-url
+                        :models [{:name "gpt-4o"}]}])))
 
 ;; =============================================================================
 ;; Chain of Density — Unit Tests (no API key needed)
@@ -1154,7 +1154,6 @@
           (let [data (:result result)]
             (expect (= "Alexander" (:name data)))
             (expect (= 18 (:age data)))))))))
-
 
 ;; =============================================================================
 ;; Streaming Integration Tests (real LLM calls)

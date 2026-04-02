@@ -147,11 +147,10 @@
     (anomaly/incorrect! "f must be a function" {:type :rlm/invalid-fn}))
   (when-not (map? tool-def)
     (anomaly/incorrect! "tool-def must be a map" {:type :rlm/invalid-tool-def}))
-  (do
-    (swap! (:custom-bindings-atom env) assoc sym f)
-    ;; Inject into live SCI ctx so tool is immediately available
-    (when-let [sci-ctx (:sci-ctx env)]
-      (rlm-tools/sci-update-binding! sci-ctx sym f)))
+  (swap! (:custom-bindings-atom env) assoc sym f)
+  ;; Inject into live SCI ctx so tool is immediately available
+  (when-let [sci-ctx (:sci-ctx env)]
+    (rlm-tools/sci-update-binding! sci-ctx sym f))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :fn :sym sym))
   env)
 
@@ -311,7 +310,7 @@
            ;; Resolve root model name for token counting / refine! config
          root-model (or (when rlm-router (rlm-routing/resolve-root-model rlm-router)) model)
            ;; Reuse env's locals-atom so get-local (closed over at env creation) sees updates
-         locals-atom (:locals-atom env)
+         _locals-atom (:locals-atom env)
          depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
          sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router)
@@ -2034,7 +2033,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
      `:document/created-at` - Instant. Creation date from metadata or now.
      `:document/updated-at` - Instant. Modification date from metadata or now.
      `:document/author` - String or nil. Document author from metadata."
-  (fn [router input & [opts]]
+  (fn [_router input & [opts]]
     (detect-input-type input (or opts {}))))
 
 ;; =============================================================================
@@ -2055,7 +2054,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          :file file-path
          :extension extension
          :supported-extensions SUPPORTED_EXTENSIONS})))
-  (let [vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
+  (let [_vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
         vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         output-dir (:output-dir opts)
         vision-opts {:rlm-router router :objective vision-objective}]
@@ -2145,7 +2144,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 (defmethod build-index :string
   [router content & [opts]]
   (let [{:keys [content-type doc-name doc-title doc-author created-at updated-at]} (or opts {})
-        vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
+        _vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
         vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         vision-opts {:rlm-router router :objective vision-objective}]
     ;; Validate required options

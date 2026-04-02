@@ -1645,7 +1645,7 @@
 ;; Knowledge Engine Integration Tests
 ;; =============================================================================
 
-(defmacro ^:private with-mock-chat!
+(defmacro ^:private _with-mock-chat!
   "Stubs llm/chat-completion for testing query-env! iteration loop.
    `response-fn` receives [messages model api-key base-url] and returns a string.
    The macro wraps the string in {:content str :reasoning nil :api-usage nil}
@@ -1662,7 +1662,7 @@
        (finally
          (alter-var-root v# (constantly orig#))))))
 
-(defmacro ^:private with-mock-refine!
+(defmacro ^:private _with-mock-refine!
   "Stubs llm/refine! to passthrough the answer (skip real CoVe).
    Returns {:result answer :final-score 0.9 :converged? true :iterations-count 0}."
   [& body]
@@ -1678,8 +1678,8 @@
        (finally
          (alter-var-root v# (constantly orig#))))))
 
-(def ^:private final-response "{\"thinking\": \"Answering directly\", \"code\": [\"(FINAL \\\"test answer\\\")\"]}")
-(def ^:private final-response-low-confidence "{\"thinking\": \"Answering directly\", \"code\": [\"(FINAL \\\"test answer\\\" {:confidence :low})\"]}")
+(def ^:private _final-response "{\"thinking\": \"Answering directly\", \"code\": [\"(FINAL \\\"test answer\\\")\"]}")
+(def ^:private _final-response-low-confidence "{\"thinking\": \"Answering directly\", \"code\": [\"(FINAL \\\"test answer\\\" {:confidence :low})\"]}")
 
 (defdescribe knowledge-engine-integration-test
   (it "ingest with extract-entities? returns extraction stats"

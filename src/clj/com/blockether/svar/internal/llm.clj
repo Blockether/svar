@@ -354,10 +354,10 @@
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
-  [messages model api-key base-url retry-opts timeout-ms extra-body on-chunk]
+  [messages model api-key base-url _retry-opts timeout-ms extra-body on-chunk]
   (let [request-body (-> (build-request-body messages model extra-body)
                        (assoc :stream true
-                              :stream_options {:include_usage true}))
+                         :stream_options {:include_usage true}))
         chat-url (if (str/ends-with? base-url "/chat/completions")
                    base-url
                    (str base-url "/chat/completions"))]
@@ -375,7 +375,7 @@
                               (ex-message e))]
           (anomaly/fault! error-message
             (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
-                                                        :llm-request {:model model :base-url base-url}})
+                                                       :llm-request {:model model :base-url base-url}})
               api-key-error (assoc :api-key-error api-key-error))))))))
 
 ;; PUBLIC — rlm.clj accesses this directly
@@ -749,7 +749,7 @@
 (defn- earliest-available [router prefs]
   (let [{:keys [providers state]} router
         current-state @state
-        ts (router-now-ms router)
+        _ts (router-now-ms router)
         window-ms (:window-ms router)]
     (->> providers
       (filter #(some? (resolve-model % prefs)))
@@ -1101,7 +1101,7 @@
                                (when-let [partial-map (jsonish/parse-partial content)]
                                  (let [coerced (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                 (catch Exception _ partial-map))]
+                                                    (catch Exception _ partial-map))]
                                    (on-chunk {:result coerced
                                               :reasoning reasoning
                                               :tokens nil

@@ -1,7 +1,6 @@
 (ns com.blockether.svar.internal.rlm.context-tools-test
   (:require
-   [clojure.string :as str]
-   [lazytest.core :refer [defdescribe describe expect it throws?]]
+   [lazytest.core :refer [defdescribe describe expect it]]
    [sci.core :as sci]
    [com.blockether.svar.internal.rlm.tools :as tools]))
 

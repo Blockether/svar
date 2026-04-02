@@ -343,9 +343,9 @@
           (expect (pageindex-spec/valid-document? doc)))))
 
     (it "index! saves and load-index reads back (when LLM available)"
-      (when-let [router (make-integration-router)]
+      (when-let [_router (make-integration-router)]
         (let [output-path "resources-test/example-generated.pageindex"
-              result (pageindex/index! router TEST_PDF_PATH
+              result (pageindex/index! TEST_PDF_PATH
                        {:output output-path})
               loaded (pageindex/load-index output-path)]
           (try
