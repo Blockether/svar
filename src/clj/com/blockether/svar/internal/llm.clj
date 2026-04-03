@@ -799,7 +799,11 @@
           (let [result (try (f provider model-map)
                             (catch Exception e
                               (if (router-transient-error? router e)
-                                (do (cb-record-failure! router pid
+                                (do (trove/log! {:level :warn
+                                                 :data {:provider pid :status (:status (ex-data e))
+                                                        :error (ex-message e)}
+                                                 :msg "Provider transient error"})
+                                    (cb-record-failure! router pid
                                       (= 429 (:status (ex-data e))))
                                     (when-let [on-chunk (:on-chunk prefs)]
                                       (on-chunk {:reset? true
@@ -966,8 +970,11 @@
         (cond-> {}
           (:on-chunk prefs)
           (assoc :on-chunk (:on-chunk prefs))
-          (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
-          (assoc :extra-body (:reasoning-params model-map)))))))
+          :always
+          (assoc :extra-body (merge
+                               (when (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
+                                 (:reasoning-params model-map))
+                               (:extra-body prefs))))))))
 
 (defn sanitize-config
   [config]

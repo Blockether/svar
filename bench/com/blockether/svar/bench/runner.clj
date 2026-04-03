@@ -2,40 +2,17 @@
   "Unified benchmark runner for svar.
 
    Usage:
-      clojure -M:bench -- --bench gsm8k --mode ask --limit 50
-      clojure -M:bench -- --bench humaneval --mode ask --model gpt-4o
-      clojure -M:bench -- --bench mbpp --mode ask --model gpt-5-mini --limit 100
-      clojure -M:bench -- --bench gsm8k --mode query-env --model claude-opus-4-6
+      clojure -M:bench -- --bench 4clojure --limit 20 --model gpt-4o
+      clojure -M:bench -- --bench humaneval --agent pi --model blockether/glm-5-turbo
       clojure -M:bench -- --bench all --limit 50
       clojure -M:bench -- --list
-      clojure -M:bench -- --scores
-
-   Every benchmark's run-fn MUST return a unified result map:
-     {:bench           \"gsm8k\"
-      :mode            :ask | :query-env
-      :model           \"gpt-4o\"
-      :total-questions 50
-      :total-dataset   1319
-      :correct         45
-      :incorrect       3
-      :errors          2
-      :accuracy        0.9
-      :avg-duration-ms 1200.0
-      :avg-iterations  nil | 2.3
-      :avg-tokens      {:input 120 :output 30}
-      :total-cost      0.42
-      :results         [{:q-num 1 :question \"...\" :gold 18 :predicted 18
-                         :correct? true :error nil :tokens {...} :cost {...}
-                         :duration-ms 1234 :iterations nil}]
-      :saved-to        \"bench/results/gsm8k-ask-gpt-4o-2026-03-31.edn\"}"
+      clojure -M:bench -- --scores"
   (:require
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [com.blockether.svar.bench.gsm8k :as gsm8k]
+   [com.blockether.svar.bench.fourclojure :as fourclojure]
    [com.blockether.svar.bench.humaneval :as humaneval]
-   [com.blockether.svar.bench.mbpp :as mbpp]
-   [com.blockether.svar.bench.mbpp-sci :as mbpp-sci]
    [com.blockether.svar.core :as svar]))
 
 ;; =============================================================================
@@ -43,67 +20,69 @@
 ;; =============================================================================
 
 (def ^:private ROUTER (atom nil))
-(def ^:private ROUTER_MODEL (atom nil))
+(def ^:private ROUTER_KEY (atom nil))
+
+(def ^:private PROVIDERS
+  "Known benchmark providers with their env vars and base URLs."
+  {:blockether {:env-keys ["BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"]
+                :base-url "https://llm.blockether.com/v1"}
+   :zai-coding {:env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
+                :base-url "https://api.z.ai/api/coding/paas/v4"}
+   :zai        {:env-keys ["ZAI_API_KEY"]
+                :base-url "https://api.z.ai/api/paas/v4"}
+   :openai     {:env-keys ["OPENAI_API_KEY"]
+                :base-url "https://api.openai.com/v1"}})
+
+(defn- resolve-provider-key
+  "Resolves API key from environment for a provider config."
+  [{:keys [env-keys]}]
+  (some #(System/getenv %) env-keys))
 
 (defn- make-bench-router
-  "Creates a benchmark router from environment variables for one model."
-  [model]
-  (let [blockether-key (or (System/getenv "BLOCKETHER_LLM_API_KEY")
-                         (System/getenv "BLOCKETHER_OPENAI_API_KEY"))
-        openai-key     (System/getenv "OPENAI_API_KEY")
-        api-key        (or blockether-key openai-key)
-        provider-id    (cond
-                         blockether-key :blockether
-                         openai-key :openai
-                         :else nil)]
+  "Creates a benchmark router for a provider + model."
+  [provider-id model]
+  (let [provider-cfg (get PROVIDERS provider-id)
+        api-key      (when provider-cfg (resolve-provider-key provider-cfg))]
     (if (nil? api-key)
-      (throw (ex-info "Missing API key for benchmark router"
-               {:type :bench/missing-api-key
-                :required-one-of ["BLOCKETHER_LLM_API_KEY"
-                                  "BLOCKETHER_OPENAI_API_KEY"
-                                  "OPENAI_API_KEY"]}))
-      (let [base-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
-                       (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
-                       (System/getenv "OPENAI_BASE_URL")
-                       (cond
-                         blockether-key "https://llm.blockether.com/v1"
-                         openai-key "https://api.openai.com/v1"
-                         :else nil))]
-        (svar/make-router [{:id provider-id
-                            :api-key api-key
-                            :base-url base-url
-                            :models [{:name model}]}])))))
+      ;; Fallback: try all providers
+      (let [[pid cfg key] (some (fn [[pid cfg]]
+                                  (when-let [k (resolve-provider-key cfg)]
+                                    [pid cfg k]))
+                            PROVIDERS)]
+        (if key
+          (svar/make-router [{:id pid :api-key key
+                              :base-url (:base-url cfg)
+                              :models [{:name model}]}])
+          (throw (ex-info "No API key found for any provider"
+                   {:type :bench/missing-api-key
+                    :providers (keys PROVIDERS)}))))
+      (svar/make-router [{:id provider-id :api-key api-key
+                          :base-url (:base-url provider-cfg)
+                          :models [{:name model}]}]))))
 
 (defn- ensure-router!
-  [model]
-  (if (and (some? @ROUTER) (= @ROUTER_MODEL model))
-    @ROUTER
-    (let [router (make-bench-router model)]
-      (reset! ROUTER router)
-      (reset! ROUTER_MODEL model)
-      router)))
+  [provider-id model]
+  (let [key [provider-id model]]
+    (if (and (some? @ROUTER) (= @ROUTER_KEY key))
+      @ROUTER
+      (let [router (make-bench-router provider-id model)]
+        (reset! ROUTER router)
+        (reset! ROUTER_KEY key)
+        router))))
 
 ;; =============================================================================
 ;; Registry
 ;; =============================================================================
 
 (def ^:private BENCHMARKS
-  [{:name        "gsm8k"
-    :description "Grade School Math 8K — 1319 math word problems (Cobbe et al., 2021)"
-    :tests       "Code execution accuracy, iteration efficiency, cost"
-    :run-fn      gsm8k/run-benchmark!}
+  [{:name        "4clojure"
+    :description "4Clojure — 151 idiomatic Clojure coding problems"
+    :tests       "pass@1 on all test forms via bb verification"
+    :run-fn      fourclojure/run-benchmark!}
    {:name        "humaneval"
     :description "OpenAI HumanEval — 164 Python coding tasks"
-    :tests       "pass@1 on canonical unit tests"
-    :run-fn      humaneval/run-benchmark!}
-   {:name        "mbpp"
-    :description "Google MBPP — mostly basic Python problems"
-    :tests       "pass@1 on public MBPP test_list asserts"
-    :run-fn      mbpp/run-benchmark!}
-   {:name        "mbpp-sci"
-    :description "MBPP translated to Clojure asserts, executed in SCI"
-    :tests       "pass@1 on supported MBPP assert translations"
-    :run-fn      mbpp-sci/run-benchmark!}])
+    :tests       "pass@1 on canonical unit tests via python3"
+    :run-fn      humaneval/run-benchmark!}])
 
 (def ^:private AGGREGATE_FILE_PREFIX
   "bench/results/aggregate-")
@@ -248,7 +227,7 @@
   (println)
   (println (format "%s Benchmark Results" (or bench "?")))
   (println "=======================")
-  (println (format "Mode:       %s" (case mode :ask "ask! (direct)" :query-env "query-env! (RLM)" (str mode))))
+  (println (format "Mode:       %s" (if (= mode :query-env) "query-env! (RLM)" (str mode))))
   (println (format "Model:      %s" model))
   (println (format "Questions:  %d/%d" total-questions total-dataset))
   (println (format "Correct:    %d (%.1f%%)" correct (* 100.0 (double (or accuracy 0)))))
@@ -277,11 +256,9 @@
     (println (format "  %-12s %s" name description))
     (println (format "  %-12s Tests: %s" "" tests))
     (println))
-  (println "Usage: clojure -M:bench -- --bench <name> [--mode ask|query-env] [--model MODEL] [--limit N] [--offset N]")
-  (println "       clojure -M:bench -- --bench humaneval [--model MODEL] [--limit N] [--timeout-ms N]")
-  (println "       clojure -M:bench -- --bench mbpp [--model MODEL] [--limit N] [--timeout-ms N] [--include-challenge-tests true|false]")
-  (println "       clojure -M:bench -- --bench mbpp-sci [--model MODEL] [--limit N]")
-  (println "       clojure -M:bench -- --bench all [--limit N]")
+  (println "Usage: clojure -M:bench -- --bench <name> [--agent query-env|pi] [--provider blockether|zai-coding|zai] [--model MODEL] [--limit N] [--offset N]")
+  (println "       clojure -M:bench -- --bench 4clojure --agent query-env --provider zai-coding --model glm-5-turbo")
+  (println "       clojure -M:bench -- --bench all --limit 50")
   (println "       clojure -M:bench -- --list")
   (println "       clojure -M:bench -- --scores"))
 
@@ -295,12 +272,11 @@
           (= k "--list")   (assoc acc :list? true)
           (= k "--scores") (assoc acc :scores? true)
           (= k "--bench")  (recur (drop 2 remaining) (assoc acc :bench v))
-          (= k "--mode")   (recur (drop 2 remaining) (assoc acc :mode (keyword v)))
+          (= k "--agent")  (recur (drop 2 remaining) (assoc acc :agent (keyword v)))
+          (= k "--provider") (recur (drop 2 remaining) (assoc acc :provider (keyword v)))
           (= k "--model")  (recur (drop 2 remaining) (assoc acc :model v))
           (= k "--limit")  (recur (drop 2 remaining) (assoc acc :limit (Long/parseLong v)))
           (= k "--offset") (recur (drop 2 remaining) (assoc acc :offset (Long/parseLong v)))
-          (= k "--timeout-ms") (recur (drop 2 remaining) (assoc acc :timeout-ms (Long/parseLong v)))
-          (= k "--include-challenge-tests") (recur (drop 2 remaining) (assoc acc :include-challenge-tests? (= "true" (str/lower-case v))))
           :else            (recur (rest remaining) acc))))))
 
 (defn- run-one! [bench-name opts]
@@ -337,8 +313,8 @@
 (defn -main [& args]
   (let [parsed (parse-args args)
         bench  (or (:bench parsed)
-                 (if (some #(contains? parsed %) [:mode :model :limit :offset])
-                   "gsm8k"
+                 (if (some #(contains? parsed %) [:model :limit :offset])
+                   "4clojure"
                    nil))
         opts   (dissoc parsed :bench :list? :scores?)]
     (cond
@@ -347,8 +323,9 @@
       (nil? bench)        (do (println "Error: --bench <name> is required (or --list to see options)")
                             (print-list)
                             (System/exit 1))
-      :else               (let [model (or (:model opts) "gpt-4o")
-                                run-opts (assoc opts :router (ensure-router! model))]
+      :else               (let [model    (or (:model opts) "gpt-4o")
+                                provider (or (:provider opts) :blockether)
+                                run-opts (assoc opts :router (ensure-router! provider model))]
                             (if (= bench "all")
                               (run-all! run-opts)
                               (run-one! bench run-opts))))

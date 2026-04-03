@@ -441,9 +441,14 @@
                          When provider has reasoning, pass ITERATION_SPEC_CODE_ONLY."
   [rlm-env messages & [{:keys [iteration-spec on-chunk] :or {iteration-spec ITERATION_SPEC}}]]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
-    (let [_ (rlm-debug! {:msg-count (count messages)} "LLM call started")
+    (let [context-chars (reduce + 0 (map #(count (str (:content %))) messages))
+          _ (trove/log! {:level :info :id ::llm-call
+                         :data {:msg-count (count messages)
+                                :context-chars context-chars
+                                :context-chars-k (format "%.1fK" (/ context-chars 1000.0))}
+                         :msg "LLM call started"})
           response-data (llm/routed-chat-completion (:router rlm-env) messages
-                          (cond-> {:strategy :root}
+                          (cond-> {:strategy :root :extra-body {:max_tokens 25000}}
                             on-chunk (assoc :on-chunk on-chunk)))
           response (:content response-data)
           model-reasoning (:reasoning response-data)

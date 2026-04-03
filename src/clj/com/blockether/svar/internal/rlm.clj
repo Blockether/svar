@@ -35,7 +35,8 @@
 (def MAX_ITERATIONS schema/MAX_ITERATIONS)
 (def DEFAULT_RECURSION_DEPTH schema/DEFAULT_RECURSION_DEPTH)
 (def ^:dynamic *max-recursion-depth* schema/*max-recursion-depth*)
-(def ^:dynamic *rlm-ctx* schema/*rlm-ctx*)
+;; Use schema/*rlm-ctx* directly — do NOT redefine as a separate dynamic var,
+;; as binding a local alias won't propagate to core.clj which imports schema/*rlm-ctx*.
 
 (def GENERATION_PERSONAS schema/GENERATION_PERSONAS)
 (def DEDUP_SPEC schema/DEDUP_SPEC)
@@ -362,7 +363,7 @@
                  (rlm-tools/sci-update-binding! sci-ctx sym val))))
          rlm-env (assoc env :context context :max-iterations-atom max-iterations-atom)
          env-id (:env-id env)]
-     (binding [*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
+     (binding [schema/*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
        (binding [*max-recursion-depth* max-recursion-depth]
          (rlm-core/rlm-debug! {:query query-str :root-model root-model :max-iterations max-iterations
                                :verify? verify? :plan? plan?

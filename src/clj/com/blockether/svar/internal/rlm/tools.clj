@@ -594,8 +594,11 @@
 ;; =============================================================================
 
 (defn sci-update-binding!
-  "Update a binding in an existing SCI context via sci/intern.
-   Directly injects the value — no eval string, no user-visible symbol."
+  "Update a binding in an existing SCI context.
+   Ensures the symbol is a real SCI var before interning the value,
+   since bindings from sci/init :namespaces are not SCI vars."
   [sci-ctx sym val]
   (let [ns-obj (sci/find-ns sci-ctx 'user)]
+    ;; Promote to SCI var if needed (sci/init :namespaces creates plain values)
+    (sci/eval-string* sci-ctx (str "(def " sym " nil)"))
     (sci/intern sci-ctx ns-obj sym val)))

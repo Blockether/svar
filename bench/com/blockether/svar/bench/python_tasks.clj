@@ -39,8 +39,9 @@
       (let [pb (ProcessBuilder. (into-array String ["python3" "-I" (.getAbsolutePath path)]))
             _ (.redirectErrorStream pb true)
             proc (.start pb)
+            output-future (future (slurp (.getInputStream proc)))
             finished? (.waitFor proc timeout-ms TimeUnit/MILLISECONDS)
-            output (slurp (.getInputStream proc))]
+            output (if finished? (deref output-future 5000 "") "")]
         (if finished?
           {:ok? (zero? (.exitValue proc))
            :exit-code (.exitValue proc)
@@ -48,6 +49,7 @@
            :timeout? false}
           (do
             (.destroyForcibly proc)
+            (future-cancel output-future)
             {:ok? false
              :exit-code nil
              :output "Timed out"

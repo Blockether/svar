@@ -80,6 +80,7 @@
 
    ;; ── Zhipu / ZAI ─────────────────────────────────────────────────────────
    "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
+   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}}
    "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
 
@@ -99,7 +100,8 @@
     "claude-sonnet-4-6"         {:pricing {:input 3.00  :output 15.00} :context 200000}
     "claude-haiku-4-5"          {:pricing {:input 1.00  :output 5.00}  :context 200000}
     "gemini-2.5-pro"            {:pricing {:input 1.25  :output 10.00} :context 2000000}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
+    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 100000}
+    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 100000}
     "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
     "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "gpt-4.1"                   {:pricing {:input 2.00  :output 8.00}  :context 1000000}
@@ -136,6 +138,7 @@
 
    :zai
    {"glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
+    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}
     "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
     "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}}
 
@@ -322,8 +325,9 @@
   "https://api.openai.com/v1")
 
 (def DEFAULT_TIMEOUT_MS
-  "Default HTTP request timeout in milliseconds (3 minutes)."
-  180000)
+  "Default HTTP request timeout in milliseconds (5 minutes).
+   Reasoning models (e.g. glm-5-turbo) may need extended time for chain-of-thought."
+  300000)
 
 (def DEFAULT_RETRY
   "Default retry policy for transient HTTP errors."

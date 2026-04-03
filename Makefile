@@ -1,4 +1,4 @@
-.PHONY: test test-ff test-readme test-watch clean jar install deploy lint compile-java prepare test-allure allure-serve allure bench bench-gsm8k bench-gsm8k-quick bench-list
+.PHONY: test test-ff test-readme test-watch clean jar install deploy lint compile-java prepare test-allure allure-serve allure bench bench-4clojure bench-4clojure-quick bench-humaneval bench-humaneval-quick bench-list
 
 prepare: compile-java
 
@@ -64,11 +64,17 @@ allure: test-allure allure-serve
 bench: target/classes
 	clojure -M:bench -- --bench all
 
-bench-gsm8k: target/classes
-	clojure -M:bench -- --bench gsm8k
+bench-4clojure: target/classes
+	clojure -M:bench -- --bench 4clojure
 
-bench-gsm8k-quick: target/classes
-	clojure -M:bench -- --bench gsm8k --limit 50
+bench-4clojure-quick: target/classes
+	clojure -M:bench -- --bench 4clojure --limit 20
+
+bench-humaneval: target/classes
+	clojure -M:bench -- --bench humaneval
+
+bench-humaneval-quick: target/classes
+	clojure -M:bench -- --bench humaneval --limit 20
 
 bench-list:
 	clojure -M:bench -- --list

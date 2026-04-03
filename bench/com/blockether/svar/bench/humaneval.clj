@@ -1,206 +1,148 @@
 (ns com.blockether.svar.bench.humaneval
-  "HumanEval benchmark harness for svar.
+  "HumanEval benchmark — 164 Python coding tasks.
 
-   Dataset/source:
-   OpenAI HumanEval (164 tasks)
-   https://github.com/openai/human-eval
+   Agents: :query-env (svar RLM) | :pi (Pi coding agent)
+   Verification: python3 subprocess.
 
    Usage:
-     clojure -M:bench -- --bench humaneval --mode ask --model gpt-4o"
+     clojure -M:bench -- --bench humaneval --limit 20 --model gpt-4o
+     clojure -M:bench -- --bench humaneval --agent pi --model blockether/glm-5-turbo"
   (:require
    [charred.api :as json]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [com.blockether.svar.bench.bench-common :as common]
    [com.blockether.svar.bench.python-tasks :as py]
    [com.blockether.svar.core :as svar]
    [taoensso.trove :as trove])
   (:import
-   (java.time Instant)
    (java.util.zip GZIPInputStream)))
+
+;; =============================================================================
+;; Constants
+;; =============================================================================
 
 (def ^:private dataset-url
   "https://raw.githubusercontent.com/openai/human-eval/master/data/HumanEval.jsonl.gz")
+(def ^:private dataset-path "bench/data/humaneval/HumanEval.jsonl.gz")
+(def ^:private python-timeout-ms 30000)
 
-(def ^:private dataset-path
-  "bench/data/humaneval/HumanEval.jsonl.gz")
+;; =============================================================================
+;; Dataset
+;; =============================================================================
 
-(def ^:private CODE_SPEC
-  (svar/spec
-    (svar/field svar/NAME :code
-      svar/TYPE svar/TYPE_STRING
-      svar/CARDINALITY svar/CARDINALITY_ONE
-      svar/DESCRIPTION "Python code implementing the requested function.")))
-
-(defn- ensure-dataset!
-  []
+(defn- ensure-dataset! []
   (py/download-if-missing! dataset-url dataset-path))
 
-(defn- load-dataset
-  []
+(defn- load-dataset []
   (ensure-dataset!)
   (with-open [in (io/input-stream dataset-path)
               gz (GZIPInputStream. in)
               rdr (io/reader gz)]
     (mapv (fn [line] (json/read-json line :key-fn keyword)) (line-seq rdr))))
 
-(defn- build-task-prompt
-  [task]
-  (str
-    "Complete this HumanEval Python task. Return ONLY Python code for the implementation.\n\n"
-    "Task ID: " (:task_id task) "\n"
+;; =============================================================================
+;; Python verification
+;; =============================================================================
+
+(defn- verify-python [code task]
+  (let [script (str code "\n\n" (:test task) "\ncheck(" (:entry_point task) ")\n")
+        run    (py/run-python-script! script python-timeout-ms)]
+    {:correct? (:ok? run)
+     :failure  (if (:ok? run) nil (:output run))
+     :timeout? (:timeout? run)}))
+
+;; =============================================================================
+;; Prompt
+;; =============================================================================
+
+(defn- build-prompt [task]
+  (str "Complete this Python function. "
+    "Return ONLY valid Python code, no markdown, no explanation, no code fences.\n\n"
+    "Task: " (:task_id task) "\n"
     "Entry point: " (:entry_point task) "\n\n"
-    "Prompt:\n"
     (:prompt task)))
 
-(defn- eval-task-ask!
-  [router task model timeout-ms]
-  (let [ask-result (svar/ask! router {:spec CODE_SPEC
-                                      :messages [(svar/system "You write correct Python code. Return only code, no markdown.")
-                                                 (svar/user (build-task-prompt task))]
-                                      :model model})
-        code (py/strip-fence (get-in ask-result [:result :code]))
-        script (str code "\n\n"
-                 (:test task) "\n"
-                 "check(" (:entry_point task) ")\n")
-        run (py/run-python-script! script timeout-ms)]
-    {:correct? (:ok? run)
-     :failure (if (:ok? run) nil (:output run))
-     :timeout? (:timeout? run)
-     :code code
-     :tokens (:tokens ask-result)
-     :cost (:cost ask-result)
-     :duration-ms (:duration-ms ask-result)}))
+;; =============================================================================
+;; Agent eval functions
+;; =============================================================================
 
-(defn- ensure-results-dir! []
-  (py/ensure-dir! "bench/results"))
+(defn- eval-query-env! [router task model]
+  (let [env   (svar/create-env router {})
+        start (System/currentTimeMillis)]
+    (try
+      (let [result (svar/query-env! env (build-prompt task) {:model model :max-iterations 20 :debug? true})
+            code   (py/strip-fence (str/trim (str (:answer result))))
+            score  (verify-python code task)]
+        {:correct?    (:correct? score)
+         :failure     (:failure score)
+         :timeout?    (:timeout? score)
+         :code        code
+         :iterations  (:iterations result)
+         :tokens      (:tokens result)
+         :cost        (:cost result)
+         :duration-ms (- (System/currentTimeMillis) start)})
+      (finally
+        (svar/dispose-env! env)))))
 
-(defn- save-results!
-  [bench mode model results summary]
-  (ensure-results-dir!)
-  (let [ts (.toString (Instant/now))
-        ts-safe (str/replace ts ":" "-")
-        model-safe (str/replace model "/" "-")
-        run-id (str bench "-" (name mode) "-" model-safe "-" ts-safe)
-        filename (str "bench/results/bench-" run-id ".ednl")
-        _summary summary
-        base {:bench bench :mode mode :model model :run-id run-id}
-        result-lines (map #(merge base {:type :result} %) results)
-        content (str/join "\n" (map pr-str result-lines))]
-    (spit filename content)
-    (trove/log! {:level :info :id ::bench-saved :data {:file filename} :msg "Benchmark results saved"})
-    filename))
+(defn- eval-pi! [task model]
+  (let [pi-result (common/run-pi! (build-prompt task) model)]
+    (if (:timed-out? pi-result)
+      {:correct? false :failure "pi timed out" :duration-ms (:duration-ms pi-result)}
+      (let [code  (py/strip-fence (:output pi-result))
+            score (verify-python code task)]
+        {:correct?    (:correct? score)
+         :failure     (:failure score)
+         :timeout?    (:timeout? score)
+         :code        code
+         :duration-ms (:duration-ms pi-result)}))))
 
-(defn- print-progress
-  [done total correct errors avg-ms]
-  (let [pct (if (pos? done) (/ (* 100.0 correct) done) 0.0)
-        err-str (if (pos? errors) (format " | errors: %d" errors) "")]
-    (println (format "[%d/%d] pass@1: %d (%.1f%%)%s | avg-ms: %d"
-               done total correct pct err-str (long avg-ms)))))
+;; =============================================================================
+;; Result record builder
+;; =============================================================================
+
+(defn- make-result-rec [q-num task eval-result]
+  {:task-num    q-num
+   :task-id     (:task_id task)
+   :entry-point (:entry_point task)
+   :correct?    (boolean (:correct? eval-result))
+   :timeout?    (:timeout? eval-result)
+   :code        (:code eval-result)
+   :failure     (:failure eval-result)
+   :error       (:error eval-result)
+   :tokens      (:tokens eval-result)
+   :cost        (:cost eval-result)
+   :duration-ms (:duration-ms eval-result)
+   :iterations  (:iterations eval-result)})
+
+;; =============================================================================
+;; Main runner
+;; =============================================================================
 
 (defn run-benchmark!
   "Runs HumanEval benchmark.
-
-   opts:
-     :mode      - only :ask supported
-     :model     - model name
-     :limit     - max tasks to run (default all 164)
-     :offset    - skip first N tasks
-     :timeout-ms - python test timeout per task (default 8000)
-     :router    - required router"
+   opts: :agent :model :limit :offset :router"
   [opts]
-  (let [mode (get opts :mode :ask)
-        model (get opts :model "gpt-4o")
-        router (if-let [r (:router opts)]
-                 r
-                 (throw (ex-info "Missing :router in benchmark opts"
-                          {:type :bench/missing-router
-                           :hint "Construct router in bench runner and pass via opts"})))
-        _mode-check (if (= mode :ask)
-                      :ok
-                      (throw (ex-info "humaneval supports only --mode ask" {:mode mode})))
-        timeout-ms (get opts :timeout-ms 8000)
-        offset (get opts :offset 0)
-        limit (get opts :limit nil)
+  (let [agent-name (get opts :agent :query-env)
+        model      (get opts :model "gpt-4o")
+        router     (:router opts)
+        offset     (get opts :offset 0)
+        limit      (get opts :limit nil)
+
+        _ (if (and (= agent-name :query-env) (nil? router))
+            (throw (ex-info "Missing :router for query-env agent" {:type :bench/missing-router}))
+            nil)
+
         _ (trove/log! {:level :info :id ::bench-start
-                       :data {:mode mode :model model :offset offset :limit limit :timeout-ms timeout-ms}
+                       :data {:agent agent-name :model model :offset offset :limit limit}
                        :msg "Starting HumanEval benchmark"})
+
         dataset (load-dataset)
         total-ds (count dataset)
-        slice (cond->> (drop offset dataset)
-                limit (take limit))
-        tasks (vec slice)
-        total-q (count tasks)
-        state (atom {:correct 0 :incorrect 0 :errors 0
-                     :results []
-                     :total-duration-ms 0
-                     :total-input-tokens 0 :total-output-tokens 0
-                     :total-cost 0.0})]
+        tasks   (vec (cond->> (drop offset dataset) limit (take limit)))
 
-    (println (format "\nRunning HumanEval [mode=%s model=%s tasks=%d offset=%d]\n"
-               (name mode) model total-q offset))
+        eval-fn (case agent-name
+                  :query-env (fn [task] (eval-query-env! router task model))
+                  :pi        (fn [task] (eval-pi! task model)))]
 
-    (doseq [[idx task] (map-indexed vector tasks)]
-      (let [q-num (inc idx)
-            eval-result (try
-                          (eval-task-ask! router task model timeout-ms)
-                          (catch Exception e
-                            (trove/log! {:level :warn :id ::bench-error
-                                         :data {:q-num q-num :error (ex-message e)}
-                                         :msg "Task evaluation failed"})
-                            {:error (ex-message e) :correct? false :duration-ms 0}))
-            correct? (boolean (:correct? eval-result))
-            error? (boolean (:error eval-result))
-            result-rec {:task-num q-num
-                        :task-id (:task_id task)
-                        :entry-point (:entry_point task)
-                        :correct? correct?
-                        :timeout? (:timeout? eval-result)
-                        :code (:code eval-result)
-                        :failure (:failure eval-result)
-                        :error (:error eval-result)
-                        :tokens (:tokens eval-result)
-                        :cost (:cost eval-result)
-                        :duration-ms (:duration-ms eval-result)}]
-
-        (swap! state
-          (fn [s]
-            (-> s
-              (update :correct + (if (and correct? (not error?)) 1 0))
-              (update :incorrect + (if (and (not correct?) (not error?)) 1 0))
-              (update :errors + (if error? 1 0))
-              (update :results conj result-rec)
-              (update :total-duration-ms + (or (:duration-ms eval-result) 0))
-              (update :total-input-tokens + (or (get-in eval-result [:tokens :input]) 0))
-              (update :total-output-tokens + (or (get-in eval-result [:tokens :output]) 0))
-              (update :total-cost + (or (get-in eval-result [:cost :total-cost]) 0.0)))))
-
-        (if (or (= q-num 1) (zero? (mod q-num 10)) (= q-num total-q))
-          (let [s @state
-                done q-num
-                avg-ms (/ (double (:total-duration-ms s)) done)]
-            (print-progress done total-q (:correct s) (:errors s) avg-ms)
-            (flush))
-          nil)))
-
-    (let [s @state
-          n (max 1 total-q)
-          avg-dur (/ (double (:total-duration-ms s)) n)
-          avg-toks {:input (/ (double (:total-input-tokens s)) n)
-                    :output (/ (double (:total-output-tokens s)) n)}
-          accuracy (if (pos? total-q) (/ (double (:correct s)) total-q) 0.0)
-          saved (save-results! "humaneval" mode model (:results s) nil)]
-      {:bench "humaneval"
-       :mode mode
-       :model model
-       :total-questions total-q
-       :total-dataset total-ds
-       :correct (:correct s)
-       :incorrect (:incorrect s)
-       :errors (:errors s)
-       :accuracy accuracy
-       :avg-duration-ms avg-dur
-       :avg-iterations nil
-       :avg-tokens avg-toks
-       :total-cost (:total-cost s)
-       :results (:results s)
-       :saved-to saved})))
+    (common/run-parallel-bench! "humaneval" agent-name model tasks total-ds eval-fn make-result-rec)))
