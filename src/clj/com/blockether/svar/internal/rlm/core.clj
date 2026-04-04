@@ -238,8 +238,8 @@
 
 <available_tools>
   <tool name=\"context\">The data context - access as 'context' variable</tool>
-  <tool name=\"llm-query\">(llm-query prompt) or (llm-query prompt {:spec my-spec}) - Simple text query to LLM</tool>
-  <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce patterns over many chunks.</tool>
+  <tool name=\"llm-query\">(llm-query prompt) or (llm-query prompt {:spec my-spec}) - Ask a sub-LLM anything: algorithm help, error diagnosis, code review, approach validation. Returns text or structured data. Use freely for hard problems.</tool>
+  <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce or parallel analysis.</tool>
   <tool name=\"request-more-iterations\">(request-more-iterations n) - Request n more iterations if running low. Returns {:granted n :new-budget N :cap max}.</tool>
 </available_tools>
 "
@@ -352,21 +352,19 @@
 
     "
 <rlm_patterns>
-  Aggregation: partition pages → llm-query-batch → synthesize. Use for counting/summarizing ALL content.
-  Retrieval: search-document-pages → P-add! → def result. Use for finding SPECIFIC info.
-  Regex: (re-seq #\"pattern\" my-var) for structured extraction across stored text.
+  Sub-LLM: (llm-query \"explain Quine-McCluskey algorithm\") — ask for help on algorithms, errors, approaches.
+  Aggregation: partition data → llm-query-batch → synthesize. Use for parallel analysis.
+  Regex: (re-seq #\"pattern\" my-var) for structured extraction across text.
 </rlm_patterns>
 
 <workflow>
 0. FIRST: Check <context> and <var_index> - if they already answer the query, set 'final-answer' immediately
-1. If more info needed, check available documents: (list-documents)
-2. Browse TOC to understand document structure: (list-document-toc)
-3. Pick sections from TOC, fetch content: (def section \"doc for section\" (P-add! [:page.node/id node-id]))
-4. For exhaustive analysis: use llm-query-batch over chunks
-5. Check entities if relevant: (document-entity-stats), then (list-document-entities {:type :party})
-6. Store intermediate results with (def my-var \"docstring\" value) — use docstrings!
-7. List vars to carry in 'carry' field for next iteration
-8. Set 'final-answer' when done
+1. For coding tasks: write code, test it, iterate. Use (llm-query) to ask for algorithm help if stuck.
+2. For document tasks: (list-documents) → (list-document-toc) → (P-add! ...) → analyze
+3. For exhaustive analysis: use llm-query-batch over chunks
+4. Store intermediate results with (def my-var \"docstring\" value) — use docstrings!
+5. List vars to carry in 'carry' field for next iteration
+6. Set 'final-answer' when done
 </workflow>
 
 <response_format>
