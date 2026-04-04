@@ -7,7 +7,6 @@
   (:require
    [babashka.http-client :as http]
    [charred.api :as json]
-   [clojure.core.async :as async]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.jsonish :as jsonish]
@@ -529,440 +528,35 @@
 ;; The router selects the best provider, handles rate limits, and retries
 ;; on transient errors with automatic fallback to the next provider.
 
-(def ^:private router-default-opts
-  {:window-ms              60000
-   :cooldown-ms            60000
-   :max-wait-ms            30000
-   :transient-status-codes #{429 500 502 503 504}
-   ;; Circuit breaker defaults
-   :cb-failure-threshold   5
-   :cb-recovery-ms         60000})
-
-(def ^:private INTELLIGENCE_ORDER
-  {:frontier 4 :high 3 :medium 2 :low 1})
-
-(def ^:private COST_ORDER
-  {:high 3 :medium 2 :low 1})
-
-(def ^:private SPEED_ORDER
-  {:fast 3 :medium 2 :slow 1})
-
-(defn- router-now-ms [router] ((:clock router)))
-
-(defn- router-prune-window
-  [router entries]
-  (let [cutoff (- (router-now-ms router) (:window-ms router))]
-    (filterv #(> (if (map? %) (:ts %) %) cutoff) entries)))
-
-(defn- rpm-count [router ps]
-  (count (router-prune-window router (:requests ps []))))
-
-(defn- tpm-count [router ps]
-  (reduce + 0 (map :n (router-prune-window router (:tokens ps [])))))
-
 ;; =============================================================================
-;; Circuit Breaker — three-state: :closed → :open → :half-open → :closed
+;; Router delegation — all routing logic lives in router.clj
 ;; =============================================================================
 
-(defn- cb-state
-  "Returns the effective circuit breaker state for a provider, accounting for
-   time-based open→half-open transitions."
-  [router ps]
-  (let [state (or (:cb-state ps) :closed)]
-    (if (and (= state :open)
-          (:cb-open-until ps)
-          (>= (router-now-ms router) (:cb-open-until ps)))
-      :half-open
-      state)))
+(def make-router
+  "Creates a router from a vector of provider maps. Delegates to router/make-router."
+  router/make-router)
 
-(defn- cb-available?
-  "Returns true if the circuit breaker allows a request."
-  [router ps]
-  (let [state (cb-state router ps)]
-    (or (= state :closed)
-      (= state :half-open))))
+(def select-provider
+  "Returns [provider model-map] or nil. Delegates to router/select-provider."
+  router/select-provider)
 
-(defn- cb-record-failure!
-  "Records a failure. Transitions closed→open after threshold, half-open→open immediately."
-  [router provider-id is-rate-limit?]
-  (let [now (router-now-ms router)
-        recovery-ms (if is-rate-limit?
-                      (:cooldown-ms router)
-                      (:cb-recovery-ms router))
-        threshold (:cb-failure-threshold router)]
-    (swap! (:state router) update provider-id
-      (fn [ps]
-        (let [current-state (cb-state router ps)
-              new-failures (inc (or (:cb-failures ps) 0))]
-          (if (or (= current-state :half-open)
-                (>= new-failures threshold))
-            (do (trove/log! {:level :warn
-                             :data {:provider provider-id :cb-state :open
-                                    :recovery-ms recovery-ms :failures new-failures
-                                    :trigger (if is-rate-limit? :rate-limit :transient-error)}
-                             :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
-            (assoc ps :cb-failures new-failures)))))))
+(def router-stats
+  "Returns cumulative + windowed stats. Delegates to router/router-stats."
+  router/router-stats)
 
-(defn- cb-record-success!
-  "Records a success. Transitions half-open→closed, resets failure count."
-  [router provider-id]
-  (swap! (:state router) update provider-id
-    (fn [ps]
-      (let [current-state (cb-state router ps)]
-        (if (= current-state :half-open)
-          (do (trove/log! {:level :info :data {:provider provider-id}
-                           :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
-          ;; In closed state, reset consecutive failures on success
-          (assoc ps :cb-failures 0))))))
+(def reset-budget!
+  "Resets the router's budget counters. Delegates to router/reset-budget!."
+  router/reset-budget!)
 
-;; =============================================================================
-;; Budget — pre-flight rejection when cumulative spend exceeds limits
-;; =============================================================================
-
-(defn- budget-check!
-  "Throws if the router's token budget is exhausted. Called before each request."
-  [router]
-  (when-let [budget (:budget router)]
-    (let [{:keys [total-tokens total-cost]} @(:budget-state router)
-          max-tokens (:max-tokens budget)
-          max-cost (:max-cost budget)]
-      (when (and max-tokens (>= total-tokens max-tokens))
-        (throw (ex-info "Token budget exhausted"
-                 {:type :svar/budget-exhausted
-                  :budget budget
-                  :spent {:tokens total-tokens :cost total-cost}})))
-      (when (and max-cost (>= total-cost max-cost))
-        (throw (ex-info "Cost budget exhausted"
-                 {:type :svar/budget-exhausted
-                  :budget budget
-                  :spent {:tokens total-tokens :cost total-cost}}))))))
-
-(defn- budget-record!
-  "Records token usage and cost against the router's budget."
-  [router provider-id model-name api-usage]
-  (when (:budget-state router)
-    (let [input-tokens (or (:prompt_tokens api-usage) 0)
-          output-tokens (or (:completion_tokens api-usage) 0)
-          total-tokens (+ input-tokens output-tokens)
-          pricing (router/provider-model-pricing provider-id model-name)
-          input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing 5.0)))
-          output-cost (* (/ (double output-tokens) 1000000.0) (double (:output pricing 15.0)))
-          total-cost (+ input-cost output-cost)]
-      (swap! (:budget-state router)
-        (fn [bs]
-          (-> bs
-            (update :total-tokens + total-tokens)
-            (update :total-cost + total-cost)))))))
-
-;; =============================================================================
-;; Cumulative stats recording
-;; =============================================================================
-
-(defn- record-cumulative!
-  "Records cumulative stats for a provider after a successful request."
-  [router provider-id token-count latency-ms]
-  (swap! (:state router) update provider-id
-    (fn [ps]
-      (-> ps
-        (update-in [:cum :requests] (fnil inc 0))
-        (update-in [:cum :total-tokens] (fnil + 0) (or token-count 0))
-        (update-in [:cum :latencies] (fnil conj []) latency-ms)))))
-
-;; =============================================================================
-;; Provider availability + model selection
-;; =============================================================================
-
-(defn- provider-available? [router provider ps]
-  (and (cb-available? router ps)
-    (< (rpm-count router ps) (:rpm provider Long/MAX_VALUE))
-    (< (tpm-count router ps) (:tpm provider Long/MAX_VALUE))))
-
-(defn- preference-sort-key
-  "Returns a sort key fn for a single preference keyword.
-   Lower values = better (for sort-by ascending)."
-  [pref]
-  (case pref
-    :cost         (fn [m] (get COST_ORDER (:cost m) 0))
-    :intelligence (fn [m] (- (get INTELLIGENCE_ORDER (:intelligence m) 0)))
-    :speed        (fn [m] (- (get SPEED_ORDER (:speed m) 0)))
-    nil))
-
-(defn- resolve-model
-  "Returns the best model map for a provider given preferences, or nil.
-   :prefer can be a keyword (:cost, :intelligence, :speed) or a vector of keywords
-   for multi-criteria sorting, e.g. [:cost :speed] = cheapest first, then fastest."
-  [provider prefs]
-  (if (= (:strategy prefs) :root)
-    (let [root-name (:root provider)]
-      (first (filter #(= (:name %) root-name) (:models provider))))
-    (let [required-caps (or (:capabilities prefs) #{})
-          exclude (:exclude-model prefs)
-          candidates (->> (:models provider)
-                       (filter #(every? (:capabilities %) required-caps))
-                       (filter #(if exclude (not= (:name %) exclude) true)))]
-      (when (seq candidates)
-        (let [prefer (:prefer prefs)
-              prefs-vec (cond
-                          (vector? prefer) prefer
-                          (keyword? prefer) [prefer]
-                          :else nil)]
-          (if (seq prefs-vec)
-            (let [key-fns (keep preference-sort-key prefs-vec)]
-              (first (sort-by (fn [m] (mapv #(% m) key-fns)) candidates)))
-            (first candidates)))))))
-
-(defn select-provider
-  "Returns [provider model-map] or nil. Read-only."
-  [router prefs]
-  (let [{:keys [providers state]} router
-        current-state @state
-        candidates (->> providers
-                     (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
-                     (filter (fn [[p _]] (provider-available? router p (get current-state (:id p) {})))))]
-    (when (seq candidates)
-      (first (sort-by (fn [[p _]] (:priority p 0)) candidates)))))
-
-(defn- select-and-claim!
-  "Atomically selects best provider and claims a request slot."
-  [router prefs]
-  (let [{:keys [providers state]} router]
-    (loop []
-      (let [current @state
-            ts (router-now-ms router)
-            candidates (->> providers
-                         (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
-                         (filter (fn [[p _]] (provider-available? router p (get current (:id p) {})))))]
-        (when (seq candidates)
-          (let [[provider model-map] (first (sort-by (fn [[p _]] (:priority p 0)) candidates))
-                pid (:id provider)
-                new-state (update-in current [pid :requests]
-                            (fn [r] (conj (router-prune-window router (or r [])) ts)))]
-            (if (compare-and-set! state current new-state)
-              [provider model-map]
-              (recur))))))))
-
-(defn- earliest-available [router prefs]
-  (let [{:keys [providers state]} router
-        current-state @state
-        _ts (router-now-ms router)
-        window-ms (:window-ms router)]
-    (->> providers
-      (filter #(some? (resolve-model % prefs)))
-      (keep (fn [p]
-              (let [ps (get current-state (:id p) {})
-                    ;; For circuit breaker: use open-until as earliest time
-                    cb-ready (when (= :open (or (:cb-state ps) :closed))
-                               (:cb-open-until ps))
-                    requests (sort (mapv #(if (map? %) (:ts %) %)
-                                     (router-prune-window router (:requests ps []))))
-                    rpm-ready (when (and (seq requests)
-                                      (>= (count requests) (:rpm p Long/MAX_VALUE)))
-                                (+ (long (first requests)) window-ms))
-                    times (remove nil? [cb-ready rpm-ready])]
-                (when (seq times) (apply max times)))))
-      sort first)))
-
-(defn- record-tokens! [router provider-id token-count]
-  (let [ts (router-now-ms router)]
-    (swap! (:state router) update-in [provider-id :tokens]
-      (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
-
-(defn- router-transient-error? [router e]
-  (let [status (:status (ex-data e))
-        etype (:type (ex-data e))
-        codes (:transient-status-codes router)
-        msg (ex-message e)]
-    (boolean
-      (or (and status (contains? codes status))
-        (and (= etype :svar.core/http-error)
-          (some-> msg (clojure.string/includes? "timed out")))
-        (instance? java.net.ConnectException e)
-        (instance? java.net.SocketTimeoutException e)
-        (some-> (.getCause e)
-          ((fn [c] (or (instance? java.net.ConnectException c)
-                     (instance? java.net.SocketTimeoutException c)))))))))
-
-(defn- with-provider-fallback [router prefs f]
-  (budget-check! router)
-  (let [tried (atom #{})
-        max-wait-ms (:max-wait-ms router)]
-    (loop [attempts 0]
-      (if-let [[provider model-map] (select-and-claim! router prefs)]
-        (let [pid (:id provider)
-              start-ms (router-now-ms router)]
-          (swap! tried conj pid)
-          (let [result (try (f provider model-map)
-                            (catch Exception e
-                              (if (router-transient-error? router e)
-                                (do (trove/log! {:level :warn
-                                                 :data {:provider pid :status (:status (ex-data e))
-                                                        :error (ex-message e)}
-                                                 :msg "Provider transient error"})
-                                    (cb-record-failure! router pid
-                                      (= 429 (:status (ex-data e))))
-                                    (when-let [on-chunk (:on-chunk prefs)]
-                                      (on-chunk {:reset? true
-                                                 :reason :provider-fallback
-                                                 :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                                 :new-provider nil}))
-                                    ::transient-error)
-                                (throw e))))]
-            (if (= result ::transient-error)
-              (recur (inc attempts))
-              (let [token-count (or (get-in result [:api-usage :total_tokens])
-                                  (get-in result [:tokens :total])
-                                  0)
-                    latency-ms (- (router-now-ms router) start-ms)]
-                (record-tokens! router pid token-count)
-                (cb-record-success! router pid)
-                (record-cumulative! router pid token-count latency-ms)
-                (budget-record! router pid (:name model-map) (or (:api-usage result) {:prompt_tokens 0 :completion_tokens 0}))
-                (assoc result
-                  :routed/provider-id pid
-                  :routed/model (:name model-map)
-                  :routed/base-url (:base-url provider))))))
-        (let [earliest (earliest-available router prefs)]
-          (if (and earliest (< attempts 3))
-            (let [wait-ms (min (- earliest (router-now-ms router)) max-wait-ms)]
-              (when (pos? wait-ms)
-                (trove/log! {:level :info :data {:wait-ms wait-ms :prefs prefs}
-                             :msg "All providers busy, waiting"})
-                (async/<!! (async/timeout wait-ms)))
-              (recur (inc attempts)))
-            (throw (ex-info "All providers exhausted"
-                     {:type :svar.llm/all-providers-exhausted
-                      :prefs prefs :tried @tried}))))))))
-
-;; =============================================================================
-;; Router creation
-;; =============================================================================
-
-(defn make-router
-  "Creates a router from a vector of provider maps.
-
-   Vector order = priority (first provider is highest priority).
-   First model in provider vector = root model.
-   Provider :base-url auto-resolved from router/KNOWN_PROVIDERS for known IDs.
-   Model metadata auto-inferred from :name and merged with provider-scoped pricing/context.
-   Duplicate provider :id values are a hard error.
-
-   `opts` - Optional map:
-     :network   - {:timeout-ms N :max-retries N ...} router-level network defaults
-     :tokens    - {:check-context? bool :pricing {} :context-limits {}} token defaults
-     :budget    - {:max-tokens N :max-cost N} spend limits (nil = no limit)
-     :cb-failure-threshold - Int. Failures before circuit opens (default: 5)
-     :cb-recovery-ms       - Int. Ms before open→half-open (default: 60000)
-
-   Example:
-     (make-router [{:id :blockether :api-key <key>
-                    :models [{:name <model-a>} {:name <model-b>}]}
-                   {:id :openai :api-key <key>
-                    :models [{:name <model-a>} {:name <model-b>}]}]
-                  {:budget {:max-tokens 1000000 :max-cost 5.0}})"
-  ([providers] (make-router providers {}))
-  ([providers opts]
-   (when-not (sequential? providers)
-     (throw (ex-info "make-router expects a vector of provider maps" {:type :svar/invalid-providers :got (type providers)})))
-   (when (empty? providers)
-     (throw (ex-info "make-router requires at least one provider" {:type :svar/no-providers})))
-   (let [normalized (vec (map-indexed router/normalize-provider providers))
-         ids (map :id normalized)
-         dupes (keys (filter (fn [[_ n]] (> n 1)) (frequencies ids)))
-         merged (merge router-default-opts opts)
-         budget (:budget opts)
-         init-provider-state {:requests [] :tokens []
-                              :cb-state :closed :cb-failures 0 :cb-open-until nil
-                              :cum {:requests 0 :total-tokens 0 :latencies []}}]
-     (when (seq dupes)
-       (throw (ex-info (str "Duplicate provider IDs: " (str/join ", " (map name dupes)))
-                {:type :svar/duplicate-provider-ids :ids dupes})))
-     {:providers              normalized
-      :state                  (atom (zipmap ids (repeat init-provider-state)))
-      :budget                 budget
-      :budget-state           (when budget (atom {:total-tokens 0 :total-cost 0.0}))
-      :network                (merge router/DEFAULT_RETRY
-                                {:timeout-ms router/DEFAULT_TIMEOUT_MS}
-                                (:network opts))
-      :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
-                                                 (if (some? cc) cc true))
-                               :pricing (merge router/DEFAULT_MODEL_PRICING
-                                          (:pricing (:tokens opts)))
-                               :context-limits (merge router/DEFAULT_CONTEXT_LIMITS
-                                                 (:context-limits (:tokens opts)))
-                               :output-reserve (:output-reserve (:tokens opts))}
-      :clock                  (get opts :clock #(System/currentTimeMillis))
-      :window-ms              (:window-ms merged)
-      :cooldown-ms            (:cooldown-ms merged)
-      :max-wait-ms            (:max-wait-ms merged)
-      :cb-failure-threshold   (:cb-failure-threshold merged)
-      :cb-recovery-ms         (:cb-recovery-ms merged)
-      :transient-status-codes (:transient-status-codes merged)})))
-
-;; =============================================================================
-;; Router observability + management
-;; =============================================================================
-
-(defn router-stats
-  "Returns cumulative + windowed stats for the router.
-
-   Returns map with :total and :providers keys.
-   :total - Aggregate across all providers.
-   :providers - Map of provider-id to per-provider stats."
-  [router]
-  (let [current-state @(:state router)
-        budget-state (when (:budget-state router) @(:budget-state router))
-        provider-stats
-        (reduce-kv
-          (fn [acc pid ps]
-            (let [windowed-requests (router-prune-window router (:requests ps []))
-                  windowed-tokens (router-prune-window router (:tokens ps []))
-                  cum (or (:cum ps) {})
-                  latencies (or (:latencies cum) [])
-                  avg-latency (if (seq latencies)
-                                (double (/ (reduce + 0 latencies) (count latencies)))
-                                0.0)]
-              (assoc acc pid
-                {:circuit-breaker (cb-state router ps)
-                 :cb-failures (or (:cb-failures ps) 0)
-                 :windowed {:requests (count windowed-requests)
-                            :tokens (reduce + 0 (map :n windowed-tokens))}
-                 :cumulative {:requests (or (:requests cum) 0)
-                              :total-tokens (or (:total-tokens cum) 0)
-                              :avg-latency-ms avg-latency}})))
-          {} current-state)
-        total-requests (reduce + 0 (map #(get-in % [1 :cumulative :requests]) provider-stats))
-        total-tokens (reduce + 0 (map #(get-in % [1 :cumulative :total-tokens]) provider-stats))]
-    (cond-> {:total {:requests total-requests
-                     :tokens total-tokens}
-             :providers provider-stats}
-      budget-state (assoc :budget {:limit (:budget router)
-                                   :spent budget-state}))))
-
-(defn reset-budget!
-  "Resets the router's token/cost budget counters to zero."
-  [router]
-  (when-let [bs (:budget-state router)]
-    (reset! bs {:total-tokens 0 :total-cost 0.0}))
-  router)
-
-(defn reset-provider!
-  "Manually resets a provider's circuit breaker to :closed."
-  [router provider-id]
-  (swap! (:state router) update provider-id
-    (fn [ps]
-      (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil)))
-  router)
+(def reset-provider!
+  "Resets a provider's circuit breaker. Delegates to router/reset-provider!."
+  router/reset-provider!)
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
    Prefs may include :on-chunk fn for streaming."
   [router messages prefs]
-  (with-provider-fallback router prefs
+  (router/with-provider-fallback router prefs
     (fn [provider model-map]
       (chat-completion messages (:name model-map)
         (:api-key provider)
@@ -1013,7 +607,7 @@
     (let [resolved (router/resolve-routing router routing)
           provider (:provider resolved)
           model-map (:model resolved)]
-      (with-provider-fallback
+      (router/with-provider-fallback
         router {:strategy :root} ;; fallback still needs prefs for rate limiting
         (fn [_fallback-provider _fallback-model]
           (ask!* router
@@ -1028,7 +622,7 @@
                   (:strategy opts) (select-keys opts [:strategy])
                   (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                   :else {:strategy :root})]
-      (with-provider-fallback
+      (router/with-provider-fallback
         router prefs
         (fn [provider model-map]
           (let [reasoning-extra (when (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
@@ -1191,7 +785,7 @@
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
-    (with-provider-fallback
+    (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
         (abstract!* router
@@ -1644,7 +1238,7 @@
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
-    (with-provider-fallback
+    (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
         (eval!* router
@@ -2510,7 +2104,7 @@
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
                     (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                     :else {:strategy :root})]
-    (with-provider-fallback
+    (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
         (sample!* router
@@ -2618,7 +2212,7 @@
                 (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
                 :else {:strategy :root})]
-    (with-provider-fallback
+    (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
         (refine!* router

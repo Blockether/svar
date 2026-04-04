@@ -1146,3 +1146,54 @@
           :max-input-tokens max-input
           :overflow overflow}))
      result)))
+
+;; =============================================================================
+;; Router observability + management
+;; =============================================================================
+
+(defn router-stats
+  "Returns cumulative + windowed stats for the router."
+  [router]
+  (let [current-state @(:state router)
+        budget-state (when (:budget-state router) @(:budget-state router))
+        provider-stats
+        (reduce-kv
+          (fn [acc pid ps]
+            (let [windowed-requests (router-prune-window router (:requests ps []))
+                  windowed-tokens (router-prune-window router (:tokens ps []))
+                  cum (or (:cum ps) {})
+                  latencies (or (:latencies cum) [])
+                  avg-latency (if (seq latencies)
+                                (double (/ (reduce + 0 latencies) (count latencies)))
+                                0.0)]
+              (assoc acc pid
+                {:circuit-breaker (cb-state router ps)
+                 :cb-failures (or (:cb-failures ps) 0)
+                 :windowed {:requests (count windowed-requests)
+                            :tokens (reduce + 0 (map :n windowed-tokens))}
+                 :cumulative {:requests (or (:requests cum) 0)
+                              :total-tokens (or (:total-tokens cum) 0)
+                              :avg-latency-ms avg-latency}})))
+          {} current-state)
+        total-requests (reduce + 0 (map #(get-in % [1 :cumulative :requests]) provider-stats))
+        total-tokens (reduce + 0 (map #(get-in % [1 :cumulative :total-tokens]) provider-stats))]
+    (cond-> {:total {:requests total-requests
+                     :tokens total-tokens}
+             :providers provider-stats}
+      budget-state (assoc :budget {:limit (:budget router)
+                                   :spent budget-state}))))
+
+(defn reset-budget!
+  "Resets the router's token/cost budget counters to zero."
+  [router]
+  (when-let [bs (:budget-state router)]
+    (reset! bs {:total-tokens 0 :total-cost 0.0}))
+  router)
+
+(defn reset-provider!
+  "Manually resets a provider's circuit breaker to :closed."
+  [router provider-id]
+  (swap! (:state router) update provider-id
+    (fn [ps]
+      (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil)))
+  router)
