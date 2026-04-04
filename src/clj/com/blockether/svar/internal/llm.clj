@@ -241,14 +241,13 @@
         chat-url (if (str/ends-with? base-url "/chat/completions")
                    base-url
                    (str base-url "/chat/completions"))
-        _ (trove/log! {:level :info :id ::chat-completion-request
+        _ (trove/log! {:level :info :id ::llm-request
                        :data {:model model
                               :msg-count (count messages)
                               :body-size-k (format "%.1fK" (/ body-size 1000.0))
                               :timeout-ms timeout-ms
-                              :max-tokens (:max_tokens extra-body)
-                              :url chat-url}
-                       :msg "HTTP request starting"})]
+                              :max-tokens (:max_tokens extra-body)}
+                       :msg "LLM request"})]
     (try
       (with-retry
         (fn []
@@ -619,13 +618,6 @@
               auto-params (cond-> {:max_tokens (long (* 0.25 ctx))}
                             (seq (:reasoning-params model-map))
                             (merge (:reasoning-params model-map)))]
-          (trove/log! {:level :info :id ::ask-routed
-                       :data {:provider (:id provider)
-                              :model (:name model-map)
-                              :context-window ctx
-                              :max-tokens (:max_tokens auto-params)
-                              :has-reasoning (boolean (seq (:reasoning-params model-map)))}
-                       :msg "ask! routed"})
           (ask!* router
             (assoc opts
               :model (:name model-map)
@@ -737,7 +729,7 @@
                      extra-body (assoc :extra-body extra-body))
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
                                                               (chat-completion messages model api-key chat-url retry-opts))
-        _ (trove/log! {:level :info :id ::ask-response
+        _ (trove/log! {:level :info :id ::llm-response
                        :data {:model model
                               :duration-ms duration-ms
                               :content-len (count (str content))
@@ -745,7 +737,7 @@
                               :input-tokens (:prompt_tokens api-usage)
                               :output-tokens (:completion_tokens api-usage)
                               :reasoning-tokens (get-in api-usage [:completion_tokens_details :reasoning_tokens])}
-                       :msg "ask! response received"})
+                       :msg "LLM response"})
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
         token-stats (router/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}
