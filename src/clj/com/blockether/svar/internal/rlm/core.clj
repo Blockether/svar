@@ -802,6 +802,9 @@
                                        "<error>LLM call failed: " (:message iter-err) "</error>\n"
                                        "The previous attempt failed. Adjust your approach or call \final\": {\"answer\": \"your answer\", \"confidence\": \"high\"} with what you have.")
                       trace-entry {:iteration iteration :error iter-err :final? false}]
+                  ;; Store error feedback for trajectory
+                  (rlm-db/store-message! db-info
+                    {:env-id env-id :role :user :content error-feedback :iteration iteration})
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
                     (conj trace trace-entry)
@@ -815,11 +818,12 @@
                       ;; Reconstruct content as ITERATION_SPEC JSON for fine-tuning
                       _traj-msg-id (let [mid (rlm-db/store-message! db-info
                                                {:env-id env-id :role :assistant
-                                                :content (pr-str {:thinking (or thinking "")
-                                                                  :code (mapv :code executions)
-                                                                  :final (when final-result
-                                                                           {:answer (answer-str (:answer final-result))
-                                                                            :confidence (:confidence final-result)})})
+                                                :content (pr-str (cond-> {:thinking (or thinking "")
+                                                                          :code (mapv :code executions)}
+                                                                   next-optimize (assoc :next-optimize next-optimize)
+                                                                   final-result (assoc :final
+                                                                                  {:answer (answer-str (:answer final-result))
+                                                                                   :confidence (:confidence final-result)})))
                                                 :thinking (or thinking "")
                                                 :iteration iteration})]
                                      (when (and mid (seq executions))
@@ -865,6 +869,11 @@
                                     (if has-reasoning?
                                       "Respond with code or set final to finish."
                                       "Respond with thinking + code, or set final to finish."))]
+                        ;; Store empty assistant + nudge for trajectory
+                        (rlm-db/store-message! db-info
+                          {:env-id env-id :role :assistant :content (or response thinking "[empty]") :iteration iteration})
+                        (rlm-db/store-message! db-info
+                          {:env-id env-id :role :user :content nudge :iteration iteration})
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages
                             {:role "assistant" :content (or response thinking "[empty]")}
