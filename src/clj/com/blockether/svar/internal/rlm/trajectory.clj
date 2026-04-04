@@ -120,49 +120,38 @@
   "Reconstructs the full conversation for a trajectory from DB entities.
 
    Returns a vector of message maps in chronological order.
-   Assistant messages are decomposed into :thinking and :code — matching
-   the exact JSON format the model produces at inference time."
+   Assistant messages have :content with full ITERATION_SPEC JSON
+   (stored by iteration loop) plus linked :executions from DB."
   [{:keys [conn]} env-id]
   (when conn
     (let [db (d/db conn)
-          messages (->> (d/q '[:find [(pull ?e [* {:execution/_message [:execution/code :execution/order]}]) ...]
+          messages (->> (d/q '[:find [(pull ?e [* {:execution/_message
+                                                   [:execution/code :execution/result
+                                                    :execution/stdout :execution/error
+                                                    :execution/order :execution/duration]}]) ...]
                                :in $ ?env-id
                                :where [?e :message/env-id ?env-id]]
                           db env-id)
-                     (sort-by (juxt :message/iteration :message/timestamp)))
-          conversation (mapv (fn [msg]
-                               (let [role (:message/role msg)
-                                     content (:message/content msg)]
-                                 (if (= role :assistant)
-                                   (let [executions (->> (:execution/_message msg)
-                                                      (sort-by :execution/order)
-                                                      (mapv :execution/code)
-                                                      (remove str/blank?)
-                                                      vec)
-                                         thinking (or (:message/thinking msg) "")]
-                                     {:role :assistant
-                                      :thinking thinking
-                                      :code executions})
-                                   {:role role :content content})))
-                         messages)]
-      conversation)))
+                     (sort-by (juxt :message/iteration :message/timestamp)))]
+      (mapv (fn [msg]
+              {:role (:message/role msg)
+               :content (:message/content msg)
+               :thinking (:message/thinking msg)
+               :iteration (:message/iteration msg)
+               :executions (->> (:execution/_message msg)
+                             (sort-by :execution/order)
+                             vec)})
+        messages))))
 
 (defn- format-for-training
   "Converts a reconstructed conversation to OpenAI messages format for fine-tuning.
 
-   Assistant content is JSON matching the ITERATION_SPEC format:
-   {\"thinking\": \"...\", \"code\": [...], \"next-optimize\": null, \"final\": null}
-   This ensures training data matches inference-time behavior exactly."
+   Assistant :content already contains ITERATION_SPEC JSON (stored by iteration loop).
+   System/user messages use raw content."
   [conversation]
-  (mapv (fn [{:keys [role content thinking code]}]
-          (case role
-            :system    {"role" "system" "content" content}
-            :user      {"role" "user" "content" content}
-            :assistant {"role" "assistant"
-                        "content" (json/write-json-str
-                                    (cond-> {"thinking" (or thinking "") "code" (or code [])}
-                                      ;; Don't include next-optimize/final in training — let model learn when to use them
-                                      ))}))
+  (mapv (fn [{:keys [role content]}]
+          {"role" (name role)
+           "content" (or content "")})
     conversation))
 
 (defn export-trajectories!
