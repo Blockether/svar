@@ -1,2 +1,0 @@
-2026-03-31T11:08:09.436279874Z :warn com.blockether.svar.internal.llm [1040 13] ::cod-non-map-result SAP returned non-map for CoD spec — check jsonish/spec pipeline 
-  data: {:result-type clojure.lang.PersistentVector, :result "[{:entity \"August 25, 2012\", :rationale \"This date marks Voyager 1's crossing into interstellar space, a pivotal moment in the mission.\", :score 1.0} []]"}
