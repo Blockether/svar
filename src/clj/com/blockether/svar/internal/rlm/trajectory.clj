@@ -66,7 +66,7 @@
                                  (or (:code resp) []))))
                      (str/join "\n"))
           iter-count (count iterations)
-          error-count (count (filter #(= :error (:iteration/status %)) iterations))
+          error-count (count (filter #(nil? (:iteration/response %)) iterations))
           score (atom 0)]
       (when (re-find #"\(def\s+" all-code) (swap! score + 2))
       (when (re-find #"\((?:llm-query|rlm-query)\s" all-code) (swap! score + 3))
@@ -134,9 +134,9 @@
               {:index (:iteration/index it)
                :input-messages (try (edn/read-string (:iteration/input-messages it)) (catch Exception _ []))
                :response (try (edn/read-string (:iteration/response it)) (catch Exception _ nil))
-               :executions (try (edn/read-string (:iteration/executions it)) (catch Exception _ []))
+               :code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
+               :results (try (edn/read-string (:iteration/results it)) (catch Exception _ []))
                :thinking (:iteration/thinking it)
-               :status (:iteration/status it)
                :duration-ms (:iteration/duration-ms it)})
         iterations))))
 

@@ -802,7 +802,7 @@
                   ;; Store error iteration snapshot
                   (rlm-db/store-iteration! db-info
                     {:env-id env-id :index iteration :input-messages effective-messages
-                     :response nil :executions nil :thinking nil :status :error :duration-ms 0})
+                     :response nil :executions nil :thinking nil :duration-ms 0})
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
                     (conj trace trace-entry)
@@ -824,7 +824,6 @@
                                                                 :confidence (:confidence final-result)}))
                                     :executions executions
                                     :thinking thinking
-                                    :status (cond final-result :final (seq executions) :ok :else :empty)
                                     :duration-ms (get-in iteration-result [:api-usage :prompt_tokens] 0)})
                       trace-entry {:iteration iteration
                                    :response response
@@ -870,7 +869,7 @@
                         (rlm-db/store-iteration! db-info
                           {:env-id env-id :index iteration :input-messages effective-messages
                            :response {:thinking (or thinking "") :code []}
-                           :executions nil :thinking thinking :status :empty :duration-ms 0})
+                           :executions nil :thinking thinking :duration-ms 0})
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages
                             {:role "assistant" :content (or response thinking "[empty]")}

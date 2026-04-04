@@ -69,33 +69,22 @@
                            eval-score (assoc :trajectory/eval-score (float eval-score)))])
       traj-id)))
 
-(defn- sanitize-executions
-  "Converts execution results to EDN-safe format.
-   Replaces non-serializable values (vars, functions) with their pr-str."
-  [executions]
-  (when (seq executions)
-    (mapv (fn [e]
-            (-> e
-              (update :result #(try (pr-str %) (catch Exception _ "???")))
-              (dissoc :execution-time-ms)
-              (assoc :duration-ms (:execution-time-ms e 0))))
-      executions)))
-
 (defn store-iteration!
   "Stores a complete iteration snapshot — exact LLM input/output for fine-tuning.
    Captures the EXACT messages sent to LLM and the parsed response."
-  [{:keys [conn]} {:keys [env-id index input-messages response executions thinking status duration-ms]}]
+  [{:keys [conn]} {:keys [env-id index input-messages response executions thinking duration-ms]}]
   (when conn
     (let [iter-id (java.util.UUID/randomUUID)
-          safe-execs (sanitize-executions executions)]
+          code-strs (mapv :code (or executions []))
+          result-strs (mapv #(try (pr-str (:result %)) (catch Exception _ "???")) (or executions []))]
       (d/transact! conn [{:iteration/id iter-id
                           :iteration/env-id (or env-id "")
                           :iteration/index (or index 0)
                           :iteration/input-messages (pr-str input-messages)
                           :iteration/response (pr-str response)
-                          :iteration/executions (pr-str safe-execs)
+                          :iteration/code (pr-str code-strs)
+                          :iteration/results (pr-str result-strs)
                           :iteration/thinking (or thinking "")
-                          :iteration/status (or status :ok)
                           :iteration/duration-ms (or duration-ms 0)
                           :iteration/timestamp (java.util.Date.)}])
       iter-id)))

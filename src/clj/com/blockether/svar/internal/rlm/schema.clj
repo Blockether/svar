@@ -306,9 +306,9 @@
    :iteration/index          {:db/valueType :db.type/long    :db/doc "Iteration number (0-based)"}
    :iteration/input-messages {:db/valueType :db.type/string  :db/doc "pr-str of effective-messages sent to LLM"}
    :iteration/response       {:db/valueType :db.type/string  :db/doc "pr-str of parsed response (ITERATION_SPEC data)"}
-   :iteration/executions     {:db/valueType :db.type/string  :db/doc "pr-str of execution results [{:code :result :error ...}]"}
+   :iteration/code           {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
+   :iteration/results        {:db/valueType :db.type/string  :db/doc "pr-str of result strings (pr-str of each result)"}
    :iteration/thinking       {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
-   :iteration/status         {:db/valueType :db.type/keyword :db/doc ":ok :error :empty :final"}
    :iteration/duration-ms    {:db/valueType :db.type/long    :db/doc "LLM call duration"}
    :iteration/timestamp      {:db/valueType :db.type/instant}})
 
