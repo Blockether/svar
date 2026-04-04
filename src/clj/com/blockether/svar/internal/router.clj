@@ -730,40 +730,42 @@
 ;; =============================================================================
 
 (defn resolve-routing
-  "Resolves :routing opts to concrete provider + model + auto-params.
-   Returns {:provider provider-map :model model-map :auto-params {:max_tokens N ...} :error-strategy kw}"
+  "Resolves :routing opts to prefs for with-provider-fallback.
+   Returns {:prefs prefs-map :error-strategy kw}.
+   Throws on invalid provider/model combinations."
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error]} routing-opts
         error-strategy (or on-transient-error :hybrid)
-        [selected-provider selected-model] (cond
-                                             (and provider model) ;; exact match
-                                             (let [p (first (filter #(= (:id %) provider) (:providers router)))
-                                                   m (first (filter #(= (:name %) model) (:models p)))]
-                                               [p m])
-                                             provider ;; provider + optimize
-                                             (let [p (first (filter #(= (:id %) provider) (:providers router)))]
-                                               [p (if optimize
-                                                    (first (sort-by (preference-sort-key optimize) (:models p)))
-                                                    (first (:models p)))])
-                                             model ;; find provider with this model
-                                             (some (fn [p]
-                                                     (when-let [m (first (filter #(= (:name %) model) (:models p)))]
-                                                       [p m]))
-                                               (:providers router))
-                                             optimize ;; best model across all providers
-                                             (let [candidates (for [p (:providers router) m (:models p)] [p m])
-                                                   sort-fn (preference-sort-key optimize)]
-                                               (first (sort-by (fn [[_p m]] (sort-fn m)) candidates)))
-                                             :else ;; default: first model of first provider
-                                             (let [p (first (:providers router))]
-                                               [p (first (:models p))]))
-        ctx (or (:context selected-model) 8192)
-        auto-params (cond-> {:max_tokens (long (* 0.25 ctx))}
-                      (seq (:reasoning-params selected-model))
-                      (merge (:reasoning-params selected-model)))]
-    {:provider selected-provider
-     :model selected-model
-     :auto-params auto-params
+        ;; Build prefs map for with-provider-fallback
+        prefs (cond
+                ;; Exact provider + model override
+                (and provider model)
+                (let [p (first (filter #(= (:id %) provider) (:providers router)))]
+                  (when-not p
+                    (throw (ex-info (str "Unknown provider: " provider)
+                             {:type :svar/routing-resolution-failed
+                              :provider provider
+                              :available (mapv :id (:providers router))})))
+                  (when-not (some #(= (:name %) model) (:models p))
+                    (throw (ex-info (str "Model " model " not found in provider " provider)
+                             {:type :svar/routing-resolution-failed
+                              :provider provider :model model
+                              :available (mapv :name (:models p))})))
+                  {:strategy :root :force-provider provider :force-model model})
+                ;; Provider override + optimize
+                provider
+                {:strategy :root :force-provider provider
+                 :prefer (or optimize :cost)}
+                ;; Model override — find in any provider
+                model
+                {:strategy :root :force-model model}
+                ;; Optimize across all
+                optimize
+                {:prefer optimize}
+                ;; Default — first model of first provider
+                :else
+                {:strategy :root})]
+    {:prefs prefs
      :error-strategy error-strategy}))
 
 ;; =============================================================================

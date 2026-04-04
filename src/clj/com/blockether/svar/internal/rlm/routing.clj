@@ -62,8 +62,8 @@
    `rlm-router` - Router from llm/make-router, or nil.
 
    Returns:
-   Boolean. True if the root model's :reasoning? flag is set."
+   Boolean. True if the root model has :reasoning-params set."
   [rlm-router]
   (when rlm-router
     (when-let [[_provider model] (llm/select-provider rlm-router {:strategy :root})]
-      (boolean (:reasoning? model)))))
+      (boolean (seq (:reasoning-params model))))))

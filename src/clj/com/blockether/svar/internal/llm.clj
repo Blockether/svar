@@ -602,39 +602,21 @@
 
      Legacy (deprecated): :strategy, :prefer, :capabilities"
   [router opts]
-  (if-let [routing (:routing opts)]
-    ;; New :routing API — use router/resolve-routing
-    (let [resolved (router/resolve-routing router routing)
-          provider (:provider resolved)
-          model-map (:model resolved)]
-      (router/with-provider-fallback
-        router {:strategy :root} ;; fallback still needs prefs for rate limiting
-        (fn [_fallback-provider _fallback-model]
+  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
+    (router/with-provider-fallback
+      router (:prefs resolved)
+      (fn [provider model-map]
+        (let [ctx (or (:context model-map) 8192)
+              auto-params (cond-> {:max_tokens (long (* 0.25 ctx))}
+                            (seq (:reasoning-params model-map))
+                            (merge (:reasoning-params model-map)))]
           (ask!* router
             (assoc opts
               :model (:name model-map)
               :api-key (:api-key provider)
               :base-url (:base-url provider)
               :provider-id (:id provider)
-              :extra-body (:auto-params resolved))))))
-    ;; Legacy API — :strategy/:prefer
-    (let [prefs (cond
-                  (:strategy opts) (select-keys opts [:strategy])
-                  (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                  :else {:strategy :root})]
-      (router/with-provider-fallback
-        router prefs
-        (fn [provider model-map]
-          (let [reasoning-extra (when (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
-                                  (:reasoning-params model-map))
-                merged-extra (merge reasoning-extra (:extra-body opts))]
-            (ask!* router
-              (cond-> (assoc opts
-                        :model (:name model-map)
-                        :api-key (:api-key provider)
-                        :base-url (:base-url provider)
-                        :provider-id (:id provider))
-                (seq merged-extra) (assoc :extra-body merged-extra)))))))))
+              :extra-body auto-params)))))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
