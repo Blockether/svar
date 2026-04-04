@@ -59,68 +59,8 @@
 ;; Unit Tests (no LLM calls)
 ;; =============================================================================
 
-(defdescribe extract-code-blocks-test
-  (it "extracts code from clojure blocks"
-    (expect (= ["(+ 1 2)"]
-              (#'rlm-core/extract-code-blocks "text ```clojure\n(+ 1 2)\n``` more"))))
-
-  (it "extracts code from repl blocks"
-    (expect (= ["(def x 1)"]
-              (#'rlm-core/extract-code-blocks "```repl\n(def x 1)\n```"))))
-
-  (it "extracts code from clj blocks"
-    (expect (= ["(println \"hi\")"]
-              (#'rlm-core/extract-code-blocks "```clj\n(println \"hi\")\n```"))))
-
-  (it "extracts code from plain triple backtick blocks"
-    (expect (= ["(str \"test\")"]
-              (#'rlm-core/extract-code-blocks "```\n(str \"test\")\n```"))))
-
-  (it "extracts multiple code blocks"
-    (expect (= ["(def x 1)" "(inc x)"]
-              (#'rlm-core/extract-code-blocks "```clojure\n(def x 1)\n```\n```clojure\n(inc x)\n```"))))
-
-  (it "returns empty vector when no code blocks"
-    (expect (= []
-              (#'rlm-core/extract-code-blocks "no code here"))))
-
-  (it "skips empty code blocks"
-    (expect (= []
-              (#'rlm-core/extract-code-blocks "```clojure\n\n\n```"))))
-
-  (it "trims whitespace from extracted code"
-    (expect (= ["(+ 1 2)"]
-              (#'rlm-core/extract-code-blocks "```clojure\n  (+ 1 2)  \n```")))))
-
-(defdescribe check-result-for-final-test
-  (it "detects FINAL marker in result"
-    (expect (= {:final? true :answer "done" :confidence :high}
-              (#'rlm-core/check-result-for-final {:result {:rlm/final true :rlm/answer "done"}}))))
-
-  (it "extracts confidence from FINAL result"
-    (expect (= {:final? true :answer {:result "done"} :confidence :low
-                :sources [{:source "doc-1" :type :file :confidence :high}]}
-              (#'rlm-core/check-result-for-final
-               {:result {:rlm/final true
-                         :rlm/answer {:result "done"}
-                         :rlm/confidence :low
-                         :rlm/sources [{:source "doc-1" :type :file :confidence :high}]}}))))
-
-  (it "returns false when no FINAL marker"
-    (expect (= {:final? false}
-              (#'rlm-core/check-result-for-final {:result 42}))))
-
-  (it "returns false when result is nil"
-    (expect (= {:final? false}
-              (#'rlm-core/check-result-for-final {:result nil}))))
-
-  (it "returns false when result is not a map"
-    (expect (= {:final? false}
-              (#'rlm-core/check-result-for-final {:result "string"}))))
-
-  (it "returns false when rlm/final is false"
-    (expect (= {:final? false}
-              (#'rlm-core/check-result-for-final {:result {:rlm/final false :rlm/answer "test"}})))))
+;; extract-code-blocks and check-result-for-final tests removed —
+;; these functions were replaced by ask! with ITERATION_SPEC (provider-enforced JSON)
 
 (defdescribe create-rlm-env-test
   (it "creates environment with required keys"

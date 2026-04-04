@@ -21,7 +21,7 @@
 (defn make-routed-llm-query-fn
   "Creates an llm-query function that routes across providers via a router.
    Errors are caught and returned as {:content \"ERROR: ...\" :error true} so the
-   LLM can see them and adapt (e.g., retry with different approach, call FINAL).
+   LLM can see them and adapt (e.g., retry with different approach).
 
    `prefs` — preferences map, e.g. {:strategy :root} or {:prefer :cost :capabilities #{:chat}}"
   [prefs depth-atom rlm-router]

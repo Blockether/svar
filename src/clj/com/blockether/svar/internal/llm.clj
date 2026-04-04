@@ -1114,8 +1114,10 @@
                                               :tokens nil
                                               :cost nil
                                               :done? false})))))
+        extra-body (:extra-body opts)
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms})
-                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk))
+                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
+                     extra-body (assoc :extra-body extra-body))
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
                                                               (chat-completion messages model api-key chat-url retry-opts))
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts

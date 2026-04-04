@@ -178,35 +178,12 @@
                        :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
           {:result result :stdout stdout :stderr stderr :error error :execution-time-ms execution-time :timeout? false})))))
 
-;; =============================================================================
-;; FINAL Detection
-;; =============================================================================
-
-(defn check-result-for-final [result-map]
-  (let [result (:result result-map)]
-    (if (and (map? result) (true? (:rlm/final result)))
-      (cond-> {:final? true
-               :answer (:rlm/answer result)
-               :confidence (or (:rlm/confidence result) :high)}
-        (:rlm/sources result)   (assoc :sources (:rlm/sources result))
-        (:rlm/reasoning result) (assoc :reasoning (:rlm/reasoning result)))
-      {:final? false})))
-
 (defn answer-str
   "Extracts a string representation from an RLM answer.
    Answer is {:result value :type type} — returns the :result as a string."
   [answer]
   (let [v (:result answer answer)]
     (if (string? v) v (pr-str v))))
-
-;; =============================================================================
-;; Code Extraction
-;; =============================================================================
-
-(defn extract-code-blocks [text]
-  (let [pattern #"```(?:clojure|repl|clj)?\s*\n([\s\S]*?)\n```"
-        matches (re-seq pattern text)]
-    (->> matches (map second) (map str/trim) (remove str/blank?) vec)))
 
 ;; =============================================================================
 ;; System Prompt
@@ -381,7 +358,7 @@
 </rlm_patterns>
 
 <workflow>
-0. FIRST: Check <context> and <var_index> - if they already answer the query, set 'final' immediately
+0. FIRST: Check <context> and <var_index> - if they already answer the query, set 'final-answer' immediately
 1. If more info needed, check available documents: (list-documents)
 2. Browse TOC to understand document structure: (list-document-toc)
 3. Pick sections from TOC, fetch content: (def section \"doc for section\" (P-add! [:page.node/id node-id]))
@@ -389,7 +366,7 @@
 5. Check entities if relevant: (document-entity-stats), then (list-document-entities {:type :party})
 6. Store intermediate results with (def my-var \"docstring\" value) — use docstrings!
 7. List vars to carry in 'carry' field for next iteration
-8. Set 'final' field when done
+8. Set 'final-answer' when done
 </workflow>
 
 <response_format>
@@ -399,10 +376,9 @@
     "EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown, no prose outside JSON.") "
   The optional 'carry' field lists var names whose FULL VALUES you need in the next iteration.
   Vars not in 'carry' appear only in the <var_index> (name/type/size/doc — no value).
-  The optional 'final' field terminates the loop. When non-null, 'code' is IGNORED.
-  final format: {\"answer\": \"the answer\", \"confidence\": \"high|medium|low\", \"summary\": \"one-line for var index\"}
+  To finish: set 'final-answer' to your answer string and 'final-confidence' to high|medium|low. Code is IGNORED when final-answer is set.
   Example continue: {\"thinking\": \"...\", \"code\": [\"...\"], \"carry\": [\"clause\"]}
-  Example finalize: {\"thinking\": \"...\", \"code\": [], \"carry\": [], \"final\": {\"answer\": \"The penalty is 5%.\", \"confidence\": \"high\", \"summary\": \"Penalty clause analysis\"}}
+  Example finalize: {\"thinking\": \"found the answer\", \"code\": [], \"final-answer\": \"The penalty is 5%.\", \"final-confidence\": \"high\"}
 </response_format>
 
 <critical>
@@ -414,8 +390,8 @@
 - EXECUTION RESULTS: After each iteration, <execution_results> shows success/failure per code block.
 - EXECUTION JOURNAL: The <execution_journal> shows your thinking + var names from previous iterations. Squashed every 5 iterations.
 - CONVERSATION: The <conversation> section links previous queries to their final-result-N vars.
-- FINALIZE: Set the 'final' field in your response when done. Code is IGNORED when final is set.
-- FAST PATH: If context or var_index already answers the query, set 'final' IMMEDIATELY.
+- FINALIZE: Set 'final-answer' and 'final-confidence' in your response when done. Code is IGNORED when final-answer is set.
+- FAST PATH: If context or var_index already answers the query, set 'final-answer' IMMEDIATELY.
 - NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or finalize.
 - CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses.
 - VARS ARE VALUES: Use `my-var` to reference a stored value, NOT `(my-var)`.
@@ -431,14 +407,18 @@
 ;; =============================================================================
 
 (defn run-iteration
-  "Runs a single RLM iteration: LLM call → parse → execute code → check for FINAL.
+  "Runs a single RLM iteration: ask! → check final → execute code.
+
+   Uses ask! with ITERATION_SPEC for provider-enforced JSON structured output.
+   No regex fallback, no code-level FINAL detection.
 
    Params:
    `rlm-env` - RLM environment map.
    `messages` - Vector of message maps for the LLM.
    `opts` - Map, optional:
-     - :iteration-spec - Spec to use for parsing (default: ITERATION_SPEC).
-                         When provider has reasoning, pass ITERATION_SPEC_CODE_ONLY."
+     - :iteration-spec - Spec for ask! (default: ITERATION_SPEC).
+                         When provider has reasoning, pass ITERATION_SPEC_CODE_ONLY.
+     - :on-chunk - Streaming callback function."
   [rlm-env messages & [{:keys [iteration-spec on-chunk] :or {iteration-spec ITERATION_SPEC}}]]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
     (let [context-chars (reduce + 0 (map #(count (str (:content %))) messages))
@@ -447,113 +427,56 @@
                                 :context-chars context-chars
                                 :context-chars-k (format "%.1fK" (/ context-chars 1000.0))}
                          :msg "LLM call started"})
-          response-data (llm/routed-chat-completion (:router rlm-env) messages
-                          (cond-> {:strategy :root :extra-body {:max_tokens 25000}}
-                            on-chunk (assoc :on-chunk on-chunk)))
-          response (:content response-data)
-          model-reasoning (:reasoning response-data)
-          _ (rlm-debug! {:response-len (count response)
-                         :has-reasoning (some? model-reasoning)
-                         :routed-model (:routed/model response-data)
-                         :routed-provider (:routed/provider-id response-data)
-                         :response-preview (str-truncate response 300)} "LLM response received")
-          ;; Parse structured response via spec (primary), fall back to code fences
-          ;; When provider has reasoning, iteration-spec is ITERATION_SPEC_CODE_ONLY (no :thinking field)
-          parsed (try (let [p (spec/str->data-with-spec response iteration-spec)]
-                        (rlm-debug! {:spec (if (= iteration-spec ITERATION_SPEC_CODE_ONLY) :code-only :full)}
-                          "Response parsed via iteration spec (structured)")
-                        p)
-                      (catch Exception e
-                        ;; Fallback: extract code from markdown fences
-                        (rlm-debug! {:parse-error (ex-message e)} "Spec parse failed, falling back to markdown extraction")
-                        {:thinking response :code (extract-code-blocks response)}))
-          ;; Native reasoning always takes priority over spec-parsed thinking
+          ;; Use ask! with iteration spec — provider enforces JSON schema
+          ask-result (llm/ask! (:router rlm-env)
+                       (cond-> {:spec iteration-spec
+                                :messages messages
+                                :extra-body {:max_tokens 25000}
+                                :check-context? false}
+                         on-chunk (assoc :on-chunk on-chunk)))
+          parsed (:result ask-result)
+          model-reasoning (:reasoning ask-result)
+          _ (rlm-debug! {:has-reasoning (some? model-reasoning)
+                         :has-final (some? (:final-answer parsed))
+                         :code-count (count (:code parsed))
+                         :carry-count (count (:carry parsed))} "ask! response received")
+          ;; Native reasoning takes priority over spec-parsed thinking
           thinking (or model-reasoning (:thinking parsed))
           carry (vec (remove str/blank? (or (:carry parsed) [])))
-          ;; Check for final field in response — if present, skip code execution
-          response-final (when-let [f (:final parsed)]
-                           (when (map? f)
-                             {:final? true
-                              :answer {:result (str (:answer f)) :type String}
-                              :confidence (keyword (or (:confidence f) "high"))
-                              :summary (:summary f)}))]
-      ;; Early return if final field is set — code is ignored
-      (if response-final
-        (do (rlm-debug! {:final-answer (str-truncate (str (:answer response-final)) 200)} "Final field detected in response")
-            {:response (when-not model-reasoning response)
-             :thinking thinking :carry carry :executions [] :final-result response-final
-             :api-usage (:api-usage response-data)})
+          ;; Token usage from ask! result
+          api-usage {:prompt_tokens (get-in ask-result [:tokens :input] 0)
+                     :completion_tokens (get-in ask-result [:tokens :output] 0)
+                     :completion_tokens_details {:reasoning_tokens (get-in ask-result [:tokens :reasoning] 0)}
+                     :prompt_tokens_details {:cached_tokens (get-in ask-result [:tokens :cached] 0)}}]
+      ;; Check for final answer in spec response
+      (if-let [final-answer (:final-answer parsed)]
+        (let [confidence (keyword (or (:final-confidence parsed) "high"))
+              final-result {:final? true
+                            :answer {:result final-answer :type String}
+                            :confidence confidence}]
+          (rlm-debug! {:final-answer (str-truncate final-answer 200)
+                       :confidence confidence} "Final answer in response")
+          {:response nil :thinking thinking :carry carry
+           :executions [] :final-result final-result :api-usage api-usage})
         ;; Normal path: execute code blocks
         (let [code-blocks (vec (remove str/blank? (or (:code parsed) [])))
-          ;; Pre-validate: skip blocks that aren't valid Clojure (e.g. prose the LLM
-          ;; accidentally put in the :code array). Record them as errors without executing.
-          ;; Also detect "prose dump" pattern: if >50% of blocks fail read or are bare
-          ;; string literals, auto-wrap them into a FINAL answer.
-              validated (mapv (fn [code]
-                                (try
-                                  (let [sanitized (sanitize-code code)
-                                        form (read-string (str "(do " sanitized ")"))
-                                   ;; Detect bare string literals — not real code
-                                        bare-string? (and (seq? form) (= 2 (count form))
-                                                       (string? (second form)))]
-                                    {:code sanitized :valid? (not bare-string?)
-                                     :bare-string? bare-string?})
-                                  (catch Exception e
-                                    {:code code :valid? false :error (ex-message e)})))
-                          code-blocks)
-          ;; Detect prose dump: majority of blocks are invalid or bare strings
-              invalid-count (count (remove :valid? validated))
-              prose-dump? (and (> (count validated) 3)
-                            (> invalid-count (* 0.5 (count validated))))
-          ;; If prose dump detected, return as final directly (no code execution)
-              _ (when prose-dump?
-                  (rlm-debug! {:prose-blocks invalid-count :total (count validated)}
-                    "Prose dump detected — auto-wrapping as final"))]
-          (if prose-dump?
-            (let [prose (->> validated
-                          (map (fn [{:keys [code bare-string?]}]
-                                 (if bare-string?
-                                   (try (read-string code) (catch Exception _ code))
-                                   code)))
-                          (str/join "\n"))]
-              {:response (when-not model-reasoning response)
-               :thinking thinking :carry [] :executions []
-               :final-result {:final? true :answer {:result prose :type String} :confidence :medium}
-               :api-usage (:api-usage response-data)})
-            (let [{code-blocks :code-blocks validated :validated}
-                  {:code-blocks (mapv :code validated)
-                   :validated validated}
-                  _ (rlm-debug! {:code-block-count (count code-blocks)
-                                 :valid-count (count (filter :valid? validated))
-                                 :prose-dump? prose-dump?
-                                 :code-previews (mapv #(str-truncate (:code %) 120) validated)} "Code blocks extracted")
-                  execution-results (mapv (fn [{:keys [code valid? error]}]
-                                            (if valid?
-                                              (execute-code rlm-env code)
-                                              {:result nil :stdout "" :stderr "" :error error
-                                               :execution-time-ms 0 :timeout? false}))
-                                      validated)
-          ;; Combine code blocks with their execution results
-                  raw-executions (mapv (fn [idx {:keys [code]} result]
-                                         {:id idx
-                                          :code code
-                                          :result (:result result)
-                                          :stdout (:stdout result)
-                                          :stderr (:stderr result)
-                                          :error (:error result)
-                                          :execution-time-ms (:execution-time-ms result)})
-                                   (range)
-                                   validated
-                                   execution-results)
-          ;; Results stay inline — context budget handles size naturally.
-          ;; No auto-store: the model sees full results directly.
-                  executions raw-executions
-                  final-result (some #(let [check (check-result-for-final %)] (when (:final? check) check)) execution-results)]
-              {;; When native reasoning is present, the raw response is just a redundant JSON wrapper
-       ;; around thinking+code. Use nil to keep the trace clean — thinking is in :thinking.
-               :response (when-not model-reasoning response)
-               :thinking thinking :carry carry :executions executions :final-result final-result
-               :api-usage (:api-usage response-data)})))))))
+              _ (rlm-debug! {:code-block-count (count code-blocks)
+                             :code-previews (mapv #(str-truncate % 120) code-blocks)} "Code blocks extracted")
+              execution-results (mapv (fn [code]
+                                        (execute-code rlm-env code))
+                                  code-blocks)
+              ;; Combine code blocks with their execution results
+              executions (mapv (fn [idx code result]
+                                 {:id idx
+                                  :code code
+                                  :result (:result result)
+                                  :stdout (:stdout result)
+                                  :stderr (:stderr result)
+                                  :error (:error result)
+                                  :execution-time-ms (:execution-time-ms result)})
+                           (range) code-blocks execution-results)]
+          {:response nil :thinking thinking :carry carry
+           :executions executions :final-result nil :api-usage api-usage})))))
 
 (defn format-executions
   "Formats executions for LLM feedback as EDN.
@@ -793,7 +716,7 @@
                                 (str "\n\n⚠ REPETITION DETECTED: These calls have been executed 3+ times with the SAME results:\n"
                                   (str/join "\n" (map #(str "  - " (str-truncate (str %) 80)) (distinct repeated)))
                                   "\nRepeating the same action will NOT produce different results. "
-                                  "You MUST try a DIFFERENT approach, or call (FINAL {:answer [\"your answer\"]}) with what you have."))))
+                                  "You MUST try a DIFFERENT approach, or call \"final-answer\": \"your answer\" with what you have."))))
         finalize-cost (fn []
                         (let [{:keys [input-tokens output-tokens reasoning-tokens cached-tokens]} @usage-atom
                               total-tokens (+ input-tokens output-tokens)
@@ -893,7 +816,7 @@
                 ;; Error path: feed error back to LLM as user message, let it recover
                 (let [error-feedback (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
                                        "<error>LLM call failed: " (:message iter-err) "</error>\n"
-                                       "The previous attempt failed. Adjust your approach or call (FINAL {:answer [\"your answer\"]}) with what you have.")
+                                       "The previous attempt failed. Adjust your approach or call \"final-answer\": \"your answer\" with what you have.")
                       trace-entry {:iteration iteration :error iter-err :final? false}]
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
@@ -942,8 +865,8 @@
                                     "{:requirement " (pr-str (str-truncate query 200)) "}\n"
                                     "⚠ EMPTY — no code executed. You MUST include code. "
                                     (if has-reasoning?
-                                      "Respond: {\"code\": [\"(FINAL {:answer [\\\"your answer\\\"]})\"]} "
-                                      "Respond: {\"thinking\": \"...\", \"code\": [\"(FINAL {:answer [\\\"your answer\\\"]})\"]} "))]
+                                      "Respond with code or set final-answer to finish."
+                                      "Respond with thinking + code, or set final-answer to finish."))]
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages
                             {:role "assistant" :content (or response thinking "[empty]")}
@@ -960,10 +883,10 @@
                             remaining-iters (- (effective-max-iterations) (inc iteration))
                             budget-warning (when (<= remaining-iters 5)
                                              (str "\n[SYSTEM_NUDGE] Only " remaining-iters " iterations left! "
-                                               "Call (FINAL {:answer [\"your findings\"]}) NOW with what you have. DO NOT start new explorations."))
+                                               "Set final-answer NOW with what you have. DO NOT start new explorations."))
                             force-final-nudge (when (> iteration 20)
                                                 (str "\n[SYSTEM_NUDGE] You have been running for " (inc iteration) " iterations. "
-                                                  "STOP exploring. Call (FINAL {:answer [...]}) IMMEDIATELY with your current findings."))
+                                                  "STOP exploring. Set final-answer IMMEDIATELY with your current findings."))
                             user-feedback (str iteration-header "\n" exec-feedback repetition-warning budget-warning force-final-nudge)]
                         (rlm-debug! {:iteration iteration
                                      :code-blocks (count executions)

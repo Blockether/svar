@@ -110,12 +110,22 @@
     (spec/field {::spec/name :code
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})
+                 ::spec/description "Clojure expressions to execute in the sandbox."})
     (spec/field {::spec/name :carry
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/required false
-                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})))
+                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})
+    (spec/field {::spec/name :final-answer
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Set ONLY when you have the final answer. The answer string."})
+    (spec/field {::spec/name :final-confidence
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Confidence level: high, medium, or low. Required when final-answer is set."})))
 
 (def ITERATION_SPEC_CODE_ONLY
   "Spec for RLM iteration response when the provider has native reasoning.
@@ -125,12 +135,22 @@
     (spec/field {::spec/name :code
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "Clojure expressions to execute. Use (FINAL answer) when done."})
+                 ::spec/description "Clojure expressions to execute in the sandbox."})
     (spec/field {::spec/name :carry
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/required false
-                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})))
+                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})
+    (spec/field {::spec/name :final-answer
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Set ONLY when you have the final answer. The answer string."})
+    (spec/field {::spec/name :final-confidence
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Confidence level: high, medium, or low. Required when final-answer is set."})))
 
 (defn bytes->base64
   "Converts raw bytes to a base64 string.
