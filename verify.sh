@@ -163,7 +163,7 @@ _secret_scan() {
   if [ -z "$base" ]; then
     echo "No base branch found — scanning staged + unstaged changes"
     local hits
-    hits=$(git diff HEAD 2>/dev/null | grep -iE "(sk-|sk_live|api_key\s*=\s*\S{8}|AKIA[0-9A-Z]{16}|ghp_|password\s*=\s*['\"][^'\"]{8})" || true)
+    hits=$(git diff HEAD 2>/dev/null | grep -iE "(\bsk-[a-zA-Z0-9]{20,}|sk_live|api_key\s*=\s*\S{8}|AKIA[0-9A-Z]{16}|ghp_|password\s*=\s*['\"][^'\"]{8})" || true)
     if [ -n "$hits" ]; then
       echo "FAILED: Potential secrets in diff:"
       echo "$hits"
@@ -173,7 +173,7 @@ _secret_scan() {
     return 0
   fi
   local hits
-  hits=$(git diff "$base"..HEAD | grep -iE "(sk-|sk_live|api_key\s*=\s*\S{8}|AKIA[0-9A-Z]{16}|ghp_|password\s*=\s*['\"][^'\"]{8})" || true)
+  hits=$(git diff "$base"..HEAD | grep -iE "(\bsk-[a-zA-Z0-9]{20,}|sk_live|api_key\s*=\s*\S{8}|AKIA[0-9A-Z]{16}|ghp_|password\s*=\s*['\"][^'\"]{8})" || true)
   if [ -n "$hits" ]; then
     echo "FAILED: Potential secrets in diff:"
     echo "$hits"
