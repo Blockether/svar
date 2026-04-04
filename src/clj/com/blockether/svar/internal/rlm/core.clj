@@ -630,7 +630,7 @@
 
 (defn iteration-loop [rlm-env query
                       {:keys [output-spec max-context-tokens custom-docs system-prompt
-                              pre-fetched-context on-chunk
+                              pre-fetched-context on-chunk query-ref
                               max-iterations max-consecutive-errors max-restarts]}]
   (let [max-iterations (or max-iterations 50)
         max-consecutive-errors (or max-consecutive-errors 5)
@@ -801,7 +801,7 @@
                       trace-entry {:iteration iteration :error iter-err :final? false}]
                   ;; Store error iteration snapshot
                   (rlm-db/store-iteration! db-info
-                    {:env-id env-id :index iteration :input-messages effective-messages
+                    {:query-ref query-ref :index iteration
                      :response nil :executions nil :thinking nil :duration-ms 0})
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
@@ -814,8 +814,7 @@
                       {:keys [response thinking executions final-result next-optimize]} iteration-result
                       ;; Store iteration snapshot — exact input/output for fine-tuning
                       _traj-iter (rlm-db/store-iteration! db-info
-                                   {:env-id env-id :index iteration
-                                    :input-messages effective-messages
+                                   {:query-ref query-ref :index iteration
                                     :response (cond-> {:thinking (or thinking "")
                                                        :code (mapv :code executions)}
                                                 next-optimize (assoc :next-optimize next-optimize)
@@ -868,7 +867,7 @@
                                       "Respond with thinking + code, or set final to finish."))]
                         ;; Store empty iteration snapshot
                         (rlm-db/store-iteration! db-info
-                          {:env-id env-id :index iteration :input-messages effective-messages
+                          {:query-ref query-ref :index iteration
                            :response {:thinking (or thinking "") :code []}
                            :executions nil :thinking thinking :duration-ms 0})
                         (recur (inc iteration) ;; still increment to prevent infinite loop

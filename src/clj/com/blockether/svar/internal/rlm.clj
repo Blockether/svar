@@ -88,8 +88,11 @@
         llm-query-fn (rlm-routing/make-routed-llm-query-fn {} depth-atom router)
         sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:optimize :cost} depth-atom router)
         env-id (str (util/uuid))
+        root-model (or (rlm-routing/resolve-root-model router) "unknown")
+        conversation-ref (rlm-db/store-conversation! db-info {:env-id env-id :model root-model})
         {:keys [sci-ctx initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
     {:env-id env-id
+     :conversation-ref conversation-ref
      :depth-atom depth-atom
      :locals-atom locals-atom
      :custom-bindings-atom custom-bindings-atom
@@ -370,6 +373,10 @@
                                :refine-mode :final-confidence} "RLM query-env! started")
          (let [start-time (System/nanoTime)
                db-info @db-info-atom
+               ;; Create query record — iterations will link to it
+               query-ref (rlm-db/store-query! db-info
+                           {:conversation-ref (:conversation-ref env)
+                            :text query-str :status :running})
                 ;; Optional planning phase — LLM outlines approach before code execution
                plan-result (when plan?
                              (llm/ask! rlm-router {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
@@ -380,6 +387,7 @@
                 ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
                iteration-result (rlm-core/iteration-loop rlm-env query-str
                                   (cond-> {:max-iterations max-iterations
+                                           :query-ref query-ref
                                            :output-spec spec
                                            :max-context-tokens max-context-tokens
                                            :custom-docs (into (or custom-docs []) cite-docs)
@@ -418,13 +426,10 @@
              (let [duration-ms (util/elapsed-since start-time)]
                (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms} "RLM query-env! finished (max iterations)")
                (try
-                 (rlm-db/store-trajectory! @db-info-atom
-                   {:env-id env-id :query query-str :status status
-                    :answer (:result answer answer) :iterations iterations
-                    :duration-ms duration-ms :model root-model
-                    :doc-pages (try (when-let [c (:conn @db-info-atom)]
-                                      (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
-                                    (catch Exception _ 0))})
+                 (rlm-db/update-query! @db-info-atom query-ref
+                   {:answer (:result answer answer)
+                    :iterations iterations :duration-ms duration-ms
+                    :status status})
                  (catch Exception e
                    (trove/log! {:level :warn :data {:error (ex-message e)}
                                 :msg "Failed to store trajectory (max iterations)"})))
@@ -539,14 +544,10 @@
                                      :confidence confidence
                                      :answer-preview (rlm-db/str-truncate (pr-str final-answer) 200)} "RLM query-env! finished (success)")
                (try
-                 (rlm-db/store-trajectory! @db-info-atom
-                   {:env-id env-id :query query-str :status :success
-                    :answer final-answer :iterations iterations
-                    :duration-ms duration-ms :model root-model
-                    :eval-score eval-scores
-                    :doc-pages (try (when-let [c (:conn @db-info-atom)]
-                                      (or (d/q '[:find (count ?e) . :where [?e :page/id _]] (d/db c)) 0))
-                                    (catch Exception _ 0))})
+                 (rlm-db/update-query! @db-info-atom query-ref
+                   {:answer final-answer
+                    :iterations iterations :duration-ms duration-ms
+                    :status :success :eval-score eval-scores})
                  (catch Exception e
                    (trove/log! {:level :warn :data {:error (ex-message e)}
                                 :msg "Failed to store trajectory (success)"})))

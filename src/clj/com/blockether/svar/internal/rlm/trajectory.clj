@@ -131,14 +131,14 @@
   (when conn
     (let [iterations (list-iterations db-info env-id)]
       (mapv (fn [it]
-              {:index (:iteration/index it)
-               :input-messages (try (edn/read-string (:iteration/input-messages it)) (catch Exception _ []))
-               :response (try (edn/read-string (:iteration/response it)) (catch Exception _ nil))
-               :code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
-               :results (try (edn/read-string (:iteration/results it)) (catch Exception _ []))
-               :final (:iteration/final it)
-               :thinking (:iteration/thinking it)
-               :duration-ms (:iteration/duration-ms it)})
+              (cond-> {:index (:iteration/index it)
+                       :input-messages (try (edn/read-string (:iteration/input-messages it)) (catch Exception _ []))
+                       :response (try (edn/read-string (:iteration/response it)) (catch Exception _ nil))
+                       :code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
+                       :results (try (edn/read-string (:iteration/results it)) (catch Exception _ []))
+                       :duration-ms (:iteration/duration-ms it)}
+                (:iteration/final it) (assoc :final (:iteration/final it))
+                (seq (:iteration/thinking it)) (assoc :thinking (:iteration/thinking it))))
         iterations))))
 
 (defn- format-for-training

@@ -285,33 +285,35 @@
    :raw-document/id      {:db/valueType :db.type/string :db/unique :db.unique/identity}
    :raw-document/content {:db/valueType :db.type/string}
 
-   ;; Trajectories — query session outcomes for training data collection
-   :trajectory/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :trajectory/env-id      {:db/valueType :db.type/string  :db/doc "Links to messages sharing this env-id"}
-   :trajectory/query       {:db/valueType :db.type/string  :db/fulltext true}
-   :trajectory/status      {:db/valueType :db.type/keyword :db/doc ":success, :max-iterations, :error"}
-   :trajectory/answer      {:db/valueType :db.type/string  :db/doc "The FINAL answer, pr-str'd"}
-   :trajectory/iterations  {:db/valueType :db.type/long}
-   :trajectory/duration-ms {:db/valueType :db.type/long}
-   :trajectory/model       {:db/valueType :db.type/string  :db/doc "Root model used"}
-   :trajectory/doc-pages   {:db/valueType :db.type/long    :db/doc "Number of document pages in context"}
-   :trajectory/timestamp   {:db/valueType :db.type/instant}
-   :trajectory/score       {:db/valueType :db.type/long    :db/doc "Quality score for filtering (computed on export)"}
-   :trajectory/eval-score  {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0 (from refine!) — answer quality signal"}
+   ;; Conversation — env session, holds system prompt and links queries
+   :conversation/id            {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :conversation/env-id        {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "RLM env-id"}
+   :conversation/system-prompt {:db/valueType :db.type/string  :db/doc "System prompt for this session"}
+   :conversation/model         {:db/valueType :db.type/string  :db/doc "Root model used"}
+   :conversation/timestamp     {:db/valueType :db.type/instant}
 
-   ;; Iteration snapshots — exact LLM input/output per iteration for fine-tuning
-   ;; Each snapshot captures the EXACT messages sent to and received from the LLM
-   :iteration/id             {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :iteration/env-id         {:db/valueType :db.type/string  :db/doc "Links to trajectory env-id"}
-   :iteration/index          {:db/valueType :db.type/long    :db/doc "Iteration number (0-based)"}
-   :iteration/input-messages {:db/valueType :db.type/string  :db/doc "pr-str of effective-messages sent to LLM"}
-   :iteration/response       {:db/valueType :db.type/string  :db/doc "pr-str of parsed response (ITERATION_SPEC data)"}
-   :iteration/code           {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
-   :iteration/results        {:db/valueType :db.type/string  :db/doc "pr-str of result strings (pr-str of each result)"}
-   :iteration/final          {:db/valueType :db.type/string  :db/doc "Final answer string when iteration is terminal. Nil if not final."}
-   :iteration/thinking       {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
-   :iteration/duration-ms    {:db/valueType :db.type/long    :db/doc "LLM call duration"}
-   :iteration/timestamp      {:db/valueType :db.type/instant}})
+   ;; Query — one query-env! call within a conversation
+   :query/id            {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :query/conversation  {:db/valueType :db.type/ref     :db/doc "Ref to parent conversation"}
+   :query/text          {:db/valueType :db.type/string  :db/fulltext true :db/doc "The user query"}
+   :query/answer        {:db/valueType :db.type/string  :db/doc "Final answer"}
+   :query/iterations    {:db/valueType :db.type/long    :db/doc "Number of iterations"}
+   :query/duration-ms   {:db/valueType :db.type/long    :db/doc "Total wall-clock time"}
+   :query/status        {:db/valueType :db.type/keyword :db/doc ":success :max-iterations :error"}
+   :query/eval-score    {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0"}
+   :query/timestamp     {:db/valueType :db.type/instant}
+
+   ;; Iteration — one LLM call within a query
+   :iteration/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :iteration/query       {:db/valueType :db.type/ref     :db/doc "Ref to parent query"}
+   :iteration/index       {:db/valueType :db.type/long    :db/doc "Iteration number (0-based)"}
+   :iteration/response    {:db/valueType :db.type/string  :db/doc "pr-str of parsed ITERATION_SPEC response"}
+   :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
+   :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
+   :iteration/final       {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
+   :iteration/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
+   :iteration/duration-ms {:db/valueType :db.type/long    :db/doc "LLM call duration"}
+   :iteration/timestamp   {:db/valueType :db.type/instant}})
 
 (def BLOOM_DIFFICULTIES
   "Bloom's taxonomy cognitive levels as difficulty progression."

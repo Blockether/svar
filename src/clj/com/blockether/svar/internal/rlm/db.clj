@@ -50,37 +50,58 @@
 (declare db-list-toc-entries)
 (declare db-list-entities)
 
-(defn store-trajectory!
-  "Stores a trajectory record for training data collection.
-   Called at the end of query-env! with the query outcome."
-  [{:keys [conn]} {:keys [env-id query status answer iterations duration-ms model doc-pages eval-score]}]
+(defn store-conversation!
+  "Stores or retrieves a conversation entity for an env session."
+  [{:keys [conn]} {:keys [env-id system-prompt model]}]
   (when conn
-    (let [traj-id (java.util.UUID/randomUUID)]
-      (d/transact! conn [(cond-> {:trajectory/id traj-id
-                                  :trajectory/env-id (or env-id "")
-                                  :trajectory/query (or query "")
-                                  :trajectory/status (or status :unknown)
-                                  :trajectory/answer (or (when answer (pr-str answer)) "")
-                                  :trajectory/iterations (or iterations 0)
-                                  :trajectory/duration-ms (or duration-ms 0)
-                                  :trajectory/model (or model "")
-                                  :trajectory/doc-pages (or doc-pages 0)
-                                  :trajectory/timestamp (java.util.Date.)}
-                           eval-score (assoc :trajectory/eval-score (float eval-score)))])
-      traj-id)))
+    (let [existing (d/q '[:find ?e . :in $ ?env-id :where [?e :conversation/env-id ?env-id]]
+                     (d/db conn) env-id)]
+      (or existing
+        (let [conv-id (java.util.UUID/randomUUID)]
+          (d/transact! conn [{:conversation/id conv-id
+                              :conversation/env-id env-id
+                              :conversation/system-prompt (or system-prompt "")
+                              :conversation/model (or model "")
+                              :conversation/timestamp (java.util.Date.)}])
+          [:conversation/id conv-id])))))
+
+(defn store-query!
+  "Stores a query outcome linked to a conversation."
+  [{:keys [conn]} {:keys [conversation-ref text answer iterations duration-ms status eval-score]}]
+  (when conn
+    (let [query-id (java.util.UUID/randomUUID)]
+      (d/transact! conn [(cond-> {:query/id query-id
+                                  :query/conversation conversation-ref
+                                  :query/text (or text "")
+                                  :query/answer (or (when answer (pr-str answer)) "")
+                                  :query/iterations (or iterations 0)
+                                  :query/duration-ms (or duration-ms 0)
+                                  :query/status (or status :unknown)
+                                  :query/timestamp (java.util.Date.)}
+                           eval-score (assoc :query/eval-score (float eval-score)))])
+      [:query/id query-id])))
+
+(defn update-query!
+  "Updates a query record with final outcome."
+  [{:keys [conn]} query-ref {:keys [answer iterations duration-ms status eval-score]}]
+  (when conn
+    (d/transact! conn [(cond-> {:query/id (second query-ref)
+                                :query/answer (or (when answer (pr-str answer)) "")
+                                :query/iterations (or iterations 0)
+                                :query/duration-ms (or duration-ms 0)
+                                :query/status (or status :unknown)}
+                         eval-score (assoc :query/eval-score (float eval-score)))])))
 
 (defn store-iteration!
-  "Stores a complete iteration snapshot — exact LLM input/output for fine-tuning.
-   Captures the EXACT messages sent to LLM and the parsed response."
-  [{:keys [conn]} {:keys [env-id index input-messages response executions thinking final duration-ms]}]
+  "Stores an iteration snapshot linked to a query."
+  [{:keys [conn]} {:keys [query-ref index response executions thinking final duration-ms]}]
   (when conn
     (let [iter-id (java.util.UUID/randomUUID)
           code-strs (mapv :code (or executions []))
           result-strs (mapv #(try (pr-str (:result %)) (catch Exception _ "???")) (or executions []))]
       (d/transact! conn [(cond-> {:iteration/id iter-id
-                                  :iteration/env-id (or env-id "")
+                                  :iteration/query query-ref
                                   :iteration/index (or index 0)
-                                  :iteration/input-messages (pr-str input-messages)
                                   :iteration/response (pr-str response)
                                   :iteration/code (pr-str code-strs)
                                   :iteration/results (pr-str result-strs)
@@ -88,7 +109,7 @@
                                   :iteration/duration-ms (or duration-ms 0)
                                   :iteration/timestamp (java.util.Date.)}
                            final (assoc :iteration/final final))])
-      iter-id)))
+      [:iteration/id iter-id])))
 
 ;; -----------------------------------------------------------------------------
 ;; Document Storage
