@@ -37,12 +37,17 @@
   "Lists iteration snapshots for a query, sorted by index."
   [{:keys [conn]} query-ref]
   (when conn
-    (let [db (d/db conn)]
-      (->> (d/q '[:find [(pull ?e [*]) ...]
-                  :in $ ?qref
-                  :where [?e :iteration/query ?qref]]
-             db (second query-ref))
-        (sort-by :iteration/index)))))
+    (let [db (d/db conn)
+          query-eid (cond
+                      (vector? query-ref) (:db/id (d/entity db query-ref))
+                      (map? query-ref) (:db/id query-ref)
+                      :else query-ref)]
+      (when query-eid
+        (->> (d/q '[:find [(pull ?e [*]) ...]
+                    :in $ ?qeid
+                    :where [?e :iteration/query ?qeid]]
+               db query-eid)
+          (sort-by :iteration/index))))))
 
 (defn score-query
   "Scores a query trajectory for training quality.
@@ -173,8 +178,9 @@
             (throw (ex-info "No queries to export" {:type :trajectory/empty})))
         ;; Look up conversation for system-prompt
         get-system-prompt (fn [q]
-                            (when-let [conv-eid (:query/conversation q)]
-                              (let [conv (d/pull (d/db conn) '[:conversation/system-prompt] conv-eid)]
+                            (when-let [conv-ref (:query/conversation q)]
+                              (let [eid (if (map? conv-ref) (:db/id conv-ref) conv-ref)
+                                    conv (d/pull (d/db conn) '[:conversation/system-prompt] eid)]
                                 (:conversation/system-prompt conv))))
         exports (->> queries
                   (keep (fn [q]

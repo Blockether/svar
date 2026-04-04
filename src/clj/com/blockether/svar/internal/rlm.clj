@@ -432,7 +432,7 @@
                     :status status})
                  (catch Exception e
                    (trove/log! {:level :warn :data {:error (ex-message e)}
-                                :msg "Failed to store trajectory (max iterations)"})))
+                                :msg "Failed to update query (max iterations)"})))
                (let [result-map (cond-> {:answer nil
                                          :raw-answer (:result answer answer)
                                          :status status
@@ -550,7 +550,7 @@
                     :status :success :eval-score eval-scores})
                  (catch Exception e
                    (trove/log! {:level :warn :data {:error (ex-message e)}
-                                :msg "Failed to store trajectory (success)"})))
+                                :msg "Failed to update query (success)"})))
                (let [result-map (cond-> {:answer final-answer
                                          :raw-answer answer-value
                                          :eval-scores eval-scores
