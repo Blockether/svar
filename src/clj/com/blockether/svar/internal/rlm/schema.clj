@@ -299,24 +299,18 @@
    :trajectory/score       {:db/valueType :db.type/long    :db/doc "Quality score for filtering (computed on export)"}
    :trajectory/eval-score  {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0 (from refine!) — answer quality signal"}
 
-   ;; Messages — per-iteration LLM conversation for trajectory reconstruction
-   :message/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :message/env-id      {:db/valueType :db.type/string  :db/doc "Links to trajectory env-id"}
-   :message/role        {:db/valueType :db.type/keyword :db/doc ":system :user :assistant"}
-   :message/content     {:db/valueType :db.type/string  :db/doc "Message content"}
-   :message/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
-   :message/iteration   {:db/valueType :db.type/long    :db/doc "Iteration number"}
-   :message/timestamp   {:db/valueType :db.type/instant}
-
-   ;; Executions — code blocks + results per assistant message
-   :execution/id        {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :execution/message   {:db/valueType :db.type/ref     :db/doc "Ref to parent message entity"}
-   :execution/code      {:db/valueType :db.type/string  :db/doc "Clojure code executed"}
-   :execution/result    {:db/valueType :db.type/string  :db/doc "pr-str of result"}
-   :execution/stdout    {:db/valueType :db.type/string  :db/doc "Captured stdout"}
-   :execution/error     {:db/valueType :db.type/string  :db/doc "Error message if failed"}
-   :execution/order     {:db/valueType :db.type/long    :db/doc "Order within iteration"}
-   :execution/duration  {:db/valueType :db.type/long    :db/doc "Execution time ms"}})
+   ;; Iteration snapshots — exact LLM input/output per iteration for fine-tuning
+   ;; Each snapshot captures the EXACT messages sent to and received from the LLM
+   :iteration/id             {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :iteration/env-id         {:db/valueType :db.type/string  :db/doc "Links to trajectory env-id"}
+   :iteration/index          {:db/valueType :db.type/long    :db/doc "Iteration number (0-based)"}
+   :iteration/input-messages {:db/valueType :db.type/string  :db/doc "pr-str of effective-messages sent to LLM"}
+   :iteration/response       {:db/valueType :db.type/string  :db/doc "pr-str of parsed response (ITERATION_SPEC data)"}
+   :iteration/executions     {:db/valueType :db.type/string  :db/doc "pr-str of execution results [{:code :result :error ...}]"}
+   :iteration/thinking       {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
+   :iteration/status         {:db/valueType :db.type/keyword :db/doc ":ok :error :empty :final"}
+   :iteration/duration-ms    {:db/valueType :db.type/long    :db/doc "LLM call duration"}
+   :iteration/timestamp      {:db/valueType :db.type/instant}})
 
 (def BLOOM_DIFFICULTIES
   "Bloom's taxonomy cognitive levels as difficulty progression."

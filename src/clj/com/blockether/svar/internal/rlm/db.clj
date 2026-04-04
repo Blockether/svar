@@ -69,36 +69,23 @@
                            eval-score (assoc :trajectory/eval-score (float eval-score)))])
       traj-id)))
 
-(defn store-message!
-  "Stores a conversation message for trajectory reconstruction.
-   Returns the message UUID for linking executions."
-  [{:keys [conn]} {:keys [env-id role content thinking iteration]}]
+(defn store-iteration!
+  "Stores a complete iteration snapshot — exact LLM input/output for fine-tuning.
+   Captures the EXACT messages sent to LLM and the parsed response."
+  [{:keys [conn]} {:keys [env-id index input-messages response executions thinking status duration-ms]}]
   (when conn
-    (let [msg-id (java.util.UUID/randomUUID)]
-      (d/transact! conn [{:message/id msg-id
-                          :message/env-id (or env-id "")
-                          :message/role (or role :user)
-                          :message/content (or content "")
-                          :message/thinking (or thinking "")
-                          :message/iteration (or iteration 0)
-                          :message/timestamp (java.util.Date.)}])
-      msg-id)))
-
-(defn store-executions!
-  "Stores execution results linked to a message entity."
-  [{:keys [conn]} message-id executions]
-  (when (and conn (seq executions))
-    (d/transact! conn
-      (mapv (fn [idx {:keys [code result stdout error execution-time-ms]}]
-              {:execution/id (java.util.UUID/randomUUID)
-               :execution/message [:message/id message-id]
-               :execution/code (or code "")
-               :execution/result (pr-str result)
-               :execution/stdout (or stdout "")
-               :execution/error (or error "")
-               :execution/order idx
-               :execution/duration (or execution-time-ms 0)})
-        (range) executions))))
+    (let [iter-id (java.util.UUID/randomUUID)]
+      (d/transact! conn [{:iteration/id iter-id
+                          :iteration/env-id (or env-id "")
+                          :iteration/index (or index 0)
+                          :iteration/input-messages (pr-str input-messages)
+                          :iteration/response (pr-str response)
+                          :iteration/executions (pr-str executions)
+                          :iteration/thinking (or thinking "")
+                          :iteration/status (or status :ok)
+                          :iteration/duration-ms (or duration-ms 0)
+                          :iteration/timestamp (java.util.Date.)}])
+      iter-id)))
 
 ;; -----------------------------------------------------------------------------
 ;; Document Storage

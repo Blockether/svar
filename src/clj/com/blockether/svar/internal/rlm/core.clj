@@ -714,9 +714,6 @@
                  :has-reasoning? has-reasoning?
                  :prev-final-results (count prev-final-results)
                  :msg-count (count initial-messages)} "Iteration loop started")
-    ;; Store initial messages for trajectory reconstruction
-    (doseq [{:keys [role content]} initial-messages]
-      (rlm-db/store-message! db-info {:env-id env-id :role (keyword role) :content content :iteration -1}))
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :iteration-loop})]
       (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0 restarts 0
              prev-executions nil prev-iteration -1
@@ -802,9 +799,10 @@
                                        "<error>LLM call failed: " (:message iter-err) "</error>\n"
                                        "The previous attempt failed. Adjust your approach or call \final\": {\"answer\": \"your answer\", \"confidence\": \"high\"} with what you have.")
                       trace-entry {:iteration iteration :error iter-err :final? false}]
-                  ;; Store error feedback for trajectory
-                  (rlm-db/store-message! db-info
-                    {:env-id env-id :role :user :content error-feedback :iteration iteration})
+                  ;; Store error iteration snapshot
+                  (rlm-db/store-iteration! db-info
+                    {:env-id env-id :index iteration :input-messages effective-messages
+                     :response nil :executions nil :thinking nil :status :error :duration-ms 0})
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
                     (conj trace trace-entry)
@@ -814,21 +812,20 @@
                 ;; Normal path — accumulate token usage
                 (let [_ (accumulate-usage! (:api-usage iteration-result))
                       {:keys [response thinking executions final-result next-optimize]} iteration-result
-                      ;; Store assistant message + executions for trajectory
-                      ;; Reconstruct content as ITERATION_SPEC JSON for fine-tuning
-                      _traj-msg-id (let [mid (rlm-db/store-message! db-info
-                                               {:env-id env-id :role :assistant
-                                                :content (pr-str (cond-> {:thinking (or thinking "")
-                                                                          :code (mapv :code executions)}
-                                                                   next-optimize (assoc :next-optimize next-optimize)
-                                                                   final-result (assoc :final
-                                                                                  {:answer (answer-str (:answer final-result))
-                                                                                   :confidence (:confidence final-result)})))
-                                                :thinking (or thinking "")
-                                                :iteration iteration})]
-                                     (when (and mid (seq executions))
-                                       (rlm-db/store-executions! db-info mid executions))
-                                     mid)
+                      ;; Store iteration snapshot — exact input/output for fine-tuning
+                      _traj-iter (rlm-db/store-iteration! db-info
+                                   {:env-id env-id :index iteration
+                                    :input-messages effective-messages
+                                    :response (cond-> {:thinking (or thinking "")
+                                                       :code (mapv :code executions)}
+                                                next-optimize (assoc :next-optimize next-optimize)
+                                                final-result (assoc :final
+                                                               {:answer (answer-str (:answer final-result))
+                                                                :confidence (:confidence final-result)}))
+                                    :executions executions
+                                    :thinking thinking
+                                    :status (cond final-result :final (seq executions) :ok :else :empty)
+                                    :duration-ms (get-in iteration-result [:api-usage :prompt_tokens] 0)})
                       trace-entry {:iteration iteration
                                    :response response
                                    :thinking thinking
@@ -869,11 +866,11 @@
                                     (if has-reasoning?
                                       "Respond with code or set final to finish."
                                       "Respond with thinking + code, or set final to finish."))]
-                        ;; Store empty assistant + nudge for trajectory
-                        (rlm-db/store-message! db-info
-                          {:env-id env-id :role :assistant :content (or response thinking "[empty]") :iteration iteration})
-                        (rlm-db/store-message! db-info
-                          {:env-id env-id :role :user :content nudge :iteration iteration})
+                        ;; Store empty iteration snapshot
+                        (rlm-db/store-iteration! db-info
+                          {:env-id env-id :index iteration :input-messages effective-messages
+                           :response {:thinking (or thinking "") :code []}
+                           :executions nil :thinking thinking :status :empty :duration-ms 0})
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages
                             {:role "assistant" :content (or response thinking "[empty]")}
@@ -901,9 +898,6 @@
                                      :has-thinking? (some? thinking)
                                      :thinking-preview (when thinking (str-truncate thinking 150))
                                      :feedback-len (count user-feedback)} "Iteration feedback")
-                        ;; Store user feedback for trajectory
-                        (rlm-db/store-message! db-info
-                          {:env-id env-id :role :user :content user-feedback :iteration iteration})
                         (let [had-successful-execution? (some #(nil? (:error %)) executions)
                               next-errors (if had-successful-execution? 0 (inc consecutive-errors))
                               journal-entry {:iteration iteration

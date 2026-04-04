@@ -533,8 +533,7 @@
                                                         :claim/verified? (boolean (get claim :claim/verified? true))})])
                        (catch Exception e
                          (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
-                  ;; Final answer is already stored as structured assistant message in iteration-loop
-                  ;; (with :thinking and linked :execution/* entities)
+                  ;; Iteration snapshots already stored by iteration-loop (store-iteration!)
                (rlm-core/rlm-debug! {:iterations iterations :duration-ms duration-ms
                                      :refinement-count refinement-count
                                      :confidence confidence
