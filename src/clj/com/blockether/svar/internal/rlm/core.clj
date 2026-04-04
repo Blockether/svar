@@ -358,12 +358,12 @@
 </rlm_patterns>
 
 <workflow>
-0. FIRST: Check <context> and <var_index> - if they already answer the query, set 'final-answer' immediately
+0. FIRST: Check <context> and <var_index> - if they already answer the query, set final immediately
 1. For coding tasks: write code, test it, iterate. Use (llm-query) to ask for algorithm help if stuck.
 2. For document tasks: (list-documents) → (list-document-toc) → (P-add! ...) → analyze
 3. For exhaustive analysis: use llm-query-batch over chunks
 4. Store intermediate results with (def my-var \"docstring\" value) — use docstrings!
-5. Set 'final-answer' when done
+5. Set final when done
 </workflow>
 
 <response_format>
@@ -371,9 +371,9 @@
 " (if has-reasoning?
     "EVERY response MUST be valid JSON with a 'code' field. Your reasoning happens natively — do NOT include a 'thinking' field. No markdown, no prose outside JSON."
     "EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown, no prose outside JSON.") "
-  To finish: set 'final-answer' to your answer string and 'final-confidence' to high|medium|low. Code is IGNORED when final-answer is set.
+  To finish: set the 'final' object with answer and confidence. Code is IGNORED when final is set.
   Example continue: {\"thinking\": \"...\", \"code\": [\"...\"]}
-  Example finalize: {\"thinking\": \"found the answer\", \"code\": [], \"final-answer\": \"The penalty is 5%.\", \"final-confidence\": \"high\"}
+  Example finalize: {\"thinking\": \"found the answer\", \"code\": [], \"final\": {\"answer\": \"The penalty is 5%.\", \"confidence\": \"high\"}}
 </response_format>
 
 <critical>
@@ -385,8 +385,8 @@
 - EXECUTION RESULTS: After each iteration, <execution_results> shows success/failure per code block.
 - EXECUTION JOURNAL: The <execution_journal> shows your thinking + var names from previous iterations. Squashed every 5 iterations.
 - CONVERSATION: The <conversation> section links previous queries to their final-result-N vars.
-- FINALIZE: Set 'final-answer' and 'final-confidence' in your response when done. Code is IGNORED when final-answer is set.
-- FAST PATH: If context or var_index already answers the query, set 'final-answer' IMMEDIATELY.
+- FINALIZE: Set the 'final' object in your response when done. Code is IGNORED when final is set.
+- FAST PATH: If context or var_index already answers the query, set 'final' IMMEDIATELY.
 - NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or finalize.
 - CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses.
 - VARS ARE VALUES: Use `my-var` to reference a stored value, NOT `(my-var)`.
@@ -432,7 +432,7 @@
           parsed (:result ask-result)
           model-reasoning (:reasoning ask-result)
           _ (rlm-debug! {:has-reasoning (some? model-reasoning)
-                         :has-final (some? (:final-answer parsed))
+                         :has-final (some? (:final parsed))
                          :code-count (count (:code parsed))} "ask! response received")
           ;; Native reasoning takes priority over spec-parsed thinking
           thinking (or model-reasoning (:thinking parsed))
@@ -445,8 +445,9 @@
                      :completion_tokens_details {:reasoning_tokens (get-in ask-result [:tokens :reasoning] 0)}
                      :prompt_tokens_details {:cached_tokens (get-in ask-result [:tokens :cached] 0)}}]
       ;; Check for final answer in spec response
-      (if-let [final-answer (:final-answer parsed)]
-        (let [confidence (keyword (or (:final-confidence parsed) "high"))
+      (if-let [final-data (:final parsed)]
+        (let [final-answer (str (:answer final-data))
+              confidence (or (:confidence final-data) :high)
               final-result {:final? true
                             :answer {:result final-answer :type String}
                             :confidence confidence}]
@@ -694,7 +695,7 @@
                                 (str "\n\n⚠ REPETITION DETECTED: These calls have been executed 3+ times with the SAME results:\n"
                                   (str/join "\n" (map #(str "  - " (str-truncate (str %) 80)) (distinct repeated)))
                                   "\nRepeating the same action will NOT produce different results. "
-                                  "You MUST try a DIFFERENT approach, or call \"final-answer\": \"your answer\" with what you have."))))
+                                  "You MUST try a DIFFERENT approach, or call \final\": {\"answer\": \"your answer\", \"confidence\": \"high\"} with what you have."))))
         finalize-cost (fn []
                         (let [{:keys [input-tokens output-tokens reasoning-tokens cached-tokens]} @usage-atom
                               total-tokens (+ input-tokens output-tokens)
@@ -793,7 +794,7 @@
                 ;; Error path: feed error back to LLM as user message, let it recover
                 (let [error-feedback (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
                                        "<error>LLM call failed: " (:message iter-err) "</error>\n"
-                                       "The previous attempt failed. Adjust your approach or call \"final-answer\": \"your answer\" with what you have.")
+                                       "The previous attempt failed. Adjust your approach or call \final\": {\"answer\": \"your answer\", \"confidence\": \"high\"} with what you have.")
                       trace-entry {:iteration iteration :error iter-err :final? false}]
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
@@ -842,8 +843,8 @@
                                     "{:requirement " (pr-str (str-truncate query 200)) "}\n"
                                     "⚠ EMPTY — no code executed. You MUST include code. "
                                     (if has-reasoning?
-                                      "Respond with code or set final-answer to finish."
-                                      "Respond with thinking + code, or set final-answer to finish."))]
+                                      "Respond with code or set final to finish."
+                                      "Respond with thinking + code, or set final to finish."))]
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages
                             {:role "assistant" :content (or response thinking "[empty]")}
@@ -860,10 +861,10 @@
                             remaining-iters (- (effective-max-iterations) (inc iteration))
                             budget-warning (when (<= remaining-iters 5)
                                              (str "\n[SYSTEM_NUDGE] Only " remaining-iters " iterations left! "
-                                               "Set final-answer NOW with what you have. DO NOT start new explorations."))
+                                               "Set final NOW with what you have. DO NOT start new explorations."))
                             force-final-nudge (when (> iteration 20)
                                                 (str "\n[SYSTEM_NUDGE] You have been running for " (inc iteration) " iterations. "
-                                                  "STOP exploring. Set final-answer IMMEDIATELY with your current findings."))
+                                                  "STOP exploring. Set final IMMEDIATELY with your current findings."))
                             user-feedback (str iteration-header "\n" exec-feedback repetition-warning budget-warning force-final-nudge)]
                         (rlm-debug! {:iteration iteration
                                      :code-blocks (count executions)

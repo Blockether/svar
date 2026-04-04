@@ -99,10 +99,28 @@
                  ::spec/required false
                  ::spec/description "Extracted relationships"})))
 
+(def FINAL_SPEC
+  "Nested spec for final answer in iteration response."
+  (spec/spec
+    :final
+    {::spec/key-ns "final"}
+    (spec/field {::spec/name :answer
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "The final answer"})
+    (spec/field {::spec/name :confidence
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Confidence level"
+                 ::spec/values {"high" "Very confident in the answer"
+                                "medium" "Somewhat confident"
+                                "low" "Uncertain, best guess"}})))
+
 (def ITERATION_SPEC
   "Spec for each RLM iteration response. Forces structured output from LLM.
    Used when the provider does NOT have native reasoning (thinking) capability."
   (spec/spec
+    {:refs [FINAL_SPEC]}
     (spec/field {::spec/name :thinking
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
@@ -112,45 +130,44 @@
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/description "Clojure expressions to execute in the sandbox."})
     (spec/field {::spec/name :next-optimize
-                 ::spec/type :spec.type/string
+                 ::spec/type :spec.type/keyword
                  ::spec/cardinality :spec.cardinality/one
                  ::spec/required false
-                 ::spec/description "Model preference for next iteration. One of cost, speed, intelligence. Omit for auto."})
-    (spec/field {::spec/name :final-answer
-                 ::spec/type :spec.type/string
+                 ::spec/description "Model preference for next iteration"
+                 ::spec/values {"cost" "Cheap model for simple operations"
+                                "speed" "Fast model for quick tasks"
+                                "intelligence" "Powerful model for hard reasoning"}})
+    (spec/field {::spec/name :final
+                 ::spec/type :spec.type/ref
+                 ::spec/target :final
                  ::spec/cardinality :spec.cardinality/one
                  ::spec/required false
-                 ::spec/description "Set ONLY when you have the final answer. The answer string."})
-    (spec/field {::spec/name :final-confidence
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Confidence level: high, medium, or low. Required when final-answer is set."})))
+                 ::spec/description "Set when you have the final answer. Omit to continue iterating."})))
 
 (def ITERATION_SPEC_CODE_ONLY
   "Spec for RLM iteration response when the provider has native reasoning.
    No 'thinking' field — the model's native reasoning tokens handle that.
    Saves output tokens by not duplicating reasoning in JSON."
   (spec/spec
+    {:refs [FINAL_SPEC]}
     (spec/field {::spec/name :code
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/description "Clojure expressions to execute in the sandbox."})
     (spec/field {::spec/name :next-optimize
-                 ::spec/type :spec.type/string
+                 ::spec/type :spec.type/keyword
                  ::spec/cardinality :spec.cardinality/one
                  ::spec/required false
-                 ::spec/description "Model preference for next iteration. One of cost, speed, intelligence. Omit for auto."})
-    (spec/field {::spec/name :final-answer
-                 ::spec/type :spec.type/string
+                 ::spec/description "Model preference for next iteration"
+                 ::spec/values {"cost" "Cheap model for simple operations"
+                                "speed" "Fast model for quick tasks"
+                                "intelligence" "Powerful model for hard reasoning"}})
+    (spec/field {::spec/name :final
+                 ::spec/type :spec.type/ref
+                 ::spec/target :final
                  ::spec/cardinality :spec.cardinality/one
                  ::spec/required false
-                 ::spec/description "Set ONLY when you have the final answer. The answer string."})
-    (spec/field {::spec/name :final-confidence
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/one
-                 ::spec/required false
-                 ::spec/description "Confidence level: high, medium, or low. Required when final-answer is set."})))
+                 ::spec/description "Set when you have the final answer. Omit to continue iterating."})))
 
 (defn bytes->base64
   "Converts raw bytes to a base64 string.
