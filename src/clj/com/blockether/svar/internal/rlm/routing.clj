@@ -29,11 +29,27 @@
     ([prompt]
      (with-depth-tracking depth-atom routing
        (fn []
+         (trove/log! {:level :info :id ::sub-llm-call
+                      :data {:depth @depth-atom
+                             :prompt-len (count prompt)
+                             :routing routing
+                             :has-spec false}
+                      :msg "Sub-LLM call (llm-query)"})
          (let [result (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] {:routing routing})]
+           (trove/log! {:level :info :id ::sub-llm-response
+                        :data {:depth @depth-atom
+                               :content-len (count (str (:content result)))}
+                        :msg "Sub-LLM response"})
            result))))
     ([prompt opts]
      (with-depth-tracking depth-atom routing
        (fn []
+         (trove/log! {:level :info :id ::sub-llm-call
+                      :data {:depth @depth-atom
+                             :prompt-len (count prompt)
+                             :routing routing
+                             :has-spec (boolean (:spec opts))}
+                      :msg "Sub-LLM call (llm-query)"})
          (let [result (if-let [spec (:spec opts)]
                         (let [r (llm/ask! rlm-router {:spec spec
                                                       :messages [(llm/user prompt)]
@@ -43,6 +59,10 @@
                            :routed/model (:routed/model r)
                            :routed/base-url (:routed/base-url r)})
                         (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] {:routing routing}))]
+           (trove/log! {:level :info :id ::sub-llm-response
+                        :data {:depth @depth-atom
+                               :content-len (count (str (:content result)))}
+                        :msg "Sub-LLM response"})
            result))))))
 
 (defn resolve-root-model

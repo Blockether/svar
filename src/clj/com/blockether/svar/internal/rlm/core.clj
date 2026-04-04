@@ -414,11 +414,13 @@
      - :iteration-spec - Spec for ask! (default: ITERATION_SPEC).
                          When provider has reasoning, pass ITERATION_SPEC_CODE_ONLY.
      - :on-chunk - Streaming callback function."
-  [rlm-env messages & [{:keys [iteration-spec on-chunk routing] :or {iteration-spec ITERATION_SPEC}}]]
+  [rlm-env messages & [{:keys [iteration-spec on-chunk routing iteration] :or {iteration-spec ITERATION_SPEC}}]]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
     (let [context-chars (reduce + 0 (map #(count (str (:content %))) messages))
           _ (trove/log! {:level :info :id ::llm-call
-                         :data {:msg-count (count messages)
+                         :data {:env-id (:env-id rlm-env)
+                                :iteration iteration
+                                :msg-count (count messages)
                                 :context-chars context-chars
                                 :context-chars-k (format "%.1fK" (/ context-chars 1000.0))}
                          :msg "LLM call started"})
@@ -780,6 +782,7 @@
                                        (cond-> {:iteration-spec (if has-reasoning?
                                                                   ITERATION_SPEC_CODE_ONLY
                                                                   ITERATION_SPEC)
+                                                :iteration iteration
                                                 :routing (when prev-optimize {:optimize prev-optimize})}
                                          iter-on-chunk (assoc :on-chunk iter-on-chunk)))
                                      (catch Exception e
