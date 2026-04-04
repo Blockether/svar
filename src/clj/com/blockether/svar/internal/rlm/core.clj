@@ -673,11 +673,13 @@
         ;; Store initial messages if history tracking is enabled
         db-info (when-let [atom (:db-info-atom rlm-env)] @atom)
         env-id (:env-id rlm-env)
-        ;; Update conversation with system prompt (built at iteration time, not create-env time)
+        ;; Store system prompt on conversation (once — skip if already set)
         _ (when-let [conn (:conn db-info)]
             (when-let [conv-eid (d/q '[:find ?e . :in $ ?eid :where [?e :conversation/env-id ?eid]]
                                   (d/db conn) env-id)]
-              (d/transact! conn [{:db/id conv-eid :conversation/system-prompt system-prompt}])))
+              (let [existing (:conversation/system-prompt (d/entity (d/db conn) conv-eid))]
+                (when (or (nil? existing) (= existing ""))
+                  (d/transact! conn [{:db/id conv-eid :conversation/system-prompt system-prompt}])))))
         ;; Cost tracking: accumulate token usage across all iterations
         usage-atom (atom {:input-tokens 0 :output-tokens 0 :reasoning-tokens 0 :cached-tokens 0})
         accumulate-usage! (fn [api-usage]
