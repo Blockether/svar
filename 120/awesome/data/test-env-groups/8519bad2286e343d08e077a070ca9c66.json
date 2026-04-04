@@ -1,1 +1,0 @@
-{"id":"8519bad2286e343d08e077a070ca9c66","fullName":"com.blockether.svar.internal.llm-test.capabilities-filter-test.requiring :vision.excludes non-vision models","name":"capabilities-filter-test > requiring :vision > excludes non-vision models","status":"passed","testResultsByEnv":{"default":"a313bf6eecc2a190d0c1c69fc5793c9b"}}
