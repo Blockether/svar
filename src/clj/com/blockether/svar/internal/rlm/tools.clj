@@ -284,7 +284,7 @@
        []))))
 
 (def ^:private P_ADD_PAGE_SIZE
-  "Characters per chunk when P-add! returns a document as a vector of pages."
+  "Characters per chunk when fetch-content returns a document as a vector of pages."
   4000)
 
 (defn- chunk-text
@@ -305,7 +305,7 @@
               (+ current-size para-size) result)))))))
 
 (defn make-get-page-node-fn
-  "Creates P-add! — fetches content using Datalevin lookup ref syntax.
+  "Creates fetch-content — fetches content using Datalevin lookup ref syntax.
 
    Returns:
      [:page.node/id id]    → content string (single node)
@@ -313,12 +313,12 @@
      [:document.toc/id id] → TOC entry title/description string
 
    The LLM stores results in variables:
-     (def clause (P-add! [:page.node/id \"abc\"]))
-     (def doc (P-add! [:document/id \"doc-1\"]))
+     (def clause (fetch-content [:page.node/id \"abc\"]))
+     (def doc (fetch-content [:document/id \"doc-1\"]))
      (count doc)      ;; number of pages
      (nth doc 5)      ;; page 5 content"
   [db-info-atom]
-  (fn P-add! [lookup-ref]
+  (fn fetch-content [lookup-ref]
     (when-let [{:keys [conn] :as db-info} @db-info-atom]
       (when (and (vector? lookup-ref) (= 2 (count lookup-ref)))
         (let [[attr id] lookup-ref]
@@ -344,7 +344,7 @@
               (or (:document.toc/description toc) (:document.toc/title toc) ""))
 
             ;; Unknown attribute
-            (throw (ex-info (str "P-add! unknown lookup attribute: " attr
+            (throw (ex-info (str "fetch-content unknown lookup attribute: " attr
                               ". Use :page.node/id, :document/id, or :document.toc/id")
                      {:type :svar/invalid-lookup-ref :attr attr :id id}))))))))
 
@@ -497,9 +497,9 @@
                       {;; Document functions - list/get stored documents
                        'list-documents (make-list-documents-fn db-info-atom)
                        'get-document (make-get-document-fn db-info-atom)
-                       ;; Document page functions - search returns brief metadata, P-add! fetches full content
+                       ;; Document page functions - search returns brief metadata, fetch-content fetches full content
                        'search-document-pages (make-search-page-nodes-fn db-info-atom)
-                       'P-add! (make-get-page-node-fn db-info-atom)
+                       'fetch-content (make-get-page-node-fn db-info-atom)
                        'list-document-pages (make-list-page-nodes-fn db-info-atom)
                        ;; Document TOC functions - table of contents
                        'store-document-toc! (make-store-toc-entry-fn db-info-atom)
@@ -557,7 +557,7 @@
                              ;; Document tools (only if bound)
                             ['list-documents "List ingested documents with abstracts and TOC." '([] [opts])]
                             ['search-document-pages "Fulltext search across document pages. Returns brief metadata." '([query] [query top-k] [query top-k opts])]
-                            ['P-add! "Fetch content by lookup ref. Returns content string or chunked vector." '([lookup-ref])]
+                            ['fetch-content "Fetch content by lookup ref. Returns content string or chunked vector." '([lookup-ref])]
                             ['list-document-pages "List document page nodes with brief metadata." '([] [opts])]
                             ['search-document-toc "Search table of contents by title." '([query] [query top-k])]
                             ['list-document-toc "List TOC entries." '([] [opts])]

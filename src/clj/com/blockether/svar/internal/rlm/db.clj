@@ -236,7 +236,7 @@
 
 (defn- brevify-node
   "Strips full content from a page node, replacing with a 150-char preview.
-   The LLM uses P-add! to load full content into P when needed."
+   The LLM uses fetch-content to load full content into P when needed."
   [node]
   (let [content (or (:page.node/content node) (:page.node/description node) "")
         preview (if (> (count content) 150)
@@ -251,7 +251,7 @@
   "Searches page nodes by text content, optionally filtered by document and type.
    
    Returns BRIEF results by default — metadata + 150-char preview.
-   Use P-add! to fetch full content into a variable.
+   Use fetch-content to fetch full content into a variable.
    
    Params:
    `db-info` - Map with :store key.
