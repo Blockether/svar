@@ -13,7 +13,8 @@
    [clojure.string :as str]
    [com.blockether.svar.bench.fourclojure :as fourclojure]
    [com.blockether.svar.bench.humaneval :as humaneval]
-   [com.blockether.svar.core :as svar]))
+   [com.blockether.svar.core :as svar]
+   [com.blockether.svar.internal.router :as router]))
 
 ;; =============================================================================
 ;; Router
@@ -22,43 +23,31 @@
 (def ^:private ROUTER (atom nil))
 (def ^:private ROUTER_KEY (atom nil))
 
-(def ^:private PROVIDERS
-  "Known benchmark providers with their env vars and base URLs."
-  {:blockether {:env-keys ["BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"]
-                :base-url "https://llm.blockether.com/v1"}
-   :zai-coding {:env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
-                :base-url "https://api.z.ai/api/coding/paas/v4"}
-   :zai        {:env-keys ["ZAI_API_KEY"]
-                :base-url "https://api.z.ai/api/paas/v4"}
-   :openai     {:env-keys ["OPENAI_API_KEY"]
-                :base-url "https://api.openai.com/v1"}})
-
 (defn- resolve-provider-key
-  "Resolves API key from environment for a provider config."
-  [{:keys [env-keys]}]
-  (some #(System/getenv %) env-keys))
+  "Resolves API key from environment for a provider."
+  [provider-id]
+  (when-let [env-keys (:env-keys (get router/KNOWN_PROVIDERS provider-id))]
+    (some #(System/getenv %) env-keys)))
 
 (defn- make-bench-router
-  "Creates a benchmark router for a provider + model."
+  "Creates a benchmark router for a provider + model.
+   Uses router/KNOWN_PROVIDERS for base-url and env-key resolution."
   [provider-id model]
-  (let [provider-cfg (get PROVIDERS provider-id)
-        api-key      (when provider-cfg (resolve-provider-key provider-cfg))]
-    (if (nil? api-key)
-      ;; Fallback: try all providers
-      (let [[pid cfg key] (some (fn [[pid cfg]]
-                                  (when-let [k (resolve-provider-key cfg)]
-                                    [pid cfg k]))
-                            PROVIDERS)]
+  (let [api-key (resolve-provider-key provider-id)]
+    (if api-key
+      (svar/make-router [{:id provider-id :api-key api-key
+                          :models [{:name model}]}])
+      ;; Fallback: try all known providers
+      (let [[pid key] (some (fn [[pid _cfg]]
+                              (when-let [k (resolve-provider-key pid)]
+                                [pid k]))
+                        router/KNOWN_PROVIDERS)]
         (if key
           (svar/make-router [{:id pid :api-key key
-                              :base-url (:base-url cfg)
                               :models [{:name model}]}])
           (throw (ex-info "No API key found for any provider"
                    {:type :bench/missing-api-key
-                    :providers (keys PROVIDERS)}))))
-      (svar/make-router [{:id provider-id :api-key api-key
-                          :base-url (:base-url provider-cfg)
-                          :models [{:name model}]}]))))
+                    :providers (keys router/KNOWN_PROVIDERS)})))))))
 
 (defn- ensure-router!
   [provider-id model]

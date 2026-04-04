@@ -14,12 +14,20 @@
 ;; =============================================================================
 
 (def KNOWN_PROVIDERS
-  {:blockether {:base-url "https://llm.blockether.com/v1" :rpm 500 :tpm 2000000}
-   :openai     {:base-url "https://api.openai.com/v1"     :rpm 500 :tpm 2000000}
-   :anthropic  {:base-url "https://api.anthropic.com/v1"  :rpm 500 :tpm 2000000}
-   :zai        {:base-url "https://api.zai.com/v1"        :rpm 500 :tpm 2000000}
-   :openrouter {:base-url "https://openrouter.ai/api/v1"  :rpm 500 :tpm 2000000}
-   :ollama     {:base-url "http://localhost:11434/v1"      :rpm 1000 :tpm 10000000}})
+  {:blockether  {:base-url "https://llm.blockether.com/v1"       :rpm 500 :tpm 2000000
+                 :env-keys ["BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"]}
+   :openai      {:base-url "https://api.openai.com/v1"           :rpm 500 :tpm 2000000
+                 :env-keys ["OPENAI_API_KEY"]}
+   :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
+                 :env-keys ["ANTHROPIC_API_KEY"]}
+   :zai         {:base-url "https://api.z.ai/api/paas/v4"        :rpm 500 :tpm 2000000
+                 :env-keys ["ZAI_API_KEY"]}
+   :zai-coding  {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
+                 :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
+   :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
+                 :env-keys ["OPENROUTER_API_KEY"]}
+   :ollama      {:base-url "http://localhost:11434/v1"            :rpm 1000 :tpm 10000000
+                 :env-keys []}})
 
 ;; =============================================================================
 ;; Provider-independent model-family metadata
