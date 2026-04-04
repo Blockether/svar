@@ -89,7 +89,10 @@
         sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:optimize :cost} depth-atom router)
         env-id (str (util/uuid))
         root-model (or (rlm-routing/resolve-root-model router) "unknown")
-        conversation-ref (rlm-db/store-conversation! db-info {:env-id env-id :model root-model})
+        has-reasoning? (boolean (rlm-routing/provider-has-reasoning? router))
+        system-prompt (rlm-core/build-system-prompt {:has-reasoning? has-reasoning?})
+        conversation-ref (rlm-db/store-conversation! db-info
+                           {:env-id env-id :model root-model :system-prompt system-prompt})
         {:keys [sci-ctx initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
     {:env-id env-id
      :conversation-ref conversation-ref
