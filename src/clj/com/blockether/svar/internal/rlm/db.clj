@@ -69,18 +69,31 @@
                            eval-score (assoc :trajectory/eval-score (float eval-score)))])
       traj-id)))
 
+(defn- sanitize-executions
+  "Converts execution results to EDN-safe format.
+   Replaces non-serializable values (vars, functions) with their pr-str."
+  [executions]
+  (when (seq executions)
+    (mapv (fn [e]
+            (-> e
+              (update :result #(try (pr-str %) (catch Exception _ "???")))
+              (dissoc :execution-time-ms)
+              (assoc :duration-ms (:execution-time-ms e 0))))
+      executions)))
+
 (defn store-iteration!
   "Stores a complete iteration snapshot — exact LLM input/output for fine-tuning.
    Captures the EXACT messages sent to LLM and the parsed response."
   [{:keys [conn]} {:keys [env-id index input-messages response executions thinking status duration-ms]}]
   (when conn
-    (let [iter-id (java.util.UUID/randomUUID)]
+    (let [iter-id (java.util.UUID/randomUUID)
+          safe-execs (sanitize-executions executions)]
       (d/transact! conn [{:iteration/id iter-id
                           :iteration/env-id (or env-id "")
                           :iteration/index (or index 0)
                           :iteration/input-messages (pr-str input-messages)
                           :iteration/response (pr-str response)
-                          :iteration/executions (pr-str executions)
+                          :iteration/executions (pr-str safe-execs)
                           :iteration/thinking (or thinking "")
                           :iteration/status (or status :ok)
                           :iteration/duration-ms (or duration-ms 0)
