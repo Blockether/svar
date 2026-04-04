@@ -926,7 +926,7 @@
           response (llm/ask! rlm-router {:spec ENTITY_EXTRACTION_SPEC
                                          :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
                                                     (llm/user truncated)]
-                                         :prefer :cost :capabilities #{:chat}})]
+                                         :routing {:optimize :cost}})]
       (or (:result response) {:entities [] :relationships []}))
     (catch Exception e
       (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Entity extraction failed for page"})
@@ -953,14 +953,14 @@
                                              :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
                                                         (llm/user (or description "Extract entities from this image")
                                                           (llm/image b64 "image/png"))]
-                                             :prefer :cost :capabilities #{:chat :vision}})]
+                                             :routing {:optimize :cost}})]
           (or (:result response) {:entities [] :relationships []}))
         ;; Has description only - text extraction
         description
         (let [response (llm/ask! rlm-router {:spec ENTITY_EXTRACTION_SPEC
                                              :messages [(llm/system ENTITY_EXTRACTION_OBJECTIVE)
                                                         (llm/user description)]
-                                             :prefer :cost :capabilities #{:chat}})]
+                                             :routing {:optimize :cost}})]
           (or (:result response) {:entities [] :relationships []}))
         ;; Neither - skip
         :else

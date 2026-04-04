@@ -1149,8 +1149,7 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                          :messages [(llm/system objective)
                                                     (llm/user task (llm/image base64-image "image/png"))]
                                          :check-context? false
-                                         :timeout-ms timeout-ms
-                                         :strategy :root})
+                                         :timeout-ms timeout-ms})
           raw-nodes (get-in response [:result :nodes] [])
           ;; Enrich visual nodes with PDFBox-extracted images by index
           nodes (enrich-visual-nodes raw-nodes page-pdf-images page-index)
@@ -1354,7 +1353,6 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                                   (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
                                                               "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
                                                               "<document_content>\n" content "\n</document_content>"))]
-                                       :strategy :root
                                        :check-context? false
                                        :timeout-ms timeout-ms})
         nodes (get-in response [:result :nodes] [])
@@ -1563,8 +1561,7 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                                       (llm/user (str "Based on the following document content, infer the document's title. "
                                                                   "Return the most likely title - it should be concise and descriptive.\n\n"
                                                                   context))]
-                                           :prefer :cost
-                                           :capabilities #{:chat}
+                                           :routing {:optimize :cost}
                                            :check-context? false
                                            :timeout-ms timeout-ms})]
         (get-in response [:result :title])))))

@@ -86,7 +86,7 @@
         db-info (rlm-db/create-rlm-conn {:conn conn :path path})
         db-info-atom (atom db-info)
         llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom router)
-        sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom router)
+        sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:routing {:optimize :cost}} depth-atom router)
         env-id (str (util/uuid))
         {:keys [sci-ctx initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
     {:env-id env-id
@@ -314,7 +314,7 @@
          _locals-atom (:locals-atom env)
          depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
-         sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:prefer :cost :capabilities #{:chat}} depth-atom rlm-router)
+         sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:routing {:optimize :cost}} depth-atom rlm-router)
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
          claims-atom (when verify? (atom []))
@@ -374,7 +374,7 @@
                plan-result (when plan?
                              (llm/ask! rlm-router {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
                                                               (llm/user (str "Query: " query-str))]
-                                                   :prefer :intelligence :capabilities #{:chat}}))
+                                                   :routing {:optimize :intelligence}}))
                plan-context (when-let [plan (:result plan-result)]
                               (str "<plan>\n" plan "\n</plan>"))
                 ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
@@ -473,7 +473,7 @@
                                  {:prefer :intelligence :capabilities #{:chat}
                                   :exclude-model root-model})
                              (llm/select-provider rlm-router
-                               {:prefer :intelligence :capabilities #{:chat}}))
+                               {:routing {:optimize :intelligence}}))
                            refine-config (when refine-provider
                                            {:api-key (:api-key refine-provider)
                                             :base-url (:base-url refine-provider)
@@ -505,7 +505,7 @@
                                           (let [fallback (llm/ask! rlm-router {:spec spec
                                                                                :messages [(llm/system "Extract structured data.")
                                                                                           (llm/user (str "From:\n" refined-str))]
-                                                                               :prefer :cost :capabilities #{:chat}})]
+                                                                               :routing {:optimize :cost}})]
                                             (merge-cost! (:tokens fallback) (:cost fallback))
                                             (:result fallback))))
                                       refined-str))]
@@ -896,7 +896,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                   :messages
                   [(llm/system "You are a deduplication engine. Given a numbered list of questions, identify semantic duplicates — questions that ask the same thing in different words. For each group of duplicates, keep only the BEST version (most clear, specific, and well-phrased). Return the 0-based indices of questions to KEEP.")
                    (llm/user (str "Identify and remove semantic duplicates from this list. Return indices of questions to KEEP (one per duplicate group, choosing the best phrasing):\n\n" numbered-list))]
-                  :prefer :cost :capabilities #{:chat}})
+                  :routing {:optimize :cost}})
         keep-indices (set (or (:keep-indices (:result result)) []))
         kept (vec (keep-indexed
                     (fn [i q]
@@ -973,7 +973,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                     :messages
                     [(llm/system "You are a question revision engine. Given Q&A pairs with identified issues, fix the problems while preserving the core question intent, answer accuracy, and evidence grounding. Keep the same source-document, source-page, difficulty, and category. Fix only the identified issue.")
                      (llm/user (str "Revise these questions to fix the identified issues:\n\n" revision-descriptions))]
-                    :prefer :cost :capabilities #{:chat}})
+                    :routing {:optimize :cost}})
           revised (or (:questions (:result result)) [])]
       (trove/log! {:level :info :id ::qa-revision
                    :data {:input (clojure.core/count questions)
@@ -1107,7 +1107,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          selection-result (llm/ask! rlm-router {:spec CHUNK_SELECTION_SPEC
                                                 :messages [(llm/system "You are a passage selection engine for Q&A generation. Select diverse passages from the corpus based on the provided structure. Return your selections in the required JSON format.")
                                                            (llm/user selection-prompt)]
-                                                :prefer :cost :capabilities #{:chat}})
+                                                :routing {:optimize :cost}})
          passages (or (:passages (:result selection-result)) [])
          _ (trove/log! {:level :info :id ::qa-phase1-done
                         :data {:passages-selected (clojure.core/count passages)
