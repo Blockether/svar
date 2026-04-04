@@ -812,9 +812,14 @@
                 (let [_ (accumulate-usage! (:api-usage iteration-result))
                       {:keys [response thinking executions final-result next-optimize]} iteration-result
                       ;; Store assistant message + executions for trajectory
+                      ;; Reconstruct content as ITERATION_SPEC JSON for fine-tuning
                       _traj-msg-id (let [mid (rlm-db/store-message! db-info
                                                {:env-id env-id :role :assistant
-                                                :content (or response "")
+                                                :content (pr-str {:thinking (or thinking "")
+                                                                  :code (mapv :code executions)
+                                                                  :final (when final-result
+                                                                           {:answer (answer-str (:answer final-result))
+                                                                            :confidence (:confidence final-result)})})
                                                 :thinking (or thinking "")
                                                 :iteration iteration})]
                                      (when (and mid (seq executions))
