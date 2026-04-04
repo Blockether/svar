@@ -1010,12 +1010,16 @@
     (with-provider-fallback
       router prefs
       (fn [provider model-map]
-        (ask!* router
-          (assoc opts
-            :model (:name model-map)
-            :api-key (:api-key provider)
-            :base-url (:base-url provider)
-            :provider-id (:id provider)))))))
+        (let [reasoning-extra (when (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
+                                (:reasoning-params model-map))
+              merged-extra (merge reasoning-extra (:extra-body opts))]
+          (ask!* router
+            (cond-> (assoc opts
+                      :model (:name model-map)
+                      :api-key (:api-key provider)
+                      :base-url (:base-url provider)
+                      :provider-id (:id provider))
+              (seq merged-extra) (assoc :extra-body merged-extra))))))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
