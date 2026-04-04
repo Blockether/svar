@@ -111,11 +111,6 @@
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/description "Clojure expressions to execute in the sandbox."})
-    (spec/field {::spec/name :carry
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/many
-                 ::spec/required false
-                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})
     (spec/field {::spec/name :next-optimize
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
@@ -141,11 +136,6 @@
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/description "Clojure expressions to execute in the sandbox."})
-    (spec/field {::spec/name :carry
-                 ::spec/type :spec.type/string
-                 ::spec/cardinality :spec.cardinality/many
-                 ::spec/required false
-                 ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})
     (spec/field {::spec/name :next-optimize
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one

@@ -363,8 +363,7 @@
 2. For document tasks: (list-documents) → (list-document-toc) → (P-add! ...) → analyze
 3. For exhaustive analysis: use llm-query-batch over chunks
 4. Store intermediate results with (def my-var \"docstring\" value) — use docstrings!
-5. List vars to carry in 'carry' field for next iteration
-6. Set 'final-answer' when done
+5. Set 'final-answer' when done
 </workflow>
 
 <response_format>
@@ -372,10 +371,8 @@
 " (if has-reasoning?
     "EVERY response MUST be valid JSON with a 'code' field. Your reasoning happens natively — do NOT include a 'thinking' field. No markdown, no prose outside JSON."
     "EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown, no prose outside JSON.") "
-  The optional 'carry' field lists var names whose FULL VALUES you need in the next iteration.
-  Vars not in 'carry' appear only in the <var_index> (name/type/size/doc — no value).
   To finish: set 'final-answer' to your answer string and 'final-confidence' to high|medium|low. Code is IGNORED when final-answer is set.
-  Example continue: {\"thinking\": \"...\", \"code\": [\"...\"], \"carry\": [\"clause\"]}
+  Example continue: {\"thinking\": \"...\", \"code\": [\"...\"]}
   Example finalize: {\"thinking\": \"found the answer\", \"code\": [], \"final-answer\": \"The penalty is 5%.\", \"final-confidence\": \"high\"}
 </response_format>
 
@@ -384,7 +381,7 @@
 - VARS ARE STATE: Use (def var-name \"docstring\" value) to store results. Vars persist across iterations in the SCI sandbox.
 - DOCSTRINGS: ALWAYS use docstrings on def — they appear in the <var_index> and help you remember what each var contains.
 - VAR INDEX: Every iteration shows a <var_index> table of ALL your def'd vars (name, type, size, docstring).
-- CARRY: List var names in 'carry' to get their FULL values next iteration. Uncarried vars appear only in the index (name/type/size/doc).
+- DOCSTRINGS: ALWAYS use (def name \"description\" value). Docstrings appear in <var_index> — without them you lose track of what vars contain.
 - EXECUTION RESULTS: After each iteration, <execution_results> shows success/failure per code block.
 - EXECUTION JOURNAL: The <execution_journal> shows your thinking + var names from previous iterations. Squashed every 5 iterations.
 - CONVERSATION: The <conversation> section links previous queries to their final-result-N vars.
@@ -436,11 +433,9 @@
           model-reasoning (:reasoning ask-result)
           _ (rlm-debug! {:has-reasoning (some? model-reasoning)
                          :has-final (some? (:final-answer parsed))
-                         :code-count (count (:code parsed))
-                         :carry-count (count (:carry parsed))} "ask! response received")
+                         :code-count (count (:code parsed))} "ask! response received")
           ;; Native reasoning takes priority over spec-parsed thinking
           thinking (or model-reasoning (:thinking parsed))
-          carry (vec (remove str/blank? (or (:carry parsed) [])))
           ;; LLM's preference for next iteration's model selection
           next-optimize (when-let [opt (:next-optimize parsed)]
                           (keyword opt))
@@ -457,7 +452,7 @@
                             :confidence confidence}]
           (rlm-debug! {:final-answer (str-truncate final-answer 200)
                        :confidence confidence} "Final answer in response")
-          {:response nil :thinking thinking :carry carry :next-optimize next-optimize
+          {:response nil :thinking thinking :next-optimize next-optimize
            :executions [] :final-result final-result :api-usage api-usage})
         ;; Normal path: execute code blocks
         (let [code-blocks (vec (remove str/blank? (or (:code parsed) [])))
@@ -476,7 +471,7 @@
                                   :error (:error result)
                                   :execution-time-ms (:execution-time-ms result)})
                            (range) code-blocks execution-results)]
-          {:response nil :thinking thinking :carry carry :next-optimize next-optimize
+          {:response nil :thinking thinking :next-optimize next-optimize
            :executions executions :final-result nil :api-usage api-usage})))))
 
 (defn format-executions
@@ -544,24 +539,6 @@
               (str "  [" (inc idx) "] " code-str "\n      " result-info)))
           executions))
       "\n</execution_results>")))
-
-(defn- build-carried-vars
-  "Serializes full values of carried vars from SCI context into XML section.
-   Looks up each var name in SCI and renders its pr-str value."
-  [sci-ctx carry-list]
-  (when (seq carry-list)
-    (let [entries (keep
-                    (fn [var-name]
-                      (try
-                        (let [val (sci/eval-string* sci-ctx (str var-name))]
-                          (str "  " var-name " = " (pr-str (realize-value val))))
-                        (catch Exception _
-                          (str "  " var-name " = <not found>"))))
-                    carry-list)]
-      (when (seq entries)
-        (str "<carried_vars>\n"
-          (str/join "\n" entries)
-          "\n</carried_vars>")))))
 
 (def ^:private SQUASH_INTERVAL
   "Number of iterations per squash cycle."
@@ -736,7 +713,7 @@
                  :msg-count (count initial-messages)} "Iteration loop started")
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :iteration-loop})]
       (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0 restarts 0
-             prev-carry [] prev-executions nil prev-iteration -1
+             prev-executions nil prev-iteration -1
              journal [] prev-optimize nil]
         (if (>= iteration (effective-max-iterations))
           (let [locals (get-locals rlm-env)
@@ -767,22 +744,20 @@
                              :msg "Strategy restart — resetting with anti-knowledge"})
                 (rlm-debug! {:failed-summary failed-summary} "Strategy restart triggered")
                 (recur (inc iteration) restart-messages trace 0 (inc restarts)
-                  [] nil -1 journal nil))
+                  nil -1 journal nil))
               (do (trove/log! {:level :warn :data {:iteration iteration :consecutive-errors consecutive-errors
                                                    :restarts restarts} :msg "Error budget exhausted after restart"})
                   (merge {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration}
                     (finalize-cost))))
             (let [_ (rlm-debug! {:iteration iteration :msg-count (count messages)} "Iteration start")
-                  ;; Build single-shot prompt: conversation + journal + execution results + carried vars + var index
+                  ;; Build single-shot prompt: conversation + journal + execution results + var index
                   var-index-str (build-var-index (:sci-ctx rlm-env) (:initial-ns-keys rlm-env))
-                  carried-vars-str (build-carried-vars (:sci-ctx rlm-env) prev-carry)
                   exec-results-str (format-execution-results prev-executions prev-iteration)
                   journal-str (render-execution-journal journal)
                   iteration-context (str
                                       conversation-thread
                                       (when journal-str (str "\n" journal-str))
                                       (when exec-results-str (str "\n" exec-results-str))
-                                      (when carried-vars-str (str "\n" carried-vars-str))
                                       (when var-index-str
                                         (str "\n<var_index>\n" var-index-str "\n</var_index>")))
                   base-messages (vec (take 2 messages)) ;; [system-prompt, user-query]
@@ -825,10 +800,10 @@
                     (conj trace trace-entry)
                     (inc consecutive-errors)
                     restarts
-                    [] nil -1 journal nil))
+                    nil -1 journal nil))
                 ;; Normal path — accumulate token usage
                 (let [_ (accumulate-usage! (:api-usage iteration-result))
-                      {:keys [response thinking carry executions final-result next-optimize]} iteration-result
+                      {:keys [response thinking executions final-result next-optimize]} iteration-result
                       trace-entry {:iteration iteration
                                    :response response
                                    :thinking thinking
@@ -876,7 +851,7 @@
                           trace ;; DON'T add empty trace entry
                           (inc consecutive-errors)
                           restarts
-                          [] nil -1 journal next-optimize))
+                          nil -1 journal next-optimize))
                       ;; Normal iteration with executions
                       (let [exec-feedback (format-executions executions)
                             iteration-header (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
@@ -906,7 +881,7 @@
                             (conj trace trace-entry)
                             next-errors
                             restarts
-                            (or carry []) executions iteration
+                            executions iteration
                             (conj journal journal-entry) next-optimize))))))))))))))
 
 ;; =============================================================================
