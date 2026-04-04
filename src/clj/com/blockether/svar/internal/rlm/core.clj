@@ -419,7 +419,7 @@
      - :iteration-spec - Spec for ask! (default: ITERATION_SPEC).
                          When provider has reasoning, pass ITERATION_SPEC_CODE_ONLY.
      - :on-chunk - Streaming callback function."
-  [rlm-env messages & [{:keys [iteration-spec on-chunk] :or {iteration-spec ITERATION_SPEC}}]]
+  [rlm-env messages & [{:keys [iteration-spec on-chunk routing] :or {iteration-spec ITERATION_SPEC}}]]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
     (let [context-chars (reduce + 0 (map #(count (str (:content %))) messages))
           _ (trove/log! {:level :info :id ::llm-call
@@ -431,7 +431,7 @@
           ask-result (llm/ask! (:router rlm-env)
                        (cond-> {:spec iteration-spec
                                 :messages messages
-                                :routing {}
+                                :routing (or routing {})
                                 :check-context? false}
                          on-chunk (assoc :on-chunk on-chunk)))
           parsed (:result ask-result)
@@ -443,6 +443,9 @@
           ;; Native reasoning takes priority over spec-parsed thinking
           thinking (or model-reasoning (:thinking parsed))
           carry (vec (remove str/blank? (or (:carry parsed) [])))
+          ;; LLM's preference for next iteration's model selection
+          next-optimize (when-let [opt (:next-optimize parsed)]
+                          (keyword opt))
           ;; Token usage from ask! result
           api-usage {:prompt_tokens (get-in ask-result [:tokens :input] 0)
                      :completion_tokens (get-in ask-result [:tokens :output] 0)
@@ -456,7 +459,7 @@
                             :confidence confidence}]
           (rlm-debug! {:final-answer (str-truncate final-answer 200)
                        :confidence confidence} "Final answer in response")
-          {:response nil :thinking thinking :carry carry
+          {:response nil :thinking thinking :carry carry :next-optimize next-optimize
            :executions [] :final-result final-result :api-usage api-usage})
         ;; Normal path: execute code blocks
         (let [code-blocks (vec (remove str/blank? (or (:code parsed) [])))
@@ -475,7 +478,7 @@
                                   :error (:error result)
                                   :execution-time-ms (:execution-time-ms result)})
                            (range) code-blocks execution-results)]
-          {:response nil :thinking thinking :carry carry
+          {:response nil :thinking thinking :carry carry :next-optimize next-optimize
            :executions executions :final-result nil :api-usage api-usage})))))
 
 (defn format-executions
@@ -736,7 +739,7 @@
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :iteration-loop})]
       (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0 restarts 0
              prev-carry [] prev-executions nil prev-iteration -1
-             journal []]
+             journal [] prev-optimize nil]
         (if (>= iteration (effective-max-iterations))
           (let [locals (get-locals rlm-env)
                 useful-value (some->> locals vals (filter #(and (some? %) (not (fn? %)))) last)]
@@ -766,7 +769,7 @@
                              :msg "Strategy restart — resetting with anti-knowledge"})
                 (rlm-debug! {:failed-summary failed-summary} "Strategy restart triggered")
                 (recur (inc iteration) restart-messages trace 0 (inc restarts)
-                  [] nil -1 journal))
+                  [] nil -1 journal nil))
               (do (trove/log! {:level :warn :data {:iteration iteration :consecutive-errors consecutive-errors
                                                    :restarts restarts} :msg "Error budget exhausted after restart"})
                   (merge {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration}
@@ -802,7 +805,8 @@
                                      (run-iteration rlm-env effective-messages
                                        (cond-> {:iteration-spec (if has-reasoning?
                                                                   ITERATION_SPEC_CODE_ONLY
-                                                                  ITERATION_SPEC)}
+                                                                  ITERATION_SPEC)
+                                                :routing (when prev-optimize {:optimize prev-optimize})}
                                          iter-on-chunk (assoc :on-chunk iter-on-chunk)))
                                      (catch Exception e
                                        (let [err-msg (ex-message e)
@@ -823,10 +827,10 @@
                     (conj trace trace-entry)
                     (inc consecutive-errors)
                     restarts
-                    [] nil -1 journal))
+                    [] nil -1 journal nil))
                 ;; Normal path — accumulate token usage
                 (let [_ (accumulate-usage! (:api-usage iteration-result))
-                      {:keys [response thinking carry executions final-result]} iteration-result
+                      {:keys [response thinking carry executions final-result next-optimize]} iteration-result
                       trace-entry {:iteration iteration
                                    :response response
                                    :thinking thinking
@@ -874,7 +878,7 @@
                           trace ;; DON'T add empty trace entry
                           (inc consecutive-errors)
                           restarts
-                          [] nil -1 journal))
+                          [] nil -1 journal next-optimize))
                       ;; Normal iteration with executions
                       (let [exec-feedback (format-executions executions)
                             iteration-header (str "[Iteration " (inc iteration) "/" (effective-max-iterations) "]\n"
@@ -905,7 +909,7 @@
                             next-errors
                             restarts
                             (or carry []) executions iteration
-                            (conj journal journal-entry)))))))))))))))
+                            (conj journal journal-entry) next-optimize))))))))))))))
 
 ;; =============================================================================
 ;; Entity Extraction Functions

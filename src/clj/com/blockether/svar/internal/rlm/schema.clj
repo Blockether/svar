@@ -116,6 +116,11 @@
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/required false
                  ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})
+    (spec/field {::spec/name :next-optimize
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Model preference for next iteration. One of cost, speed, intelligence. Omit for auto."})
     (spec/field {::spec/name :final-answer
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
@@ -141,6 +146,11 @@
                  ::spec/cardinality :spec.cardinality/many
                  ::spec/required false
                  ::spec/description "Var names to carry into next iteration (full values injected into prompt)"})
+    (spec/field {::spec/name :next-optimize
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Model preference for next iteration. One of cost, speed, intelligence. Omit for auto."})
     (spec/field {::spec/name :final-answer
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
