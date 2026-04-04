@@ -69,6 +69,37 @@
                            eval-score (assoc :trajectory/eval-score (float eval-score)))])
       traj-id)))
 
+(defn store-message!
+  "Stores a conversation message for trajectory reconstruction.
+   Returns the message UUID for linking executions."
+  [{:keys [conn]} {:keys [env-id role content thinking iteration]}]
+  (when conn
+    (let [msg-id (java.util.UUID/randomUUID)]
+      (d/transact! conn [{:message/id msg-id
+                          :message/env-id (or env-id "")
+                          :message/role (or role :user)
+                          :message/content (or content "")
+                          :message/thinking (or thinking "")
+                          :message/iteration (or iteration 0)
+                          :message/timestamp (java.util.Date.)}])
+      msg-id)))
+
+(defn store-executions!
+  "Stores execution results linked to a message entity."
+  [{:keys [conn]} message-id executions]
+  (when (and conn (seq executions))
+    (d/transact! conn
+      (mapv (fn [idx {:keys [code result stdout error execution-time-ms]}]
+              {:execution/id (java.util.UUID/randomUUID)
+               :execution/message [:message/id message-id]
+               :execution/code (or code "")
+               :execution/result (pr-str result)
+               :execution/stdout (or stdout "")
+               :execution/error (or error "")
+               :execution/order idx
+               :execution/duration (or execution-time-ms 0)})
+        (range) executions))))
+
 ;; -----------------------------------------------------------------------------
 ;; Document Storage
 ;; -----------------------------------------------------------------------------

@@ -3,7 +3,7 @@
    [clojure.string :as str]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.router :as router]
-   [com.blockether.svar.internal.rlm.db
+   [com.blockether.svar.internal.rlm.db :as rlm-db
     :refer [create-rlm-conn dispose-rlm-conn!
             db-list-documents db-store-final-result!
             db-list-final-results db-store-pageindex-document! str-truncate]]
@@ -714,6 +714,9 @@
                  :has-reasoning? has-reasoning?
                  :prev-final-results (count prev-final-results)
                  :msg-count (count initial-messages)} "Iteration loop started")
+    ;; Store initial messages for trajectory reconstruction
+    (doseq [{:keys [role content]} initial-messages]
+      (rlm-db/store-message! db-info {:env-id env-id :role (keyword role) :content content :iteration -1}))
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :iteration-loop})]
       (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0 restarts 0
              prev-executions nil prev-iteration -1
@@ -808,6 +811,15 @@
                 ;; Normal path — accumulate token usage
                 (let [_ (accumulate-usage! (:api-usage iteration-result))
                       {:keys [response thinking executions final-result next-optimize]} iteration-result
+                      ;; Store assistant message + executions for trajectory
+                      _traj-msg-id (let [mid (rlm-db/store-message! db-info
+                                               {:env-id env-id :role :assistant
+                                                :content (or response "")
+                                                :thinking (or thinking "")
+                                                :iteration iteration})]
+                                     (when (and mid (seq executions))
+                                       (rlm-db/store-executions! db-info mid executions))
+                                     mid)
                       trace-entry {:iteration iteration
                                    :response response
                                    :thinking thinking
@@ -875,6 +887,9 @@
                                      :has-thinking? (some? thinking)
                                      :thinking-preview (when thinking (str-truncate thinking 150))
                                      :feedback-len (count user-feedback)} "Iteration feedback")
+                        ;; Store user feedback for trajectory
+                        (rlm-db/store-message! db-info
+                          {:env-id env-id :role :user :content user-feedback :iteration iteration})
                         (let [had-successful-execution? (some #(nil? (:error %)) executions)
                               next-errors (if had-successful-execution? 0 (inc consecutive-errors))
                               journal-entry {:iteration iteration

@@ -150,8 +150,8 @@
 (defn- format-for-training
   "Converts a reconstructed conversation to OpenAI messages format for fine-tuning.
 
-   Assistant content is JSON matching the model's actual output format:
-   {\"thinking\": \"...\", \"code\": [\"...\"]}
+   Assistant content is JSON matching the ITERATION_SPEC format:
+   {\"thinking\": \"...\", \"code\": [...], \"next-optimize\": null, \"final\": null}
    This ensures training data matches inference-time behavior exactly."
   [conversation]
   (mapv (fn [{:keys [role content thinking code]}]
@@ -159,7 +159,10 @@
             :system    {"role" "system" "content" content}
             :user      {"role" "user" "content" content}
             :assistant {"role" "assistant"
-                        "content" (json/write-json-str {"thinking" thinking "code" code})}))
+                        "content" (json/write-json-str
+                                    (cond-> {"thinking" (or thinking "") "code" (or code [])}
+                                      ;; Don't include next-optimize/final in training — let model learn when to use them
+                                      ))}))
     conversation))
 
 (defn export-trajectories!

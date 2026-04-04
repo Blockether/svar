@@ -297,7 +297,26 @@
    :trajectory/doc-pages   {:db/valueType :db.type/long    :db/doc "Number of document pages in context"}
    :trajectory/timestamp   {:db/valueType :db.type/instant}
    :trajectory/score       {:db/valueType :db.type/long    :db/doc "Quality score for filtering (computed on export)"}
-   :trajectory/eval-score  {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0 (from refine!) — answer quality signal"}})
+   :trajectory/eval-score  {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0 (from refine!) — answer quality signal"}
+
+   ;; Messages — per-iteration LLM conversation for trajectory reconstruction
+   :message/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :message/env-id      {:db/valueType :db.type/string  :db/doc "Links to trajectory env-id"}
+   :message/role        {:db/valueType :db.type/keyword :db/doc ":system :user :assistant"}
+   :message/content     {:db/valueType :db.type/string  :db/doc "Message content"}
+   :message/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
+   :message/iteration   {:db/valueType :db.type/long    :db/doc "Iteration number"}
+   :message/timestamp   {:db/valueType :db.type/instant}
+
+   ;; Executions — code blocks + results per assistant message
+   :execution/id        {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :execution/message   {:db/valueType :db.type/ref     :db/doc "Ref to parent message entity"}
+   :execution/code      {:db/valueType :db.type/string  :db/doc "Clojure code executed"}
+   :execution/result    {:db/valueType :db.type/string  :db/doc "pr-str of result"}
+   :execution/stdout    {:db/valueType :db.type/string  :db/doc "Captured stdout"}
+   :execution/error     {:db/valueType :db.type/string  :db/doc "Error message if failed"}
+   :execution/order     {:db/valueType :db.type/long    :db/doc "Order within iteration"}
+   :execution/duration  {:db/valueType :db.type/long    :db/doc "Execution time ms"}})
 
 (def BLOOM_DIFFICULTIES
   "Bloom's taxonomy cognitive levels as difficulty progression."
