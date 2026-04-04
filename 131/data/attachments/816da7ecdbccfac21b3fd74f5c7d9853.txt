@@ -1,0 +1,2 @@
+2026-04-04T17:49:13.460460522Z :info com.blockether.svar.internal.llm [244 11] ::chat-completion-request HTTP request starting 
+  data: {:model "gpt-4o", :msg-count 3, :body-size-k "4.2K", :timeout-ms 300000, :max-tokens nil, :url "http://test/chat/completions"}

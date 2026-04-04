@@ -1,0 +1,2 @@
+2026-04-04T17:49:25.916537409Z :info com.blockether.svar.internal.llm [622 11] ::ask-routed ask! routed 
+  data: {:provider :test, :model "gpt-4o", :context-window 8192, :max-tokens 2048, :has-reasoning false}

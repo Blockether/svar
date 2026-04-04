@@ -1,0 +1,4 @@
+2026-04-04T17:49:25.216004525Z :info com.blockether.svar.internal.llm [622 11] ::ask-routed ask! routed 
+  data: {:provider :test, :model "gpt-4o", :context-window 8192, :max-tokens 2048, :has-reasoning false}
+2026-04-04T17:49:25.216656282Z :warn com.blockether.svar.internal.rlm.core [913 7] Entity extraction failed for page 
+  data: {:error "boom"}
