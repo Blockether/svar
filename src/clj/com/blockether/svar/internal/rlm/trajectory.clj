@@ -136,6 +136,7 @@
                :response (try (edn/read-string (:iteration/response it)) (catch Exception _ nil))
                :code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
                :results (try (edn/read-string (:iteration/results it)) (catch Exception _ []))
+               :final (:iteration/final it)
                :thinking (:iteration/thinking it)
                :duration-ms (:iteration/duration-ms it)})
         iterations))))

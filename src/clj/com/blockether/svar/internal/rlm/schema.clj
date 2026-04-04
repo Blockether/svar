@@ -308,6 +308,7 @@
    :iteration/response       {:db/valueType :db.type/string  :db/doc "pr-str of parsed response (ITERATION_SPEC data)"}
    :iteration/code           {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
    :iteration/results        {:db/valueType :db.type/string  :db/doc "pr-str of result strings (pr-str of each result)"}
+   :iteration/final          {:db/valueType :db.type/string  :db/doc "Final answer string when iteration is terminal. Nil if not final."}
    :iteration/thinking       {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
    :iteration/duration-ms    {:db/valueType :db.type/long    :db/doc "LLM call duration"}
    :iteration/timestamp      {:db/valueType :db.type/instant}})

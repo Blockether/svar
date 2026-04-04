@@ -824,6 +824,7 @@
                                                                 :confidence (:confidence final-result)}))
                                     :executions executions
                                     :thinking thinking
+                                    :final (when final-result (answer-str (:answer final-result)))
                                     :duration-ms (get-in iteration-result [:api-usage :prompt_tokens] 0)})
                       trace-entry {:iteration iteration
                                    :response response
