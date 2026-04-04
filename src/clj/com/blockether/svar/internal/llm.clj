@@ -12,6 +12,7 @@
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.defaults :as defaults]
    [com.blockether.svar.internal.jsonish :as jsonish]
+   [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [taoensso.trove :as trove])
@@ -999,27 +1000,48 @@
    Params:
    `router` - Router instance from make-router. Required.
    `opts` - Map. Accepts all opts that ask!* accepts, plus:
-     :strategy - :root (use provider's root model, default)
-     :prefer - :cost, :intelligence, or :speed (model selection preference)
-     :capabilities - #{:chat :vision ...} (required model capabilities)"
+     :routing - Map with routing preferences:
+       :optimize - :cost, :intelligence, or :speed (nil = first model)
+       :provider - keyword, override specific provider
+       :model - string, override specific model
+       :on-transient-error - :hybrid (default), :auto-route-cross-providers,
+                             :fallback-model-in-the-same-provider, :fail
+
+     Legacy (deprecated): :strategy, :prefer, :capabilities"
   [router opts]
-  (let [prefs (cond
-                (:strategy opts) (select-keys opts [:strategy])
-                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                :else {:strategy :root})]
-    (with-provider-fallback
-      router prefs
-      (fn [provider model-map]
-        (let [reasoning-extra (when (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
-                                (:reasoning-params model-map))
-              merged-extra (merge reasoning-extra (:extra-body opts))]
+  (if-let [routing (:routing opts)]
+    ;; New :routing API — use router/resolve-routing
+    (let [resolved (router/resolve-routing router routing)
+          provider (:provider resolved)
+          model-map (:model resolved)]
+      (with-provider-fallback
+        router {:strategy :root} ;; fallback still needs prefs for rate limiting
+        (fn [_fallback-provider _fallback-model]
           (ask!* router
-            (cond-> (assoc opts
-                      :model (:name model-map)
-                      :api-key (:api-key provider)
-                      :base-url (:base-url provider)
-                      :provider-id (:id provider))
-              (seq merged-extra) (assoc :extra-body merged-extra))))))))
+            (assoc opts
+              :model (:name model-map)
+              :api-key (:api-key provider)
+              :base-url (:base-url provider)
+              :provider-id (:id provider)
+              :extra-body (:auto-params resolved))))))
+    ;; Legacy API — :strategy/:prefer
+    (let [prefs (cond
+                  (:strategy opts) (select-keys opts [:strategy])
+                  (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                  :else {:strategy :root})]
+      (with-provider-fallback
+        router prefs
+        (fn [provider model-map]
+          (let [reasoning-extra (when (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
+                                  (:reasoning-params model-map))
+                merged-extra (merge reasoning-extra (:extra-body opts))]
+            (ask!* router
+              (cond-> (assoc opts
+                        :model (:name model-map)
+                        :api-key (:api-key provider)
+                        :base-url (:base-url provider)
+                        :provider-id (:id provider))
+                (seq merged-extra) (assoc :extra-body merged-extra)))))))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
