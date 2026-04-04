@@ -427,11 +427,14 @@
                                 :context-chars context-chars
                                 :context-chars-k (format "%.1fK" (/ context-chars 1000.0))}
                          :msg "LLM call started"})
+          ;; Derive max_tokens from model context window (25%)
+          effective-model (resolve-root-model (:router rlm-env))
+          max-output-tokens (long (* 0.25 (defaults/context-limit (or effective-model "gpt-4o"))))
           ;; Use ask! with iteration spec — provider enforces JSON schema
           ask-result (llm/ask! (:router rlm-env)
                        (cond-> {:spec iteration-spec
                                 :messages messages
-                                :extra-body {:max_tokens 25000}
+                                :extra-body {:max_tokens max-output-tokens}
                                 :check-context? false}
                          on-chunk (assoc :on-chunk on-chunk)))
           parsed (:result ask-result)
