@@ -527,7 +527,16 @@
                                                       'superset? clojure.set/superset?}}
                            :ns-aliases {'str 'clojure.string
                                         'set 'clojure.set}
-                           :classes {'java.util.regex.Pattern java.util.regex.Pattern
+                           :classes {'java.lang.Character Character
+                                     'java.lang.Math Math
+                                     'java.lang.String String
+                                     'java.lang.Integer Integer
+                                     'java.lang.Long Long
+                                     'java.lang.Double Double
+                                     'java.lang.Boolean Boolean
+                                     'java.util.Collections java.util.Collections
+                                     'java.util.Arrays java.util.Arrays
+                                     'java.util.regex.Pattern java.util.regex.Pattern
                                      'java.util.regex.Matcher java.util.regex.Matcher
                                      'java.time.LocalDate java.time.LocalDate
                                      'java.time.Period java.time.Period
