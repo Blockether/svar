@@ -1,4 +1,0 @@
-2026-04-04T17:49:13.503550388Z :info com.blockether.svar.internal.llm [622 11] ::ask-routed ask! routed 
-  data: {:provider :test, :model "gpt-4o", :context-window 8192, :max-tokens 2048, :has-reasoning false}
-2026-04-04T17:49:13.504247089Z :info com.blockether.svar.internal.llm [244 11] ::chat-completion-request HTTP request starting 
-  data: {:model "gpt-4o", :msg-count 3, :body-size-k "0.3K", :timeout-ms 300000, :max-tokens 2048, :url "http://test/chat/completions"}
