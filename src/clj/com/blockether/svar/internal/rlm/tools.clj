@@ -542,6 +542,33 @@
                                      'java.time.Period java.time.Period
                                      'java.util.UUID java.util.UUID}
                            :deny '[require import ns eval load-string read-string]})]
+    ;; Inject doc metadata so (doc fn-name) works in SCI
+    (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
+                            ['llm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
+                            ['request-more-iterations "Request n more iterations. Returns {:granted n :new-budget N}." '([n])]
+                            ['spec "Create a structured output spec." '([& fields])]
+                            ['field "Create a spec field." '([& kvs])]
+                            ['context "The data context passed to query-env!." nil]
+                            ['str-truncate "Truncate string to n chars." '([s n])]
+                            ['str-join "Join strings with separator." '([sep coll])]
+                            ['str-split "Split string by regex." '([s re])]
+                            ['parse-date "Parse ISO date string to LocalDate." '([s])]
+                            ['today-str "Today as ISO-8601 string." '([])]
+                             ;; Document tools (only if bound)
+                            ['list-documents "List ingested documents with abstracts and TOC." '([] [opts])]
+                            ['search-document-pages "Fulltext search across document pages. Returns brief metadata." '([query] [query top-k] [query top-k opts])]
+                            ['P-add! "Fetch content by lookup ref. Returns content string or chunked vector." '([lookup-ref])]
+                            ['list-document-pages "List document page nodes with brief metadata." '([] [opts])]
+                            ['search-document-toc "Search table of contents by title." '([query] [query top-k])]
+                            ['list-document-toc "List TOC entries." '([] [opts])]
+                            ['search-document-entities "Search entities by name/description." '([query] [query top-k] [query top-k opts])]
+                            ['list-document-entities "List entities with filters." '([] [opts])]
+                            ['document-entity-stats "Entity statistics: types, counts, relationships." '([])]]]
+      (when (sci/eval-string* sci-ctx (str "(resolve '" sym ")"))
+        (sci/eval-string* sci-ctx
+          (str "(def ^{:doc " (pr-str doc)
+            (when args (str " :arglists (quote " (pr-str args) ")"))
+            "} " sym " " sym ")"))))
     {:sci-ctx sci-ctx
      :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))}))
 

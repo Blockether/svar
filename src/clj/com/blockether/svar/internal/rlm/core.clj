@@ -13,7 +13,6 @@
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
             EVAL_TIMEOUT_MS
-            MAX_ITERATIONS MAX_ITERATION_CAP
             bytes->base64 *rlm-ctx*]]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value build-var-index]]
    [com.blockether.svar.internal.jsonish :as jsonish]
@@ -223,179 +222,41 @@
       "\n</custom_tools>\n")))
 
 (defn build-system-prompt
-  "Builds the system prompt. Optionally includes spec schema, history tools, and custom docs.
+  "Builds the system prompt — compact, token-efficient.
+   All tool documentation is discoverable via (doc fn-name) in SCI."
+  [{:keys [output-spec custom-docs has-reasoning? system-prompt]}]
+  (str "You are a Clojure agent in a SCI sandbox. Write code, execute, iterate.
 
-   When :has-reasoning? is true, uses ITERATION_SPEC_CODE_ONLY (no thinking field)
-   because the provider emits native reasoning tokens — no need to duplicate in JSON."
-  [{:keys [output-spec custom-docs has-documents?
-           has-reasoning? system-prompt]}]
-  (str "<rlm_environment>
-<role>You are an expert Clojure programmer analyzing data in a sandboxed environment.</role>
+ARCHITECTURE:
+- Single-shot: each iteration is a fresh prompt. No message history.
+- State lives in def'd vars — they persist across iterations.
+- <var_index> shows all your vars (name, type, size, docstring).
+- <execution_results> shows what your last code returned.
+- Use (doc fn-name) to discover any function's purpose and args.
+- Use (llm-query \"question\") to ask a sub-LLM for help.
 "
     (when system-prompt
-      (str "\n<agent_instructions>\n" system-prompt "\n</agent_instructions>\n"))
-    "
+      (str "\nINSTRUCTIONS:\n" system-prompt "\n"))
 
-<available_tools>
-  <tool name=\"context\">The data context - access as 'context' variable</tool>
-  <tool name=\"llm-query\">(llm-query prompt) or (llm-query prompt {:spec my-spec}) - Ask a sub-LLM anything: algorithm help, error diagnosis, code review, approach validation. Returns text or structured data. Use freely for hard problems.</tool>
-  <tool name=\"llm-query-batch\">(llm-query-batch [prompt1 prompt2 ...]) - Parallel batch of LLM sub-calls. Returns vector of results. Use for map-reduce or parallel analysis.</tool>
-  <tool name=\"request-more-iterations\">(request-more-iterations n) - Request n more iterations if running low. Returns {:granted n :new-budget N :cap max}.</tool>
-</available_tools>
-"
-    (when has-documents? "
-<document_tools>
-  <description>Query ingested PageIndex documents. Documents contain metadata, pages with content, and table of contents.</description>
-  <tool name=\"list-documents\">(list-documents) or (list-documents {:limit n :include-toc? true}) - List documents with abstracts and TOC. Returns:
-    [{:document/id \"...\"
-      :document/name \"filename\"
-      :document/title \"Document Title\"
-      :document/abstract \"Summary of the document...\"
-      :document/extension \"pdf\"
-      :document/toc [{:title \"Chapter 1\" :level \"l1\" :page 0}
-                     {:title \"Section 1.1\" :level \"l2\" :page 3}
-                     ...]}]</tool>
-  <tool name=\"get-document\">(get-document doc-id) - Get document with abstract and full TOC.</tool>
-  <tool name=\"search-document-pages\">(search-document-pages query) or (search-document-pages query top-k) or (search-document-pages query top-k {:document-id id :type :paragraph}) - Fulltext search across document pages. Returns BRIEF metadata: [{:page.node/id :page.node/type :page.node/page-id :page.node/document-id :preview \"first 150 chars...\" :content-length N}...]. Use P-add! to fetch full content.</tool>
-  <tool name=\"P-add!\">(P-add! [:page.node/id id]) or (P-add! [:document/id id]) or (P-add! [:document.toc/id id]) - Fetches content using Datalevin lookup ref.
-    :page.node/id → content string. Store: (def clause (P-add! [:page.node/id \"abc\"]))
-    :document/id → vector of ~4000 char page strings (chunked). Store: (def doc (P-add! [:document/id \"doc-1\"])). Access: (count doc), (nth doc 5), (mapv #(re-seq #\"pattern\" %) doc)
-    :document.toc/id → TOC title/description string.</tool>
-  <tool name=\"list-document-pages\">(list-document-pages) or (list-document-pages {:page-id id :document-id id :type :heading :limit n}) - List document page nodes with brief metadata.</tool>
-  <tool name=\"search-document-toc\">(search-document-toc query) or (search-document-toc query top-k) - Search table of contents by title/description (case-insensitive). Returns [{:document.toc/id :document.toc/title :document.toc/description :document.toc/level :document.toc/target-page}...].</tool>
-  <tool name=\"get-document-toc-entry\">(get-document-toc-entry entry-id) - Get full TOC entry by ID.</tool>
-  <tool name=\"list-document-toc\">(list-document-toc) or (list-document-toc {:parent-id id :limit n}) - List TOC entries.</tool>
-  <tool name=\"store-document-toc!\">(store-document-toc! entry) - Store a PageIndex TOC entry. Returns stored entry.</tool>
-  <document_page_schema>
-    :page.node/id - String (UUID), unique identifier
-    :page.node/type - Keyword: :section :heading :paragraph :list-item :image :table :header :footer :metadata
-    :page.node/level - String, e.g. \"h1\"-\"h6\" for headings, \"l1\"-\"l6\" for lists
-    :page.node/content - String, the actual text content
-    :page.node/description - String, AI-generated description for sections/images/tables
-    :page.node/page-id - String, reference to parent page
-    :page.node/document-id - String, reference to parent document
-  </document_page_schema>
-  <document_toc_schema>
-    :document.toc/id - String (UUID), unique identifier
-    :document.toc/title - String, section title
-    :document.toc/description - String or nil, section summary
-    :document.toc/target-page - Long, page number (0-based)
-    :document.toc/level - String, hierarchy level (\"l1\", \"l2\", \"l3\")
-    :document.toc/parent-id - String or nil, parent entry ID
-  </document_toc_schema>
-  <usage_tips>
-    - START HERE: Call (list-documents) to see available documents with abstracts and TOC
-    - Use (search-document-pages \"penalty\") to find relevant nodes (returns brief metadata + preview)
-    - Use (P-add! [:page.node/id id]) to fetch full content: (def clause (P-add! [:page.node/id \"abc-123\"]))
-    - Use (P-add! [:document/id id]) to fetch entire document as text
-    - Use (list-document-toc) to understand document structure
-    - Filter by :type to find specific content (e.g., :paragraph for text, :heading for titles)
-    - Filter by :document-id to search within a specific document
-  </usage_tips>
-</document_tools>
-
-<document_entity_tools>
-  <description>Search, retrieve, and analyze entities extracted from documents: parties, obligations, conditions, terms, clauses, cross-references.</description>
-  <tool name=\"search-document-entities\">(search-document-entities query) or (search-document-entities query top-k) or (search-document-entities query top-k {:type :party :document-id \"...\"}) - Search entities by name/description (case-insensitive). Returns [{:entity/id :entity/name :entity/type :entity/description :entity/document-id :entity/page :entity/section}...].</tool>
-  <tool name=\"get-document-entity\">(get-document-entity entity-id) - Get full entity by UUID.</tool>
-  <tool name=\"list-document-entities\">(list-document-entities) or (list-document-entities {:type :party :document-id \"...\" :limit 50}) - List entities with filters.</tool>
-  <tool name=\"list-document-relationships\">(list-document-relationships entity-id) or (list-document-relationships entity-id {:type :references}) - List relationships for an entity (both directions).</tool>
-  <tool name=\"document-entity-stats\">(document-entity-stats) - Entity statistics: {:total-entities N :types {:party N :obligation N ...} :total-relationships N}</tool>
-  <entity_schema>
-    :entity/id - UUID, unique identifier
-    :entity/name - String, entity name or label
-    :entity/type - Keyword: :party, :obligation, :condition, :term, :clause, :cross-reference
-    :entity/description - String, extracted context/description
-    :entity/document-id - String, source document reference
-    :entity/page - Long, source page number
-    :entity/section - String, source section identifier
-  </entity_schema>
-  <relationship_schema>
-    :relationship/id - UUID, unique identifier
-    :relationship/type - Keyword: :references, :defines, :obligates, :conditions, :amends
-    :relationship/source-entity-id - UUID, source entity
-    :relationship/target-entity-id - UUID, target entity
-    :relationship/description - String, relationship context
-  </relationship_schema>
-  <usage_tips>
-    - START with (document-entity-stats) to see what entities are available
-    - Use (search-document-entities \"party name\") to find specific entities
-    - Use (list-document-relationships entity-id) to explore connections
-    - Entities give STRUCTURE, document pages give CONTENT — use both together
-  </usage_tips>
-</document_entity_tools>
-")
-    "
-<helpers>
-  Date: parse-date, date-before?, date-after?, days-between, date-plus-days, date-minus-days, date-format, today-str (ISO-8601 format)
-  Sets: set-union, set-intersection, set-difference, set-subset?, set-superset?
-</helpers>
-"
-       ;; No history tools in system prompt — locals are injected in every iteration feedback.
-       ;; The model always sees its variables and doesn't need to waste iterations on get-history.
-    "
-<string_helpers>str-lines, str-words, str-truncate, str-join, str-split, str-replace, str-trim, str-lower, str-upper, str-blank?, str-includes?, str-starts-with?, str-ends-with?</string_helpers>
-
-<regex>re-pattern, re-find, re-matches, re-seq</regex>
-
-<safe_functions>map, filter, reduce, assoc, get, keys, vals, first, rest, take, drop, sort, group-by, frequencies, +, -, *, /, etc.</safe_functions>
-"
-       ;; Include custom docs if provided
     (format-custom-docs custom-docs)
 
-       ;; Include spec schema if provided
     (when output-spec
-      (str "\n<expected_output_schema>\n"
-        "Your FINAL answer should match this structure:\n"
-        (spec/spec->prompt output-spec)
-        "\n</expected_output_schema>\n"))
-
+      (str "\nOUTPUT SCHEMA:\n" (spec/spec->prompt output-spec) "\n"))
     "
-<rlm_patterns>
-  Sub-LLM: (llm-query \"explain Quine-McCluskey algorithm\") — ask for help on algorithms, errors, approaches.
-  Aggregation: partition data → llm-query-batch → synthesize. Use for parallel analysis.
-  Regex: (re-seq #\"pattern\" my-var) for structured extraction across text.
-</rlm_patterns>
-
-<workflow>
-0. FIRST: Check <context> and <var_index> - if they already answer the query, set final immediately
-1. For coding tasks: write code, test it, iterate. Use (llm-query) to ask for algorithm help if stuck.
-2. For document tasks: (list-documents) → (list-document-toc) → (P-add! ...) → analyze
-3. For exhaustive analysis: use llm-query-batch over chunks
-4. Store intermediate results with (def my-var \"docstring\" value) — use docstrings!
-5. Set final when done
-</workflow>
-
-<response_format>
+RESPONSE FORMAT:
 " (spec/spec->prompt (if has-reasoning? ITERATION_SPEC_CODE_ONLY ITERATION_SPEC)) "
 " (if has-reasoning?
-    "EVERY response MUST be valid JSON with a 'code' field. Your reasoning happens natively — do NOT include a 'thinking' field. No markdown, no prose outside JSON."
-    "EVERY response MUST be valid JSON with 'thinking' and 'code' fields. No markdown, no prose outside JSON.") "
-  To finish: set the 'final' object with answer and confidence. Code is IGNORED when final is set.
-  Example continue: {\"thinking\": \"...\", \"code\": [\"...\"]}
-  Example finalize: {\"thinking\": \"found the answer\", \"code\": [], \"final\": {\"answer\": \"The penalty is 5%.\", \"confidence\": \"high\"}}
-</response_format>
+    "Respond with valid JSON. Your reasoning is native — omit 'thinking'."
+    "Respond with valid JSON containing 'thinking' and 'code'.") "
+Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high\"}}
 
-<critical>
-- SINGLE-SHOT: Each iteration is a fresh prompt. No message history accumulates. State lives in your def'd vars.
-- VARS ARE STATE: Use (def var-name \"docstring\" value) to store results. Vars persist across iterations in the SCI sandbox.
-- DOCSTRINGS: ALWAYS use docstrings on def — they appear in the <var_index> and help you remember what each var contains.
-- VAR INDEX: Every iteration shows a <var_index> table of ALL your def'd vars (name, type, size, docstring).
-- DOCSTRINGS: ALWAYS use (def name \"description\" value). Docstrings appear in <var_index> — without them you lose track of what vars contain.
-- EXECUTION RESULTS: After each iteration, <execution_results> shows success/failure per code block.
-- EXECUTION JOURNAL: The <execution_journal> shows your thinking + var names from previous iterations. Squashed every 5 iterations.
-- CONVERSATION: The <conversation> section links previous queries to their final-result-N vars.
-- FINALIZE: Set the 'final' object in your response when done. Code is IGNORED when final is set.
-- FAST PATH: If context or var_index already answers the query, set 'final' IMMEDIATELY.
-- NEVER REPEAT: If a call returned [] or nil, do NOT call it again. Try a different approach or finalize.
-- CLOJURE SYNTAX: ALL function calls MUST be wrapped in parentheses.
-- VARS ARE VALUES: Use `my-var` to reference a stored value, NOT `(my-var)`.
-- COMBINE STEPS: Code blocks execute sequentially in ONE iteration. Do NOT split read+answer into separate iterations.
-- ITERATION BUDGET: " MAX_ITERATIONS " iterations. Hard cap: " MAX_ITERATION_CAP ". " (/ EVAL_TIMEOUT_MS 1000) "s timeout per execution.
-</critical>
-"
-    "
-</rlm_environment>"))
+RULES:
+- Always (def name \"docstring\" value) — docstrings are your memory
+- Test code before finalizing
+- Never repeat a failed call — try a different approach
+- Combine steps in one iteration
+- If <var_index> or <context> already answers the query, finalize immediately
+"))
 
 ;; =============================================================================
 ;; Iteration Loop
