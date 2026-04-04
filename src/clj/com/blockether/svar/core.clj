@@ -495,10 +495,10 @@
   rlm/query-env!)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def list-trajectories
-  "Lists trajectory records from an RLM environment.
+(def list-queries
+  "Lists query records from an RLM environment.
    See internal.rlm for details."
-  rlm/list-trajectories)
+  rlm/list-queries)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def export-trajectories!

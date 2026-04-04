@@ -566,15 +566,13 @@
                                   verify? (assoc :verified-claims (vec @claims-atom)))]
                  result-map)))))))))
 
-(defn list-trajectories
-  "Lists trajectory records from an RLM environment.
-   See trajectory/list-trajectories for opts."
+(defn list-queries
+  "Lists query records from an RLM environment."
   [env & [opts]]
-  (trajectory/list-trajectories @(:db-info-atom env) opts))
+  (trajectory/list-queries @(:db-info-atom env) opts))
 
 (defn export-trajectories!
-  "Exports filtered trajectories as JSONL for fine-tuning.
-   See trajectory/export-trajectories! for opts."
+  "Exports filtered trajectories as JSONL for fine-tuning."
   [env output-dir & [opts]]
   (trajectory/export-trajectories! @(:db-info-atom env) output-dir opts))
 
