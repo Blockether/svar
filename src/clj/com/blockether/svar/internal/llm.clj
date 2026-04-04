@@ -554,21 +554,21 @@
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
-   Prefs may include :on-chunk fn for streaming."
-  [router messages prefs]
-  (router/with-provider-fallback router prefs
-    (fn [provider model-map]
-      (chat-completion messages (:name model-map)
-        (:api-key provider)
-        (:base-url provider)
-        (cond-> {}
-          (:on-chunk prefs)
-          (assoc :on-chunk (:on-chunk prefs))
-          :always
-          (assoc :extra-body (merge
-                               (when (and (= (:strategy prefs) :root) (seq (:reasoning-params model-map)))
-                                 (:reasoning-params model-map))
-                               (:extra-body prefs))))))))
+   opts may include :routing and :on-chunk."
+  [router messages opts]
+  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
+    (router/with-provider-fallback router (:prefs resolved)
+      (fn [provider model-map]
+        (let [ctx (or (:context model-map) 8192)
+              auto-params (cond-> {:max_tokens (long (* 0.25 ctx))}
+                            (seq (:reasoning-params model-map))
+                            (merge (:reasoning-params model-map)))]
+          (chat-completion messages (:name model-map)
+            (:api-key provider)
+            (:base-url provider)
+            (cond-> {:extra-body auto-params}
+              (:on-chunk opts)
+              (assoc :on-chunk (:on-chunk opts)))))))))
 
 (defn sanitize-config
   [config]
@@ -764,11 +764,9 @@
 (defn abstract!
   "Routed abstract! — provider fallback + rate limiting."
   [router opts]
-  (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                    :else {:strategy :root})]
+  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
     (router/with-provider-fallback
-      router prefs
+      router (:prefs resolved)
       (fn [provider model-map]
         (abstract!* router
           (assoc opts
@@ -2083,11 +2081,9 @@
 (defn sample!
   "Routed sample! — provider fallback + rate limiting."
   [router opts]
-  (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                    :else {:strategy :root})]
+  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
     (router/with-provider-fallback
-      router prefs
+      router (:prefs resolved)
       (fn [provider model-map]
         (sample!* router
           (assoc opts
@@ -2187,15 +2183,11 @@
 ;; =============================================================================
 
 (defn refine!
-  "Routed refine — iterative refinement with provider fallback and rate limiting.
-   Accepts all opts that refine!* accepts, plus :strategy, :prefer, :capabilities."
+  "Routed refine — iterative refinement with provider fallback and rate limiting."
   [router opts]
-  (let [prefs (cond
-                (:strategy opts) (select-keys opts [:strategy])
-                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                :else {:strategy :root})]
+  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
     (router/with-provider-fallback
-      router prefs
+      router (:prefs resolved)
       (fn [provider model-map]
         (refine!* router
           (assoc opts

@@ -85,8 +85,8 @@
         custom-docs-atom (atom [])
         db-info (rlm-db/create-rlm-conn {:conn conn :path path})
         db-info-atom (atom db-info)
-        llm-query-fn (rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom router)
-        sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:routing {:optimize :cost}} depth-atom router)
+        llm-query-fn (rlm-routing/make-routed-llm-query-fn {} depth-atom router)
+        sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:optimize :cost} depth-atom router)
         env-id (str (util/uuid))
         {:keys [sci-ctx initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
     {:env-id env-id
@@ -314,7 +314,7 @@
          _locals-atom (:locals-atom env)
          depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
-         sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:routing {:optimize :cost}} depth-atom rlm-router)
+         sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:optimize :cost} depth-atom rlm-router)
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
          claims-atom (when verify? (atom []))

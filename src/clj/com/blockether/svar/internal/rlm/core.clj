@@ -65,7 +65,7 @@
          _ (when (and db-info-atom (seq documents))
              (doseq [doc documents]
                (db-store-pageindex-document! @db-info-atom doc)))
-         llm-query-fn (make-routed-llm-query-fn {:strategy :root} depth-atom router)
+         llm-query-fn (make-routed-llm-query-fn {} depth-atom router)
          {:keys [sci-ctx initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil)]
      {:sci-ctx sci-ctx :initial-ns-keys initial-ns-keys :context context-data
       :llm-query-fn llm-query-fn

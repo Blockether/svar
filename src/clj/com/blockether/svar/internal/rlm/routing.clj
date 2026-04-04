@@ -23,28 +23,26 @@
    Errors are caught and returned as {:content \"ERROR: ...\" :error true} so the
    LLM can see them and adapt (e.g., retry with different approach).
 
-   `prefs` — preferences map, e.g. {:strategy :root} or {:prefer :cost :capabilities #{:chat}}"
-  [prefs depth-atom rlm-router]
+   `routing` — routing opts map, e.g. {} or {:optimize :cost}"
+  [routing depth-atom rlm-router]
   (fn llm-query
     ([prompt]
-     (with-depth-tracking depth-atom prefs
+     (with-depth-tracking depth-atom routing
        (fn []
-         (let [result (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] prefs)]
+         (let [result (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] {:routing routing})]
            result))))
     ([prompt opts]
-     (with-depth-tracking depth-atom prefs
+     (with-depth-tracking depth-atom routing
        (fn []
          (let [result (if-let [spec (:spec opts)]
                         (let [r (llm/ask! rlm-router {:spec spec
                                                       :messages [(llm/user prompt)]
-                                                      :prefer (:prefer prefs)
-                                                      :strategy (:strategy prefs)
-                                                      :capabilities (:capabilities prefs)})]
+                                                      :routing routing})]
                           {:content (pr-str (:result r))
                            :routed/provider-id (:routed/provider-id r)
                            :routed/model (:routed/model r)
                            :routed/base-url (:routed/base-url r)})
-                        (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] prefs))]
+                        (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] {:routing routing}))]
            result))))))
 
 (defn resolve-root-model
