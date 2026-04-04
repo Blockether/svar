@@ -2,7 +2,7 @@
   (:require
    [clojure.string :as str]
    [com.blockether.svar.internal.llm :as llm]
-   [com.blockether.svar.internal.defaults :as defaults]
+   [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.rlm.db
     :refer [create-rlm-conn dispose-rlm-conn!
             db-list-documents db-store-final-result!
@@ -665,7 +665,7 @@
         ;; Default max-context-tokens to 60% of model's context window.
         ;; Prevents unbounded history accumulation (quadratic token growth over iterations).
         max-context-tokens (or max-context-tokens
-                             (long (* 0.6 (defaults/context-limit effective-model))))
+                             (long (* 0.6 (router/context-limit effective-model))))
         ;; Check if root provider has native reasoning (thinking tokens)
         has-reasoning? (boolean (provider-has-reasoning? (:router rlm-env)))
         has-docs? (when-let [db-atom (:db-info-atom rlm-env)]
@@ -720,7 +720,7 @@
         finalize-cost (fn []
                         (let [{:keys [input-tokens output-tokens reasoning-tokens cached-tokens]} @usage-atom
                               total-tokens (+ input-tokens output-tokens)
-                              cost (defaults/estimate-cost effective-model input-tokens output-tokens)]
+                              cost (router/estimate-cost effective-model input-tokens output-tokens)]
                           {:tokens {:input input-tokens :output output-tokens
                                     :reasoning reasoning-tokens :cached cached-tokens
                                     :total total-tokens}

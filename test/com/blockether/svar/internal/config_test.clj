@@ -2,7 +2,7 @@
   "Tests for router creation and defaults."
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.internal.defaults :as defaults]
+   [com.blockether.svar.internal.router :as defaults]
    [com.blockether.svar.internal.llm :as llm]))
 
 (defdescribe make-router-test

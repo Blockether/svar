@@ -10,7 +10,6 @@
    [clojure.core.async :as async]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.internal.defaults :as defaults]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]
@@ -389,7 +388,7 @@
    `api-key` - String. Bearer token.
    `base-url` - String. API base URL.
    `opts` - Map, optional:
-     - :timeout-ms - Integer. Request timeout (default: defaults/DEFAULT_TIMEOUT_MS).
+     - :timeout-ms - Integer. Request timeout (default: router/DEFAULT_TIMEOUT_MS).
      - :extra-body - Map. Additional params for the API request body.
      - :on-chunk - Function. When provided, enables SSE streaming. Callback receives
                    accumulated text string after each chunk.
@@ -400,7 +399,7 @@
   ([messages model api-key base-url]
    (chat-completion messages model api-key base-url {}))
   ([messages model api-key base-url opts]
-   (let [timeout-ms (get opts :timeout-ms defaults/DEFAULT_TIMEOUT_MS)
+   (let [timeout-ms (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
          extra-body (:extra-body opts)
          on-chunk (:on-chunk opts)]
      (if on-chunk
@@ -503,16 +502,16 @@
    If :provider-id is present, uses provider-scoped pricing/context overlays."
   [router {:keys [model timeout-ms check-context? output-reserve api-key base-url provider-id]}]
   (let [{:keys [network tokens]} router
-        default-pricing (or (:pricing tokens) defaults/DEFAULT_MODEL_PRICING)
-        default-context-limits (or (:context-limits tokens) defaults/DEFAULT_CONTEXT_LIMITS)
+        default-pricing (or (:pricing tokens) router/DEFAULT_MODEL_PRICING)
+        default-context-limits (or (:context-limits tokens) router/DEFAULT_CONTEXT_LIMITS)
         pricing (if provider-id
-                  (assoc default-pricing model (defaults/provider-model-pricing provider-id model))
+                  (assoc default-pricing model (router/provider-model-pricing provider-id model))
                   default-pricing)
         context-limits (if provider-id
-                         (assoc default-context-limits model (defaults/provider-model-context provider-id model))
+                         (assoc default-context-limits model (router/provider-model-context provider-id model))
                          default-context-limits)]
     {:model model
-     :timeout-ms (or timeout-ms (:timeout-ms network) defaults/DEFAULT_TIMEOUT_MS)
+     :timeout-ms (or timeout-ms (:timeout-ms network) router/DEFAULT_TIMEOUT_MS)
      :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
      :output-reserve (or output-reserve (:output-reserve tokens))
      :api-key api-key
@@ -650,7 +649,7 @@
     (let [input-tokens (or (:prompt_tokens api-usage) 0)
           output-tokens (or (:completion_tokens api-usage) 0)
           total-tokens (+ input-tokens output-tokens)
-          pricing (defaults/provider-model-pricing provider-id model-name)
+          pricing (router/provider-model-pricing provider-id model-name)
           input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing 5.0)))
           output-cost (* (/ (double output-tokens) 1000000.0) (double (:output pricing 15.0)))
           total-cost (+ input-cost output-cost)]
@@ -848,7 +847,7 @@
 
    Vector order = priority (first provider is highest priority).
    First model in provider vector = root model.
-   Provider :base-url auto-resolved from defaults/KNOWN_PROVIDERS for known IDs.
+   Provider :base-url auto-resolved from router/KNOWN_PROVIDERS for known IDs.
    Model metadata auto-inferred from :name and merged with provider-scoped pricing/context.
    Duplicate provider :id values are a hard error.
 
@@ -871,7 +870,7 @@
      (throw (ex-info "make-router expects a vector of provider maps" {:type :svar/invalid-providers :got (type providers)})))
    (when (empty? providers)
      (throw (ex-info "make-router requires at least one provider" {:type :svar/no-providers})))
-   (let [normalized (vec (map-indexed defaults/normalize-provider providers))
+   (let [normalized (vec (map-indexed router/normalize-provider providers))
          ids (map :id normalized)
          dupes (keys (filter (fn [[_ n]] (> n 1)) (frequencies ids)))
          merged (merge router-default-opts opts)
@@ -886,14 +885,14 @@
       :state                  (atom (zipmap ids (repeat init-provider-state)))
       :budget                 budget
       :budget-state           (when budget (atom {:total-tokens 0 :total-cost 0.0}))
-      :network                (merge defaults/DEFAULT_RETRY
-                                {:timeout-ms defaults/DEFAULT_TIMEOUT_MS}
+      :network                (merge router/DEFAULT_RETRY
+                                {:timeout-ms router/DEFAULT_TIMEOUT_MS}
                                 (:network opts))
       :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
                                                  (if (some? cc) cc true))
-                               :pricing (merge defaults/DEFAULT_MODEL_PRICING
+                               :pricing (merge router/DEFAULT_MODEL_PRICING
                                           (:pricing (:tokens opts)))
-                               :context-limits (merge defaults/DEFAULT_CONTEXT_LIMITS
+                               :context-limits (merge router/DEFAULT_CONTEXT_LIMITS
                                                  (:context-limits (:tokens opts)))
                                :output-reserve (:output-reserve (:tokens opts))}
       :clock                  (get opts :clock #(System/currentTimeMillis))
@@ -1114,7 +1113,7 @@
         check-opts (cond-> {:context-limits context-limits}
                      output-reserve (assoc :output-reserve output-reserve))
         context-check (when check-context?
-                        (let [check (defaults/check-context-limit model messages check-opts)]
+                        (let [check (router/check-context-limit model messages check-opts)]
                           (when-not (:ok? check)
                             (anomaly/incorrect! (:error check)
                               {:type :svar.core/context-overflow
@@ -1147,7 +1146,7 @@
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
                                                               (chat-completion messages model api-key chat-url retry-opts))
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
-        token-stats (defaults/count-and-estimate model messages content
+        token-stats (router/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}
                         context-check (assoc :input-tokens (:input-tokens context-check))))
           ;; Parse response
