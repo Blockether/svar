@@ -30,12 +30,15 @@ resources-test/diarization.json
 .cloudflared*.pid
 models 
 schema-therapy.pdf
+schema-therapy.pageindex*/
 lancedb
 
 /data/
 /debug/
 bench/data/
 bench/results/
+bench/trajectories/
+.bench-logs/
 allure-results/
 allure-report/
 .allure-history.jsonl
