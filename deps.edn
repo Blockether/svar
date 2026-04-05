@@ -47,4 +47,5 @@
                        :artifact "target/svar.jar"}}
 
   :bench {:extra-paths ["bench"]
+          :jvm-opts ["-Xmx8g"]
           :main-opts ["-m" "com.blockether.svar.bench.runner"]}}}

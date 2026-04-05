@@ -57,7 +57,11 @@
 ;; =============================================================================
 
 (defn- build-prompt [task]
-  (str "Complete this Python function. "
+  (str "Complete this Python function.\n\n"
+    "RUNTIME: Your solution MUST run in python3 (CPython). "
+    "Use only the Python standard library. No pip packages, no external deps.\n"
+    "DO NOT write any files to disk. DO NOT create scripts, tests, or helper files. "
+    "Compute everything in-memory only.\n"
     "Return ONLY valid Python code, no markdown, no explanation, no code fences.\n\n"
     "Task: " (:task_id task) "\n"
     "Entry point: " (:entry_point task) "\n\n"
@@ -67,8 +71,10 @@
 ;; Agent eval functions
 ;; =============================================================================
 
-(defn- eval-query-env! [router task model]
-  (let [env   (svar/create-env router {})
+(defn- eval-query-env! [router task model run-ts]
+  (let [task-id (or (:task_id task) (str (hash task)))
+        db-path (common/trajectory-path "humaneval" model run-ts task-id)
+        env   (svar/create-env router {:path db-path})
         start (System/currentTimeMillis)]
     (try
       (let [result (svar/query-env! env (build-prompt task) {:model model :max-iterations 20 :debug? true})
@@ -125,9 +131,12 @@
   [opts]
   (let [agent-name (get opts :agent :query-env)
         model      (get opts :model "gpt-4o")
+        provider   (get opts :provider :blockether)
+        pi-model   (str (name provider) "/" model)
         router     (:router opts)
         offset     (get opts :offset 0)
         limit      (get opts :limit nil)
+        run-ts     (str (java.time.Instant/now))
 
         _ (if (and (= agent-name :query-env) (nil? router))
             (throw (ex-info "Missing :router for query-env agent" {:type :bench/missing-router}))
@@ -142,7 +151,7 @@
         tasks   (vec (cond->> (drop offset dataset) limit (take limit)))
 
         eval-fn (case agent-name
-                  :query-env (fn [task] (eval-query-env! router task model))
-                  :pi        (fn [task] (eval-pi! task model)))]
+                  :query-env (fn [task] (eval-query-env! router task model run-ts))
+                  :pi        (fn [task] (eval-pi! task pi-model)))]
 
     (common/run-parallel-bench! "humaneval" agent-name model tasks total-ds eval-fn make-result-rec)))

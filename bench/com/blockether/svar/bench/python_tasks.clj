@@ -23,12 +23,20 @@
         dest-path))))
 
 (defn strip-fence
+  "Extracts Python code from LLM output with multi-block aware selection.
+   Pi/RLM outputs often contain multiple fenced blocks (test output + final
+   code). Strategy:
+     1. Prefer the LAST ```python/py tagged block (final answer).
+     2. Fall back to the LAST untagged ``` block.
+     3. Fall back to raw input."
   [raw]
   (let [s (str/trim (str raw))
-        m (re-find #"(?s)^```(?:python|py)?\s*(.*?)\s*```$" s)]
-    (if m
-      (str/trim (second m))
-      s)))
+        tagged (re-seq #"(?s)```(?:python|py)\s*(.*?)\s*```" s)
+        untagged (re-seq #"(?s)```\s*(.*?)\s*```" s)]
+    (cond
+      (seq tagged)   (str/trim (second (last tagged)))
+      (seq untagged) (str/trim (second (last untagged)))
+      :else          s)))
 
 (defn run-python-script!
   [script timeout-ms]

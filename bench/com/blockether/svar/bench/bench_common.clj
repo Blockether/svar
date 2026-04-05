@@ -19,6 +19,22 @@
 (def pi-timeout-ms 300000)       ;; 5 minutes for pi agent
 (def parallelism 4)              ;; 4 problems at once
 
+(def trajectories-root "bench/trajectories")
+
+(defn trajectory-path
+  "Returns a persistent DB path for a single task's trajectory.
+   Each task is a separate conversation, so each gets its own directory.
+
+   Layout: bench/trajectories/{bench}/{model-safe}/{run-ts}/{task-id-safe}"
+  [bench model run-ts task-id]
+  (let [sanitize #(-> % str (str/replace #"[^a-zA-Z0-9_-]" "-"))
+        path (str trajectories-root "/" bench "/"
+               (sanitize model) "/"
+               (sanitize run-ts) "/"
+               (sanitize task-id))]
+    (.mkdirs (io/file path))
+    path))
+
 ;; =============================================================================
 ;; Code fence stripping
 ;; =============================================================================

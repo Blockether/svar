@@ -109,15 +109,22 @@
     (if (seq restricted)
       (str "\n\nRestricted (do NOT use these): " (str/join ", " restricted))
       "")
-    "\n\nReturn ONLY a valid Clojure expression that replaces __. "
+    "\n\nRUNTIME: Your solution MUST run in Babashka (bb). "
+    "Use only functions available in bb's clojure.core and standard libs. "
+    "No JVM-only classes, no external deps.\n"
+    "DO NOT write any files to disk. DO NOT create scripts, tests, or helper files. "
+    "Compute everything in-memory only.\n"
+    "Return ONLY a valid Clojure expression that replaces __. "
     "No markdown, no explanation, no code fences. Just the raw Clojure expression."))
 
 ;; =============================================================================
 ;; Agent eval functions
 ;; =============================================================================
 
-(defn- eval-query-env! [router problem model]
-  (let [env   (svar/create-env router {})
+(defn- eval-query-env! [router problem model run-ts]
+  (let [task-id (or (:id problem) (:title problem) (str (hash problem)))
+        db-path (common/trajectory-path "4clojure" model run-ts task-id)
+        env   (svar/create-env router {:path db-path})
         start (System/currentTimeMillis)]
     (try
       (let [result (svar/query-env! env (build-prompt problem) {:model model :max-iterations 20 :debug? true})
@@ -178,9 +185,12 @@
   [opts]
   (let [agent-name (get opts :agent :query-env)
         model      (get opts :model "gpt-4o")
+        provider   (get opts :provider :blockether)
+        pi-model   (str (name provider) "/" model)
         router     (:router opts)
         offset     (get opts :offset 0)
         limit      (get opts :limit nil)
+        run-ts     (str (java.time.Instant/now))
 
         _ (if (and (= agent-name :query-env) (nil? router))
             (throw (ex-info "Missing :router for query-env agent" {:type :bench/missing-router}))
@@ -195,7 +205,7 @@
         problems (vec (cond->> (drop offset dataset) limit (take limit)))
 
         eval-fn  (case agent-name
-                   :query-env (fn [problem] (eval-query-env! router problem model))
-                   :pi        (fn [problem] (eval-pi! problem model)))]
+                   :query-env (fn [problem] (eval-query-env! router problem model run-ts))
+                   :pi        (fn [problem] (eval-pi! problem pi-model)))]
 
     (common/run-parallel-bench! "4clojure" agent-name model problems total-ds eval-fn make-result-rec)))
