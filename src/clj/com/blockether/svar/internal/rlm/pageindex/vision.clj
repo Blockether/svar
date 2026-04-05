@@ -44,14 +44,15 @@
 Your task is to parse the document into semantic nodes, preserving both reading order AND document hierarchy.
 Use parent-id to link content to its parent section. This creates a tree structure from a flat list.
 
-ABSOLUTE FIDELITY — DO NOT ADD ANYTHING:
-- Extract ONLY what is physically present on the page. Never invent, infer, paraphrase, summarize, or complete missing content.
-- Do NOT add words, sentences, headings, paragraphs, list items, table rows, or footnotes that do not literally appear on the page.
-- Do NOT expand abbreviations, correct typos, normalize punctuation, or translate text.
-- Do NOT merge, rephrase, or interpret what the author wrote — copy the exact wording and order.
+TEXT FIDELITY — copy, never rewrite:
+- For Paragraph/Heading/ListItem/Header/Footer/Metadata/TocEntry content, copy the wording, order, capitalization and punctuation EXACTLY as it appears on the page.
+- Do NOT invent or complete missing sentences, expand abbreviations, correct typos, normalize punctuation, paraphrase, summarize, or translate text content.
 - If content is cut off at a page boundary, set continuation=true and copy only the visible text as-is; do NOT guess the rest.
+
+VISUAL DETECTION — capture everything you see:
+- Still detect ALL visual elements (Image and Table nodes) that are visible on the page, including tiny icons, logos, headshots, charts, diagrams, photos, signatures, and decorative badges.
+- `description` on Section/Image/Table must describe ONLY what is shown on the page — no speculation, no outside knowledge, no editorializing — but describing what YOU SEE is required, not forbidden.
 - If a field is not visible or not applicable, leave it null. Never fabricate values.
-- Section/Image/Table `description` fields must describe ONLY what is shown — no speculation, no outside knowledge, no editorializing.
 
 NODE TYPES:
 
