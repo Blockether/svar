@@ -891,12 +891,12 @@
 
 (defdescribe build-index-pages-filter-test
   (describe "build-index :path with :pages option"
+    ;; PDF filtering happens at the vision layer (extract-text-from-pdf).
+    ;; The mocks below simulate that by pre-filtering the returned page list.
     (it "filters pages from extraction output"
-      (let [fake-pages (mapv (fn [i] {:page/index i
-                                      :page/nodes [{:page.node/type :paragraph
-                                                    :page.node/id (str "p" i)
-                                                    :page.node/content (str "Page " i)}]})
-                         (range 5))]
+      (let [fake-pages [{:page/index 1 :page/nodes [{:page.node/type :paragraph :page.node/id "p1" :page.node/content "Page 1"}]}
+                        {:page/index 2 :page/nodes [{:page.node/type :paragraph :page.node/id "p2" :page.node/content "Page 2"}]}
+                        {:page/index 3 :page/nodes [{:page.node/type :paragraph :page.node/id "p3" :page.node/content "Page 3"}]}]]
         (with-redefs [com.blockether.svar.internal.rlm/extract-text
                       (fn [_ _] fake-pages)
                       com.blockether.svar.internal.rlm/generate-document-abstract
@@ -904,16 +904,11 @@
                       com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
                       (fn [_ _] nil)]
           (let [doc (pageindex/build-index nil "resources-test/example.pdf" {:pages [2 4]})]
-            ;; Pages 2,3,4 (1-indexed) = indices 1,2,3 (0-indexed)
             (expect (= 3 (count (:document/pages doc))))
             (expect (= [1 2 3] (mapv :page/index (:document/pages doc))))))))
 
     (it "single page integer works"
-      (let [fake-pages (mapv (fn [i] {:page/index i
-                                      :page/nodes [{:page.node/type :paragraph
-                                                    :page.node/id (str "p" i)
-                                                    :page.node/content (str "Page " i)}]})
-                         (range 5))]
+      (let [fake-pages [{:page/index 2 :page/nodes [{:page.node/type :paragraph :page.node/id "p2" :page.node/content "Page 2"}]}]]
         (with-redefs [com.blockether.svar.internal.rlm/extract-text
                       (fn [_ _] fake-pages)
                       com.blockether.svar.internal.rlm/generate-document-abstract
@@ -939,20 +934,17 @@
           (let [doc (pageindex/build-index nil "resources-test/example.pdf")]
             (expect (= 3 (count (:document/pages doc))))))))
 
-    (it "out-of-bounds pages throws"
-      (let [fake-pages [{:page/index 0
-                         :page/nodes [{:page.node/type :paragraph
-                                       :page.node/id "p0"
-                                       :page.node/content "Only page"}]}]]
-        (with-redefs [com.blockether.svar.internal.rlm/extract-text
-                      (fn [_ _] fake-pages)
-                      com.blockether.svar.internal.rlm/generate-document-abstract
-                      (fn [_ _] nil)
-                      com.blockether.svar.internal.rlm.pageindex.vision/infer-document-title
-                      (fn [_ _] nil)]
-           ;; Requesting page 5 of a 1-page document
-          (expect (throws? clojure.lang.ExceptionInfo
-                    #(pageindex/build-index nil "resources-test/example.pdf" {:pages 5}))))))))
+    (it "out-of-bounds pages raises at vision layer"
+      ;; With the vision-layer-filters-PDFs invariant, build-index no longer
+      ;; validates :pages against the file's true length. The vision extractor
+      ;; is responsible for raising if requested pages exceed the document.
+      (with-redefs [com.blockether.svar.internal.rlm/extract-text
+                    (fn [_ opts]
+                      (throw (ex-info "page index out of range"
+                               {:type :svar.pageindex/pages-out-of-range
+                                :pages (:pages opts)})))]
+        (expect (throws? clojure.lang.ExceptionInfo
+                  #(pageindex/build-index nil "resources-test/example.pdf" {:pages 5})))))))
 
 (defdescribe extract-text-from-pdf-page-set-test
   (describe "extract-text-from-pdf with :page-set"
