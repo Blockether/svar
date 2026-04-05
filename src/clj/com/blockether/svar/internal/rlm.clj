@@ -2050,13 +2050,74 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 ;; build-index - :path method (file path input)
 ;; =============================================================================
 
-(defmethod build-index :path
-  [router file-path & [opts]]
-  ;; Validate file exists
+(defn- strip-nil-keys
+  "Drops entries whose value is nil from a map. Keeps the stricter load-index
+   spec happy (e.g. :page.node/image-index must be int? when the key is present)."
+  [m]
+  (into (empty m) (remove (fn [[_ v]] (nil? v))) m))
+
+(defn- render-page-pngs!
+  "Renders each selected PDF page as a full-page PNG into `<output-dir>/page-NNN.png`
+   (1-indexed). Silently skips files that already exist, so it is safe to call
+   repeatedly from incremental `index!` runs."
+  [file-path pages output-dir]
+  (try
+    (let [page-indices (sort (mapv :page/index pages))
+          imgs (pdf/pdf->images file-path {:page-set (set page-indices)})]
+      (when-not (.exists (io/file output-dir))
+        (.mkdirs (io/file output-dir)))
+      (doseq [[i buf] (map-indexed vector imgs)
+              :let [page-idx (nth (vec page-indices) i)
+                    out-file (io/file output-dir (format "page-%03d.png" (inc page-idx)))]
+              :when (not (.exists out-file))]
+        (javax.imageio.ImageIO/write ^java.awt.image.BufferedImage buf "png" out-file))
+      (trove/log! {:level :info :data {:pages (count imgs) :output-dir output-dir}
+                   :msg "Rendered full-page PNGs"}))
+    (catch Exception e
+      (trove/log! {:level :warn :data {:error (ex-message e)}
+                   :msg "Failed to render full-page PNGs"}))))
+
+(defn- write-embedded-image-nodes!
+  "For every :image/:table node that still carries raw `:page.node/image-data`
+   bytes, writes the bytes to `<output-dir>/<node-id>.png` and replaces the
+   bytes with a relative `:page.node/image-path`."
+  [pages output-dir]
+  (let [dir-file (io/file output-dir)]
+    (when-not (.exists dir-file)
+      (anomaly/not-found! (str "Output directory not found: " output-dir)
+        {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
+    (mapv
+      (fn [page]
+        (update page :page/nodes
+          (fn [nodes]
+            (mapv
+              (fn [node]
+                (let [img-bytes (:page.node/image-data node)]
+                  (if (and (#{:image :table} (:page.node/type node)) img-bytes)
+                    (let [img-name (str (:page.node/id node) ".png")
+                          out-file (io/file output-dir img-name)]
+                      (with-open [out (io/output-stream out-file)]
+                        (.write out ^bytes img-bytes))
+                      (-> node
+                        (dissoc :page.node/image-data)
+                        (assoc :page.node/image-path (str "images/" img-name))))
+                    node)))
+              nodes))))
+      pages)))
+
+(defn- extract-pdf-pages
+  "Phase 1 of the PDF indexing pipeline: run vision extraction, normalize IDs,
+   group cross-page continuations, strip nil node keys, write per-page and
+   per-image PNGs to `:output-dir`, and return the raw page list plus enough
+   metadata for phase 2 to assemble the final document.
+
+   This phase is safe to call per-page (by passing `:pages page-num` in opts)
+   and its output can be accumulated across many invocations before a single
+   finalize pass runs abstract + title inference once for the whole document."
+  [router file-path opts]
   (when-not (.exists (io/file file-path))
     (anomaly/not-found! (str "File not found: " file-path)
       {:type :svar.pageindex/file-not-found :file file-path}))
-   ;; Validate file type is supported
   (when-not (supported-extension? file-path)
     (let [extension (extract-extension file-path)]
       (anomaly/unsupported! (str "Unsupported file type: " (or extension "unknown"))
@@ -2064,117 +2125,81 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          :file file-path
          :extension extension
          :supported-extensions SUPPORTED_EXTENSIONS})))
-  (let [_vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
-        vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
+  (let [vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         output-dir (:output-dir opts)
-        vision-opts {:rlm-router router :objective vision-objective}]
-    (trove/log! {:level :info :data {:file file-path}
-                 :msg "Starting text extraction from file"})
-    (let [page-list-all (extract-text file-path (merge opts vision-opts))
-          ;; Step 0: Filter pages if :pages specified (safety net for non-PDF
-          ;; extractors and stubbed extract-text in tests). For PDFs, the vision
-          ;; layer has already filtered — re-filtering against the shrunken list
-          ;; would misinterpret the user's :pages spec, so skip it.
-          pdf? (= :pdf (file-type file-path))
-          page-set (when (and (not pdf?) (:pages opts))
-                     (normalize-page-spec (:pages opts) (count page-list-all)))
-          page-list-raw (if pdf?
-                          page-list-all
-                          (filter-pages page-list-all page-set))
-           ;; Step 1: Translate local IDs to global UUIDs
-          page-list-uuids (translate-all-ids page-list-raw)
-          ;; Step 2: Group continuation nodes across pages
-          page-list (group-continuations page-list-uuids)
-          doc-name (extract-doc-name file-path)
-          extension (extract-extension file-path)
-          ftype (file-type file-path)
-          ;; Extract PDF metadata if available
-          file-metadata (when (= :pdf ftype)
-                          (try
-                            (pdf/pdf-metadata file-path)
-                            (catch Exception e
-                              (trove/log! {:level :warn :data {:error (ex-message e)}
-                                           :msg "Failed to extract PDF metadata"})
-                              nil)))
-          ;; Step 3: Post-process TOC (build/link with UUIDs)
-          {:keys [pages toc]} (postprocess-toc page-list)
-          ;; Strip keys whose value is nil from every node so the stricter
-          ;; load-index spec (which requires :image-index to be int? when
-          ;; present) accepts the resulting document.
-          strip-nil-keys (fn [m] (into (empty m) (remove (fn [[_ v]] (nil? v))) m))
-          pages (mapv (fn [p]
-                        (update p :page/nodes (fn [nodes] (mapv strip-nil-keys nodes))))
-                  pages)
-          ;; Render every selected page as a full-page PNG so even PDFs whose
-          ;; figures aren't exposed as embedded images give the user a usable
-          ;; visual dump. Files go to <output-dir>/page-NNN.png (1-indexed).
-          _ (when (and output-dir (= :pdf ftype))
-              (try
-                (let [page-indices (sort (mapv :page/index pages))
-                      imgs (pdf/pdf->images file-path {:page-set (set page-indices)})]
-                  (when-not (.exists (io/file output-dir))
-                    (.mkdirs (io/file output-dir)))
-                  (doseq [[i buf] (map-indexed vector imgs)
-                          :let [page-idx (nth (vec page-indices) i)
-                                out-file (io/file output-dir (format "page-%03d.png" (inc page-idx)))]
-                          :when (not (.exists out-file))]
-                    (javax.imageio.ImageIO/write ^java.awt.image.BufferedImage buf "png" out-file))
-                  (trove/log! {:level :info :data {:pages (count imgs) :output-dir output-dir}
-                               :msg "Rendered full-page PNGs"}))
-                (catch Exception e
-                  (trove/log! {:level :warn :data {:error (ex-message e)}
-                               :msg "Failed to render full-page PNGs"}))))
-          pages-with-images (if output-dir
-                              (let [dir-file (io/file output-dir)]
-                                (when-not (.exists dir-file)
-                                  (anomaly/not-found! (str "Output directory not found: " output-dir)
-                                    {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
-                                (mapv
-                                  (fn [page]
-                                    (update page :page/nodes
-                                      (fn [nodes]
-                                        (mapv
-                                          (fn [node]
-                                            (let [img-bytes (:page.node/image-data node)]
-                                              (if (and (#{:image :table} (:page.node/type node)) img-bytes)
-                                                (let [img-name (str (:page.node/id node) ".png")
-                                                      out-file (io/file output-dir img-name)]
-                                                  (with-open [out (io/output-stream out-file)]
-                                                    (.write out ^bytes img-bytes))
-                                                  (-> node
-                                                    (dissoc :page.node/image-data)
-                                                    (assoc :page.node/image-path (str "images/" img-name))))
-                                                node)))
-                                          nodes))))
-                                  pages))
-                              pages)
-           ;; Step 3: Generate document abstract from section descriptions
-          text-model (:text-model opts)
-          abstract-opts {:rlm-router router :text-model text-model}
-          document-abstract (generate-document-abstract pages-with-images abstract-opts)
-           ;; Step 4: Infer title if not in metadata
-          metadata-title (:title file-metadata)
-          inferred-title (when-not metadata-title
-                           (vision/infer-document-title pages (cond-> {:rlm-router router}
-                                                                text-model (assoc :text-model text-model))))
-          final-title (or metadata-title inferred-title)
-          now (Instant/now)]
-      (trove/log! {:level :info :data {:document/name doc-name
-                                       :pages (count pages)
-                                       :toc-entries (count toc)
-                                       :has-metadata (boolean file-metadata)
-                                       :title-inferred (boolean inferred-title)
-                                       :has-abstract (boolean document-abstract)}
-                   :msg "Text extraction complete"})
-      {:document/name doc-name
-       :document/title final-title
-       :document/abstract document-abstract
-       :document/extension extension
-       :document/pages pages-with-images
-       :document/toc toc
-       :document/created-at (or (:created-at file-metadata) now)
-       :document/updated-at (or (:updated-at file-metadata) now)
-       :document/author (:author file-metadata)})))
+        vision-opts {:rlm-router router :objective vision-objective}
+        _ (trove/log! {:level :info :data {:file file-path}
+                       :msg "Starting text extraction from file"})
+        page-list-all (extract-text file-path (merge opts vision-opts))
+        pdf? (= :pdf (file-type file-path))
+        ;; Filter pages if :pages specified — only needed for non-PDF extractors
+        ;; and stubbed extract-text in tests. The PDF vision layer already applied
+        ;; the user's :pages selection, so re-filtering its shrunken list would
+        ;; misinterpret the spec.
+        page-list-raw (if pdf?
+                        page-list-all
+                        (filter-pages page-list-all
+                          (when (:pages opts)
+                            (normalize-page-spec (:pages opts) (count page-list-all)))))
+        page-list (-> page-list-raw translate-all-ids group-continuations)
+        pages (mapv (fn [p] (update p :page/nodes #(mapv strip-nil-keys %))) page-list)
+        ftype (file-type file-path)
+        file-metadata (when (= :pdf ftype)
+                        (try
+                          (pdf/pdf-metadata file-path)
+                          (catch Exception e
+                            (trove/log! {:level :warn :data {:error (ex-message e)}
+                                         :msg "Failed to extract PDF metadata"})
+                            nil)))
+        _ (when (and output-dir (= :pdf ftype))
+            (render-page-pngs! file-path pages output-dir))
+        pages (if output-dir
+                (write-embedded-image-nodes! pages output-dir)
+                pages)]
+    {:pages pages
+     :doc-name (extract-doc-name file-path)
+     :extension (extract-extension file-path)
+     :ftype ftype
+     :file-metadata file-metadata}))
+
+(defn- finalize-pdf-document
+  "Phase 2 of the PDF indexing pipeline: take the accumulated page list from
+   `extract-pdf-pages` (possibly from many per-page invocations merged together)
+   and run TOC post-processing, document abstract, and title inference once.
+
+   Returns a full document map ready for spec validation and on-disk write."
+  [router {:keys [pages doc-name extension file-metadata]} opts]
+  (let [{:keys [pages toc]} (postprocess-toc pages)
+        text-model (:text-model opts)
+        abstract-opts {:rlm-router router :text-model text-model}
+        document-abstract (generate-document-abstract pages abstract-opts)
+        metadata-title (:title file-metadata)
+        inferred-title (when-not metadata-title
+                         (vision/infer-document-title pages
+                           (cond-> {:rlm-router router}
+                             text-model (assoc :text-model text-model))))
+        final-title (or metadata-title inferred-title)
+        now (Instant/now)]
+    (trove/log! {:level :info :data {:document/name doc-name
+                                     :pages (count pages)
+                                     :toc-entries (count toc)
+                                     :has-metadata (boolean file-metadata)
+                                     :title-inferred (boolean inferred-title)
+                                     :has-abstract (boolean document-abstract)}
+                 :msg "Text extraction complete"})
+    {:document/name doc-name
+     :document/title final-title
+     :document/abstract document-abstract
+     :document/extension extension
+     :document/pages pages
+     :document/toc toc
+     :document/created-at (or (:created-at file-metadata) now)
+     :document/updated-at (or (:updated-at file-metadata) now)
+     :document/author (:author file-metadata)}))
+
+(defmethod build-index :path
+  [router file-path & [opts]]
+  (finalize-pdf-document router (extract-pdf-pages router file-path opts) opts))
 
 ;; =============================================================================
 ;; build-index - :string method (raw content input)
@@ -2439,7 +2464,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
    Returns map with :document, :output-path, :cached?, :pages-processed, :errors-count."
   ([file-path] (index! file-path {}))
-  ([file-path {:keys [router output vision-model parallel parallel-refine
+  ([file-path {:keys [router output vision-model text-model parallel parallel-refine
                       refine? refine-model refine-iterations
                       refine-threshold refine-sample-size pages
                       force?]}]
@@ -2509,8 +2534,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                        :pages manifest-initial-pages}
                                  (when (and existing-manifest hash-match? (not force?))
                                    (select-keys existing-manifest [:last-successful-index-at]))))
-               common-index-opts (cond-> {}
+               images-dir (str (io/file output-path "images"))
+               _ (.mkdirs (io/file images-dir))
+               common-index-opts (cond-> {:output-dir images-dir}
                                    vision-model (assoc :model vision-model)
+                                   text-model (assoc :text-model text-model)
                                    parallel (assoc :parallel parallel)
                                    parallel-refine (assoc :parallel-refine parallel-refine)
                                    refine? (assoc :refine? refine?)
@@ -2597,8 +2625,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                               eta-ms (assoc :eta-ms eta-ms))
                                       :msg (format "Indexing page %d/%d (%d%%)" (inc n) total-to-process progress-pct)})
                          (try
-                           (let [doc (build-index router abs-path (assoc common-index-opts :pages page-num))
-                                 page (first (:document/pages doc))
+                           (let [extracted (extract-pdf-pages router abs-path (assoc common-index-opts :pages page-num))
+                                 page (first (:pages extracted))
                                  now (str (Instant/now))
                                  page-elapsed (- (System/currentTimeMillis) t0)]
                              (when-not page
@@ -2606,12 +2634,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                  {:type :svar.pageindex/missing-page
                                   :page-number page-num}))
                              (swap! page-map-atom assoc idx page)
-                             (when (seq (:document/toc doc))
-                               (reset! toc-atom (:document/toc doc)))
+                             ;; Capture doc/extension/file-metadata once — finalize needs them.
                              (swap! metadata-atom merge
-                               (select-keys doc [:document/name :document/title :document/abstract
-                                                 :document/extension :document/created-at :document/updated-at
-                                                 :document/author]))
+                               {:document/name (:doc-name extracted)
+                                :document/extension (:extension extracted)
+                                :svar.pageindex/file-metadata (:file-metadata extracted)})
                              (update-manifest-page! output-path manifest-atom idx
                                {:status :done
                                 :indexed-at now
@@ -2682,9 +2709,22 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                     :msg (format "Bulk indexing failed: %s" (ex-message e))}))))
 
                  (let [final-pages (->> @page-map-atom (sort-by key) (mapv val))
-                       final-document (merge @metadata-atom
-                                        {:document/pages final-pages
-                                         :document/toc @toc-atom})
+                       ;; Phase 2: run TOC post-processing + abstract + title inference
+                       ;; exactly ONCE on the merged page set, regardless of how many
+                       ;; per-page extract invocations contributed to it.
+                       final-document (if (seq final-pages)
+                                        (finalize-pdf-document
+                                          router
+                                          {:pages final-pages
+                                           :doc-name (or (:document/name @metadata-atom)
+                                                       (fs/strip-ext (fs/file-name abs-path)))
+                                           :extension (or (:document/extension @metadata-atom)
+                                                        (some-> (fs/extension abs-path) name))
+                                           :file-metadata (:svar.pageindex/file-metadata @metadata-atom)}
+                                          common-index-opts)
+                                        (merge @metadata-atom
+                                          {:document/pages []
+                                           :document/toc @toc-atom}))
                        elapsed-ms (- (System/currentTimeMillis) start-time)
                        all-failed? (and (pos? @errors-count) (empty? final-pages))]
              ;; Only validate+write document when we have pages.

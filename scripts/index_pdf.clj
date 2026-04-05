@@ -23,44 +23,7 @@
 ;;     manifest.edn    — per-page progress (for crash-recovery)
 
 (require '[com.blockether.svar.core :as svar]
-         '[com.blockether.svar.internal.rlm :as rlm]
-         '[com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
-         '[clojure.edn :as edn]
-         '[clojure.java.io :as io]
-         '[clojure.walk :as walk])
-
-(import '[javax.imageio ImageIO]
-        '[java.awt.image BufferedImage])
-
-(defn- save-page-images!
-  "Render each page in `page-set` (0-indexed) of `pdf-path` to a PNG in
-   `out-dir`, named page-<1-indexed>.png. Skips pages that already have a file."
-  [pdf-path page-set out-dir]
-  (.mkdirs out-dir)
-  (let [imgs (pdf/pdf->images pdf-path {:page-set page-set})
-        ordered (vec (sort page-set))]
-    (doseq [[idx ^BufferedImage img] (map-indexed vector imgs)
-            :let [page-idx (nth ordered idx)
-                  f (io/file out-dir (format "page-%03d.png" (inc page-idx)))]
-            :when (not (.exists f))]
-      (ImageIO/write img "png" f))))
-
-(defn- sanitize-doc
-  "Strip keys whose value is nil from every map in the document, and drop
-   stray TocEntry maps that slipped into :page/nodes so the result matches
-   the stricter load-index spec."
-  [doc]
-  (let [strip-nils (fn [form]
-                     (if (map? form)
-                       (into (empty form) (remove (fn [[_ v]] (nil? v))) form)
-                       form))
-        content-node? (fn [n] (contains? n :page.node/type))]
-    (-> doc
-      (update :document/pages
-        (fn [pages]
-          (mapv (fn [p] (update p :page/nodes (fn [ns] (filterv content-node? ns))))
-            pages)))
-      (->> (walk/postwalk strip-nils)))))
+         '[clojure.edn :as edn])
 
 (defn parse-args [args]
   (loop [args args acc {}]
@@ -115,41 +78,32 @@
 (when pages (println "Pages:       " pages))
 (println)
 
-;; Call build-index directly (bypass per-page tracking so vision/abstract/title
-;; run ONCE for the full selected page range instead of N× per page).
-(def output-path
-  (let [f (io/file pdf-path)
-        parent (.getParentFile (.getAbsoluteFile f))
-        base (clojure.string/replace (.getName f) #"\.[^.]+$" "")]
-    (.getAbsolutePath (io/file parent (str base ".pageindex")))))
-
-(def images-dir (io/file output-path "images"))
-(.mkdirs images-dir)
-
-(let [start   (System/currentTimeMillis)
-      opts    (cond-> {:model model
-                       :text-model text-model
-                       :parallel parallel
-                       :output-dir (.getAbsolutePath images-dir)}
-                pages (assoc :pages pages))
-      doc     (sanitize-doc (rlm/build-index router pdf-path opts))
-      elapsed (/ (- (System/currentTimeMillis) start) 1000.0)
-      edn-path (io/file output-path "document.edn")
-      page-set (set (map :page/index (:document/pages doc)))]
-
-  (spit edn-path (pr-str doc))
-
-  ;; Render every indexed page as a full-page PNG so the user has a complete
-  ;; visual alongside the structured EDN. PDFBox-matched embedded images
-  ;; remain in images/<uuid>.png; page renders go to images/page-NNN.png.
-  (save-page-images! pdf-path page-set images-dir)
+;; Delegate to svar/index! which handles:
+;;   - per-page vision extraction (parallel)
+;;   - manifest.edn with per-page {:status :done|:error|:pending} tracking
+;;     → crash recovery: re-running skips :done pages and retries :error pages
+;;   - single-pass TOC linking + abstract + title inference (across ALL pages)
+;;   - document.edn + images/page-NNN.png + images/<uuid>.png output
+(let [start  (System/currentTimeMillis)
+      opts   (cond-> {:router router
+                      :vision-model model
+                      :text-model text-model
+                      :parallel parallel}
+               pages (assoc :pages pages))
+      result (svar/index! pdf-path opts)
+      doc    (:document result)
+      elapsed (/ (- (System/currentTimeMillis) start) 1000.0)]
 
   (println "=== Done ===")
-  (println "Output:      " output-path)
+  (println "Output:      " (:output-path result))
   (println "Pages:       " (count (:document/pages doc)))
   (println "TOC entries: " (count (:document/toc doc)))
   (println "Total nodes: " (reduce + (map #(count (:page/nodes %)) (:document/pages doc))))
   (println (format "Time: %.1fs" elapsed))
   (println)
   (println "Load with:")
-  (println (str "  (svar/load-index \"" output-path "\")")))
+  (println (str "  (svar/load-index \"" (:output-path result) "\")"))
+  (when (pos? (:errors-count result 0))
+    (println)
+    (println "!! " (:errors-count result) " page(s) errored. Re-run the same command to retry just those pages.")
+    (println "   Inspect manifest.edn in the output dir to see which pages failed and why.")))
