@@ -1,0 +1,15 @@
+2026-04-05T21:35:10.155678168Z :warn com.blockether.svar.internal.router [627 37] Provider transient error 
+  data: {:provider :integration, :status 502, :error "Exceptional status code: 502"}
+CHUNK 1 [7/7] event=French Revolution toll=40000
+CHUNK 2 [7/7] event=French Revolution toll=40000
+CHUNK 3 [7/7] event=French Revolution toll=40000
+2026-04-05T21:35:17.615301645Z :info com.blockether.svar.internal.llm [724 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 7458.456553, :content-len 931, :has-reasoning false, :input-tokens 261, :output-tokens 239, :reasoning-tokens 0}
+CHUNK 4 [7/7] event=French Revolution toll=40000
+
+=== COMPLEX STREAMING ===
+Total chunks: 4
+Final: {:event French Revolution, :date 1789–1799, :location Versailles, France, :key-figures [Louis XVI Marie Antoinette Maximilien Robespierre Georges Danton Marquis de Lafayette], :causes [Fiscal crisis in France Widespread crop failures and famine Spread of Enlightenment ideals promoting liberty and equality Anger against absolute monarchy and social inequality], :consequences [Abolition of feudalism Adoption of the Declaration of the Rights of Man and of the Citizen Execution of Louis XVI in 1793 The Reign of Terror resulting in ~17,000 executions Rise of Napoleon Bonaparte Transformation of French society and government Creation of the metric system Inspiration for democratic movements worldwide Establishment of modern concepts of citizenship], :death-toll 40000}
+Tokens: {:input 261, :output 239, :reasoning 0, :total 500} Cost: {:input-cost 6.525E-4, :output-cost 0.00239, :total-cost 0.0030425}
+=========================
+
