@@ -11,7 +11,7 @@
    [charred.api :as json]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [com.blockether.svar.bench.bench-common :as common]
+   [com.blockether.svar.bench.common :as common]
    [com.blockether.svar.core :as svar]
    [taoensso.trove :as trove])
   (:import
@@ -122,25 +122,26 @@
 ;; =============================================================================
 
 (defn- eval-query-env! [router problem model run-ts]
-  (let [task-id (or (:id problem) (:title problem) (str (hash problem)))
-        db-path (common/trajectory-path "4clojure" model run-ts task-id)
-        env   (svar/create-env router {:path db-path})
-        start (System/currentTimeMillis)]
-    (try
-      (let [result (svar/query-env! env (build-prompt problem) {:model model :max-iterations 20 :debug? true})
-            answer (str/trim (str (:answer result)))
-            score  (verify-with-bb (:tests problem) answer)]
-        {:correct?    (:all-passed? score)
-         :answer      answer
-         :passed      (:passed score)
-         :total-tests (:total score)
-         :failures    (:failures score)
-         :iterations  (:iterations result)
-         :tokens      (:tokens result)
-         :cost        (:cost result)
-         :duration-ms (- (System/currentTimeMillis) start)})
-      (finally
-        (svar/dispose-env! env)))))
+  (common/run-query-env-task!
+    {:bench     "4clojure"
+     :router    router
+     :task      problem
+     :model     model
+     :run-ts    run-ts
+     :task-id   (or (:id problem) (:title problem) (str (hash problem)))
+     :prompt-fn build-prompt
+     :score-fn  (fn [p result duration]
+                  (let [answer (str/trim (str (:answer result)))
+                        score  (verify-with-bb (:tests p) answer)]
+                    {:correct?    (:all-passed? score)
+                     :answer      answer
+                     :passed      (:passed score)
+                     :total-tests (:total score)
+                     :failures    (:failures score)
+                     :iterations  (:iterations result)
+                     :tokens      (:tokens result)
+                     :cost        (:cost result)
+                     :duration-ms duration}))}))
 
 (defn- eval-pi! [problem model]
   (let [pi-result (common/run-pi! (build-prompt problem) model)]

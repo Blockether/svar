@@ -1,11 +1,14 @@
-(ns com.blockether.svar.bench.bench-common
+(ns com.blockether.svar.bench.common
   "Shared utilities for svar benchmarks.
 
    Provides: parallel batch runner, Pi agent execution,
    result persistence, progress printing, and constants."
   (:require
+   [babashka.fs :as fs]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [com.blockether.svar.core :as svar]
+   [com.blockether.svar.internal.rlm.trajectory :as trajectory]
    [taoensso.trove :as trove])
   (:import
    (java.time Instant)
@@ -21,19 +24,86 @@
 
 (def trajectories-root "bench/trajectories")
 
-(defn trajectory-path
-  "Returns a persistent DB path for a single task's trajectory.
-   Each task is a separate conversation, so each gets its own directory.
+(defn- sanitize-path-segment [s]
+  (str/replace (str s) #"[^a-zA-Z0-9_-]" "-"))
 
-   Layout: bench/trajectories/{bench}/{model-safe}/{run-ts}/{task-id-safe}"
+(defn trajectory-edn-path
+  "Returns the final EDN file path where a task's trajectory will be written.
+   Layout: bench/trajectories/{bench}/{model}/{run-ts}/{task-id}.edn"
   [bench model run-ts task-id]
-  (let [sanitize #(-> % str (str/replace #"[^a-zA-Z0-9_-]" "-"))
-        path (str trajectories-root "/" bench "/"
-               (sanitize model) "/"
-               (sanitize run-ts) "/"
-               (sanitize task-id))]
-    (.mkdirs (io/file path))
-    path))
+  (let [dir (str trajectories-root "/" bench "/"
+              (sanitize-path-segment model) "/"
+              (sanitize-path-segment run-ts))]
+    (.mkdirs (io/file dir))
+    (str dir "/" (sanitize-path-segment task-id) ".edn")))
+
+(defn trajectory-temp-db-path
+  "Returns a fresh temp directory path for a task's Datalevin DB.
+   The caller is responsible for deleting it after extracting the trajectory."
+  [task-id]
+  (let [tmp-root (System/getProperty "java.io.tmpdir")
+        dir (str tmp-root "/svar-bench-db-"
+              (sanitize-path-segment task-id) "-"
+              (System/nanoTime))]
+    (.mkdirs (io/file dir))
+    dir))
+
+(defn persist-trajectory!
+  "Extracts all queries and iteration snapshots from an RLM env's DB and
+   writes them to an EDN file. Call this after query-env! completes, before
+   dispose-env!. Returns the EDN path on success, nil if no DB or no queries."
+  [env edn-path]
+  (when-let [db-info-atom (:db-info-atom env)]
+    (when-let [db-info @db-info-atom]
+      (let [queries (trajectory/list-queries db-info)]
+        (when (seq queries)
+          (let [enriched (mapv (fn [q]
+                                 (assoc q :iterations
+                                   (vec (trajectory/list-iterations db-info [:query/id (:query/id q)]))))
+                           queries)]
+            (spit edn-path (pr-str enriched))
+            edn-path))))))
+
+(defn cleanup-temp-db!
+  "Recursively deletes a temp DB directory. Safe to call on missing paths."
+  [db-path]
+  (when (and db-path (fs/exists? db-path))
+    (fs/delete-tree db-path)))
+
+(def ^:private DEFAULT_QUERY_ENV_OPTS
+  {:max-iterations 20 :debug? true})
+
+(defn run-query-env-task!
+  "High-level wrapper that runs a single task through svar/query-env! with full
+   trajectory plumbing: temp Datalevin DB per task, trajectory persisted as EDN,
+   DB cleaned up afterwards. Removes the boilerplate from every benchmark.
+
+   Params map:
+     :bench     String - benchmark name (used in trajectory path)
+     :router    Router instance
+     :task      The task/problem map
+     :model     Model name string
+     :run-ts    Run timestamp string (shared across tasks in a single run)
+     :task-id   String - unique per task, used in trajectory + temp DB paths
+     :prompt-fn (task) -> String - builds the user prompt from the task
+     :score-fn  (task result duration-ms) -> result-map - scores the outcome
+                and shapes the final per-task record
+
+   Returns whatever score-fn returns."
+  [{:keys [bench router task model run-ts task-id prompt-fn score-fn]}]
+  (let [edn-path (trajectory-edn-path bench model run-ts task-id)
+        db-path  (trajectory-temp-db-path task-id)
+        env      (svar/create-env router {:path db-path})
+        start    (System/currentTimeMillis)]
+    (try
+      (let [result   (svar/query-env! env (prompt-fn task)
+                       (assoc DEFAULT_QUERY_ENV_OPTS :model model))
+            duration (- (System/currentTimeMillis) start)]
+        (persist-trajectory! env edn-path)
+        (score-fn task result duration))
+      (finally
+        (svar/dispose-env! env)
+        (cleanup-temp-db! db-path)))))
 
 ;; =============================================================================
 ;; Code fence stripping

@@ -13,6 +13,7 @@
    [clojure.string :as str]
    [com.blockether.svar.bench.fourclojure :as fourclojure]
    [com.blockether.svar.bench.humaneval :as humaneval]
+   [com.blockether.svar.bench.swebench-verified :as swebench]
    [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.router :as router]))
 
@@ -71,7 +72,11 @@
    {:name        "humaneval"
     :description "OpenAI HumanEval — 164 Python coding tasks"
     :tests       "pass@1 on canonical unit tests via python3"
-    :run-fn      humaneval/run-benchmark!}])
+    :run-fn      humaneval/run-benchmark!}
+   {:name        "swebench-verified"
+    :description "SWE-bench Verified — 500 human-verified GitHub issues (Python)"
+    :tests       "official SWE-bench harness (requires Docker + pip install swebench)"
+    :run-fn      swebench/run-benchmark!}])
 
 (def ^:private AGGREGATE_FILE_PREFIX
   "bench/results/aggregate-")

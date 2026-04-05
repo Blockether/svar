@@ -24,8 +24,43 @@
 
 (require '[com.blockether.svar.core :as svar]
          '[com.blockether.svar.internal.rlm :as rlm]
+         '[com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
          '[clojure.edn :as edn]
-         '[clojure.java.io :as io])
+         '[clojure.java.io :as io]
+         '[clojure.walk :as walk])
+
+(import '[javax.imageio ImageIO]
+        '[java.awt.image BufferedImage])
+
+(defn- save-page-images!
+  "Render each page in `page-set` (0-indexed) of `pdf-path` to a PNG in
+   `out-dir`, named page-<1-indexed>.png. Skips pages that already have a file."
+  [pdf-path page-set out-dir]
+  (.mkdirs out-dir)
+  (let [imgs (pdf/pdf->images pdf-path {:page-set page-set})
+        ordered (vec (sort page-set))]
+    (doseq [[idx ^BufferedImage img] (map-indexed vector imgs)
+            :let [page-idx (nth ordered idx)
+                  f (io/file out-dir (format "page-%03d.png" (inc page-idx)))]
+            :when (not (.exists f))]
+      (ImageIO/write img "png" f))))
+
+(defn- sanitize-doc
+  "Strip keys whose value is nil from every map in the document, and drop
+   stray TocEntry maps that slipped into :page/nodes so the result matches
+   the stricter load-index spec."
+  [doc]
+  (let [strip-nils (fn [form]
+                     (if (map? form)
+                       (into (empty form) (remove (fn [[_ v]] (nil? v))) form)
+                       form))
+        content-node? (fn [n] (contains? n :page.node/type))]
+    (-> doc
+      (update :document/pages
+        (fn [pages]
+          (mapv (fn [p] (update p :page/nodes (fn [ns] (filterv content-node? ns))))
+            pages)))
+      (->> (walk/postwalk strip-nils)))))
 
 (defn parse-args [args]
   (loop [args args acc {}]
@@ -97,11 +132,17 @@
                        :parallel parallel
                        :output-dir (.getAbsolutePath images-dir)}
                 pages (assoc :pages pages))
-      doc     (rlm/build-index router pdf-path opts)
+      doc     (sanitize-doc (rlm/build-index router pdf-path opts))
       elapsed (/ (- (System/currentTimeMillis) start) 1000.0)
-      edn-path (io/file output-path "document.edn")]
+      edn-path (io/file output-path "document.edn")
+      page-set (set (map :page/index (:document/pages doc)))]
 
   (spit edn-path (pr-str doc))
+
+  ;; Render every indexed page as a full-page PNG so the user has a complete
+  ;; visual alongside the structured EDN. PDFBox-matched embedded images
+  ;; remain in images/<uuid>.png; page renders go to images/page-NNN.png.
+  (save-page-images! pdf-path page-set images-dir)
 
   (println "=== Done ===")
   (println "Output:      " output-path)

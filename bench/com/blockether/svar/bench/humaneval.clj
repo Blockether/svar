@@ -11,7 +11,7 @@
    [charred.api :as json]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [com.blockether.svar.bench.bench-common :as common]
+   [com.blockether.svar.bench.common :as common]
    [com.blockether.svar.bench.python-tasks :as py]
    [com.blockether.svar.core :as svar]
    [taoensso.trove :as trove])
@@ -72,24 +72,25 @@
 ;; =============================================================================
 
 (defn- eval-query-env! [router task model run-ts]
-  (let [task-id (or (:task_id task) (str (hash task)))
-        db-path (common/trajectory-path "humaneval" model run-ts task-id)
-        env   (svar/create-env router {:path db-path})
-        start (System/currentTimeMillis)]
-    (try
-      (let [result (svar/query-env! env (build-prompt task) {:model model :max-iterations 20 :debug? true})
-            code   (py/strip-fence (str/trim (str (:answer result))))
-            score  (verify-python code task)]
-        {:correct?    (:correct? score)
-         :failure     (:failure score)
-         :timeout?    (:timeout? score)
-         :code        code
-         :iterations  (:iterations result)
-         :tokens      (:tokens result)
-         :cost        (:cost result)
-         :duration-ms (- (System/currentTimeMillis) start)})
-      (finally
-        (svar/dispose-env! env)))))
+  (common/run-query-env-task!
+    {:bench     "humaneval"
+     :router    router
+     :task      task
+     :model     model
+     :run-ts    run-ts
+     :task-id   (or (:task_id task) (str (hash task)))
+     :prompt-fn build-prompt
+     :score-fn  (fn [t result duration]
+                  (let [code  (py/strip-fence (str/trim (str (:answer result))))
+                        score (verify-python code t)]
+                    {:correct?    (:correct? score)
+                     :failure     (:failure score)
+                     :timeout?    (:timeout? score)
+                     :code        code
+                     :iterations  (:iterations result)
+                     :tokens      (:tokens result)
+                     :cost        (:cost result)
+                     :duration-ms duration}))}))
 
 (defn- eval-pi! [task model]
   (let [pi-result (common/run-pi! (build-prompt task) model)]

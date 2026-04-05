@@ -1735,13 +1735,20 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
      :toc - Vector of TocEntry nodes (generated or extracted from pages)"
   [pages]
   (if (has-toc-entries? pages)
-    ;; TOC exists - link entries to sections and extract them
+    ;; TOC exists - link entries to sections, then move them out of pages.
     (let [linked-pages (link-toc-entries pages)
           toc-entries (vec (filter #(= :toc-entry (:document.toc/type %))
-                             (collect-all-nodes linked-pages)))]
+                             (collect-all-nodes linked-pages)))
+          ;; Strip TocEntry maps from :page/nodes — they live in :document/toc now.
+          pages-without-toc (mapv
+                              (fn [page]
+                                (update page :page/nodes
+                                  (fn [nodes]
+                                    (filterv #(not= :toc-entry (:document.toc/type %)) nodes))))
+                              linked-pages)]
       (trove/log! {:level :debug :data {:toc-entries (count toc-entries)}
                    :msg "Linked existing TOC entries to sections"})
-      {:pages linked-pages
+      {:pages pages-without-toc
        :toc toc-entries})
     ;; No TOC - generate from structure
     (let [generated-toc (build-toc-from-structure pages)]
@@ -2091,31 +2098,54 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                               nil)))
           ;; Step 3: Post-process TOC (build/link with UUIDs)
           {:keys [pages toc]} (postprocess-toc page-list)
+          ;; Strip keys whose value is nil from every node so the stricter
+          ;; load-index spec (which requires :image-index to be int? when
+          ;; present) accepts the resulting document.
+          strip-nil-keys (fn [m] (into (empty m) (remove (fn [[_ v]] (nil? v))) m))
+          pages (mapv (fn [p]
+                        (update p :page/nodes (fn [nodes] (mapv strip-nil-keys nodes))))
+                  pages)
+          ;; Render every selected page as a full-page PNG so even PDFs whose
+          ;; figures aren't exposed as embedded images give the user a usable
+          ;; visual dump. Files go to <output-dir>/page-NNN.png (1-indexed).
+          _ (when (and output-dir (= :pdf ftype))
+              (try
+                (let [page-indices (sort (mapv :page/index pages))
+                      imgs (pdf/pdf->images file-path {:page-set (set page-indices)})]
+                  (when-not (.exists (io/file output-dir))
+                    (.mkdirs (io/file output-dir)))
+                  (doseq [[i buf] (map-indexed vector imgs)
+                          :let [page-idx (nth (vec page-indices) i)
+                                out-file (io/file output-dir (format "page-%03d.png" (inc page-idx)))]
+                          :when (not (.exists out-file))]
+                    (javax.imageio.ImageIO/write ^java.awt.image.BufferedImage buf "png" out-file))
+                  (trove/log! {:level :info :data {:pages (count imgs) :output-dir output-dir}
+                               :msg "Rendered full-page PNGs"}))
+                (catch Exception e
+                  (trove/log! {:level :warn :data {:error (ex-message e)}
+                               :msg "Failed to render full-page PNGs"}))))
           pages-with-images (if output-dir
                               (let [dir-file (io/file output-dir)]
                                 (when-not (.exists dir-file)
                                   (anomaly/not-found! (str "Output directory not found: " output-dir)
                                     {:type :svar.pageindex/output-dir-not-found :output-dir output-dir}))
-                                (mapv (fn [page]
-                                        (update page :page/nodes
-                                          (fn [nodes]
-                                            (mapv (fn [node]
-                                                    (let [img-bytes (:page.node/image-data node)]
-                                                      (if (and (#{:image :table} (:page.node/type node))
-                                                            img-bytes)
-                                                        (do
-                                                          (try
-                                                            (let [file-path (fs/path output-dir (str (:page.node/id node) ".png"))]
-                                                              (with-open [out (io/output-stream (io/file (str file-path)))]
-                                                                (.write out ^bytes img-bytes)))
-                                                            (catch Exception e
-                                                              (trove/log! {:level :warn
-                                                                           :data {:node-id (:page.node/id node)
-                                                                                  :error (ex-message e)}
-                                                                           :msg "Failed to write image bytes to output directory"})))
-                                                          (dissoc node :page.node/image-data))
-                                                        node)))
-                                              nodes))))
+                                (mapv
+                                  (fn [page]
+                                    (update page :page/nodes
+                                      (fn [nodes]
+                                        (mapv
+                                          (fn [node]
+                                            (let [img-bytes (:page.node/image-data node)]
+                                              (if (and (#{:image :table} (:page.node/type node)) img-bytes)
+                                                (let [img-name (str (:page.node/id node) ".png")
+                                                      out-file (io/file output-dir img-name)]
+                                                  (with-open [out (io/output-stream out-file)]
+                                                    (.write out ^bytes img-bytes))
+                                                  (-> node
+                                                    (dissoc :page.node/image-data)
+                                                    (assoc :page.node/image-path (str "images/" img-name))))
+                                                node)))
+                                          nodes))))
                                   pages))
                               pages)
            ;; Step 3: Generate document abstract from section descriptions

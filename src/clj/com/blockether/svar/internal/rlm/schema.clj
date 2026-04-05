@@ -658,9 +658,10 @@
 (s/def :document.toc/target-page
   nat-int?)
 
-;; TOC entry target section ID (UUID string linking to page node)
+;; TOC entry target section ID (UUID string linking to page node).
+;; Nilable because linking happens in post-processing and may not resolve.
 (s/def :document.toc/target-section-id
-  string?)
+  (s/nilable string?))
 
 ;; TOC entry level (l1, l2, l3, etc.)
 (s/def :document.toc/level
@@ -672,10 +673,10 @@
                 :document.toc/id
                 :document.toc/title
                 :document.toc/target-page
-                :document.toc/target-section-id
                 :document.toc/level]
     :opt [:document.toc/parent-id
-          :document.toc/description]))
+          :document.toc/description
+          :document.toc/target-section-id]))
 
 ;; Document TOC: vector of TOC entries
 (s/def :document/toc
