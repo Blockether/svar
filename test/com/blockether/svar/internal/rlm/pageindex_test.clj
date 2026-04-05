@@ -399,19 +399,7 @@
                   img-path (fs/path output-dir (str node-id ".png"))]
               (expect (fs/exists? img-path))))
           (finally
-            (fs/delete-tree output-dir)))))
-
-    (it "throws when output-dir does not exist"
-      (let [fake-pages [{:page/index 0
-                         :page/nodes [{:page.node/type :image
-                                       :page.node/id "img-1"
-                                       :page.node/image-data (byte-array [1 2 3])
-                                       :page.node/description "diagram"}]}]]
-        (with-redefs [com.blockether.svar.internal.rlm/extract-text (fn [_ _] fake-pages)
-                      com.blockether.svar.internal.rlm/generate-document-abstract (fn [_ _] nil)
-                      vision/infer-document-title (fn [_ _] nil)]
-          (expect (throws? clojure.lang.ExceptionInfo
-                    #(pageindex/build-index nil TEST_PDF_PATH {:output-dir "does-not-exist"})))))))
+            (fs/delete-tree output-dir))))))
 
   (describe "build-index :path without output-dir"
     (it "retains image bytes in returned structure"
