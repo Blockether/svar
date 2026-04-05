@@ -144,11 +144,13 @@
                                                  *err* (java.io.PrintWriter. stderr-writer true)]
                                          (sci/eval-string* sci-ctx code))]
                             {:result result :stdout (str stdout-writer) :stderr (str stderr-writer) :error nil})
-                          (catch Exception e {:result nil :stdout (str stdout-writer) :stderr (str stderr-writer) :error (ex-message e)})))
+                          (catch Throwable e
+                            {:result nil :stdout (str stdout-writer) :stderr (str stderr-writer)
+                             :error (str (.getSimpleName (class e)) ": " (or (ex-message e) (str e)))})))
           execution-result (try
                              (deref exec-future EVAL_TIMEOUT_MS nil)
-                             (catch Exception e
-                               {:result nil :stdout "" :stderr "" :error (ex-message e)}))
+                             (catch Throwable e
+                               {:result nil :stdout "" :stderr "" :error (str (.getSimpleName (class e)) ": " (ex-message e))}))
           execution-time (- (System/currentTimeMillis) start-time)
           timed-out? (nil? execution-result)]
       (if timed-out?
@@ -221,20 +223,101 @@
       (str/join "\n" (map format-tool-doc custom-docs))
       "\n</custom_tools>\n")))
 
+(defn build-document-summary
+  "Builds a compact summary of available documents for the system prompt.
+   Returns nil if no documents are loaded.
+
+   Params:
+   `db-info` - Map with :conn key.
+
+   Returns string like:
+   \"3 documents, 142 pages, 87 entities (person: 23, org: 15, ...)
+    Documents:
+      [doc-1] Annual Report 2024 (pdf, 48 pages)
+      [doc-2] API Reference (html, 12 pages)
+      [doc-3] Meeting Notes (md, 82 pages)\""
+  [{:keys [conn]}]
+  (when conn
+    (let [docs (d/q '[:find [(pull ?e [:document/id :document/name :document/title :document/extension]) ...]
+                      :where [?e :document/id _]]
+                 (d/db conn))
+          page-counts (when (seq docs)
+                        (into {}
+                          (for [doc docs]
+                            [(:document/id doc)
+                             (or (d/q '[:find (count ?p) .
+                                        :in $ ?doc-id
+                                        :where [?p :page.node/document-id ?doc-id]]
+                                   (d/db conn) (:document/id doc))
+                               0)])))
+          total-pages (reduce + 0 (vals page-counts))
+          entity-stats (let [entities (d/q '[:find [(pull ?e [:entity/type]) ...]
+                                             :where [?e :entity/id _]]
+                                        (d/db conn))
+                             types-map (frequencies (map :entity/type entities))]
+                         {:total (count entities) :types types-map})
+          total-entities (:total entity-stats)]
+      (when (seq docs)
+        (str (count docs) " documents, " total-pages " pages"
+          (when (pos? total-entities)
+            (str ", " total-entities " entities ("
+              (str/join ", " (map (fn [[t c]] (str (name t) ": " c))
+                               (take 5 (sort-by val > (:types entity-stats)))))
+              ")"))
+          "\nDocuments:\n"
+          (str/join "\n"
+            (map (fn [doc]
+                   (let [id (:document/id doc)
+                         title (or (:document/title doc) (:document/name doc) id)
+                         ext (:document/extension doc)
+                         pages (get page-counts id 0)]
+                     (str "  [" id "] " title
+                       (when ext (str " (" ext ")"))
+                       ", " pages " pages")))
+              (sort-by :document/id docs))))))))
+
 (defn build-system-prompt
   "Builds the system prompt — compact, token-efficient.
    All tool documentation is discoverable via (doc fn-name) in SCI."
-  [{:keys [output-spec custom-docs has-reasoning? system-prompt]}]
+  [{:keys [output-spec custom-docs has-reasoning? has-documents? document-summary system-prompt]}]
   (str "You are a Clojure agent in a SCI sandbox. Write code, execute, iterate.
 
 ARCHITECTURE:
 - Single-shot: each iteration is a fresh prompt. No message history.
-- State lives in def'd vars — they persist across iterations.
+- State lives in def'd vars - they persist across iterations.
 - <var_index> shows all your vars (name, type, size, docstring).
 - <execution_results> shows what your last code returned.
 - Use (doc fn-name) to discover any function's purpose and args.
 - Use (llm-query \"question\") to ask a sub-LLM for help.
+- The SCI sandbox is your REPL: test ANY expression before finalizing. No need
+  to connect to an external REPL - just (def x ...) or inline-eval and iterate.
+
+CLOJURE DATA LITERALS (critical - wrong form = runtime error):
+- List literal:   '(1 2 3)       ; bare (1 2 3) is a FUNCTION CALL -> Long cannot be cast to IFn
+- Vector:         [1 2 3]
+- Map:            {:a 1 :b 2}
+- Set:            #{1 2 3}
+- Nested list:    '((1 2) (3 4)) ; the outer quote propagates
+- Keyword:        :foo            String: \"foo\"            Char: \\a
+- Seq from fn:    (list 1 2 3)   ; equivalent to '(1 2 3)
+- When your FINAL answer is a literal collection, ALWAYS quote lists.
 "
+    (when (and has-documents? document-summary)
+      (str "
+DOCUMENTS: " document-summary "
+
+Document tools (2 functions, polymorphic):
+1. (search-documents \"query\") - searches pages+toc+entities, returns {:pages [...] :toc [...] :entities [...]}
+   (search-documents \"query\" {:in :pages})    - narrow to :pages | :toc | :entities
+   (search-documents \"query\" {:top-k 20 :document-id \"doc-1\"})
+2. (fetch-content lookup-ref) - full content:
+   [:page.node/id \"id\"]    -> page text
+   [:document/id \"id\"]     -> vector of ~4K char pages
+   [:document.toc/id \"id\"] -> TOC description
+   [:entity/id \"id\"]       -> {:entity {...} :relationships [...]}
+Store in vars: (def pages (fetch-content [:document/id \"doc-1\"]))
+"))
+
     (when system-prompt
       (str "\nINSTRUCTIONS:\n" system-prompt "\n"))
 
@@ -246,16 +329,36 @@ ARCHITECTURE:
 RESPONSE FORMAT:
 " (spec/spec->prompt (if has-reasoning? ITERATION_SPEC_CODE_ONLY ITERATION_SPEC)) "
 " (if has-reasoning?
-    "Respond with valid JSON. Your reasoning is native — omit 'thinking'."
+    "Respond with valid JSON. Your reasoning is native - omit 'thinking'."
     "Respond with valid JSON containing 'thinking' and 'code'.") "
 Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high\"}}
 
 RULES:
-- Always (def name \"docstring\" value) — docstrings are your memory
+- Always (def name \"docstring\" value) - docstrings are your memory
 - Test code before finalizing
-- Never repeat a failed call — try a different approach
+- Never repeat a failed call - try a different approach
 - Combine steps in one iteration
 - If <var_index> or <context> already answers the query, finalize immediately
+
+CODE STYLE:
+- Simplest working solution. No over-engineering.
+- No abstractions for single-use operations.
+- No speculative features or \"you might also want...\"
+- No docstrings or type annotations on code not being changed.
+- No error handling for scenarios that cannot happen.
+- Three similar lines is better than a premature abstraction.
+
+OUTPUT STYLE:
+- Put the answer in 'final'. Explanation only if non-obvious.
+- No boilerplate. No filler prose.
+- No em dashes, smart quotes, or decorative Unicode symbols.
+- Plain hyphens and straight quotes only.
+- Natural language characters (accented letters, CJK) are fine when content requires them.
+
+DEBUGGING:
+- Never speculate about a bug without reading the relevant code first.
+- State what you found, where, and the fix. One pass.
+- If cause is unclear: say so. Do not guess.
 "))
 
 ;; =============================================================================
@@ -277,13 +380,13 @@ RULES:
      - :on-chunk - Streaming callback function."
   [rlm-env messages & [{:keys [iteration-spec on-chunk routing iteration] :or {iteration-spec ITERATION_SPEC}}]]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :run-iteration})]
-    (let [context-chars (reduce + 0 (map #(count (str (:content %))) messages))
+    (let [model-name (resolve-root-model (:router rlm-env))
+          input-tokens (router/count-messages (or model-name "gpt-4o") messages)
           _ (trove/log! {:level :info :id ::llm-call
                          :data {:env-id (:env-id rlm-env)
                                 :iteration iteration
                                 :msg-count (count messages)
-                                :context-chars context-chars
-                                :context-chars-k (format "%.1fK" (/ context-chars 1000.0))}
+                                :input-tokens input-tokens}
                          :msg "LLM call started"})
           ;; Use ask! with iteration spec — router auto-resolves max_tokens + reasoning_params
           ask-result (llm/ask! (:router rlm-env)
@@ -513,9 +616,12 @@ RULES:
         has-docs? (when-let [db-atom (:db-info-atom rlm-env)]
                     (when-let [db @db-atom]
                       (pos? (count (db-list-documents db {:limit 1 :include-toc? false})))))
+        doc-summary (when (and has-docs? (:db-info-atom rlm-env))
+                      (build-document-summary @(:db-info-atom rlm-env)))
         system-prompt (build-system-prompt {:output-spec output-spec
                                             :custom-docs custom-docs
                                             :has-documents? has-docs?
+                                            :document-summary doc-summary
                                             :has-reasoning? has-reasoning?
                                             :system-prompt system-prompt
                                             :max-context-tokens max-context-tokens})
