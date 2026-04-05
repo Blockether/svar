@@ -2360,17 +2360,23 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (when (.exists f)
       (edn/read-string (slurp f)))))
 
+(def ^:private manifest-write-lock
+  "Serializes manifest.edn writes so parallel per-page workers never interleave bytes."
+  (Object.))
+
 (defn- write-manifest!
-  "Writes manifest.edn to a pageindex directory."
+  "Writes manifest.edn to a pageindex directory. Thread-safe."
   [output-path manifest]
-  (let [dir (io/file output-path)]
-    (when-not (.exists dir)
-      (.mkdirs dir)))
-  (spit (str output-path "/manifest.edn")
-    (pr-str manifest)))
+  (locking manifest-write-lock
+    (let [dir (io/file output-path)]
+      (when-not (.exists dir)
+        (.mkdirs dir)))
+    (spit (str output-path "/manifest.edn")
+      (pr-str manifest))))
 
 (defn- update-manifest-page!
-  "Updates a single page's status in the manifest and persists immediately."
+  "Updates a single page's status in the manifest and persists immediately.
+   Thread-safe: swap! is atomic, write-manifest! is locked."
   [output-path manifest-atom page-idx status-map]
   (swap! manifest-atom assoc-in [:pages page-idx] status-map)
   (write-manifest! output-path @manifest-atom))
@@ -2605,81 +2611,102 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
                  (if (seq pages-to-process)
                    (let [total-to-process (count pages-to-process)
-                         page-times-atom (atom [])]
-                     (doseq [[n idx] (map-indexed vector (sort pages-to-process))]
-                       (let [page-num (inc idx)
-                             t0 (System/currentTimeMillis)
-                             progress-pct (Math/round (* 100.0 (/ n total-to-process)))
-                             avg-ms-per-page (when (seq @page-times-atom)
-                                               (/ (reduce + @page-times-atom) (count @page-times-atom)))
-                             eta-ms (when avg-ms-per-page
-                                      (long (* avg-ms-per-page (- total-to-process n))))]
-                         (trove/log! {:level :info
-                                      :id :svar.pageindex/indexing-page
-                                      :data (cond-> {:page (inc n)
-                                                     :page-number page-num
-                                                     :total total-to-process
-                                                     :progress-pct progress-pct
-                                                     :elapsed-ms (- (System/currentTimeMillis) start-time)
-                                                     :errors @errors-count}
-                                              eta-ms (assoc :eta-ms eta-ms))
-                                      :msg (format "Indexing page %d/%d (%d%%)" (inc n) total-to-process progress-pct)})
-                         (try
-                           (let [extracted (extract-pdf-pages router abs-path (assoc common-index-opts :pages page-num))
-                                 page (first (:pages extracted))
-                                 now (str (Instant/now))
-                                 page-elapsed (- (System/currentTimeMillis) t0)]
-                             (when-not page
-                               (anomaly/incorrect! "No page returned for selected page"
-                                 {:type :svar.pageindex/missing-page
-                                  :page-number page-num}))
-                             (swap! page-map-atom assoc idx page)
-                             ;; Capture doc/extension/file-metadata once — finalize needs them.
-                             (swap! metadata-atom merge
-                               {:document/name (:doc-name extracted)
-                                :document/extension (:extension extracted)
-                                :svar.pageindex/file-metadata (:file-metadata extracted)})
-                             (update-manifest-page! output-path manifest-atom idx
-                               {:status :done
-                                :indexed-at now
-                                :updated-at now
-                                :nodes (count (:page/nodes page))
-                                :elapsed-ms page-elapsed})
-                             (swap! processed-count inc)
-                             (swap! page-times-atom conj page-elapsed)
-                             (let [remaining (- total-to-process @processed-count)
-                                   new-avg (/ (reduce + @page-times-atom) (count @page-times-atom))
-                                   new-eta-ms (long (* new-avg remaining))]
-                               (trove/log! {:level :info
-                                            :id :svar.pageindex/indexed-page
-                                            :data {:page-number page-num
-                                                   :nodes (count (:page/nodes page))
-                                                   :elapsed-ms page-elapsed
-                                                   :processed @processed-count
-                                                   :remaining remaining
-                                                   :eta-ms new-eta-ms
-                                                   :errors @errors-count}
-                                            :msg (format "Indexed page %d — %d nodes, %dms (remaining: %d, ETA: %ds)"
-                                                   page-num (count (:page/nodes page)) page-elapsed
-                                                   remaining (quot new-eta-ms 1000))})))
-                           (catch Exception e
-                             (let [now (str (Instant/now))
-                                   page-elapsed (- (System/currentTimeMillis) t0)]
-                               (swap! errors-count inc)
-                               (update-manifest-page! output-path manifest-atom idx
-                                 {:status :error
-                                  :updated-at now
-                                  :error (ex-message e)
-                                  :elapsed-ms page-elapsed})
-                               (trove/log! {:level :warn
-                                            :id :svar.pageindex/page-error
-                                            :data {:page-number page-num
-                                                   :error (ex-message e)
-                                                   :elapsed-ms page-elapsed
-                                                   :errors @errors-count
-                                                   :remaining (- total-to-process (inc n))}
-                                            :msg (format "Page %d failed: %s — marked :error (errors so far: %d)"
-                                                   page-num (ex-message e) @errors-count)})))))))
+                         page-times-atom (atom [])
+                         ;; Worker pool: process up to `parallel` pages concurrently.
+                         ;; Each worker runs a full extract-pdf-pages call for one
+                         ;; page, updates the manifest atomically, and appends timing
+                         ;; info. Manifest writes are locked; the atom is thread-safe.
+                         worker-count (max 1 (or parallel 3))
+                         pool (java.util.concurrent.Executors/newFixedThreadPool worker-count)
+                         per-page-task
+                         (fn [n idx]
+                           (let [page-num (inc idx)
+                                 t0 (System/currentTimeMillis)
+                                 avg-ms-per-page (when (seq @page-times-atom)
+                                                   (/ (reduce + @page-times-atom) (count @page-times-atom)))
+                                 eta-ms (when avg-ms-per-page
+                                          (long (* avg-ms-per-page (- total-to-process n))))
+                                 progress-pct (Math/round (* 100.0 (/ n total-to-process)))]
+                             (trove/log! {:level :info
+                                          :id :svar.pageindex/indexing-page
+                                          :data (cond-> {:page (inc n)
+                                                         :page-number page-num
+                                                         :total total-to-process
+                                                         :progress-pct progress-pct
+                                                         :elapsed-ms (- (System/currentTimeMillis) start-time)
+                                                         :errors @errors-count}
+                                                  eta-ms (assoc :eta-ms eta-ms))
+                                          :msg (format "Indexing page %d/%d (%d%%)" (inc n) total-to-process progress-pct)})
+                             (try
+                               (let [extracted (extract-pdf-pages router abs-path (assoc common-index-opts :pages page-num))
+                                     page (first (:pages extracted))
+                                     now (str (Instant/now))
+                                     page-elapsed (- (System/currentTimeMillis) t0)]
+                                 (when-not page
+                                   (anomaly/incorrect! "No page returned for selected page"
+                                     {:type :svar.pageindex/missing-page
+                                      :page-number page-num}))
+                                 (swap! page-map-atom assoc idx page)
+                                 (swap! metadata-atom merge
+                                   {:document/name (:doc-name extracted)
+                                    :document/extension (:extension extracted)
+                                    :svar.pageindex/file-metadata (:file-metadata extracted)})
+                                 (update-manifest-page! output-path manifest-atom idx
+                                   {:status :done
+                                    :indexed-at now
+                                    :updated-at now
+                                    :nodes (count (:page/nodes page))
+                                    :elapsed-ms page-elapsed})
+                                 (swap! processed-count inc)
+                                 (swap! page-times-atom conj page-elapsed)
+                                 (let [processed-so-far @processed-count
+                                       remaining (- total-to-process processed-so-far)
+                                       new-avg (/ (reduce + @page-times-atom) (count @page-times-atom))
+                                       ;; Parallel runs finish worker-count pages roughly simultaneously,
+                                       ;; so wall-clock ETA is (remaining × avg) / workers.
+                                       new-eta-ms (long (/ (* new-avg remaining) worker-count))]
+                                   (trove/log! {:level :info
+                                                :id :svar.pageindex/indexed-page
+                                                :data {:page-number page-num
+                                                       :nodes (count (:page/nodes page))
+                                                       :elapsed-ms page-elapsed
+                                                       :processed processed-so-far
+                                                       :remaining remaining
+                                                       :eta-ms new-eta-ms
+                                                       :errors @errors-count}
+                                                :msg (format "Indexed page %d — %d nodes, %dms (remaining: %d, ETA: %ds)"
+                                                       page-num (count (:page/nodes page)) page-elapsed
+                                                       remaining (quot new-eta-ms 1000))})))
+                               (catch Exception e
+                                 (let [now (str (Instant/now))
+                                       page-elapsed (- (System/currentTimeMillis) t0)]
+                                   (swap! errors-count inc)
+                                   (update-manifest-page! output-path manifest-atom idx
+                                     {:status :error
+                                      :updated-at now
+                                      :error (ex-message e)
+                                      :elapsed-ms page-elapsed})
+                                   (trove/log! {:level :warn
+                                                :id :svar.pageindex/page-error
+                                                :data {:page-number page-num
+                                                       :error (ex-message e)
+                                                       :elapsed-ms page-elapsed
+                                                       :errors @errors-count
+                                                       :remaining (- total-to-process (inc n))}
+                                                :msg (format "Page %d failed: %s — marked :error (errors so far: %d)"
+                                                       page-num (ex-message e) @errors-count)}))))))
+                         futures (mapv (fn [[n idx]]
+                                         (.submit pool ^Callable (fn [] (per-page-task n idx))))
+                                   (map-indexed vector (sort pages-to-process)))]
+                     (try
+                       ;; Block until every page worker has finished. Exceptions are
+                       ;; already caught and logged per-page so .get here should be
+                       ;; safe, but we still swallow interruption cleanly.
+                       (doseq [^java.util.concurrent.Future f futures]
+                         (try (.get f)
+                              (catch Exception _)))
+                       (finally
+                         (.shutdown pool))))
              ;; Fallback: file types without per-page tracking (e.g. unknown extensions)
                    (try
                      (let [doc (build-index router abs-path (cond-> common-index-opts

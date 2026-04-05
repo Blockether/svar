@@ -10,6 +10,7 @@
 ;;   --pages SPEC      Explicit pages spec as EDN, e.g. "[[1 10]]" or "[1 5 [7 9]]"
 ;;                     (overrides --skip/--limit)
 ;;   --parallel N      Max concurrent pages (default: 3)
+;;   --force           Ignore existing manifest and reindex every selected page
 ;;
 ;; Examples:
 ;;   clojure -M scripts/index_pdf.clj --limit 10
@@ -25,12 +26,14 @@
 (require '[com.blockether.svar.core :as svar]
          '[clojure.edn :as edn])
 
+(def ^:private boolean-flags #{"--force"})
+
 (defn parse-args [args]
   (loop [args args acc {}]
-    (if (empty? args)
-      acc
-      (let [[k v & rst] args]
-        (recur rst (assoc acc k v))))))
+    (cond
+      (empty? args) acc
+      (contains? boolean-flags (first args)) (recur (rest args) (assoc acc (first args) true))
+      :else (let [[k v & rst] args] (recur rst (assoc acc k v))))))
 
 (def cli (parse-args *command-line-args*))
 
@@ -40,6 +43,7 @@
 (def skip       (some-> (get cli "--skip") Long/parseLong))
 (def limit      (some-> (get cli "--limit") Long/parseLong))
 (def pages-spec (some-> (get cli "--pages") edn/read-string))
+(def force?     (boolean (get cli "--force")))
 
 (def pages
   (cond
@@ -89,7 +93,8 @@
                       :vision-model model
                       :text-model text-model
                       :parallel parallel}
-               pages (assoc :pages pages))
+               pages  (assoc :pages pages)
+               force? (assoc :force? true))
       result (svar/index! pdf-path opts)
       doc    (:document result)
       elapsed (/ (- (System/currentTimeMillis) start) 1000.0)]
