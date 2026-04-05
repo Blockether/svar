@@ -3,10 +3,9 @@
    [clojure.set :as set]
    [clojure.string :as str]
    [com.blockether.svar.internal.rlm.db :as db
-    :refer [db-entity-stats db-get-document db-get-entity
-            db-get-page-node db-get-toc-entry db-list-documents db-list-entities
-            db-list-page-nodes db-list-relationships db-list-toc-entries db-search-entities db-search-page-nodes
-            db-search-toc-entries db-store-toc-entry!
+    :refer [db-get-entity db-get-page-node db-get-toc-entry
+            db-list-relationships db-search-entities db-search-page-nodes
+            db-search-toc-entries
             str-includes? str-lower str-truncate]]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
@@ -229,59 +228,9 @@
 ;; Document Storage
 ;; -----------------------------------------------------------------------------
 
-(defn make-store-toc-entry-fn
-  "Creates store-document-toc! — store a PageIndex TOC entry."
-  [db-info-atom]
-  (fn store-document-toc!
-    ([entry] (store-document-toc! entry nil))
-    ([entry doc-id]
-     (when-let [db-info @db-info-atom]
-       (db-store-toc-entry! db-info entry (or doc-id "manual"))))))
-
-(defn make-search-toc-entries-fn
-  "Creates search-document-toc — search document TOC entries by title/description."
-  [db-info-atom]
-  (fn search-document-toc
-    ([query] (search-document-toc query 10))
-    ([query top-k]
-     (if-let [db-info @db-info-atom]
-       (db-search-toc-entries db-info query {:top-k top-k})
-       []))))
-
-(defn make-get-toc-entry-fn
-  "Creates get-document-toc-entry — get a document TOC entry by ID."
-  [db-info-atom]
-  (fn get-document-toc-entry [entry-id]
-    (when-let [db-info @db-info-atom]
-      (db-get-toc-entry db-info entry-id))))
-
-(defn make-list-toc-entries-fn
-  "Creates list-document-toc — list document TOC entries."
-  [db-info-atom]
-  (fn list-document-toc
-    ([] (list-document-toc {}))
-    ([opts]
-     (if-let [db-info @db-info-atom]
-       (db-list-toc-entries db-info opts)
-       []))))
-
 ;; -----------------------------------------------------------------------------
-;; Document Page SCI Functions (for LLM to search actual document content)
+;; Unified Document Tools
 ;; -----------------------------------------------------------------------------
-
-(defn make-search-page-nodes-fn
-  "Creates search-document-pages — fulltext search across document page content."
-  [db-info-atom]
-  (fn search-document-pages
-    ([query] (search-document-pages query 10))
-    ([query top-k]
-     (if-let [db-info @db-info-atom]
-       (db-search-page-nodes db-info query {:top-k top-k})
-       []))
-    ([query top-k opts]
-     (if-let [db-info @db-info-atom]
-       (db-search-page-nodes db-info query (merge {:top-k top-k} opts))
-       []))))
 
 (def ^:private P_ADD_PAGE_SIZE
   "Characters per chunk when fetch-content returns a document as a vector of pages."
@@ -304,19 +253,57 @@
             (recur (rest remaining) (conj current para)
               (+ current-size para-size) result)))))))
 
-(defn make-get-page-node-fn
+(defn make-search-documents-fn
+  "Creates search-documents — unified search across pages, TOC, and entities.
+
+   Usage:
+     (search-documents \"query\")                     ;; searches everywhere (default)
+     (search-documents \"query\" {:in :pages})        ;; pages only
+     (search-documents \"query\" {:in :toc})          ;; TOC only
+     (search-documents \"query\" {:in :entities})     ;; entities only
+     (search-documents \"query\" {:top-k 20 :document-id \"doc-1\"})
+
+   Returns:
+     :in omitted → {:pages [...] :toc [...] :entities [...]}
+     :in set     → vector of results for that target"
+  [db-info-atom]
+  (fn search-documents
+    ([query] (search-documents query {}))
+    ([query {:keys [in top-k document-id type] :or {top-k 10}}]
+     (if-let [db-info @db-info-atom]
+       (let [do-pages #(db-search-page-nodes db-info query
+                         (cond-> {:top-k top-k}
+                           document-id (assoc :document-id document-id)
+                           type (assoc :type type)))
+             do-toc #(db-search-toc-entries db-info query {:top-k top-k})
+             do-ents #(db-search-entities db-info query
+                        (cond-> {:top-k top-k}
+                          document-id (assoc :document-id document-id)
+                          type (assoc :type type)))]
+         (case in
+           :pages (do-pages)
+           :toc (do-toc)
+           :entities (do-ents)
+           {:pages (do-pages) :toc (do-toc) :entities (do-ents)}))
+       (if in [] {:pages [] :toc [] :entities []})))))
+
+(defn make-fetch-content-fn
   "Creates fetch-content — fetches content using Datalevin lookup ref syntax.
 
    Returns:
-     [:page.node/id id]    → content string (single node)
+     [:page.node/id id]    → content string
      [:document/id id]     → vector of ~4000 char page strings (chunked)
-     [:document.toc/id id] → TOC entry title/description string
+     [:document.toc/id id] → TOC entry description string
+     [:entity/id id]       → {:entity {...} :relationships [...]}
 
    The LLM stores results in variables:
      (def clause (fetch-content [:page.node/id \"abc\"]))
      (def doc (fetch-content [:document/id \"doc-1\"]))
      (count doc)      ;; number of pages
-     (nth doc 5)      ;; page 5 content"
+     (nth doc 5)      ;; page 5 content
+     (def p (fetch-content [:entity/id \"e1\"]))
+     (:entity p)      ;; entity map
+     (:relationships p) ;; connected entities"
   [db-info-atom]
   (fn fetch-content [lookup-ref]
     (when-let [{:keys [conn] :as db-info} @db-info-atom]
@@ -343,87 +330,14 @@
             (when-let [toc (db-get-toc-entry db-info id)]
               (or (:document.toc/description toc) (:document.toc/title toc) ""))
 
-            ;; Unknown attribute
+            :entity/id
+            (when-let [entity (db-get-entity db-info id)]
+              {:entity entity
+               :relationships (db-list-relationships db-info id {})})
+
             (throw (ex-info (str "fetch-content unknown lookup attribute: " attr
-                              ". Use :page.node/id, :document/id, or :document.toc/id")
+                              ". Use :page.node/id, :document/id, :document.toc/id, or :entity/id")
                      {:type :svar/invalid-lookup-ref :attr attr :id id}))))))))
-
-(defn make-list-page-nodes-fn
-  "Creates list-document-pages — list/filter document page nodes."
-  [db-info-atom]
-  (fn list-document-pages
-    ([] (list-document-pages {}))
-    ([opts]
-     (if-let [db-info @db-info-atom]
-       (db-list-page-nodes db-info opts)
-       []))))
-
-(defn make-list-documents-fn
-  "Creates a function for the LLM to list stored documents with abstracts and TOC."
-  [db-info-atom]
-  (fn list-documents
-    ([] (list-documents {}))
-    ([opts]
-     (if-let [db-info @db-info-atom]
-       (db-list-documents db-info opts)
-       []))))
-
-(defn make-get-document-fn
-  "Creates a function for the LLM to get a document by ID."
-  [db-info-atom]
-  (fn get-document [doc-id]
-    (when-let [db-info @db-info-atom]
-      (db-get-document db-info doc-id))))
-
-;; -----------------------------------------------------------------------------
-;; Document Entity SCI Functions (for LLM to search/get extracted entities)
-;; -----------------------------------------------------------------------------
-
-(defn make-search-entities-fn
-  "Creates search-document-entities — search extracted entities by name/description."
-  [db-info-atom]
-  (fn search-document-entities
-    ([query] (search-document-entities query 10))
-    ([query top-k] (search-document-entities query top-k {}))
-    ([query top-k opts]
-     (if-let [db-info @db-info-atom]
-       (db-search-entities db-info query (merge {:top-k top-k} opts))
-       []))))
-
-(defn make-get-entity-fn
-  "Creates get-document-entity — get an extracted entity by ID."
-  [db-info-atom]
-  (fn get-document-entity [entity-id]
-    (when-let [db-info @db-info-atom]
-      (db-get-entity db-info entity-id))))
-
-(defn make-list-entities-fn
-  "Creates list-document-entities — list extracted entities with optional filters."
-  [db-info-atom]
-  (fn list-document-entities
-    ([] (list-document-entities {}))
-    ([opts]
-     (if-let [db-info @db-info-atom]
-       (db-list-entities db-info opts)
-       []))))
-
-(defn make-list-relationships-fn
-  "Creates list-document-relationships — list relationships for an entity."
-  [db-info-atom]
-  (fn list-document-relationships
-    ([entity-id] (list-document-relationships entity-id {}))
-    ([entity-id opts]
-     (if-let [db-info @db-info-atom]
-       (db-list-relationships db-info entity-id opts)
-       []))))
-
-(defn make-entity-stats-fn
-  "Creates document-entity-stats — entity/relationship aggregate statistics."
-  [db-info-atom]
-  (fn document-entity-stats []
-    (if-let [db-info @db-info-atom]
-      (db-entity-stats db-info)
-      {:total-entities 0 :types {} :total-relationships 0})))
 
 (defn make-cite-fn
   "Creates CITE function for the LLM to cite claims with sources."
@@ -494,24 +408,9 @@
                        'days-between days-between 'date-plus-days date-plus-days
                        'date-minus-days date-minus-days 'date-format date-format 'today-str today-str}
         db-bindings (when db-info-atom
-                      {;; Document functions - list/get stored documents
-                       'list-documents (make-list-documents-fn db-info-atom)
-                       'get-document (make-get-document-fn db-info-atom)
-                       ;; Document page functions - search returns brief metadata, fetch-content fetches full content
-                       'search-document-pages (make-search-page-nodes-fn db-info-atom)
-                       'fetch-content (make-get-page-node-fn db-info-atom)
-                       'list-document-pages (make-list-page-nodes-fn db-info-atom)
-                       ;; Document TOC functions - table of contents
-                       'store-document-toc! (make-store-toc-entry-fn db-info-atom)
-                       'search-document-toc (make-search-toc-entries-fn db-info-atom)
-                       'get-document-toc-entry (make-get-toc-entry-fn db-info-atom)
-                       'list-document-toc (make-list-toc-entries-fn db-info-atom)
-                       ;; Document entity functions - extracted entities
-                       'search-document-entities (make-search-entities-fn db-info-atom)
-                       'get-document-entity (make-get-entity-fn db-info-atom)
-                       'list-document-entities (make-list-entities-fn db-info-atom)
-                       'list-document-relationships (make-list-relationships-fn db-info-atom)
-                       'document-entity-stats (make-entity-stats-fn db-info-atom)})
+                      {;; Unified document tools
+                       'search-documents (make-search-documents-fn db-info-atom)
+                       'fetch-content (make-fetch-content-fn db-info-atom)})
         all-bindings (merge SAFE_BINDINGS base-bindings db-bindings
                        (or custom-bindings {}))
         sci-ctx (sci/init {:namespaces {'user all-bindings
@@ -554,16 +453,9 @@
                             ['str-split "Split string by regex." '([s re])]
                             ['parse-date "Parse ISO date string to LocalDate." '([s])]
                             ['today-str "Today as ISO-8601 string." '([])]
-                             ;; Document tools (only if bound)
-                            ['list-documents "List ingested documents with abstracts and TOC." '([] [opts])]
-                            ['search-document-pages "Fulltext search across document pages. Returns brief metadata." '([query] [query top-k] [query top-k opts])]
-                            ['fetch-content "Fetch content by lookup ref. Returns content string or chunked vector." '([lookup-ref])]
-                            ['list-document-pages "List document page nodes with brief metadata." '([] [opts])]
-                            ['search-document-toc "Search table of contents by title." '([query] [query top-k])]
-                            ['list-document-toc "List TOC entries." '([] [opts])]
-                            ['search-document-entities "Search entities by name/description." '([query] [query top-k] [query top-k opts])]
-                            ['list-document-entities "List entities with filters." '([] [opts])]
-                            ['document-entity-stats "Entity statistics: types, counts, relationships." '([])]]]
+                             ;; Document navigation — 2 unified tools
+                            ['search-documents "Search across documents. No :in = search everywhere (pages+toc+entities).\n  (search-documents \"query\") → {:pages [...] :toc [...] :entities [...]}\n  (search-documents \"query\" {:in :pages})      ;; pages only\n  (search-documents \"query\" {:in :toc})        ;; TOC only\n  (search-documents \"query\" {:in :entities})   ;; entities only\n  Opts: :top-k :document-id :type" '([query] [query opts])]
+                            ['fetch-content "Fetch full content by lookup ref.\n  [:page.node/id \"id\"]    → page text\n  [:document/id \"id\"]     → vector of ~4K char pages\n  [:document.toc/id \"id\"] → TOC entry description\n  [:entity/id \"id\"]       → {:entity {...} :relationships [...]}" '([lookup-ref])]]]
       (when (sci/eval-string* sci-ctx (str "(resolve '" sym ")"))
         (sci/eval-string* sci-ctx
           (str "(def ^{:doc " (pr-str doc)

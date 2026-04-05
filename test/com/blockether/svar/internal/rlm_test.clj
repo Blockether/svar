@@ -333,39 +333,22 @@
 (defdescribe build-system-prompt-test
   (it "includes basic environment info"
     (let [prompt (#'rlm-core/build-system-prompt {})]
-      (expect (str/includes? prompt "<rlm_environment>"))
-      (expect (str/includes? prompt "available_tools"))
-      (expect (str/includes? prompt "FINAL"))))
+      (expect (str/includes? prompt "Clojure agent"))
+      (expect (str/includes? prompt "ARCHITECTURE"))
+      (expect (str/includes? prompt "final"))))
 
-  (it "excludes learning helpers but keeps FINAL guidance"
+  (it "excludes learning helpers"
     (let [prompt (#'rlm-core/build-system-prompt {})]
       (expect (not (str/includes? prompt "search-learnings")))
       (expect (not (str/includes? prompt "learning-stats")))
-      (expect (not (str/includes? prompt "list-learning-tags")))
-      (expect (not (str/includes? prompt ":learn")))))
+      (expect (not (str/includes? prompt "list-learning-tags")))))
 
-  (it "includes document entity tools section when has-documents?"
-    (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true})]
-      (expect (str/includes? prompt "document_entity_tools"))
-      (expect (str/includes? prompt "search-document-entities"))
-      (expect (str/includes? prompt "get-document-entity"))
-      (expect (str/includes? prompt "list-document-entities"))
-      (expect (str/includes? prompt "list-document-relationships"))
-      (expect (str/includes? prompt "document-entity-stats"))
-      (expect (str/includes? prompt "entity_schema"))
-      (expect (str/includes? prompt "relationship_schema"))))
-
-  (it "includes date and set helpers in compact format"
-    (let [prompt (#'rlm-core/build-system-prompt {})]
-      (expect (str/includes? prompt "parse-date"))
-      (expect (str/includes? prompt "days-between"))
-      (expect (str/includes? prompt "set-union"))
-      (expect (str/includes? prompt "set-intersection"))))
-
-  (it "includes entity check in workflow when has-documents?"
-    (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true})]
-      (expect (str/includes? prompt "(document-entity-stats)"))
-      (expect (str/includes? prompt "(search-document-entities"))))
+  (it "includes unified document tools section when has-documents?"
+    (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true :document-summary "1 document"})]
+      (expect (str/includes? prompt "DOCUMENTS"))
+      (expect (str/includes? prompt "search-documents"))
+      (expect (str/includes? prompt "fetch-content"))
+      (expect (str/includes? prompt ":entity/id"))))
 
   (it "includes spec schema when provided"
     (let [test-spec (svar/spec
@@ -375,7 +358,7 @@
                                    svar/REQUIRED true
                                    svar/DESCRIPTION "Name field"}))
           prompt (#'rlm-core/build-system-prompt {:output-spec test-spec})]
-      (expect (str/includes? prompt "expected_output_schema")))))
+      (expect (str/includes? prompt "OUTPUT SCHEMA")))))
 
 ;; =============================================================================
 ;; System Prompt Tests
@@ -383,11 +366,10 @@
 
 (defdescribe system-prompt-injection-test
   (describe "system prompt injection"
-    (it "includes <agent_instructions> when provided"
+    (it "includes custom instructions when provided"
       (let [prompt (#'rlm-core/build-system-prompt {:system-prompt "You are a code reviewer"})]
-        (expect (str/includes? prompt "<agent_instructions>"))
-        (expect (str/includes? prompt "You are a code reviewer"))
-        (expect (str/includes? prompt "</agent_instructions>"))))))
+        (expect (str/includes? prompt "INSTRUCTIONS"))
+        (expect (str/includes? prompt "You are a code reviewer"))))))
 
 ;; =============================================================================
 ;; Sub-RLM Tests
@@ -1496,50 +1478,31 @@
 ;; =============================================================================
 
 (defdescribe entity-bindings-test
-  (it "search-document-entities returns empty vector when no entities exist"
+  (it "search-documents with :in :entities returns empty vector when no entities exist"
     (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(search-document-entities \"party\")")]
+                         (let [result (#'rlm-core/execute-code env "(search-documents \"party\" {:in :entities})")]
                            (expect (nil? (:error result)))
                            (expect (= [] (:result result)))))))
 
-  (it "get-document-entity returns nil for non-existent entity"
+  (it "search-documents without :in returns map with empty collections"
     (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(get-document-entity (java.util.UUID/randomUUID))")]
+                         (let [result (#'rlm-core/execute-code env "(search-documents \"party\")")]
+                           (expect (nil? (:error result)))
+                           (expect (map? (:result result)))
+                           (expect (contains? (:result result) :pages))
+                           (expect (contains? (:result result) :toc))
+                           (expect (contains? (:result result) :entities))))))
+
+  (it "fetch-content returns nil for non-existent entity lookup"
+    (with-test-env* {} (fn [env]
+                         (let [result (#'rlm-core/execute-code env "(fetch-content [:entity/id (java.util.UUID/randomUUID)])")]
                            (expect (nil? (:error result)))
                            (expect (nil? (:result result)))))))
 
-  (it "list-document-entities returns empty vector when no entities exist"
-    (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(list-document-entities)")]
-                           (expect (nil? (:error result)))
-                           (expect (= [] (:result result)))))))
-
-  (it "list-document-entities accepts filter options"
-    (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(list-document-entities {:type :party :limit 10})")]
-                           (expect (nil? (:error result)))
-                           (expect (= [] (:result result)))))))
-
-  (it "document-entity-stats returns zero counts when no entities exist"
-    (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(document-entity-stats)")]
-                           (expect (nil? (:error result)))
-                           (expect (= {:total-entities 0 :types {} :total-relationships 0}
-                                     (:result result)))))))
-
-  (it "list-document-relationships returns empty vector for non-existent entity"
-    (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(list-document-relationships (java.util.UUID/randomUUID))")]
-                           (expect (nil? (:error result)))
-                           (expect (= [] (:result result)))))))
-
-  (it "document entity functions not available when db is disabled"
+  (it "document tools not available when db is disabled"
     (with-test-env* {} {:db false} (fn [env]
-                                     (let [result (#'rlm-core/execute-code env "(document-entity-stats)")]
-        ;; Should either error or return the fallback value
-                                       (expect (or (some? (:error result))
-                                                 (= {:total-entities 0 :types {} :total-relationships 0}
-                                                   (:result result)))))))))
+                                     (let [result (#'rlm-core/execute-code env "(search-documents \"x\")")]
+                                       (expect (some? (:error result))))))))
 
 (defdescribe inline-cite-test
   (it "CITE accumulates claims in claims-atom"
@@ -1652,12 +1615,11 @@
       (expect (= 0.5 (:claim/confidence (second @claims-atom))))
       (expect (false? (:claim/verified? (second @claims-atom))))))
 
-  (it "document-entity-stats returns zero counts on empty DB via full env"
+  (it "search-documents returns empty results on empty DB via full env"
     (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(document-entity-stats)")]
+                         (let [result (#'rlm-core/execute-code env "(search-documents \"x\" {:in :entities})")]
                            (expect (nil? (:error result)))
-                           (expect (= {:total-entities 0 :types {} :total-relationships 0}
-                                     (:result result))))))))
+                           (expect (= [] (:result result))))))))
 
 ;; =============================================================================
 ;; Real LLM Integration Tests for Knowledge Engine Features

@@ -75,7 +75,7 @@
       (when (re-find #"\(def\s+" all-code) (swap! score + 2))
       (when (re-find #"\((?:llm-query|rlm-query)\s" all-code) (swap! score + 3))
       (when (re-find #"\(llm-query-batch\s" all-code) (swap! score + 2))
-      (when (re-find #"\((?:search-document-pages|search-document-toc|search-document-entities)\s" all-code) (swap! score + 1))
+      (when (re-find #"\((?:search-documents|fetch-content)\s" all-code) (swap! score + 1))
       (when (and (pos? max-iterations) (< iter-count (/ max-iterations 2))) (swap! score + 2))
       (when (> error-count 2) (swap! score - 2))
       (when-let [last-iter (last iterations)]
