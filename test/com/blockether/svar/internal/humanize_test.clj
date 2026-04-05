@@ -354,11 +354,7 @@
   (describe "custom patterns"
     (it "works with :patterns key"
       (expect (= "world"
-                (sut/humanize-string "hello" {:patterns {"hello" "world"}}))))
-
-    (it "legacy raw map still works"
-      (expect (= "world"
-                (sut/humanize-string "hello" {"hello" "world"}))))))
+                (sut/humanize-string "hello" {:patterns {"hello" "world"}}))))))
 
 ;; =============================================================================
 ;; T5: Exclusion zones
@@ -473,10 +469,6 @@
 
     (it "passes custom patterns through"
       (let [result (sut/humanize-data {:msg "hello"} {:patterns {"hello" "world"}})]
-        (expect (= "world" (:msg result)))))
-
-    (it "legacy raw map still works"
-      (let [result (sut/humanize-data {:msg "hello"} {"hello" "world"})]
         (expect (= "world" (:msg result)))))))
 
 ;; =============================================================================

@@ -33,9 +33,8 @@
      `make-router` so users can require only this namespace.
    
    Configuration:
-   LLM calls route automatically by default. You can still pass :config for backward compatibility,
-   but explicit config wiring is optional.
-   
+   LLM calls route automatically via the default router.
+
     Example:
      (ask! {:spec my-spec
             :messages [(system \"Help the user.\")
@@ -339,12 +338,6 @@
   humanize/humanizer)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
-(def HUMANIZE_DEFAULT_PATTERNS
-  "Default patterns for AI phrase humanization (safe + aggressive combined).
-   Preserved for backward compatibility."
-  humanize/DEFAULT_PATTERNS)
-
-#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def HUMANIZE_SAFE_PATTERNS
   "Safe humanization patterns: AI identity, refusal, knowledge, punctuation.
    These are unambiguously AI artifacts, safe for arbitrary text."
@@ -572,12 +565,11 @@
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def load-index
   "Load an indexed document from a .pageindex directory.
-   
+
    Reads the EDN + PNG files produced by `index!` and returns the document map.
-   Also supports loading legacy formats for backward compatibility.
-   
+
    Example:
      (svar/load-index \"docs/manual.pageindex\")
-   
+
    See internal.rlm for details."
   rlm/load-index)

@@ -453,8 +453,7 @@
     CLOSING_CLICHE_PATTERNS))
 
 (def DEFAULT_PATTERNS
-  "Combined map of all humanization patterns (safe + aggressive).
-   Preserved for backward compatibility."
+  "Combined map of all humanization patterns (safe + aggressive)."
   (merge SAFE_PATTERNS AGGRESSIVE_PATTERNS))
 
 ;; ============================================================================
@@ -621,35 +620,21 @@
    Uses boundary-aware matching to prevent false positives inside longer words.
    Protects code blocks, inline code, and URLs from modification.
    
-   Two calling conventions:
-   
+   Calling conventions:
+
    (humanize-string s)                        ;; safe patterns only (default)
    (humanize-string s {:aggressive? true})    ;; all patterns
    (humanize-string s {:patterns custom-map}) ;; custom pattern map
-   
-   Legacy 2-arity still supported for backward compatibility:
-   (humanize-string s pattern-map)            ;; uses provided map directly
-   
+
    Returns:
    String. The humanized text. Non-string inputs returned unchanged."
   ([s] (humanize-string s {}))
-  ([s opts-or-patterns]
+  ([s opts]
    (if-not (string? s)
      s
      (let [patterns (cond
-                      ;; opts map with :patterns key
-                      (and (map? opts-or-patterns) (contains? opts-or-patterns :patterns))
-                      (:patterns opts-or-patterns)
-                      ;; opts map with :aggressive? flag
-                      (and (map? opts-or-patterns) (:aggressive? opts-or-patterns))
-                      DEFAULT_PATTERNS
-                      ;; opts map (empty = safe only)
-                      (and (map? opts-or-patterns) (empty? opts-or-patterns))
-                      SAFE_PATTERNS
-                      ;; legacy: raw pattern map passed directly
-                      (map? opts-or-patterns)
-                      opts-or-patterns
-                      ;; fallback
+                      (contains? opts :patterns) (:patterns opts)
+                      (:aggressive? opts) DEFAULT_PATTERNS
                       :else SAFE_PATTERNS)
            sorted-patterns (sort-by (comp - count key) patterns)]
        (apply-with-exclusions
@@ -671,18 +656,18 @@
    
    Params:
    `data` - Any. The data structure to humanize.
-   `opts-or-patterns` - Map, optional. Either an opts map or a pattern map.
+   `opts` - Map, optional. Either an opts map or a pattern map.
    
    Returns:
    Any. The data structure with all strings humanized."
   ([data] (humanize-data data {}))
-  ([data opts-or-patterns]
+  ([data opts]
    (cond
-     (string? data) (humanize-string data opts-or-patterns)
-     (map? data) (into {} (map (fn [[k v]] [k (humanize-data v opts-or-patterns)]) data))
-     (vector? data) (mapv #(humanize-data % opts-or-patterns) data)
-     (list? data) (apply list (map #(humanize-data % opts-or-patterns) data))
-     (set? data) (into #{} (map #(humanize-data % opts-or-patterns) data))
+     (string? data) (humanize-string data opts)
+     (map? data) (into {} (map (fn [[k v]] [k (humanize-data v opts)]) data))
+     (vector? data) (mapv #(humanize-data % opts) data)
+     (list? data) (apply list (map #(humanize-data % opts) data))
+     (set? data) (into #{} (map #(humanize-data % opts) data))
      :else data)))
 
 (defn humanizer

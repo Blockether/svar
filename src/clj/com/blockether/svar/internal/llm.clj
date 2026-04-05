@@ -236,7 +236,7 @@
   "Calls the LLM API with exponential backoff retry for rate limits."
   [messages model api-key base-url retry-opts timeout-ms extra-body]
   (let [request-body (build-request-body messages model extra-body)
-        body-size (count (str request-body))
+        input-tokens (router/count-messages model messages)
         ;; Ensure URL has /chat/completions endpoint
         chat-url (if (str/ends-with? base-url "/chat/completions")
                    base-url
@@ -244,7 +244,7 @@
         _ (trove/log! {:level :info :id ::llm-request
                        :data {:model model
                               :msg-count (count messages)
-                              :body-size-k (format "%.1fK" (/ body-size 1000.0))
+                              :input-tokens input-tokens
                               :timeout-ms timeout-ms
                               :max-tokens (:max_tokens extra-body)}
                        :msg "LLM request"})]
@@ -509,8 +509,8 @@
    If :provider-id is present, uses provider-scoped pricing/context overlays."
   [router {:keys [model timeout-ms check-context? output-reserve api-key base-url provider-id]}]
   (let [{:keys [network tokens]} router
-        default-pricing (or (:pricing tokens) router/DEFAULT_MODEL_PRICING)
-        default-context-limits (or (:context-limits tokens) router/DEFAULT_CONTEXT_LIMITS)
+        default-pricing (or (:pricing tokens) router/MODEL_PRICING)
+        default-context-limits (or (:context-limits tokens) router/MODEL_CONTEXT_LIMITS)
         pricing (if provider-id
                   (assoc default-pricing model (router/provider-model-pricing provider-id model))
                   default-pricing)
@@ -578,12 +578,6 @@
               (:on-chunk opts)
               (assoc :on-chunk (:on-chunk opts)))))))))
 
-(defn sanitize-config
-  [config]
-  (update config :providers
-    (fn [providers]
-      (mapv #(dissoc % :api-key) providers))))
-
 ;; =============================================================================
 ;; ask!* - Low-level structured output (primitive, no routing)
 ;; =============================================================================
@@ -606,9 +600,7 @@
        :provider - keyword, override specific provider
        :model - string, override specific model
        :on-transient-error - :hybrid (default), :auto-route-cross-providers,
-                             :fallback-model-in-the-same-provider, :fail
-
-     Legacy (deprecated): :strategy, :prefer, :capabilities"
+                             :fallback-model-in-the-same-provider, :fail"
   [router opts]
   (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
     (router/with-provider-fallback

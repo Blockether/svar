@@ -3,10 +3,6 @@
    
    Provides:
    - `image->base64` - Convert BufferedImage to base64 PNG string
-   - `image->bytes` - Convert BufferedImage to PNG byte array
-   - `image->bytes-region` - Extract and convert a bounding-box region to PNG bytes
-   - `extract-image-region` - Crop a BufferedImage to a bounding-box region
-   - `scale-and-clamp-bbox` - Scale and clamp bounding box coordinates to image dimensions
    - `extract-text-from-image` - Extract structured nodes from a single BufferedImage (vision)
    - `extract-text-from-pdf` - Extract structured nodes from all pages of a PDF (vision)
    - `extract-text-from-text-file` - Extract from text/markdown file (LLM, no image rendering)
@@ -41,30 +37,21 @@
   "Default vision model for text extraction."
   "glm-4.6v")
 
-(def BBOX_COORDINATE_SCALES
-  "Bounding box coordinate scale factors by model.
-   
-   Vision models return bbox coordinates in different formats:
-   - Some use normalized coordinates (0-1000, 0-1, etc.)
-   - Some use actual pixel coordinates (nil = no scaling needed)
-   
-   This map defines the normalization scale for each model.
-   If a model returns coords in 0-N range, set scale to N.
-   If a model returns actual pixels, set to nil."
-  {"glm-4.6v"       1000   ; GLM-4.6V uses 0-1000 normalized coordinates
-   "glm-4.6v-flash" 1000   ; GLM-4.6V-Flash likely same as GLM-4.6V
-   "glm-4.6v-flashx" 1000  ; GLM-4.6V-FlashX likely same
-   "gpt-4o"         nil    ; GPT-4o uses actual pixel coordinates
-   "gpt-4-turbo"    nil    ; GPT-4-Turbo uses actual pixels
-   "claude-3-opus"  nil    ; Claude uses actual pixels
-   "claude-3-sonnet" nil})
-
 (def DEFAULT_VISION_OBJECTIVE
   "Default system prompt for vision-based text extraction."
   "You are an expert document analyzer. Extract document content as typed nodes with hierarchical structure.
 
 Your task is to parse the document into semantic nodes, preserving both reading order AND document hierarchy.
 Use parent-id to link content to its parent section. This creates a tree structure from a flat list.
+
+ABSOLUTE FIDELITY — DO NOT ADD ANYTHING:
+- Extract ONLY what is physically present on the page. Never invent, infer, paraphrase, summarize, or complete missing content.
+- Do NOT add words, sentences, headings, paragraphs, list items, table rows, or footnotes that do not literally appear on the page.
+- Do NOT expand abbreviations, correct typos, normalize punctuation, or translate text.
+- Do NOT merge, rephrase, or interpret what the author wrote — copy the exact wording and order.
+- If content is cut off at a page boundary, set continuation=true and copy only the visible text as-is; do NOT guess the rest.
+- If a field is not visible or not applicable, leave it null. Never fabricate values.
+- Section/Image/Table `description` fields must describe ONLY what is shown — no speculation, no outside knowledge, no editorializing.
 
 NODE TYPES:
 
@@ -193,19 +180,6 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   (let [baos (ByteArrayOutputStream.)]
     (ImageIO/write image "PNG" baos)
     (.encodeToString (Base64/getEncoder) (.toByteArray baos))))
-
-(defn image->bytes
-  "Converts a BufferedImage to raw PNG bytes.
-   
-   Params:
-   `image` - BufferedImage. The image to convert.
-   
-   Returns:
-   byte[]. Raw PNG bytes."
-  [^BufferedImage image]
-  (let [baos (ByteArrayOutputStream.)]
-    (ImageIO/write image "PNG" baos)
-    (.toByteArray baos)))
 
 (defn- rotate-image
   "Rotates a BufferedImage by the specified degrees clockwise.
@@ -660,92 +634,6 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   "Default timeout for vision LLM requests (6 minutes per image).
    Vision models processing images can take longer than text-only requests."
   360000)
-
-(def ^:private BBOX_PADDING_PX
-  "Padding in pixels to add around image bounding boxes.
-   Prevents cropping from trimming edges of detected images."
-  4)
-
-(defn scale-and-clamp-bbox
-  "Scales bounding box from model coordinates to pixel coordinates,
-   adds padding, then clamps to valid image dimensions.
-   
-   Different vision models return bbox in different formats:
-   - GLM-4.6V: normalized 0-1000 coordinates
-   - GPT-4o/Claude: actual pixel coordinates
-   
-   Params:
-   `bbox` - Vector of [xmin, ymin, xmax, ymax] in model coordinates.
-   `width` - Integer. Image width in pixels.
-   `height` - Integer. Image height in pixels.
-   `bbox-scale` - Integer or nil. If set, coords are in 0-N normalized space
-                  and will be scaled to pixels. If nil, coords are already pixels.
-   
-   Returns:
-   Vector of [xmin, ymin, xmax, ymax] in actual pixels with padding, clamped to valid range,
-   or nil if invalid."
-  [bbox width height bbox-scale]
-  (when (and bbox (= 4 (count bbox)))
-    (let [[raw-xmin raw-ymin raw-xmax raw-ymax] bbox
-          width (long width)
-          height (long height)
-          ;; Scale from normalized to actual pixel coordinates (if scale is set)
-          [xmin ymin xmax ymax] (if bbox-scale
-                                  (let [bbox-scale (double bbox-scale)]
-                                    [(int (* (double raw-xmin) (/ (double width) bbox-scale)))
-                                     (int (* (double raw-ymin) (/ (double height) bbox-scale)))
-                                     (int (* (double raw-xmax) (/ (double width) bbox-scale)))
-                                     (int (* (double raw-ymax) (/ (double height) bbox-scale)))])
-                                  (mapv int [raw-xmin raw-ymin raw-xmax raw-ymax]))
-          ;; Add padding (expand the box outward)
-          xmin (- (long xmin) BBOX_PADDING_PX)
-          ymin (- (long ymin) BBOX_PADDING_PX)
-          xmax (+ (long xmax) BBOX_PADDING_PX)
-          ymax (+ (long ymax) BBOX_PADDING_PX)
-          ;; Clamp to valid range (padding may have pushed outside bounds)
-          xmin (max 0 (min xmin width))
-          ymin (max 0 (min ymin height))
-          xmax (max 0 (min xmax width))
-          ymax (max 0 (min ymax height))]
-      ;; Ensure we have a valid box (positive dimensions)
-      (when (and (< xmin xmax) (< ymin ymax))
-        [xmin ymin xmax ymax]))))
-
-(defn extract-image-region
-  "Extracts a region from a BufferedImage and returns it as base64.
-   
-   Params:
-   `image` - BufferedImage. The source image.
-   `bbox` - Vector of [xmin, ymin, xmax, ymax] in PIXEL coordinates (already scaled).
-   
-   Returns:
-   String. Base64-encoded PNG of the cropped region, or nil if bbox is invalid."
-  [^BufferedImage image bbox]
-  (when (and bbox (= 4 (count bbox)))
-    (let [[xmin ymin xmax ymax] (map int bbox)
-          width (- (long xmax) (long xmin))
-          height (- (long ymax) (long ymin))]
-      (when (and (pos? width) (pos? height))
-        (let [cropped (.getSubimage image (int xmin) (int ymin) (int width) (int height))]
-          (image->base64 cropped))))))
-
-(defn image->bytes-region
-  "Extracts a region from a BufferedImage and returns it as PNG bytes.
-   
-   Params:
-   `image` - BufferedImage. The source image.
-   `bbox` - Vector of [xmin, ymin, xmax, ymax] in PIXEL coordinates (already scaled).
-   
-   Returns:
-   byte[]. PNG bytes of the cropped region, or nil if bbox is invalid."
-  [^BufferedImage image bbox]
-  (when (and bbox (= 4 (count bbox)))
-    (let [[xmin ymin xmax ymax] (map int bbox)
-          width (- (long xmax) (long xmin))
-          height (- (long ymax) (long ymin))]
-      (when (and (pos? width) (pos? height))
-        (let [cropped (.getSubimage image (int xmin) (int ymin) (int width) (int height))]
-          (image->bytes cropped))))))
 
 (defn- visual-node?
   "Checks if a node is a visual node (Image or Table) by presence of :page.node/kind field."
@@ -1518,7 +1406,7 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
    
    Returns:
    String. The inferred document title, or nil if cannot be inferred."
-  [pages {:keys [rlm-router timeout-ms]
+  [pages {:keys [rlm-router text-model timeout-ms]
           :or {timeout-ms 30000}}]
   (let [;; Collect relevant content for title inference
         all-nodes (mapcat :page/nodes pages)
@@ -1561,7 +1449,9 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                                       (llm/user (str "Based on the following document content, infer the document's title. "
                                                                   "Return the most likely title - it should be concise and descriptive.\n\n"
                                                                   context))]
-                                           :routing {:optimize :cost}
+                                           :routing (if text-model
+                                                      {:model text-model}
+                                                      {:optimize :cost})
                                            :check-context? false
                                            :timeout-ms timeout-ms})]
         (get-in response [:result :title])))))

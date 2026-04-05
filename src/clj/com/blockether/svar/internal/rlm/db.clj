@@ -153,22 +153,6 @@
       (sort-by (juxt :level :page))
       vec)))
 
-(defn db-get-document
-  "Gets a document by ID with abstract and TOC.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `doc-id` - String. Document ID.
-
-   Returns:
-   Document map with :document/toc (formatted list) or nil."
-  [{:keys [conn] :as db-info} doc-id]
-  (when conn
-    (let [doc (d/pull (d/db conn) '[*] [:document/id doc-id])]
-      (when (:db/id doc)
-        (-> (dissoc doc :db/id)
-          (assoc :document/toc (get-document-toc db-info doc-id)))))))
-
 (defn db-list-documents
   "Lists all stored documents with abstracts and TOC summaries.
 
@@ -577,28 +561,6 @@
                   :relationship/target-entity-id (:relationship/target-entity-id r)
                   :relationship/description (when-not (= "" (str (:relationship/description r)))
                                               (:relationship/description r))})))))))
-
-(defn db-entity-stats
-  "Gets entity and relationship statistics.
-
-   Params:
-   `db-info` - Map with :conn key.
-
-   Returns:
-   Map with :total-entities, :types (map of type->count), :total-relationships."
-  [{:keys [conn]}]
-  (if conn
-    (let [entities (d/q '[:find [(pull ?e [:entity/type]) ...]
-                          :where [?e :entity/id _]]
-                     (d/db conn))
-          types-map (frequencies (map :entity/type entities))
-          rel-count (count (d/q '[:find ?e
-                                  :where [?e :relationship/id _]]
-                             (d/db conn)))]
-      {:total-entities (count entities)
-       :types types-map
-       :total-relationships rel-count})
-    {:total-entities 0 :types {} :total-relationships 0}))
 
 ;; -----------------------------------------------------------------------------
 ;; Final Result Persistence

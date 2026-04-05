@@ -1782,7 +1782,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
    
    Returns:
    String. Document abstract, or nil if no section descriptions found."
-  [pages {:keys [rlm-router]}]
+  [pages {:keys [rlm-router text-model]}]
   (let [descriptions (collect-section-descriptions pages)]
     (when (seq descriptions)
       (trove/log! {:level :info :data {:section-count (count descriptions)}
@@ -1790,10 +1790,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
       (let [;; Combine all descriptions into a single text for summarization
             combined-text (str/join "\n\n" descriptions)
              ;; Target ~150 words for document abstract
-            abstracts (llm/abstract! rlm-router {:text combined-text
-                                                 :strategy :root
-                                                 :target-length 150
-                                                 :iterations 3})]
+            abstracts (llm/abstract! rlm-router (cond-> {:text combined-text
+                                                         :strategy :root
+                                                         :target-length 150
+                                                         :iterations 3}
+                                                  text-model (assoc :routing {:model text-model})))]
         (when-let [iterations (seq (:result abstracts))]
           (let [abstract (:summary (last iterations))]
             (trove/log! {:level :info :data {:abstract-length (count abstract)}
@@ -2063,12 +2064,16 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (trove/log! {:level :info :data {:file file-path}
                  :msg "Starting text extraction from file"})
     (let [page-list-all (extract-text file-path (merge opts vision-opts))
-          ;; Step 0: Filter pages if :pages specified (safety net — vision layer
-          ;; already skips LLM calls for excluded pages, but this handles non-PDF
-          ;; extractors and stubbed extract-text in tests)
-          page-set (when-let [pages (:pages opts)]
-                     (normalize-page-spec pages (count page-list-all)))
-          page-list-raw (filter-pages page-list-all page-set)
+          ;; Step 0: Filter pages if :pages specified (safety net for non-PDF
+          ;; extractors and stubbed extract-text in tests). For PDFs, the vision
+          ;; layer has already filtered — re-filtering against the shrunken list
+          ;; would misinterpret the user's :pages spec, so skip it.
+          pdf? (= :pdf (file-type file-path))
+          page-set (when (and (not pdf?) (:pages opts))
+                     (normalize-page-spec (:pages opts) (count page-list-all)))
+          page-list-raw (if pdf?
+                          page-list-all
+                          (filter-pages page-list-all page-set))
            ;; Step 1: Translate local IDs to global UUIDs
           page-list-uuids (translate-all-ids page-list-raw)
           ;; Step 2: Group continuation nodes across pages
@@ -2114,12 +2119,14 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                   pages))
                               pages)
            ;; Step 3: Generate document abstract from section descriptions
-          abstract-opts {:rlm-router router}
+          text-model (:text-model opts)
+          abstract-opts {:rlm-router router :text-model text-model}
           document-abstract (generate-document-abstract pages-with-images abstract-opts)
            ;; Step 4: Infer title if not in metadata
           metadata-title (:title file-metadata)
           inferred-title (when-not metadata-title
-                           (vision/infer-document-title pages {:rlm-router router}))
+                           (vision/infer-document-title pages (cond-> {:rlm-router router}
+                                                                text-model (assoc :text-model text-model))))
           final-title (or metadata-title inferred-title)
           now (Instant/now)]
       (trove/log! {:level :info :data {:document/name doc-name
@@ -2402,10 +2409,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
    Returns map with :document, :output-path, :cached?, :pages-processed, :errors-count."
   ([file-path] (index! file-path {}))
-  ([file-path {:keys [output vision-model parallel parallel-refine
+  ([file-path {:keys [router output vision-model parallel parallel-refine
                       refine? refine-model refine-iterations
                       refine-threshold refine-sample-size pages
-                      config force?]}]
+                      force?]}]
    (let [abs-path (ensure-absolute file-path)
          output-path (or output (derive-index-path abs-path))
          _ (when-not (fs/exists? abs-path)
@@ -2420,11 +2427,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                needs-full-reindex? (or force? (not hash-match?))
                file-type* (file-type abs-path)
                total-pages-hint (or (:total-pages existing-manifest)
-                                  (when (and (not pages) (= :pdf file-type*))
+                                  (when (= :pdf file-type*)
                                     (pdf/page-count abs-path))
-                                  (when (and (not pages) (= :markdown file-type*))
+                                  (when (= :markdown file-type*)
                                     (count (markdown/markdown-file->pages abs-path)))
-                                  (when (and (not pages) (#{:text :image} file-type*))
+                                  (when (#{:text :image} file-type*)
                                     1))
                user-page-set (when (and pages total-pages-hint)
                                (normalize-page-spec pages total-pages-hint))
@@ -2473,7 +2480,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                  (when (and existing-manifest hash-match? (not force?))
                                    (select-keys existing-manifest [:last-successful-index-at]))))
                common-index-opts (cond-> {}
-                                   config (assoc :config config)
                                    vision-model (assoc :model vision-model)
                                    parallel (assoc :parallel parallel)
                                    parallel-refine (assoc :parallel-refine parallel-refine)
@@ -2561,7 +2567,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                               eta-ms (assoc :eta-ms eta-ms))
                                       :msg (format "Indexing page %d/%d (%d%%)" (inc n) total-to-process progress-pct)})
                          (try
-                           (let [doc (build-index abs-path (assoc common-index-opts :pages page-num))
+                           (let [doc (build-index router abs-path (assoc common-index-opts :pages page-num))
                                  page (first (:document/pages doc))
                                  now (str (Instant/now))
                                  page-elapsed (- (System/currentTimeMillis) t0)]
@@ -2619,8 +2625,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                                    page-num (ex-message e) @errors-count)})))))))
              ;; Fallback: file types without per-page tracking (e.g. unknown extensions)
                    (try
-                     (let [doc (build-index abs-path (cond-> common-index-opts
-                                                       pages (assoc :pages pages)))
+                     (let [doc (build-index router abs-path (cond-> common-index-opts
+                                                              pages (assoc :pages pages)))
                            now (str (Instant/now))]
                        (swap! metadata-atom merge
                          (select-keys doc [:document/name :document/title :document/abstract
@@ -2693,19 +2699,17 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
 (defn load-index
   "Load an indexed document from a pageindex directory (EDN + PNG files).
-   
-   Also supports loading legacy Nippy files for backward compatibility.
-   
+
    Params:
-   `index-path` - String. Path to the pageindex directory or legacy .nippy file.
-   
+   `index-path` - String. Path to the pageindex directory.
+
    Returns:
    The RLM document map.
-   
+
    Throws:
-   - ex-info if path not found
+   - ex-info if path not found or not a directory
    - ex-info if document fails spec validation
-   
+
    Example:
    (load-index \"docs/manual.pageindex\")"
   [index-path]
@@ -2713,13 +2717,12 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (when-not (fs/exists? abs-path)
       (trove/log! {:level :error :data {:path abs-path} :msg "Index path not found"})
       (anomaly/not-found! "Index path not found" {:type :svar.pageindex/index-not-found :path abs-path}))
+    (when-not (fs/directory? abs-path)
+      (anomaly/incorrect! "Index path must be a pageindex directory"
+        {:type :svar.pageindex/invalid-path :path abs-path}))
 
     (trove/log! {:level :debug :data {:path abs-path} :msg "Loading index"})
-    (let [document (if (fs/directory? abs-path)
-                     ;; New format: directory with document.edn + images/
-                     (read-document-edn abs-path)
-                     ;; Legacy: could be a plain EDN file
-                     (fast-edn/read-once (io/file abs-path)))]
+    (let [document (read-document-edn abs-path)]
 
       ;; Validate the document - throw on failure
       (when-not (schema/valid-document? document)

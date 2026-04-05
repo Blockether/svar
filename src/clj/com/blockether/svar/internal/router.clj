@@ -187,15 +187,6 @@
       {} KNOWN_PROVIDER_MODELS)
     :default {:input 5.0 :output 15.0}))
 
-;; Aliases for backward compatibility within the codebase
-(def DEFAULT_CONTEXT_LIMITS
-  "Context window sizes derived from KNOWN_PROVIDER_MODELS. Single source of truth."
-  MODEL_CONTEXT_LIMITS)
-
-(def DEFAULT_MODEL_PRICING
-  "Model pricing derived from KNOWN_PROVIDER_MODELS. Single source of truth."
-  MODEL_PRICING)
-
 ;; =============================================================================
 ;; Configuration Defaults
 ;; =============================================================================
@@ -337,7 +328,7 @@
    Returns:
    Integer. Maximum context tokens."
   (^long [^String model]
-   (context-limit model DEFAULT_CONTEXT_LIMITS))
+   (context-limit model MODEL_CONTEXT_LIMITS))
   (^long [^String model context-limits]
    (or (get context-limits model)
        ;; Try partial matching for versioned model names
@@ -517,11 +508,23 @@
 (defn- resolve-model
   "Returns the best model map for a provider given preferences, or nil.
    :prefer can be a keyword (:cost, :intelligence, :speed) or a vector of keywords
-   for multi-criteria sorting, e.g. [:cost :speed] = cheapest first, then fastest."
+   for multi-criteria sorting, e.g. [:cost :speed] = cheapest first, then fastest.
+
+   Precedence:
+     1. :force-model  — exact model name, honored across all strategies.
+     2. :strategy :root with no force — provider's root (first) model.
+     3. :prefer / :capabilities — filtered & sorted candidate selection."
   [provider prefs]
-  (if (= (:strategy prefs) :root)
+  (cond
+    ;; Explicit force-model wins regardless of strategy.
+    (:force-model prefs)
+    (first (filter #(= (:name %) (:force-model prefs)) (:models provider)))
+
+    (= (:strategy prefs) :root)
     (let [root-name (:root provider)]
       (first (filter #(= (:name %) root-name) (:models provider))))
+
+    :else
     (let [required-caps (or (:capabilities prefs) #{})
           exclude (:exclude-model prefs)
           candidates (->> (:models provider)
@@ -712,9 +715,9 @@
                                 (:network opts))
       :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
                                                  (if (some? cc) cc true))
-                               :pricing (merge DEFAULT_MODEL_PRICING
+                               :pricing (merge MODEL_PRICING
                                           (:pricing (:tokens opts)))
-                               :context-limits (merge DEFAULT_CONTEXT_LIMITS
+                               :context-limits (merge MODEL_CONTEXT_LIMITS
                                                  (:context-limits (:tokens opts)))
                                :output-reserve (:output-reserve (:tokens opts))}
       :clock                  (get opts :clock #(System/currentTimeMillis))
@@ -769,30 +772,6 @@
      :error-strategy error-strategy}))
 
 ;; =============================================================================
-;; Provider-agnostic accessors (legacy / fallbacks)
-;; =============================================================================
-
-(defn model-pricing [model-name]
-  (or (get MODEL_PRICING model-name)
-    (:default MODEL_PRICING)))
-
-(defn model-capabilities [model-name]
-  (or (:capabilities (get KNOWN_MODEL_METADATA model-name))
-    #{:chat}))
-
-;; =============================================================================
-;; Configuration Defaults
-;; =============================================================================
-
-(def DEFAULT_MODEL
-  "Default LLM model. No hardcoded fallback."
-  nil)
-
-(def DEFAULT_BASE_URL
-  "Default OpenAI API base URL."
-  "https://api.openai.com/v1")
-
-;; =============================================================================
 ;; Token Encoding Registry
 ;; =============================================================================
 
@@ -819,7 +798,7 @@
   (^long [^String model]
    (max-input-tokens model {}))
   (^long [^String model {:keys [output-reserve trim-ratio context-limits]}]
-   (let [limit (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS))
+   (let [limit (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
          effective-reserve (or output-reserve DEFAULT_OUTPUT_RESERVE)]
      (if trim-ratio
        (long (* limit (double trim-ratio)))
@@ -1019,7 +998,7 @@
   "Gets pricing for a model, with fallback to default.
    Handles model name variations by checking for partial matches."
   ([^String model]
-   (get-model-pricing model DEFAULT_MODEL_PRICING))
+   (get-model-pricing model MODEL_PRICING))
   ([^String model pricing]
    (or (get pricing model)
      (some (fn [[k v]]
@@ -1031,7 +1010,7 @@
 (defn estimate-cost
   "Estimates the cost in USD for a given token count."
   ([^String model ^long input-tokens ^long output-tokens]
-   (estimate-cost model input-tokens output-tokens DEFAULT_MODEL_PRICING))
+   (estimate-cost model input-tokens output-tokens MODEL_PRICING))
   ([^String model ^long input-tokens ^long output-tokens pricing-map]
    (let [pricing (get-model-pricing model pricing-map)
          input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing)))
@@ -1058,7 +1037,7 @@
          cached-tokens (long (or (get-in api-usage [:prompt_tokens_details :cached_tokens]) 0))
          total-tokens (+ input-tokens output-tokens)
          cost (estimate-cost model input-tokens output-tokens
-                (or pricing DEFAULT_MODEL_PRICING))]
+                (or pricing MODEL_PRICING))]
      {:input-tokens input-tokens
       :output-tokens output-tokens
       :reasoning-tokens reasoning-tokens
@@ -1124,7 +1103,7 @@
   ([^String model messages]
    (check-context-limit model messages {}))
   ([^String model messages {:keys [output-reserve throw? context-limits] :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
-   (let [ctx-limit (context-limit model (or context-limits DEFAULT_CONTEXT_LIMITS))
+   (let [ctx-limit (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
          effective-reserve (long output-reserve)
          max-input (- ctx-limit effective-reserve)
          input-tokens (count-messages model messages)

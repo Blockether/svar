@@ -157,9 +157,3 @@
       (let [ps (get @(:state r) :openai)]
         (expect (= :closed (:cb-state ps)))
         (expect (= 0 (:cb-failures ps)))))))
-
-(defdescribe default-model-test
-  "Tests for DEFAULT_MODEL — no hardcoded fallback"
-
-  (it "DEFAULT_MODEL is nil (no hardcoded fallback)"
-    (expect (nil? defaults/DEFAULT_MODEL))))
