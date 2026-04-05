@@ -1,6 +1,0 @@
-2026-04-04T19:26:44.505027007Z :info com.blockether.svar.internal.rlm.routing [32 10] ::sub-llm-call Sub-LLM call (llm-query) 
-  data: {:depth 1, :prompt-len 12, :routing {:strategy :root}, :has-spec false}
-2026-04-04T19:26:44.506107561Z :info com.blockether.svar.internal.llm [244 11] ::llm-request LLM request 
-  data: {:model "gpt-4o", :msg-count 1, :body-size-k "0.1K", :timeout-ms 300000, :max-tokens 2048}
-2026-04-04T19:26:44.509756947Z :warn com.blockether.svar.internal.rlm.routing [17 9] llm-query failed 
-  data: {:error nil, :prefs {:strategy :root}}
