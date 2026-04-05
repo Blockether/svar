@@ -2,9 +2,9 @@
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
    [sci.core :as sci]
-   [com.blockether.svar.internal.rlm.core :as core]))
+   [com.blockether.svar.internal.paren-repair :as paren-repair]))
 
-(def sanitize-code #'core/sanitize-code)
+(def sanitize-code paren-repair/repair-code)
 
 (defn- eval-sanitized
   "Sanitize code then eval in SCI. Returns result or {:error msg}."

@@ -15,6 +15,7 @@
             EVAL_TIMEOUT_MS
             bytes->base64 *rlm-ctx*]]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value build-var-index]]
+   [com.blockether.svar.internal.paren-repair :as paren-repair]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
@@ -80,92 +81,62 @@
 ;; Code Execution
 ;; =============================================================================
 
-(defn- sanitize-code
-  "Fix common delimiter mismatches from LLM-generated code.
-   1. Strips trailing unmatched } ] ) that cause parse errors.
-   2. Appends missing closing delimiters in correct order.
-   Handles whitespace between valid code and extra delimiters.
-   Safe for multi-form code (def, if, do, defn etc.)."
-  [code]
-  (let [s (str/trim code)]
-    (if (str/blank? s)
-      ""
-      (let [;; Phase 1: strip trailing unmatched closers
-            stripped (loop [s s]
-                       (let [trimmed (str/trimr s)
-                             last-ch (when (pos? (count trimmed)) (nth trimmed (dec (count trimmed))))
-                             opens  (frequencies (filter #{\( \[ \{} trimmed))
-                             closes (frequencies (filter #{\) \] \}} trimmed))
-                             extra-close (fn [o c] (- (get closes c 0) (get opens o 0)))]
-                         (cond
-                           (and (= last-ch \}) (pos? (extra-close \{ \})))
-                           (recur (subs trimmed 0 (dec (count trimmed))))
-                           (and (= last-ch \]) (pos? (extra-close \[ \])))
-                           (recur (subs trimmed 0 (dec (count trimmed))))
-                           (and (= last-ch \)) (pos? (extra-close \( \))))
-                           (recur (subs trimmed 0 (dec (count trimmed))))
-                           :else trimmed)))
-            ;; Phase 2: add missing closers by tracking open/close stack
-            closer-for {\( \) \[ \] \{ \}}
-            skip-string (fn [chars]
-                          ;; Consume chars until closing unescaped ", return remaining chars
-                          (loop [cs chars escaped? false]
-                            (if-not cs
-                              nil ;; unclosed string
-                              (let [ch (first cs)]
-                                (cond
-                                  escaped? (recur (next cs) false)
-                                  (= ch \\) (recur (next cs) true)
-                                  (= ch \") (next cs) ;; found closing quote, return rest
-                                  :else (recur (next cs) false))))))
-            missing (loop [chars (seq stripped) stack []]
-                      (if-not chars
-                        (apply str (map closer-for (reverse stack)))
-                        (let [c (first chars)]
-                          (cond
-                            (#{\( \[ \{} c) (recur (next chars) (conj stack c))
-                            (#{\) \] \}} c) (recur (next chars) (if (seq stack) (pop stack) stack))
-                            (= c \") (recur (skip-string (next chars)) stack)
-                            :else (recur (next chars) stack)))))]
-        (str stripped missing)))))
+(defn- run-sci-code
+  "Evaluate `code` in `sci-ctx` with captured stdout/stderr.
+   Returns {:result :stdout :stderr :error} with writers already closed."
+  [sci-ctx code]
+  (let [stdout-writer (java.io.StringWriter.)
+        stderr-writer (java.io.StringWriter.)
+        exec-future (future
+                      (try
+                        (let [result (binding [*out* stdout-writer
+                                               *err* (java.io.PrintWriter. stderr-writer true)]
+                                       (sci/eval-string* sci-ctx code))]
+                          {:result result :stdout (str stdout-writer) :stderr (str stderr-writer) :error nil})
+                        (catch Throwable e
+                          {:result nil :stdout (str stdout-writer) :stderr (str stderr-writer)
+                           :error (str (.getSimpleName (class e)) ": " (or (ex-message e) (str e)))})))
+        execution-result (try
+                           (deref exec-future EVAL_TIMEOUT_MS nil)
+                           (catch Throwable e
+                             {:result nil :stdout "" :stderr "" :error (str (.getSimpleName (class e)) ": " (ex-message e))}))]
+    (.close stdout-writer)
+    (.close stderr-writer)
+    (if (nil? execution-result)
+      (do (future-cancel exec-future)
+          {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)") :timeout? true})
+      execution-result)))
 
 (defn execute-code [{:keys [sci-ctx locals-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
-    (let [code (sanitize-code code)
-          _ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
+    (let [_ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
           start-time (System/currentTimeMillis)
           vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
-          ;; Use future (not async/thread) so we can cancel on timeout
-          stdout-writer (java.io.StringWriter.)
-          stderr-writer (java.io.StringWriter.)
-          exec-future (future
-                        (try
-                          (let [result (binding [*out* stdout-writer
-                                                 *err* (java.io.PrintWriter. stderr-writer true)]
-                                         (sci/eval-string* sci-ctx code))]
-                            {:result result :stdout (str stdout-writer) :stderr (str stderr-writer) :error nil})
-                          (catch Throwable e
-                            {:result nil :stdout (str stdout-writer) :stderr (str stderr-writer)
-                             :error (str (.getSimpleName (class e)) ": " (or (ex-message e) (str e)))})))
-          execution-result (try
-                             (deref exec-future EVAL_TIMEOUT_MS nil)
-                             (catch Throwable e
-                               {:result nil :stdout "" :stderr "" :error (str (.getSimpleName (class e)) ": " (ex-message e))}))
-          execution-time (- (System/currentTimeMillis) start-time)
-          timed-out? (nil? execution-result)]
-      (if timed-out?
+          execution-result (run-sci-code sci-ctx code)
+          execution-time (- (System/currentTimeMillis) start-time)]
+      (if (:timeout? execution-result)
         (do
-          ;; Cancel the future — interrupts the thread
-          (future-cancel exec-future)
-          ;; Close writers
-          (.close stdout-writer)
-          (.close stderr-writer)
           (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
-          {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)")
-           :execution-time-ms execution-time :timeout? true})
-        (let [{:keys [result stdout stderr error]} execution-result
-              _ (.close stdout-writer)
-              _ (.close stderr-writer)
+          (assoc execution-result :execution-time-ms execution-time :timeout? true))
+        (let [{:keys [error]} execution-result
+              ;; Attempt paren repair if execution produced a parse error
+              final-result (if (and error (paren-repair/parse-error? error))
+                             (try
+                               (let [repaired (paren-repair/repair-code code)]
+                                 (if (= repaired code)
+                                   execution-result
+                                   (let [retry (run-sci-code sci-ctx repaired)]
+                                     (if (:error retry)
+                                       execution-result
+                                       (do
+                                         (trove/log! {:level :info :id ::repair-applied
+                                                      :data {:original code :repaired repaired :sci-error error}
+                                                      :msg "Paren repair applied successfully"})
+                                         (assoc retry :repaired? true))))))
+                               (catch Throwable _
+                                 execution-result))
+                             execution-result)
+              {:keys [result stdout stderr error]} final-result
               vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ vars-before))
               new-vars (apply dissoc vars-after (keys vars-before))]
           (when (seq new-vars)
@@ -177,7 +148,7 @@
                        :stdout-preview (when-not (str/blank? stdout) (str-truncate stdout 200))
                        :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))
                        :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
-          {:result result :stdout stdout :stderr stderr :error error :execution-time-ms execution-time :timeout? false})))))
+          (assoc final-result :execution-time-ms execution-time :timeout? false))))))
 
 (defn answer-str
   "Extracts a string representation from an RLM answer.
@@ -436,7 +407,8 @@ DEBUGGING:
                                   :stdout (:stdout result)
                                   :stderr (:stderr result)
                                   :error (:error result)
-                                  :execution-time-ms (:execution-time-ms result)})
+                                  :execution-time-ms (:execution-time-ms result)
+                                  :repaired? (:repaired? result)})
                            (range) code-blocks execution-results)]
           {:response nil :thinking thinking :next-optimize next-optimize
            :executions executions :final-result nil :api-usage api-usage})))))
@@ -446,7 +418,7 @@ DEBUGGING:
    All results shown inline — context budget handles size naturally."
   [executions]
   (str/join "\n"
-    (map (fn [{:keys [code error result stdout]}]
+    (map (fn [{:keys [code error result stdout repaired?]}]
            (let [code-str (str/trim (or code ""))
                  val-part (cond
                             error
@@ -459,8 +431,10 @@ DEBUGGING:
                             (str ":ok " (pr-str (realize-value result))))
 
                  stdout-part (when-not (str/blank? stdout)
-                               (str " :stdout " (pr-str stdout)))]
-             (str "{" code-str " → " val-part (or stdout-part "") "}")))
+                               (str " :stdout " (pr-str stdout)))
+                 warning-part (when repaired?
+                                " :warning \"auto-repaired delimiters\"")]
+             (str "{" code-str " → " val-part (or stdout-part "") (or warning-part "") "}")))
       executions)))
 
 (defn- format-execution-results
