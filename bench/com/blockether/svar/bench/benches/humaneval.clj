@@ -1,4 +1,4 @@
-(ns com.blockether.svar.bench.humaneval
+(ns com.blockether.svar.bench.benches.humaneval
   "HumanEval benchmark — 164 Python coding tasks.
 
    Agents: :query-env (svar RLM) | :pi (Pi coding agent)
@@ -12,7 +12,6 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [com.blockether.svar.bench.common :as common]
-   [com.blockether.svar.bench.python-tasks :as py]
    [com.blockether.svar.core :as svar]
    [taoensso.trove :as trove])
   (:import
@@ -32,7 +31,7 @@
 ;; =============================================================================
 
 (defn- ensure-dataset! []
-  (py/download-if-missing! dataset-url dataset-path))
+  (common/download-if-missing! dataset-url dataset-path))
 
 (defn- load-dataset []
   (ensure-dataset!)
@@ -47,7 +46,7 @@
 
 (defn- verify-python [code task]
   (let [script (str code "\n\n" (:test task) "\ncheck(" (:entry_point task) ")\n")
-        run    (py/run-python-script! script python-timeout-ms)]
+        run    (common/run-python-script! script python-timeout-ms)]
     {:correct? (:ok? run)
      :failure  (if (:ok? run) nil (:output run))
      :timeout? (:timeout? run)}))
@@ -81,7 +80,7 @@
      :task-id   (or (:task_id task) (str (hash task)))
      :prompt-fn build-prompt
      :score-fn  (fn [t result duration]
-                  (let [code  (py/strip-fence (str/trim (str (:answer result))))
+                  (let [code  (common/strip-fence (str/trim (str (:answer result))))
                         score (verify-python code t)]
                     {:correct?    (:correct? score)
                      :failure     (:failure score)
@@ -96,7 +95,7 @@
   (let [pi-result (common/run-pi! (build-prompt task) model)]
     (if (:timed-out? pi-result)
       {:correct? false :failure "pi timed out" :duration-ms (:duration-ms pi-result)}
-      (let [code  (py/strip-fence (:output pi-result))
+      (let [code  (common/strip-fence (:output pi-result))
             score (verify-python code task)]
         {:correct?    (:correct? score)
          :failure     (:failure score)

@@ -1,4 +1,4 @@
-(ns com.blockether.svar.bench.swebench-verified
+(ns com.blockether.svar.bench.benches.swebench-verified
   "SWE-bench Verified benchmark - 500 human-verified GitHub issues.
 
    Uses the official SWE-bench harness for evaluation (requires Docker +

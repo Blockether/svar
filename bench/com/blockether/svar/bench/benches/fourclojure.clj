@@ -1,4 +1,4 @@
-(ns com.blockether.svar.bench.fourclojure
+(ns com.blockether.svar.bench.benches.fourclojure
   "4Clojure benchmark — 151 idiomatic Clojure coding problems.
 
    Agents: :query-env (svar RLM) | :pi (Pi coding agent)

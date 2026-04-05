@@ -11,9 +11,9 @@
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [com.blockether.svar.bench.fourclojure :as fourclojure]
-   [com.blockether.svar.bench.humaneval :as humaneval]
-   [com.blockether.svar.bench.swebench-verified :as swebench]
+   [com.blockether.svar.bench.benches.fourclojure :as fourclojure]
+   [com.blockether.svar.bench.benches.humaneval :as humaneval]
+   [com.blockether.svar.bench.benches.swebench-verified :as swebench]
    [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.router :as router]))
 
