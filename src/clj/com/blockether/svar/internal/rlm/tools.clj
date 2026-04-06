@@ -27,44 +27,16 @@
                  :when (and (var? v) (not (:macro (meta v))))]
              [sym @v])))
 
-(def SAFE_BINDINGS
-  "Map of safe clojure.core functions exposed to SCI sandbox."
-  {'+ +, '- -, '* *, '/ /,
-   'first first, 'rest rest, 'next next, 'cons cons, 'conj conj,
-   'map map, 'filter filter, 'reduce reduce, 'reduce-kv reduce-kv,
-   'assoc assoc, 'dissoc dissoc, 'get get, 'get-in get-in,
-   'update update, 'update-in update-in, 'assoc-in assoc-in,
-   'keys keys, 'vals vals, 'count count, 'empty? empty?,
-   'seq seq, 'vec vec, 'vector vector, 'list list, 'set set,
-   'hash-map hash-map, 'sorted-map sorted-map,
-   'nth nth, 'take take, 'drop drop, 'take-while take-while,
-   'drop-while drop-while, 'partition partition, 'partition-all partition-all,
-   'group-by group-by, 'frequencies frequencies,
-   'sort sort, 'sort-by sort-by, 'reverse reverse, 'distinct distinct,
-   'mapcat mapcat, 'keep keep, 'keep-indexed keep-indexed,
-   'some some, 'every? every?, 'not-every? not-every?, 'not-any? not-any?,
-   'nil? nil?, 'some? some?, 'string? string?, 'number? number?,
-   'keyword? keyword?, 'map? map?, 'vector? vector?, 'set? set?,
-   'pos? pos?, 'neg? neg?, 'zero? zero?, 'even? even?, 'odd? odd?,
-   '= =, '== ==, 'not= not=, '< <, '> >, '<= <=, '>= >=,
-   'min min, 'max max, 'min-key min-key, 'max-key max-key,
-   'inc inc, 'dec dec, 'quot quot, 'rem rem, 'mod mod,
-   'not not,
-   'str str, 'subs subs, 'name name, 'keyword keyword, 'symbol symbol,
-   'int int, 'long long, 'float float, 'double double,
-   'println println, 'print print, 'pr pr, 'prn prn, 'format format,
-   'identity identity, 'constantly constantly, 'comp comp, 'partial partial,
-   'apply apply, 'juxt juxt, 'fnil fnil,
-   'atom atom, 'swap! swap!, 'reset! reset!, 'deref deref,
+(def EXTRA_BINDINGS
+  "Extra bindings beyond what SCI provides by default.
+   SCI already ships with all of clojure.core. We only add:
+   - Clojure 1.11/1.12 additions (abs, parse-*, infinite?, NaN?)
+   - set-* convenience aliases for clojure.set fns in user ns"
+  {;; Clojure 1.11/1.12 additions SCI doesn't have yet
    'abs abs, 'parse-long parse-long, 'parse-double parse-double,
    'parse-boolean parse-boolean, 'parse-uuid parse-uuid,
    'infinite? infinite?, 'NaN? NaN?,
-   'rand rand, 'rand-int rand-int, 'rand-nth rand-nth,
-   'range range, 'repeat repeat, 'iterate iterate, 'cycle cycle,
-   ;; Regex functions
-   're-pattern re-pattern, 're-find re-find, 're-matches re-matches,
-   're-seq re-seq, 're-groups re-groups, 're-matcher re-matcher,
-   ;; Set functions (with set- prefix to avoid collision with core)
+   ;; Set functions (set- prefix to avoid collision with core/set)
    'set-union set/union, 'set-intersection set/intersection,
    'set-difference set/difference, 'set-subset? set/subset?,
    'set-superset? set/superset?})
@@ -490,7 +462,7 @@
                       {;; Unified document tools
                        'search-documents (make-search-documents-fn db-info-atom)
                        'fetch-content (make-fetch-content-fn db-info-atom)})
-        all-bindings (merge SAFE_BINDINGS base-bindings db-bindings
+        all-bindings (merge EXTRA_BINDINGS base-bindings db-bindings
                        (or custom-bindings {}))
         ;; Proper SCI namespaces via sci/copy-ns (preserves doc, arglists, meta)
         str-ns  (sci/create-ns 'clojure.string nil)
