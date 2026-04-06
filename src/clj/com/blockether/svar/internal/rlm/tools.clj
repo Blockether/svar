@@ -494,18 +494,7 @@
                                         'set 'clojure.set
                                         'walk 'clojure.walk
                                         'json 'charred.api}
-                           :classes {;; Bare aliases (model writes Character/isUpperCase, not java.lang.Character/isUpperCase)
-                                     'Character Character
-                                     'Math Math
-                                     'String String
-                                     'Integer Integer
-                                     'Long Long
-                                     'Double Double
-                                     'Boolean Boolean
-                                     'Collections java.util.Collections
-                                     'Arrays java.util.Arrays
-                                     ;; Full qualified (both work)
-                                     'java.lang.Character Character
+                           :classes {'java.lang.Character Character
                                      'java.lang.Math Math
                                      'java.lang.String String
                                      'java.lang.Integer Integer
@@ -520,6 +509,21 @@
                                      'java.time.Period java.time.Period
                                      'java.util.UUID java.util.UUID
                                      'clojure.lang.PersistentQueue clojure.lang.PersistentQueue}
+                           ;; Bare class imports so model can write Math/sqrt instead of java.lang.Math/sqrt
+                           :imports {'Character 'java.lang.Character
+                                     'Math 'java.lang.Math
+                                     'String 'java.lang.String
+                                     'Integer 'java.lang.Integer
+                                     'Long 'java.lang.Long
+                                     'Double 'java.lang.Double
+                                     'Boolean 'java.lang.Boolean
+                                     'Collections 'java.util.Collections
+                                     'Arrays 'java.util.Arrays
+                                     'Pattern 'java.util.regex.Pattern
+                                     'Matcher 'java.util.regex.Matcher
+                                     'LocalDate 'java.time.LocalDate
+                                     'UUID 'java.util.UUID
+                                     'PersistentQueue 'clojure.lang.PersistentQueue}
                            :deny '[require import ns eval load-string read-string]})]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
