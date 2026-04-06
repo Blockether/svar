@@ -454,25 +454,53 @@ OUTPUT STYLE:
           {:response nil :thinking thinking :next-optimize next-optimize
            :executions executions :final-result nil :api-usage api-usage})))))
 
-(def ^:private ERROR_HINTS
-  "Conditional hints injected into error feedback only when relevant.
-   NOT in system prompt — zero cost on iterations without errors."
-  [[#"Unable to resolve symbol" "Define it first: (def X ...) or check spelling."]
-   [#"Wrong number of args" "Check arglists with (doc fn-name)."]
-   [#"cannot be cast to clojure.lang.IFn" "Bare (1 2 3) calls 1 as fn. Use '(1 2 3) or (list 1 2 3)."]
-   [#"Nested fn" "Nested #() illegal. Use (fn [...] ...) for inner lambdas."]
-   [#"No such namespace" "Use aliases: str/ set/ walk/ edn/ json/"]
-   [#"PersistentVector" "Vectors take 1 arg: (v idx). Use (subvec v start end) or (nth v idx)."]
-   [#"unbound fn" "Your (defn ...) failed earlier. Fix the defn first."]
-   [#"recur.*tail position" "recur must be the last expression in loop/fn body."]
-   [#"LazySeq.*IPersistentStack" "conj/peek/pop need a vector. Use (vec my-seq) first."]
-   [#"NullPointerException" "Method called on nil. Add nil check: (when x (.method x))."]])
-
-(defn- error-hint [error-msg]
+(defn- error-hint
+  "Returns a specialized hint for a known error, or nil. Extracts context
+   from the error message for a targeted fix suggestion."
+  [error-msg]
   (when error-msg
-    (some (fn [[pattern hint]]
-            (when (re-find pattern error-msg) hint))
-      ERROR_HINTS)))
+    (let [e (str error-msg)]
+      (cond
+        ;; Unable to resolve symbol: X -> tell them exactly which symbol
+        (re-find #"Unable to resolve symbol: (\S+)" e)
+        (let [[_ sym] (re-find #"Unable to resolve symbol: (\S+)" e)]
+          (str "'" sym "' is not defined. (def " sym " ...) or check spelling."))
+
+        ;; Wrong number of args (N) passed to: X
+        (re-find #"Wrong number of args \((\d+)\) passed to: (\S+)" e)
+        (let [[_ n target] (re-find #"Wrong number of args \((\d+)\) passed to: (\S+)" e)]
+          (cond
+            (str/includes? target "PersistentVector")
+            (str "Vectors take 1 arg (index). Use (nth v idx) or (subvec v start end), not (v " (str/join " " (repeat (parse-long n) "x")) ").")
+            :else
+            (str "Function expects different arity than " n ". Check with (doc fn-name).")))
+
+        ;; Long cannot be cast to IFn
+        (str/includes? e "cannot be cast to clojure.lang.IFn")
+        "You're calling a non-function. Bare (1 2 3) calls 1 as fn. Use '(1 2 3) for list literals."
+
+        ;; Nested fn literals
+        (str/includes? e "Nested fn")
+        "Nested #() is illegal. Rewrite inner #() as (fn [x] ...)."
+
+        ;; Unbound fn
+        (re-find #"unbound fn: #'user/(\S+)" e)
+        (let [[_ sym] (re-find #"unbound fn: #'user/(\S+)" e)]
+          (str "'" sym "' was declared but its defn failed. Fix the defn above first."))
+
+        ;; LazySeq cast
+        (str/includes? e "LazySeq")
+        "conj/peek/pop need a vector, not a lazy seq. Wrap with (vec ...) first."
+
+        ;; NullPointerException
+        (str/includes? e "NullPointerException")
+        "Method called on nil. Add a nil check: (when x (.method x))."
+
+        ;; recur tail position
+        (re-find #"recur.*tail" e)
+        "recur must be the last expression in a loop/fn body."
+
+        :else nil))))
 
 (defn format-executions
   "Formats executions for LLM feedback as EDN.
