@@ -1,6 +1,8 @@
 (ns com.blockether.svar.internal.rlm.schema
   (:require
    [clojure.spec.alpha :as s]
+   [clojure.string :as str]
+   [com.blockether.svar.internal.paren-repair :as paren-repair]
    [com.blockether.svar.internal.spec :as spec])
   (:import
    [java.util Base64]))
@@ -99,6 +101,24 @@
                  ::spec/required false
                  ::spec/description "Extracted relationships"})))
 
+(defn validate-clojure-code
+  "Validates a string that looks like Clojure code.
+   Returns nil if valid, or an error string if broken.
+   Used by FINAL_SPEC and :code field validators."
+  [s]
+  (let [s (str/trim (str s))]
+    (when (re-find #"^\s*[\(#\[\{]" s)
+      (cond
+        ;; Nested #() - illegal in Clojure
+        (re-find #"#\([^)]*#\(" s)
+        "Nested #() is illegal in Clojure. Rewrite inner #() as (fn [...] ...)"
+
+        ;; Paren balance check - if repair changes the code, it's unbalanced
+        (not= s (paren-repair/repair-code s))
+        "Unbalanced delimiters in code. Check your parens/brackets."
+
+        :else nil))))
+
 (def FINAL_SPEC
   "Nested spec for final answer in iteration response."
   (spec/spec
@@ -107,7 +127,8 @@
     (spec/field {::spec/name :answer
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "The final answer"})
+                 ::spec/description "The final answer"
+                 ::spec/validator validate-clojure-code})
     (spec/field {::spec/name :confidence
                  ::spec/type :spec.type/keyword
                  ::spec/cardinality :spec.cardinality/one

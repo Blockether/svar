@@ -13,7 +13,7 @@
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
             EVAL_TIMEOUT_MS
-            bytes->base64 *rlm-ctx*]]
+            validate-clojure-code bytes->base64 *rlm-ctx*]]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value build-var-index]]
    [com.blockether.svar.internal.paren-repair :as paren-repair]
    [com.blockether.svar.internal.jsonish :as jsonish]
@@ -429,19 +429,8 @@ COMMON ERRORS AND FIXES:
       (if-let [final-data (:final parsed)]
         (let [final-answer (str (:answer final-data))
               confidence (or (:confidence final-data) :high)
-              ;; Validate final if it looks like Clojure code (starts with ( or #)
-              looks-like-code? (re-find #"^\s*[\(#\[]" final-answer)
-              lint-error (when looks-like-code? (detect-common-mistakes final-answer))
-              parse-error (when (and looks-like-code? (not lint-error))
-                            (try (sci/eval-string* (:sci-ctx rlm-env)
-                                   (str "(do " final-answer " nil)"))
-                                 nil
-                                 (catch Exception e
-                                   (let [msg (ex-message e)]
-                                     (when (or (paren-repair/parse-error? msg)
-                                             (str/includes? (str msg) "Nested fn"))
-                                       msg)))))
-              validation-error (or lint-error parse-error)]
+              ;; Spec-level validator from FINAL_SPEC ::spec/validator
+              validation-error (validate-clojure-code final-answer)]
           (if validation-error
             ;; Final answer has detectable code error - reject and ask model to fix
             (do (rlm-debug! {:final-answer (str-truncate final-answer 200)
