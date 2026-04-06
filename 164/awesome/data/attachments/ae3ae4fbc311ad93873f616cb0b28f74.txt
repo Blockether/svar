@@ -1,0 +1,8 @@
+2026-04-06T06:50:18.368627235Z :info com.blockether.svar.internal.rlm.pageindex.vision [1088 3] Starting PDF text extraction 
+  data: {:pdf "resources-test/example.pdf", :parallel 3, :timeout-ms 360000}
+2026-04-06T06:50:18.474781244Z :info com.blockether.svar.internal.rlm.pageindex.vision [1109 7] Rendering only selected pages 
+  data: {:selected-pages 1, :page-set #{0}}
+2026-04-06T06:50:18.474963223Z :info com.blockether.svar.internal.rlm.pageindex.vision [1111 5] PDF loaded, extracting text 
+  data: {:pages 1, :rotations [0]}
+2026-04-06T06:50:18.548910824Z :info com.blockether.svar.internal.rlm.pageindex.vision [1128 15] Extracted embedded images via PDFBox 
+  data: {:total-images 3}
