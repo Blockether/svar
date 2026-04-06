@@ -107,48 +107,66 @@
           {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)") :timeout? true})
       execution-result)))
 
+(defn- detect-common-mistakes
+  "Pre-exec lint: catches common Clojure mistakes BEFORE SCI eval.
+   Returns nil if clean, or an error string with actionable fix."
+  [code]
+  (let [s (str/trim code)]
+    (cond
+      ;; Nested #() - illegal in Clojure, cryptic SCI error
+      (re-find #"#\([^)]*#\(" s)
+      "Nested #() is illegal in Clojure. Rewrite inner #() as (fn [...] ...)"
+      ;; Nothing wrong
+      :else nil)))
+
 (defn execute-code [{:keys [sci-ctx locals-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
     (let [_ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
           start-time (System/currentTimeMillis)
-          vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
-          execution-result (run-sci-code sci-ctx code)
-          execution-time (- (System/currentTimeMillis) start-time)]
-      (if (:timeout? execution-result)
-        (do
-          (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
-          (assoc execution-result :execution-time-ms execution-time :timeout? true))
-        (let [{:keys [error]} execution-result
-              ;; Attempt paren repair if execution produced a parse error
-              final-result (if (and error (paren-repair/parse-error? error))
-                             (try
-                               (let [repaired (paren-repair/repair-code code)]
-                                 (if (= repaired code)
-                                   execution-result
-                                   (let [retry (run-sci-code sci-ctx repaired)]
-                                     (if (:error retry)
+          lint-error (detect-common-mistakes code)]
+      (if lint-error
+        ;; Pre-exec lint caught a known mistake - return clear error without eval
+        (do (rlm-debug! {:lint-error lint-error} "Pre-exec lint caught mistake")
+            {:result nil :stdout "" :stderr "" :error lint-error
+             :execution-time-ms 0 :timeout? false})
+        ;; Normal execution path
+        (let [vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
+              execution-result (run-sci-code sci-ctx code)
+              execution-time (- (System/currentTimeMillis) start-time)]
+          (if (:timeout? execution-result)
+            (do
+              (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
+              (assoc execution-result :execution-time-ms execution-time :timeout? true))
+            (let [{:keys [error]} execution-result
+                  final-result (if (and error (paren-repair/parse-error? error))
+                                 (try
+                                   (let [repaired (paren-repair/repair-code code)]
+                                     (if (= repaired code)
                                        execution-result
-                                       (do
-                                         (trove/log! {:level :info :id ::repair-applied
-                                                      :data {:original code :repaired repaired :sci-error error}
-                                                      :msg "Paren repair applied successfully"})
-                                         (assoc retry :repaired? true))))))
-                               (catch Throwable _
-                                 execution-result))
-                             execution-result)
-              {:keys [result stdout stderr error]} final-result
-              vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ vars-before))
-              new-vars (apply dissoc vars-after (keys vars-before))]
-          (when (seq new-vars)
-            (swap! locals-atom merge (into {} (map (fn [[k v]] [k (deref v)]) new-vars))))
-          (rlm-debug! {:execution-time-ms execution-time
-                       :has-error? (some? error)
-                       :error error
-                       :result-preview (str-truncate (pr-str result) 200)
-                       :stdout-preview (when-not (str/blank? stdout) (str-truncate stdout 200))
-                       :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))
-                       :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
-          (assoc final-result :execution-time-ms execution-time :timeout? false))))))
+                                       (let [retry (run-sci-code sci-ctx repaired)]
+                                         (if (:error retry)
+                                           execution-result
+                                           (do
+                                             (trove/log! {:level :info :id ::repair-applied
+                                                          :data {:original code :repaired repaired :sci-error error}
+                                                          :msg "Paren repair applied successfully"})
+                                             (assoc retry :repaired? true))))))
+                                   (catch Throwable _
+                                     execution-result))
+                                 execution-result)
+                  {:keys [result stdout stderr error]} final-result
+                  vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ vars-before))
+                  new-vars (apply dissoc vars-after (keys vars-before))]
+              (when (seq new-vars)
+                (swap! locals-atom merge (into {} (map (fn [[k v]] [k (deref v)]) new-vars))))
+              (rlm-debug! {:execution-time-ms execution-time
+                           :has-error? (some? error)
+                           :error error
+                           :result-preview (str-truncate (pr-str result) 200)
+                           :stdout-preview (when-not (str/blank? stdout) (str-truncate stdout 200))
+                           :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))
+                           :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
+              (assoc final-result :execution-time-ms execution-time :timeout? false))))))))
 
 (defn answer-str
   "Extracts a string representation from an RLM answer.
@@ -279,6 +297,8 @@ CLOJURE DATA LITERALS (critical - wrong form = runtime error):
 - Keyword:        :foo            String: \"foo\"            Char: \\a
 - Seq from fn:    (list 1 2 3)   ; equivalent to '(1 2 3)
 - When your FINAL answer is a literal collection, ALWAYS quote lists.
+- Nested #() is ILLEGAL in Clojure. Use (fn [...] ...) for inner lambdas.
+- PersistentQueue: clojure.lang.PersistentQueue/EMPTY, conj to add, peek/pop to consume.
 "
     (when (and has-documents? document-summary)
       (str "
