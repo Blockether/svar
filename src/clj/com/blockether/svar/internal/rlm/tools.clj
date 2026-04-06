@@ -503,7 +503,7 @@
                                       Matcher java.util.regex.Matcher
                                       LocalDate java.time.LocalDate
                                       PersistentQueue clojure.lang.PersistentQueue}
-                           :deny '[eval load-string read-string]})]
+                           :deny '[]})]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
                             ['llm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
