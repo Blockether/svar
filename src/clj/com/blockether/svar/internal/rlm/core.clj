@@ -317,7 +317,7 @@ Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high\
 
 RULES:
 - Always (def name \"docstring\" value) - docstrings are your memory
-- Test code before finalizing
+- NEVER guess. ALWAYS test. Untested answers are wrong answers.
 - Never repeat a failed call - try a different approach
 - Combine steps in one iteration
 - If <var_index> or <context> already answers the query, finalize immediately
