@@ -3,6 +3,8 @@
    [clojure.java.process :as proc]
    [clojure.set :as set]
    [clojure.string :as str]
+   #_{:clj-kondo/ignore [:unused-namespace]}
+   [clojure.walk :as walk]
    [com.blockether.svar.internal.rlm.db :as db
     :refer [db-get-entity db-get-page-node db-get-toc-entry
             db-list-relationships db-search-entities db-search-page-nodes
@@ -16,7 +18,9 @@
 (defn- ns->sci-map
   "Builds an SCI :namespaces entry map from a Clojure namespace's public vars.
    Pulls the entire ns-publics surface so models can use everything a real
-   namespace offers without us enumerating fns manually."
+   namespace offers without us enumerating fns manually.
+   NOTE: prefer sci/copy-ns for standard namespaces (preserves doc/arglists).
+   Use this only for namespaces where copy-ns fails (e.g. charred.api)."
   [ns-sym]
   (require ns-sym)
   (into {} (for [[sym v] (ns-publics (the-ns ns-sym))
@@ -485,23 +489,30 @@
                        'fetch-content (make-fetch-content-fn db-info-atom)})
         all-bindings (merge SAFE_BINDINGS base-bindings db-bindings
                        (or custom-bindings {}))
+        ;; Proper SCI namespaces via sci/copy-ns (preserves doc, arglists, meta)
+        str-ns  (sci/create-ns 'clojure.string nil)
+        set-ns  (sci/create-ns 'clojure.set nil)
+        walk-ns (sci/create-ns 'clojure.walk nil)
+        ;; zprint: can't use copy-ns (macros/.cljc crash), manual requiring-resolve
+        zp-resolve (fn [sym] (deref (requiring-resolve (symbol "zprint.core" (str sym)))))
         sci-ctx (sci/init {:namespaces {'user all-bindings
-                                        'clojure.string (ns->sci-map 'clojure.string)
-                                        'clojure.set (ns->sci-map 'clojure.set)
-                                        'clojure.walk (ns->sci-map 'clojure.walk)
+                                        'clojure.string (sci/copy-ns clojure.string str-ns)
+                                        'clojure.set (sci/copy-ns clojure.set set-ns)
+                                        'clojure.walk (sci/copy-ns clojure.walk walk-ns)
+                                        ;; fast-edn: copy-ns may not work (.cljc), use ns->sci-map
                                         'fast-edn.core (ns->sci-map 'fast-edn.core)
                                         'clojure.edn (ns->sci-map 'fast-edn.core)
-                                        'zprint.core (let [r #(deref (requiring-resolve (symbol "zprint.core" (str %))))]
-                                                       {'zprint-str (r 'zprint-str)
-                                                        'zprint (r 'zprint)
-                                                        'czprint-str (r 'czprint-str)
-                                                        'czprint (r 'czprint)
-                                                        'zprint-file-str (r 'zprint-file-str)
-                                                        'set-options! (r 'set-options!)
-                                                        'configure-all! (r 'configure-all!)})
-                                        'clojure.pprint (let [zr #(deref (requiring-resolve (symbol "zprint.core" (str %))))]
-                                                          {'pprint (zr 'zprint)
-                                                           'pprint-str (zr 'zprint-str)})
+                                        ;; zprint: manual bindings
+                                        'zprint.core {'zprint-str (zp-resolve 'zprint-str)
+                                                      'zprint (zp-resolve 'zprint)
+                                                      'czprint-str (zp-resolve 'czprint-str)
+                                                      'czprint (zp-resolve 'czprint)
+                                                      'zprint-file-str (zp-resolve 'zprint-file-str)
+                                                      'set-options! (zp-resolve 'set-options!)
+                                                      'configure-all! (zp-resolve 'configure-all!)}
+                                        'clojure.pprint {'pprint (zp-resolve 'zprint)
+                                                         'pprint-str (zp-resolve 'zprint-str)}
+                                        ;; charred: ns->sci-map (no macros, works fine)
                                         'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
                                         'edn 'fast-edn.core
