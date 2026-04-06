@@ -159,23 +159,21 @@
 
 (defn validate-final
   "Validates a final answer based on its declared type and language.
-   answer-type is a required enum in FINAL_SPEC - always present.
-   Handles both keyword (:code) and string (\"code\") values from parser.
-   Returns nil if valid, or an error string if broken."
+   answer-type and language are keyword enums from FINAL_SPEC."
   [{:keys [answer answer-type language]}]
   (let [s (str answer)
-        atype (some-> (or answer-type "code") name)
-        lang  (some-> (or language "clojure") name)]
+        atype (or answer-type :code)
+        lang  (or language :clojure)]
     (case atype
-      "code" (case lang
-               "clojure" (validate-clojure-code s)
-               "python"  (validate-python s)
-               (validate-clojure-code s))
-      "data" (case lang
-               "json" (validate-json s)
-               "edn"  (validate-edn s)
-               nil)
-      "text" nil
+      :code (case lang
+              :clojure (validate-clojure-code s)
+              :python  (validate-python s)
+              (validate-clojure-code s))
+      :data (case lang
+              :json (validate-json s)
+              :edn  (validate-edn s)
+              nil)
+      :text nil
       nil)))
 
 (def FINAL_SPEC
