@@ -471,7 +471,7 @@
                                       BigDecimal java.math.BigDecimal}
                            :deny '[;; No code loading / evaluation
                                    require import ns eval load-string load-file
-                                   read-string resolve ns-resolve find-ns
+                                   read-string find-ns
                                    ;; No filesystem I/O
                                    slurp spit
                                    ;; No var mutation from sandbox
