@@ -353,10 +353,13 @@ OUTPUT STYLE:
 - Plain hyphens and straight quotes only.
 - Natural language characters (accented letters, CJK) are fine when content requires them.
 
-DEBUGGING:
-- Never speculate about a bug without reading the relevant code first.
-- State what you found, where, and the fix. One pass.
-- If cause is unclear: say so. Do not guess.
+COMMON ERRORS AND FIXES:
+- \"Unable to resolve symbol: X\" -> you used X before defining it. (def X ...) first.
+- \"Wrong number of args (N) passed to fn\" -> check arglists with (doc fn-name).
+- \"Long cannot be cast to IFn\" -> bare (1 2 3) calls 1 as function. Use '(1 2 3).
+- \"Nested fn literals not allowed\" -> #(... #(...)) is illegal. Use (fn [...] ...) inside.
+- \"No such namespace\" -> use aliases: str/, set/, walk/, json/. Check AVAILABLE NAMESPACES.
+- \"ClassCastException\" -> wrong type passed. Check your data with (type x) or (class x).
 "))
 
 ;; =============================================================================
