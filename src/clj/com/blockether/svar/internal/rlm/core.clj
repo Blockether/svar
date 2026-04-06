@@ -287,6 +287,7 @@ AVAILABLE NAMESPACES (with aliases):
 - clojure.set     / set  - full API (set/union set/intersection set/difference ...)
 - clojure.walk    / walk - postwalk, prewalk, keywordize-keys, stringify-keys
 - fast-edn.core   / edn  - (edn/read-string s) fast EDN parsing (6x faster, safe)
+- clojure.pprint  / pp   - (pp/pprint x) (pp/print-table rows) (pp/cl-format nil fmt args)
 - zprint.core     / zp   - (zp/zprint-str x) pretty-print Clojure code/data
 - charred.api     / json - (json/read-json s) parses JSON; (json/write-json-str x) serializes
 
@@ -370,6 +371,9 @@ COMMON ERRORS AND FIXES:
 - \"Nested fn literals not allowed\" -> #(... #(...)) is illegal. Use (fn [...] ...) inside.
 - \"No such namespace\" -> use aliases: str/, set/, walk/, json/. Check AVAILABLE NAMESPACES.
 - \"ClassCastException\" -> wrong type passed. Check your data with (type x) or (class x).
+- \"Wrong number of args (2) passed to PersistentVector\" -> vectors take 1 arg (index): (v 0), not (v 0 1). Use (subvec v start end) or (nth v idx).
+- \"Attempting to call unbound fn\" -> your (defn ...) failed earlier. Check the error above and fix the defn.
+- \"Can only recur from tail position\" -> recur must be the last expression in a loop/fn body.
 "))
 
 ;; =============================================================================

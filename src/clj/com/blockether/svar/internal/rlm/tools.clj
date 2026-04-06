@@ -499,13 +499,13 @@
                                                         'zprint-file-str (r 'zprint-file-str)
                                                         'set-options! (r 'set-options!)
                                                         'configure-all! (r 'configure-all!)})
-                                        'clojure.pprint {'pprint (deref (requiring-resolve 'zprint.core/zprint))}
+                                        'clojure.pprint (ns->sci-map 'clojure.pprint)
                                         'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
                                         'edn 'fast-edn.core
                                         'zp 'zprint.core
-                                        'pprint 'zprint.core
-                                        'pp 'zprint.core
+                                        'pprint 'clojure.pprint
+                                        'pp 'clojure.pprint
                                         'set 'clojure.set
                                         'walk 'clojure.walk
                                         'json 'charred.api}
