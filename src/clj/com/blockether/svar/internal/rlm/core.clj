@@ -121,7 +121,11 @@
 
 (defn execute-code [{:keys [sci-ctx locals-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
-    (let [_ (rlm-debug! {:code-preview (str-truncate code 200)} "Executing code")
+    (let [opens  (count (filter #{\( \[ \{} code))
+          closes (count (filter #{\) \] \}} code))
+          _ (rlm-debug! {:code code
+                         :code-len (count code)
+                         :paren-balance (- opens closes)} "Executing code (full)")
           start-time (System/currentTimeMillis)
           lint-error (detect-common-mistakes code)]
       (if lint-error
@@ -142,10 +146,21 @@
                                  (try
                                    (let [repaired (paren-repair/repair-code code)]
                                      (if (= repaired code)
-                                       execution-result
+                                       (do (trove/log! {:level :debug :id ::repair-noop
+                                                        :data {:code-len (count code) :error error}
+                                                        :msg "Paren repair: no change needed"})
+                                           execution-result)
                                        (let [retry (run-sci-code sci-ctx repaired)]
                                          (if (:error retry)
-                                           execution-result
+                                           (do (trove/log! {:level :warn :id ::repair-retry-failed
+                                                            :data {:original-error error
+                                                                   :retry-error (:error retry)
+                                                                   :code-len (count code)
+                                                                   :repaired-len (count repaired)
+                                                                   :added-chars (- (count repaired) (count code))
+                                                                   :repaired-tail (subs repaired (max 0 (- (count repaired) 80)))}
+                                                            :msg "Paren repair changed code but retry still failed"})
+                                               execution-result)
                                            (do
                                              (trove/log! {:level :info :id ::repair-applied
                                                           :data {:original code :repaired repaired :sci-error error}
@@ -276,8 +291,8 @@ ARCHITECTURE:
 - State lives in def'd vars - they persist across iterations.
 - <var_index> shows all your vars (name, type, size, docstring).
 - <execution_results> shows what your last code returned.
-- (doc fn-name) for any function. (sh \"cmd\" ...) for shell. (llm-query \"q\") for sub-LLM.
-- Aliases: str/ set/ walk/ edn/ json/ zp/ pp/
+- (doc fn-name) for any function. (llm-query \"q\") for sub-LLM.
+- Aliases: str/ set/ walk/ edn/ json/ zp/ pp/ lt/ test/
 
 GOTCHAS:
 - Quote list literals: '(1 2 3) not (1 2 3). Bare parens = function call.
@@ -437,18 +452,15 @@ OUTPUT STYLE:
                             (if (empty? remaining)
                               result
                               (let [block (first remaining)
-                                    opens  (count (filter #{\( \[ \{} block))
-                                    closes (count (filter #{\) \] \}} block))]
-                                (if (and (> opens closes) (next remaining))
+                                    bal (paren-repair/paren-balance block)]
+                                (if (and (pos? bal) (next remaining))
                                   ;; Unbalanced opener - join with subsequent blocks
                                   (let [[joined rest-blocks]
                                         (loop [acc block
                                                rem (rest remaining)]
-                                          (let [o (count (filter #{\( \[ \{} acc))
-                                                c (count (filter #{\) \] \}} acc))]
-                                            (if (or (>= c o) (empty? rem))
-                                              [acc rem]
-                                              (recur (str acc "\n" (first rem)) (rest rem)))))]
+                                          (if (or (<= (paren-repair/paren-balance acc) 0) (empty? rem))
+                                            [acc rem]
+                                            (recur (str acc "\n" (first rem)) (rest rem))))]
                                     (recur rest-blocks (conj result joined)))
                                   (recur (rest remaining) (conj result block))))))
               _ (rlm-debug! {:code-block-count (count code-blocks)

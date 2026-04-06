@@ -129,7 +129,7 @@
 ;; Agent eval functions
 ;; =============================================================================
 
-(defn- eval-query-env! [router problem model run-ts]
+(defn- eval-query-env! [router problem model run-ts debug?]
   (common/run-query-env-task!
     {:bench      "4clojure"
      :router     router
@@ -138,7 +138,7 @@
      :run-ts     run-ts
      :task-id    (or (:id problem) (:title problem) (str (hash problem)))
      :prompt-fn  build-prompt
-     :query-opts {}
+     :query-opts (cond-> {} debug? (assoc :debug? true))
      :score-fn  (fn [p result duration]
                   (let [answer (str/trim (str (:answer result)))
                         score  (verify-with-bb (:tests p) answer)]
@@ -210,12 +210,18 @@
                        :data {:agent agent-name :model model :offset offset :limit limit}
                        :msg "Starting 4clojure benchmark"})
 
+        ids      (when-let [raw (get opts :ids nil)]
+                   (set (map #(Long/parseLong %) raw)))
         dataset  (load-dataset)
         total-ds (count dataset)
-        problems (vec (cond->> (drop offset dataset) limit (take limit)))
+        filtered (if ids
+                   (filter #(contains? ids (:id %)) dataset)
+                   (drop offset dataset))
+        problems (vec (cond->> (shuffle filtered) limit (take limit)))
 
+        debug?   (get opts :debug? false)
         eval-fn  (case agent-name
-                   :query-env (fn [problem] (eval-query-env! router problem model run-ts))
+                   :query-env (fn [problem] (eval-query-env! router problem model run-ts debug?))
                    :pi        (fn [problem] (eval-pi! problem pi-model)))]
 
     (common/run-parallel-bench! "4clojure" agent-name model problems total-ds eval-fn make-result-rec)))

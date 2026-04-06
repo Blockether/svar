@@ -193,6 +193,19 @@
 ;; Public API
 ;; =============================================================================
 
+(defn paren-balance
+  "Returns the net open-minus-close count for real delimiters in `s`.
+   Skips delimiters inside string literals, char literals, and comments.
+   Zero means balanced. Positive means unclosed openers."
+  [s]
+  (let [tokens (tokenize s)]
+    (reduce (fn [n {:keys [kind]}]
+              (case kind
+                :open  (inc n)
+                :close (dec n)
+                n))
+      0 tokens)))
+
 (defn repair-code
   "Run paren-repair followed by delimiter-repair on `s`.
    paren-repair removes orphan closers first; delimiter-repair then fixes

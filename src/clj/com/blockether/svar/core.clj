@@ -530,35 +530,50 @@
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def index!
   "Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files.
-   
+
    Creates a .pageindex directory alongside the original file containing:
      document.edn — structured document data
      images/      — extracted images as PNG files
-   
+
    Opts:
      :pages           - Page selector (1-indexed). Limits which pages are indexed.
                         Supports: integer, [from to] range, or [[1 3] 5 [7 10]] mixed.
                         nil = all pages (default).
-     
-     Vision extraction:
-      :vision-model    - Model for vision page extraction
-     :parallel        - Max concurrent vision page extractions (default: 3)
-     
+     :parallel        - Max concurrent page extractions (default: 3).
+
+     Extraction strategy (controls how page content is extracted):
+     :extraction-strategy - :vision (default) or :ocr.
+       :vision — Single-pass: sends page image to a vision LLM with structured output spec.
+                 Slower but handles images/tables/diagrams directly from the visual.
+       :ocr    — Two-pass: (1) sends page image to a local OCR model for raw text extraction,
+                 then (2) sends that text to a text LLM with structured output spec.
+                 Dramatically faster when using a local OCR model (e.g. glm-ocr via LM Studio).
+
+     Vision strategy options:
+     :vision-model    - Model for vision page extraction (e.g. \"glm-4.6v\").
+
+     OCR strategy options:
+     :ocr-model       - OCR model name (e.g. \"glm-ocr\"). Required when :extraction-strategy is :ocr.
+                        Must be available in the router as a provider model.
+     :text-model      - Text LLM for structuring OCR output and abstract/title inference.
+                        Also used in :vision strategy for abstract/title. (e.g. \"gpt-5-mini\")
+
      Quality refinement:
      :refine?         - Enable post-extraction quality refinement (default: false)
      :refine-model    - Model for eval/refine steps (default: \"gpt-4o\")
      :parallel-refine - Max concurrent eval/refine operations (default: 2)
-   
+
    Example:
+     ;; Vision strategy (default):
      (svar/index! \"docs/manual.pdf\")
-     (svar/index! \"docs/manual.pdf\" {:pages [1 5]})
-     (svar/index! \"docs/manual.pdf\" {:pages [[1 3] 5 [7 10]]})
-     (svar/index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\"
-                                       :parallel 5
-                                       :refine? true
-                                       :refine-model \"gpt-4o-mini\"
-                                       :parallel-refine 3})
-   
+     (svar/index! \"docs/manual.pdf\" {:vision-model \"gpt-4o\" :parallel 5})
+
+     ;; OCR strategy (fast, local OCR + remote text LLM):
+     (svar/index! \"docs/manual.pdf\" {:extraction-strategy :ocr
+                                       :ocr-model \"glm-ocr\"
+                                       :text-model \"gpt-5-mini\"
+                                       :parallel 3})
+
    See internal.rlm for full options."
   rlm/index!)
 

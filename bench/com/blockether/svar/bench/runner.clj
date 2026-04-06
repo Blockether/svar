@@ -271,6 +271,8 @@
           (= k "--model")  (recur (drop 2 remaining) (assoc acc :model v))
           (= k "--limit")  (recur (drop 2 remaining) (assoc acc :limit (Long/parseLong v)))
           (= k "--offset") (recur (drop 2 remaining) (assoc acc :offset (Long/parseLong v)))
+          (= k "--ids")    (recur (drop 2 remaining) (assoc acc :ids (set (str/split v #","))))
+          (= k "--debug") (recur (rest remaining) (assoc acc :debug? true))
           :else            (recur (rest remaining) acc))))))
 
 (defn- run-one! [bench-name opts]

@@ -415,9 +415,13 @@
                        :data {:agent agent-name :model model :offset offset :limit limit :run-id run-id}
                        :msg "Starting SWE-bench Verified benchmark"})
 
+        ids      (get opts :ids nil)
         dataset  (load-dataset)
         total-ds (count dataset)
-        tasks    (vec (cond->> (drop offset dataset) limit (take limit)))
+        filtered (if ids
+                   (filter #(contains? ids (:instance_id %)) dataset)
+                   (drop offset dataset))
+        tasks    (vec (cond->> (shuffle filtered) limit (take limit)))
         total-q  (count tasks)]
 
     ;; Phase 1: Collect predictions

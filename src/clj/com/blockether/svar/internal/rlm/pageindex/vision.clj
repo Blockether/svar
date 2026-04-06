@@ -18,6 +18,7 @@
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
    [taoensso.trove :as trove])
@@ -28,6 +29,8 @@
    [java.io ByteArrayOutputStream File]
    [java.util Base64]
    [javax.imageio ImageIO]))
+
+(declare extract-nodes-from-text)
 
 ;; =============================================================================
 ;; Default Configuration
@@ -1059,6 +1062,72 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
       {:page/index page-index
        :page/nodes nodes})))
 
+;; =============================================================================
+;; OCR-Based Extraction (Local GLM-OCR via LM Studio + Text LLM for structuring)
+;; =============================================================================
+
+(defn extract-text-from-image-ocr
+  "Extracts document content from a BufferedImage using a 2-pass approach:
+   1. Local OCR model (e.g. glm-ocr) extracts raw text as markdown from image
+   2. Text LLM (e.g. gpt-5-mini) structures the text into typed nodes via vision-response-spec
+
+   Both models are resolved from the same router. The OCR model is selected via
+   `:ocr-model`, the structuring model via `:text-model` (or router default).
+
+   Params:
+   `image` - BufferedImage. The image to extract from.
+   `page-index` - Integer. The page index (0-based).
+   `opts` - Map with:
+     `:rlm-router` - Router instance (must contain both OCR and text models).
+     `:ocr-model` - String. OCR model name (e.g. \"glm-ocr\").
+     `:text-model` - String, optional. Text LLM for structuring (default: router root).
+     `:objective` - String. System prompt for text structuring.
+     `:timeout-ms` - Integer, optional. HTTP timeout (default: 60000ms)."
+  [^BufferedImage image page-index {:keys [rlm-router ocr-model text-model objective timeout-ms]
+                                    :or {timeout-ms 60000}}]
+  (let [base64-image (image->base64 image)]
+    (trove/log! {:level :info :data {:page page-index
+                                     :ocr-model ocr-model
+                                     :image-width (.getWidth image)
+                                     :image-height (.getHeight image)}
+                 :msg "OCR pass 1: extracting raw text from page"})
+    ;; Pass 1: OCR — raw text extraction via router (no spec)
+    (let [ocr-t0 (System/currentTimeMillis)
+          resolved (router/resolve-routing
+                     rlm-router {:model ocr-model})
+          {:keys [content]}
+          (router/with-provider-fallback
+            rlm-router (:prefs resolved)
+            (fn [provider model-map]
+              (llm/chat-completion
+                [(llm/user "Return valid markdown of the text content from this image."
+                   (llm/image base64-image "image/png"))]
+                (:name model-map)
+                (:api-key provider)
+                (:base-url provider)
+                {:timeout-ms timeout-ms})))
+          raw-text (or content "")
+          ocr-ms (- (System/currentTimeMillis) ocr-t0)]
+      (trove/log! {:level :info :data {:page page-index
+                                       :ocr-ms ocr-ms
+                                       :text-length (count raw-text)}
+                   :msg "OCR pass 1 done"})
+      ;; Pass 2: Text LLM — structure the raw text into typed nodes
+      (let [struct-t0 (System/currentTimeMillis)
+            result (extract-nodes-from-text raw-text page-index
+                     {:rlm-router rlm-router
+                      :objective (or objective DEFAULT_VISION_OBJECTIVE)
+                      :timeout-ms timeout-ms
+                      :routing (when text-model {:model text-model})})
+            struct-ms (- (System/currentTimeMillis) struct-t0)]
+        (trove/log! {:level :info :data {:page page-index
+                                         :ocr-ms ocr-ms
+                                         :struct-ms struct-ms
+                                         :total-ms (+ ocr-ms struct-ms)
+                                         :nodes (count (:page/nodes result))}
+                     :msg "OCR page extraction complete"})
+        result))))
+
 (defn extract-text-from-pdf
   "Extracts document content from all pages of a PDF file using vision LLM.
    
@@ -1083,8 +1152,10 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
    
    Throws:
    Anomaly (fault) if any page fails to extract."
-  [pdf-path {:keys [rlm-router objective parallel timeout-ms refine? page-set]
-             :or {parallel 3 timeout-ms DEFAULT_VISION_TIMEOUT_MS}
+  [pdf-path {:keys [rlm-router objective parallel timeout-ms refine? page-set
+                    extraction-strategy ocr-model text-model]
+             :or {parallel 3 timeout-ms DEFAULT_VISION_TIMEOUT_MS
+                  extraction-strategy :vision}
              :as opts}]
   (trove/log! {:level :info :data {:pdf pdf-path :parallel parallel :timeout-ms timeout-ms}
                :msg "Starting PDF text extraction"})
@@ -1137,7 +1208,16 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                :pdf-images (get all-pdf-images page-idx [])})
                          images page-indices page-rotations)
             result-chan (async/chan (max 1 page-count))
-            extract-opts {:rlm-router rlm-router :objective objective :timeout-ms timeout-ms}]
+            use-ocr? (= :ocr extraction-strategy)
+            extract-opts (cond-> {:rlm-router rlm-router :objective objective :timeout-ms timeout-ms}
+                           ocr-model (assoc :ocr-model ocr-model)
+                           text-model (assoc :text-model text-model))]
+
+        (when use-ocr?
+          (trove/log! {:level :info :data {:extraction-strategy :ocr
+                                           :ocr-model ocr-model
+                                           :text-model text-model}
+                       :msg "Using OCR extraction strategy (local OCR + text LLM structuring)"}))
 
         ;; Start parallel workers - capture errors as data since pipeline-blocking catches exceptions
         ;; Page rotation is detected via PDFBox text position heuristics (no LLM cost).
@@ -1155,8 +1235,10 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                                 :msg "Correcting page rotation (heuristic)"})
                                    (rotate-image image rotation))
                                  image)]
-                    ;; Step 2: Extract content from (possibly corrected) image
-                     (extract-text-from-image image index (assoc extract-opts :pdf-images pdf-images)))
+                    ;; Step 2: Extract content — OCR path or vision LLM path
+                     (if use-ocr?
+                       (extract-text-from-image-ocr image index extract-opts)
+                       (extract-text-from-image image index (assoc extract-opts :pdf-images pdf-images))))
                    (catch Exception e
                      (let [^java.awt.image.BufferedImage image image
                            ex-data-map (ex-data e)
@@ -1234,18 +1316,20 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
    
    Returns:
    Map with :page/index and :page/nodes."
-  [content page-index {:keys [rlm-router objective timeout-ms]
+  [content page-index {:keys [rlm-router objective timeout-ms routing]
                        :or {timeout-ms DEFAULT_VISION_TIMEOUT_MS}}]
-  (trove/log! {:level :info :data {:page page-index :content-length (count content)}
+  (trove/log! {:level :info :data {:page page-index :content-length (count content)
+                                   :routing routing}
                :msg "Extracting nodes from text content"})
-  (let [response (llm/ask! rlm-router {:spec vision-response-spec
-                                       :messages [(llm/system objective)
-                                                  (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                              "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
-                                                              "<document_content>\n" content "\n</document_content>"))]
-                                       :check-context? false
-                                       :timeout-ms timeout-ms
-                                       :extra-body {:max_tokens 15000}})
+  (let [response (llm/ask! rlm-router (cond-> {:spec vision-response-spec
+                                               :messages [(llm/system objective)
+                                                          (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
+                                                                      "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                                      "<document_content>\n" content "\n</document_content>"))]
+                                               :check-context? false
+                                               :timeout-ms timeout-ms
+                                               :extra-body {:max_tokens 15000}}
+                                        routing (assoc :routing routing)))
         nodes (get-in response [:result :nodes] [])
         section-count (count (filter :page.node/description nodes))
         heading-count (count (filter :page.node/level nodes))]

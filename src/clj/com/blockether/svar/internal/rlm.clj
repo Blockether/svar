@@ -2483,8 +2483,13 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   ([file-path {:keys [router output vision-model text-model parallel parallel-refine
                       refine? refine-model refine-iterations
                       refine-threshold refine-sample-size pages
-                      force?]}]
-   (let [abs-path (ensure-absolute file-path)
+                      force? extraction-strategy ocr-model]}]
+   (let [extraction-strategy (or extraction-strategy :vision)
+         _ (when (and (= :ocr extraction-strategy) (not ocr-model))
+             (anomaly/incorrect! ":ocr-model required when :extraction-strategy is :ocr"
+               {:type :svar.pageindex/missing-ocr-model
+                :extraction-strategy extraction-strategy}))
+         abs-path (ensure-absolute file-path)
          output-path (or output (derive-index-path abs-path))
          _ (when-not (fs/exists? abs-path)
              (trove/log! {:level :error :data {:path abs-path} :msg "File not found"})
@@ -2552,9 +2557,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                    (select-keys existing-manifest [:last-successful-index-at]))))
                images-dir (str (io/file output-path "images"))
                _ (.mkdirs (io/file images-dir))
-               common-index-opts (cond-> {:output-dir images-dir}
+               common-index-opts (cond-> {:output-dir images-dir
+                                          :extraction-strategy extraction-strategy}
                                    vision-model (assoc :model vision-model)
                                    text-model (assoc :text-model text-model)
+                                   ocr-model (assoc :ocr-model ocr-model)
                                    parallel (assoc :parallel parallel)
                                    parallel-refine (assoc :parallel-refine parallel-refine)
                                    refine? (assoc :refine? refine?)

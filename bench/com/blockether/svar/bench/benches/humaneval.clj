@@ -146,9 +146,13 @@
                        :data {:agent agent-name :model model :offset offset :limit limit}
                        :msg "Starting HumanEval benchmark"})
 
+        ids      (get opts :ids nil)
         dataset (load-dataset)
         total-ds (count dataset)
-        tasks   (vec (cond->> (drop offset dataset) limit (take limit)))
+        filtered (if ids
+                   (filter #(contains? ids (:task_id %)) dataset)
+                   (drop offset dataset))
+        tasks   (vec (cond->> (shuffle filtered) limit (take limit)))
 
         eval-fn (case agent-name
                   :query-env (fn [task] (eval-query-env! router task model run-ts))

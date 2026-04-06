@@ -33,7 +33,7 @@
    :openai      {:base-url "https://api.openai.com/v1"           :rpm 500 :tpm 2000000
                  :env-keys ["OPENAI_API_KEY"]}
    :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
-                 :env-keys ["ANTHROPIC_API_KEY"]}
+                 :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic}
    :zai         {:base-url "https://api.z.ai/api/paas/v4"        :rpm 500 :tpm 2000000
                  :env-keys ["ZAI_API_KEY"]}
    :zai-coding  {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
@@ -41,6 +41,8 @@
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
    :ollama      {:base-url "http://localhost:11434/v1"            :rpm 1000 :tpm 10000000
+                 :env-keys []}
+   :lmstudio    {:base-url "http://localhost:1234/v1"             :rpm 1000 :tpm 10000000
                  :env-keys []}})
 
 ;; =============================================================================
@@ -150,7 +152,10 @@
     "gemini-2.0-flash"          {:pricing {:input 0.10  :output 0.40}  :context 1000000}}
 
    :ollama
-   {}})
+   {}
+
+   :lmstudio
+   {"gemma-4-21b-reap-tool-calling-mlx" {:pricing {:input 0.0 :output 0.0} :context 32000}}})
 
 ;; =============================================================================
 ;; Derived compatibility maps
@@ -308,6 +313,7 @@
     {:id id
      :api-key (:api-key provider-map)
      :base-url base-url
+     :api-style (or (:api-style provider-map) (:api-style known) :openai)
      :priority idx
      :rpm rpm
      :tpm tpm

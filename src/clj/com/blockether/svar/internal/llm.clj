@@ -59,16 +59,15 @@
    nothing and don't pin OS threads."
   (delay
     (let [vt-executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor)]
-      (http/client (assoc http/default-client-opts :executor vt-executor)))))
+      (http/client (assoc http/default-client-opts :executor vt-executor :version :http1.1)))))
 
 (defn- http-post!
-  "Makes an HTTP POST request with JSON body and OAuth token.
+  "Makes an HTTP POST request with JSON body.
    Reuses the shared HttpClient to avoid thread/resource leaks."
-  [url body api-key timeout-ms]
+  [url body headers timeout-ms]
   (let [response (http/post url
                    {:client @shared-http-client
-                    :headers {"Authorization" (str "Bearer " api-key)
-                              "Content-Type" "application/json"}
+                    :headers headers
                     :body (json/write-json-str body)
                     :timeout timeout-ms})]
     (json/read-json (:body response) :key-fn keyword)))
@@ -82,6 +81,90 @@
                     :headers {"Authorization" (str "Bearer " api-key)
                               "Content-Type" "application/json"}})]
     (json/read-json (:body response) :key-fn keyword)))
+
+;; =============================================================================
+;; API-style dispatch (OpenAI vs Anthropic)
+;; =============================================================================
+
+(defn- make-llm-headers
+  "Builds HTTP headers for the given API style."
+  [api-style api-key]
+  (case api-style
+    :anthropic {"x-api-key" api-key
+                "anthropic-version" "2023-06-01"
+                "Content-Type" "application/json"}
+    ;; :openai and everything else — Bearer token
+    {"Authorization" (str "Bearer " api-key)
+     "Content-Type" "application/json"}))
+
+(defn- make-chat-url
+  "Builds the chat endpoint URL for the given API style."
+  [base-url api-style]
+  (case api-style
+    :anthropic (if (str/ends-with? base-url "/messages")
+                 base-url
+                 (str base-url "/messages"))
+    ;; :openai default
+    (if (str/ends-with? base-url "/chat/completions")
+      base-url
+      (str base-url "/chat/completions"))))
+
+(defn- build-anthropic-request-body
+  "Builds request body in Anthropic Messages API format.
+   Extracts system messages to top-level :system field.
+   Ensures :max_tokens is always present (required by Anthropic)."
+  [messages model extra-body]
+  (let [system-msgs (filter #(= "system" (:role %)) messages)
+        non-system  (vec (remove #(= "system" (:role %)) messages))
+        system-text (when (seq system-msgs)
+                      (str/join "\n" (map :content system-msgs)))
+        max-tokens  (or (:max_tokens extra-body) 4096)
+        body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
+                      system-text (assoc :system system-text)
+                      (seq extra-body) (merge (dissoc extra-body :stream_options)))]
+    ;; Re-assert system after merge so extra-body can't clobber it
+    (cond-> body
+      system-text (assoc :system system-text))))
+
+(defn- extract-anthropic-response-data
+  "Extracts content, reasoning, and usage from an Anthropic Messages API response.
+   Normalizes usage keys to OpenAI names (prompt_tokens/completion_tokens)
+   so downstream token counting works unchanged."
+  [response]
+  (let [content-blocks (:content response)
+        text-parts     (->> content-blocks
+                         (filter #(= "text" (:type %)))
+                         (map :text))
+        thinking-parts (->> content-blocks
+                         (filter #(= "thinking" (:type %)))
+                         (map :thinking))
+        usage          (:usage response)]
+    {:content   (when (seq text-parts) (str/join "\n" text-parts))
+     :reasoning (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
+     :api-usage (when usage
+                  {:prompt_tokens      (:input_tokens usage)
+                   :completion_tokens  (:output_tokens usage)})}))
+
+(defn- extract-anthropic-stream-delta
+  "Extracts content/reasoning deltas from an Anthropic SSE event chunk."
+  [chunk]
+  (case (:type chunk)
+    "content_block_delta"
+    (let [delta (:delta chunk)]
+      (case (:type delta)
+        "text_delta"     {:content-delta (:text delta)     :reasoning-delta nil :api-usage nil}
+        "thinking_delta" {:content-delta nil               :reasoning-delta (:thinking delta) :api-usage nil}
+        {:content-delta nil :reasoning-delta nil :api-usage nil}))
+    "message_delta"
+    {:content-delta nil :reasoning-delta nil
+     :api-usage (when-let [u (:usage chunk)]
+                  {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)})}
+    "message_start"
+    {:content-delta nil :reasoning-delta nil
+     :api-usage (when-let [u (get-in chunk [:message :usage])]
+                  {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)})}
+    ;; default — ignore other event types
+    {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
 (defn- with-retry
   "Executes a function with exponential backoff retry for transient errors.
@@ -230,13 +313,15 @@
 
 (defn- chat-completion-with-retry
   "Calls the LLM API with exponential backoff retry for rate limits."
-  [messages model api-key base-url retry-opts timeout-ms extra-body]
-  (let [request-body (build-request-body messages model extra-body)
+  [messages model api-key base-url retry-opts timeout-ms extra-body api-style]
+  (let [api-style    (or api-style :openai)
+        request-body (if (= api-style :anthropic)
+                       (build-anthropic-request-body messages model extra-body)
+                       (build-request-body messages model extra-body))
         input-tokens (router/count-messages model messages)
-        ;; Ensure URL has /chat/completions endpoint
-        chat-url (if (str/ends-with? base-url "/chat/completions")
-                   base-url
-                   (str base-url "/chat/completions"))
+        chat-url     (make-chat-url base-url api-style)
+        headers      (make-llm-headers api-style api-key)
+        extract-fn   (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
         _ (trove/log! {:level :info :id ::llm-request
                        :data {:model model
                               :msg-count (count messages)
@@ -247,8 +332,8 @@
     (try
       (with-retry
         (fn []
-          (let [parsed (http-post! chat-url request-body api-key timeout-ms)]
-            (extract-response-data parsed)))
+          (let [parsed (http-post! chat-url request-body headers timeout-ms)]
+            (extract-fn parsed)))
         retry-opts)
       (catch Exception e
         ;; Check for API key configuration errors
@@ -306,12 +391,12 @@
 
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta for each.
+   `headers` - HTTP headers map. `delta-fn` - extracts delta from parsed SSE chunk.
    Returns {:content str :reasoning str :api-usage map}."
-  [url body api-key timeout-ms on-delta]
+  [url body headers timeout-ms delta-fn on-delta]
   (let [response (try
                    (http/post url
-                     {:headers {"Authorization" (str "Bearer " api-key)
-                                "Content-Type" "application/json"}
+                     {:headers headers
                       :body (json/write-json-str body)
                       :timeout timeout-ms
                       :as :stream})
@@ -336,7 +421,7 @@
                 (when (str/starts-with? line "data: ")
                   (let [data-str (subs line 6)]
                     (when-let [chunk (parse-sse-data data-str)]
-                      (let [{:keys [content-delta reasoning-delta api-usage]} (extract-stream-delta chunk)]
+                      (let [{:keys [content-delta reasoning-delta api-usage]} (delta-fn chunk)]
                         (when content-delta (.append content-acc content-delta))
                         (when reasoning-delta (.append reasoning-acc reasoning-delta))
                         (when api-usage (reset! usage-atom api-usage))
@@ -357,15 +442,19 @@
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
-  [messages model api-key base-url _retry-opts timeout-ms extra-body on-chunk]
-  (let [request-body (-> (build-request-body messages model extra-body)
-                       (assoc :stream true
-                         :stream_options {:include_usage true}))
-        chat-url (if (str/ends-with? base-url "/chat/completions")
-                   base-url
-                   (str base-url "/chat/completions"))]
+  [messages model api-key base-url _retry-opts timeout-ms extra-body on-chunk api-style]
+  (let [api-style    (or api-style :openai)
+        anthropic?   (= api-style :anthropic)
+        base-body    (if anthropic?
+                       (build-anthropic-request-body messages model extra-body)
+                       (build-request-body messages model extra-body))
+        request-body (cond-> (assoc base-body :stream true)
+                       (not anthropic?) (assoc :stream_options {:include_usage true}))
+        chat-url     (make-chat-url base-url api-style)
+        headers      (make-llm-headers api-style api-key)
+        delta-fn     (if anthropic? extract-anthropic-stream-delta extract-stream-delta)]
     (try
-      (http-post-stream! chat-url request-body api-key timeout-ms
+      (http-post-stream! chat-url request-body headers timeout-ms delta-fn
         (fn [{:keys [content-acc reasoning-acc]}]
           (on-chunk {:content content-acc :reasoning reasoning-acc :done? false})))
       (catch Exception e
@@ -404,12 +493,13 @@
   ([messages model api-key base-url opts]
    (let [timeout-ms (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
          extra-body (:extra-body opts)
-         on-chunk (:on-chunk opts)]
+         on-chunk   (:on-chunk opts)
+         api-style  (:api-style opts)]
      (if on-chunk
        (chat-completion-streaming
-         messages model api-key base-url opts timeout-ms extra-body on-chunk)
+         messages model api-key base-url opts timeout-ms extra-body on-chunk api-style)
        (chat-completion-with-retry
-         messages model api-key base-url opts timeout-ms extra-body)))))
+         messages model api-key base-url opts timeout-ms extra-body api-style)))))
 
 (defn- build-system-prompt
   "Builds the system prompt with the objective wrapped in XML tags."
@@ -503,7 +593,7 @@
   "Extracts effective values from router + opts.
    Router provides network/tokens defaults. Opts provides per-call overrides.
    If :provider-id is present, uses provider-scoped pricing/context overlays."
-  [router {:keys [model timeout-ms check-context? output-reserve api-key base-url provider-id]}]
+  [router {:keys [model timeout-ms check-context? output-reserve api-key base-url provider-id api-style]}]
   (let [{:keys [network tokens]} router
         default-pricing (or (:pricing tokens) router/MODEL_PRICING)
         default-context-limits (or (:context-limits tokens) router/MODEL_CONTEXT_LIMITS)
@@ -519,6 +609,7 @@
      :output-reserve (or output-reserve (:output-reserve tokens))
      :api-key api-key
      :base-url base-url
+     :api-style (or api-style :openai)
      :provider-id provider-id
      :network network
      :pricing pricing
@@ -570,7 +661,7 @@
           (chat-completion messages (:name model-map)
             (:api-key provider)
             (:base-url provider)
-            (cond-> {:extra-body auto-params}
+            (cond-> {:extra-body auto-params :api-style (:api-style provider)}
               (:on-chunk opts)
               (assoc :on-chunk (:on-chunk opts)))))))))
 
@@ -613,6 +704,7 @@
               :model (:name model-map)
               :api-key (:api-key provider)
               :base-url (:base-url provider)
+              :api-style (:api-style provider)
               :provider-id (:id provider)
               :extra-body merged-body)))))))
 
@@ -672,8 +764,8 @@
    Returns:
    Map with :result, :tokens, :cost, :duration-ms."
   [router {:keys [spec messages humanizer] :as opts}]
-  (let [{:keys [model api-key base-url timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts router opts)
-        chat-url (str base-url "/chat/completions")
+  (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts router opts)
+        chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
         ;; Process messages: wrap system content with build-system-prompt
         processed-msgs (mapv (fn [{:keys [role content] :as msg}]
@@ -714,7 +806,7 @@
                                               :cost nil
                                               :done? false})))))
         extra-body (:extra-body opts)
-        retry-opts (cond-> (merge network {:timeout-ms timeout-ms})
+        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      extra-body (assoc :extra-body extra-body))
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
@@ -780,6 +872,7 @@
             :model (:name model-map)
             :api-key (:api-key provider)
             :base-url (:base-url provider)
+            :api-style (:api-style provider)
             :provider-id (:id provider)))))))
 
 (def ^:private DEFAULT_ITERATIONS
@@ -938,7 +1031,7 @@
                     (build-cod-first-iteration-objective target-length special-instructions)
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary accumulated-entities)
-        ask-resp (ask!* router (merge (select-keys resolved-opts [:model :api-key :base-url :provider-id])
+        ask-resp (ask!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id])
                                  {:spec (build-cod-spec)
                                   :messages [(system objective)
                                              (user task)]}))
@@ -956,7 +1049,7 @@
                  (nil? (:summary result))
                  (assoc :summary previous-summary))
         eval-resp (when eval?
-                    (eval!* router (merge (select-keys resolved-opts [:model :api-key :base-url :provider-id])
+                    (eval!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id])
                                      {:task (str "Summarize the following text:\n\n" source-text)
                                       :output (:summary result)
                                       :criteria COD_EVAL_CRITERIA})))
@@ -1233,6 +1326,7 @@
             :model (:name model-map)
             :api-key (:api-key provider)
             :base-url (:base-url provider)
+            :api-style (:api-style provider)
             :provider-id (:id provider)))))))
 
 (defn eval!*
@@ -2097,6 +2191,7 @@
             :model (:name model-map)
             :api-key (:api-key provider)
             :base-url (:base-url provider)
+            :api-style (:api-style provider)
             :provider-id (:id provider)))))))
 
 (defn sample!*
@@ -2201,4 +2296,5 @@
             :model (:name model-map)
             :api-key (:api-key provider)
             :base-url (:base-url provider)
+            :api-style (:api-style provider)
             :provider-id (:id provider)))))))

@@ -474,8 +474,8 @@
                                    read-string find-ns
                                    ;; No filesystem I/O
                                    slurp spit
-                                   ;; No var mutation from sandbox
-                                   alter-var-root intern
+                                   ;; No var mutation from sandbox (alter-var-root allowed — needed by letfn in SCI)
+                                   intern
                                    ;; No shell / process execution
                                    sh
                                    ;; No IO handles
