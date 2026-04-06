@@ -497,6 +497,8 @@
                            :ns-aliases {'str 'clojure.string
                                         'edn 'fast-edn.core
                                         'zp 'zprint.core
+                                        'pprint 'zprint.core
+                                        'pp 'zprint.core
                                         'set 'clojure.set
                                         'walk 'clojure.walk
                                         'json 'charred.api}
