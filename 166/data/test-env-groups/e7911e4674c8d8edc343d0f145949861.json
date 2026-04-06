@@ -1,0 +1,1 @@
+{"id":"e7911e4674c8d8edc343d0f145949861","fullName":"com.blockether.svar.internal.llm-test.vector-prefer-test.[:cost :speed].cheapest first, fastest as tiebreaker","name":"vector-prefer-test > [:cost :speed] > cheapest first, fastest as tiebreaker","status":"passed","testResultsByEnv":{"default":"003c6bb3959fd1aaf73ab2de93c4d402"}}
