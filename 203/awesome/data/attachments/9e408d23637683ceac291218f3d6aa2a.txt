@@ -1,0 +1,13 @@
+CHUNK 1 => {:title Penicillin Discovery, :scientist Alexander Fleming, :year 1928, :significance Revolutionized medicine with antibiotics, saving millions of lives., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+CHUNK 2 => {:title Penicillin Discovery, :scientist Alexander Fleming, :year 1928, :significance Revolutionized medicine with antibiotics, saving millions of lives., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+CHUNK 3 => {:title Penicillin Discovery, :scientist Alexander Fleming, :year 1928, :significance Revolutionized medicine with antibiotics, saving millions of lives., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+2026-04-06T14:11:21.766508945Z :info com.blockether.svar.internal.llm [722 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 3078.408756, :content-len 312, :has-reasoning false, :input-tokens 151, :output-tokens 83, :reasoning-tokens 0}
+CHUNK 4 => {:title Penicillin Discovery, :scientist Alexander Fleming, :year 1928, :significance Revolutionized medicine with antibiotics, saving millions of lives., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+
+=== STREAMING RESULT ===
+Total chunks: 4
+Final: {:title Penicillin Discovery, :scientist Alexander Fleming, :year 1928, :significance Revolutionized medicine with antibiotics, saving millions of lives., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+Tokens: {:input 151, :output 83, :reasoning 0, :total 234} Cost: {:input-cost 3.775E-4, :output-cost 8.3E-4, :total-cost 0.0012075}
+========================
+
