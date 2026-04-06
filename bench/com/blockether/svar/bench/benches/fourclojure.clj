@@ -128,6 +128,20 @@
     "- No named refs like my-fn. Return the expression itself.\n"
     "- No files. In-memory only."))
 
+(defn- build-pi-prompt [{:keys [title description tests restricted]}]
+  (str "4CLOJURE PROBLEM\n\n"
+    "Title: " title "\n"
+    "Description: " (str/replace description "\n" " ") "\n\n"
+    "Test forms (your expression replaces __):\n"
+    (str/join "\n" (map #(str "  " %) tests))
+    (if (seq restricted)
+      (str "\n\nRestricted (do NOT use these): " (str/join ", " restricted))
+      "")
+    "\n\nReturn ONLY the Clojure expression that replaces __. No explanation, no markdown.\n"
+    "- Nested #() is ILLEGAL. Use (fn [...] ...) for inner lambdas.\n"
+    "- Quote list literals: '(1 2 3) not (1 2 3)\n"
+    "- % args only work inside #(). Don't use them standalone."))
+
 ;; =============================================================================
 ;; Agent eval functions
 ;; =============================================================================
@@ -159,9 +173,10 @@
                      :duration-ms duration}))}))
 
 (defn- eval-pi! [problem model & {:keys [router]}]
-  (let [pi-result (if router
-                    (common/run-pi-local! (build-prompt problem) router)
-                    (common/run-pi! (build-prompt problem) model))]
+  (let [prompt   (build-pi-prompt problem)
+        pi-result (if router
+                    (common/run-pi-local! prompt router)
+                    (common/run-pi! prompt model))]
     (if (:timed-out? pi-result)
       {:correct? false :answer nil :duration-ms (:duration-ms pi-result)
        :failures [{:error "pi timed out"}]}
