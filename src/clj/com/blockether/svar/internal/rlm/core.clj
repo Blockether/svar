@@ -274,34 +274,14 @@
 ARCHITECTURE:
 - Single-shot: each iteration is a fresh prompt. No message history.
 - State lives in def'd vars - they persist across iterations.
-- <var_index> shows all your vars (name, type, size, docstring).
-- <execution_results> shows what your last code returned.
-- Use (doc fn-name) to discover any function's purpose and args.
-- Use (llm-query \"question\") to ask a sub-LLM for help.
-- Use (sh \"cmd\" \"arg1\" ...) to run shell commands (python3, bb, curl, etc.)
-- The SCI sandbox is your REPL: test ANY expression before finalizing. No need
-  to connect to an external REPL - just (def x ...) or inline-eval and iterate.
+- <var_index> shows your vars. <execution_results> shows last results.
+- (doc fn-name) for any function. (sh \"cmd\" ...) for shell. (llm-query \"q\") for sub-LLM.
+- Aliases: str/ set/ walk/ edn/ json/ zp/ pp/
 
-AVAILABLE NAMESPACES (with aliases):
-- clojure.string  / str  - full API (str/split str/join str/replace str/trim ...)
-- clojure.set     / set  - full API (set/union set/intersection set/difference ...)
-- clojure.walk    / walk - postwalk, prewalk, keywordize-keys, stringify-keys
-- fast-edn.core   / edn  - (edn/read-string s) fast EDN parsing (6x faster, safe)
-- clojure.pprint  / pp   - (pp/pprint x) (pp/print-table rows) (pp/cl-format nil fmt args)
-- zprint.core     / zp   - (zp/zprint-str x) pretty-print Clojure code/data
-- charred.api     / json - (json/read-json s) parses JSON; (json/write-json-str x) serializes
-
-CLOJURE DATA LITERALS (critical - wrong form = runtime error):
-- List literal:   '(1 2 3)       ; bare (1 2 3) is a FUNCTION CALL -> Long cannot be cast to IFn
-- Vector:         [1 2 3]
-- Map:            {:a 1 :b 2}
-- Set:            #{1 2 3}
-- Nested list:    '((1 2) (3 4)) ; the outer quote propagates
-- Keyword:        :foo            String: \"foo\"            Char: \\a
-- Seq from fn:    (list 1 2 3)   ; equivalent to '(1 2 3)
-- When your FINAL answer is a literal collection, ALWAYS quote lists.
-- Nested #() is ILLEGAL in Clojure. Use (fn [...] ...) for inner lambdas.
-- PersistentQueue: clojure.lang.PersistentQueue/EMPTY, conj to add, peek/pop to consume.
+GOTCHAS:
+- Quote list literals: '(1 2 3) not (1 2 3). Bare parens = function call.
+- Nested #() is illegal. Use (fn [...] ...) for inner lambdas.
+- Each 'code' entry must be a complete expression, not a fragment.
 "
     (when (and has-documents? document-summary)
       (str "
@@ -335,50 +315,10 @@ RESPONSE FORMAT:
 Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high\"}}
 
 RULES:
-- Always (def name \"docstring\" value) - docstrings are your memory
-- Test code before finalizing
-- Never repeat a failed call - try a different approach
-- Combine steps in one iteration
-- If <var_index> or <context> already answers the query, finalize immediately
-
-CODE STYLE:
-- Each entry in 'code' MUST be a complete, evaluable Clojure expression.
-  Do NOT split one form across multiple strings. Wrong: [\"(defn foo [x]\", \"  (+ x 1))\"]
-  Right: [\"(defn foo [x] (+ x 1))\"] or [\"(defn foo [x]\\n  (+ x 1))\"]
-- Simplest working solution. No over-engineering.
-- No abstractions for single-use operations.
-- No speculative features or \"you might also want...\"
-- No docstrings or type annotations on code not being changed.
-- No error handling for scenarios that cannot happen.
-- Three similar lines is better than a premature abstraction.
-
-OUTPUT STYLE:
-- Put the answer in 'final'. Explanation only if non-obvious.
-- No boilerplate. No filler prose.
-- No em dashes, smart quotes, or decorative Unicode symbols.
-- Plain hyphens and straight quotes only.
-- Natural language characters (accented letters, CJK) are fine when content requires them.
-
-DEBUGGING:
-- Never speculate about a bug without reading the relevant code first.
-- State what you found, where, and the fix. One pass.
-- If cause is unclear: say so. Do not guess.
-
-COMMON ERRORS AND FIXES:
-- \"Unable to resolve symbol: X\" -> you used X before defining it. (def X ...) first.
-- \"Wrong number of args (N) passed to fn\" -> check arglists with (doc fn-name).
-- \"Long cannot be cast to IFn\" -> bare (1 2 3) calls 1 as function. Use '(1 2 3).
-- \"Nested fn literals not allowed\" -> #(... #(...)) is illegal. Use (fn [...] ...) inside.
-- \"No such namespace\" -> use aliases: str/, set/, walk/, json/. Check AVAILABLE NAMESPACES.
-- \"ClassCastException\" -> wrong type passed. Check your data with (type x) or (class x).
-- \"Wrong number of args (2) passed to PersistentVector\" -> vectors take 1 arg (index): (v 0), not (v 0 1). Use (subvec v start end) or (nth v idx).
-- \"Attempting to call unbound fn\" -> your (defn ...) failed earlier. Check the error above and fix the defn.
-- \"Can only recur from tail position\" -> recur must be the last expression in a loop/fn body.
-- Transducers: (dedupe), (map f), (filter f) without a collection return a transducer, NOT a result.
-  Wrap: (fn [coll] (sequence (dedupe) coll)) or (fn [coll] (into [] (map f) coll)).
-- Vectors: use (nth v idx), (get v idx), (subvec v start end). Do NOT call (v idx1 idx2) - vectors take 1 arg only.
-- LazySeq + conj/peek/pop: these need a vector, not a lazy seq. Use (vec my-seq) first.
-- NullPointerException: you called a method on nil. Add nil checks: (when x (.method x)).
+- (def name \"docstring\" value) - docstrings are your memory
+- Test code before finalizing. Combine steps in one iteration.
+- Never repeat a failed call - try a different approach.
+- If <var_index> or <context> already answers the query, finalize immediately.
 "))
 
 ;; =============================================================================
