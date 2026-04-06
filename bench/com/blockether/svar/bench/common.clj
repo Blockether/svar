@@ -9,6 +9,7 @@
    [clojure.string :as str]
    [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.rlm.trajectory :as trajectory]
+   [datalevin.core :as d]
    [taoensso.trove :as trove])
   (:import
    (java.nio.file Files)
@@ -49,18 +50,45 @@
     (.mkdirs (io/file dir))
     dir))
 
+(defn- strip-db-refs
+  "Removes :db/id keys and replaces {:db/id N} ref maps with nil.
+   These are Datalevin internals meaningless outside the DB."
+  [m]
+  (cond
+    (map? m) (into {}
+               (keep (fn [[k v]]
+                       (when-not (= :db/id k)
+                         [k (strip-db-refs v)])))
+               m)
+    (vector? m) (mapv strip-db-refs m)
+    :else m))
+
+(defn- pull-conversation
+  "Pulls full conversation entity from db-info, given a ref (eid or {:db/id N})."
+  [{:keys [conn]} conv-ref]
+  (when (and conn conv-ref)
+    (let [eid (if (map? conv-ref) (:db/id conv-ref) conv-ref)]
+      (when eid
+        (-> (d/pull (d/db conn) '[*] eid)
+          (dissoc :db/id))))))
+
 (defn persist-trajectory!
   "Extracts all queries and iteration snapshots from an RLM env's DB and
-   writes them to an EDN file. Call this after query-env! completes, before
-   dispose-env!. Returns the EDN path on success, nil if no DB or no queries."
+   writes them to a fully denormalized EDN file. Conversation data (system-prompt,
+   model, env-id) is inlined into each query. All :db/id refs stripped."
   [env edn-path]
   (when-let [db-info-atom (:db-info-atom env)]
     (when-let [db-info @db-info-atom]
       (let [queries (trajectory/list-queries db-info)]
         (when (seq queries)
           (let [enriched (mapv (fn [q]
-                                 (assoc q :iterations
-                                   (vec (trajectory/list-iterations db-info [:query/id (:query/id q)]))))
+                                 (let [conv (pull-conversation db-info (:query/conversation q))
+                                       iters (vec (trajectory/list-iterations db-info [:query/id (:query/id q)]))]
+                                   (-> q
+                                     (dissoc :query/conversation)
+                                     (assoc :conversation conv
+                                            :iterations (mapv #(dissoc % :iteration/query) iters))
+                                     strip-db-refs)))
                            queries)]
             (spit edn-path (pr-str enriched))
             edn-path))))))
