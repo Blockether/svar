@@ -56,6 +56,9 @@
    'identity identity, 'constantly constantly, 'comp comp, 'partial partial,
    'apply apply, 'juxt juxt, 'fnil fnil,
    'atom atom, 'swap! swap!, 'reset! reset!, 'deref deref,
+   'abs abs, 'parse-long parse-long, 'parse-double parse-double,
+   'parse-boolean parse-boolean, 'parse-uuid parse-uuid,
+   'infinite? infinite?, 'NaN? NaN?,
    'rand rand, 'rand-int rand-int, 'rand-nth rand-nth,
    'range range, 'repeat repeat, 'iterate iterate, 'cycle cycle,
    ;; Regex functions
