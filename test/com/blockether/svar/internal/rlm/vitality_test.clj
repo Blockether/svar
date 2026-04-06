@@ -26,11 +26,11 @@
 
 (defdescribe compute-page-vitality-test
   (describe "freshly created page"
-    (it "has high vitality (active zone)"
+    (it "starts active (ingestion = access-count 1.0)"
       (let [now (java.util.Date.)
-            {:keys [score zone]} (db/compute-page-vitality 0.0 now now 5 now)]
-        (expect (>= score 0.3))
-        (expect (not= :archived zone)))))
+            {:keys [score zone]} (db/compute-page-vitality 1.0 now now 5 now)]
+        (expect (>= score 0.6))
+        (expect (= :active zone)))))
 
   (describe "heavily accessed page"
     (it "has higher vitality than unaccessed"
@@ -46,6 +46,14 @@
             recent (db/compute-page-vitality 1.0 (ms-ago ONE_DAY_MS) (ms-ago ONE_DAY_MS) 5 now)
             old (db/compute-page-vitality 1.0 (ms-ago (* 365 ONE_DAY_MS)) (ms-ago (* 365 ONE_DAY_MS)) 5 now)]
         (expect (> (:score recent) (:score old))))))
+
+  (describe "recency of access"
+    (it "recently accessed page has higher vitality than stale page"
+      (let [created (ms-ago (* 30 ONE_DAY_MS))
+            now (java.util.Date.)
+            recently-accessed (db/compute-page-vitality 5.0 created (ms-ago ONE_HOUR_MS) 5 now)
+            long-ago-accessed (db/compute-page-vitality 5.0 created (ms-ago (* 30 ONE_DAY_MS)) 5 now)]
+        (expect (> (:score recently-accessed) (:score long-ago-accessed))))))
 
   (describe "structural boost"
     (it "page with many children has higher vitality"
@@ -77,7 +85,22 @@
       (let [page-score 0.5
             section (db/compute-node-vitality page-score :section)
             heading (db/compute-node-vitality page-score :heading)]
-        (expect (= (:score section) (:score heading)))))))
+        (expect (= (:score section) (:score heading)))))
+
+    (it "dead page means dead nodes regardless of type"
+      (let [toc (db/compute-node-vitality 0.0 :toc-entry)
+            section (db/compute-node-vitality 0.0 :section)
+            paragraph (db/compute-node-vitality 0.0 :paragraph)]
+        (expect (= 0.0 (:score toc)))
+        (expect (= 0.0 (:score section)))
+        (expect (= 0.0 (:score paragraph)))
+        (expect (= :archived (:zone toc)))))
+
+    (it "unknown node type uses default rate 1.0"
+      (let [page-score 0.5
+            unknown (db/compute-node-vitality page-score :unknown-type)
+            paragraph (db/compute-node-vitality page-score :paragraph)]
+        (expect (= (:score unknown) (:score paragraph)))))))
 
 ;; =============================================================================
 ;; vitality-zone — zone classification

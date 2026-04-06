@@ -48,10 +48,6 @@
       (catch Exception e
         (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to delete temp RLM DB"})))))
 
-(declare db-list-page-nodes)
-(declare db-list-toc-entries)
-(declare db-list-entities)
-
 (defn store-conversation!
   "Stores or retrieves a conversation entity for an env session."
   [{:keys [conn]} {:keys [env-id system-prompt model]}]
@@ -266,20 +262,20 @@
                            (filter #(or (nil? type) (= type (:page.node/type %)))))
              ;; Cache page vitality lookups (many nodes share the same page)
              page-vitality-cache (atom {})
-             get-page-vitality (fn [page-id]
-                                 (if-let [cached (get @page-vitality-cache page-id)]
-                                   cached
-                                   (let [v (or (get-page-vitality db-info page-id)
-                                               {:score 1.0 :zone :active})]
-                                     (swap! page-vitality-cache assoc page-id v)
-                                     v)))
+             cached-page-vitality (fn [page-id]
+                                    (if-let [cached (get @page-vitality-cache page-id)]
+                                      cached
+                                      (let [v (or (get-page-vitality db-info page-id)
+                                                  {:score 1.0 :zone :active})]
+                                        (swap! page-vitality-cache assoc page-id v)
+                                        v)))
              ;; Assign relevance rank (position in fulltext results = relevance signal)
              total (max 1 (count raw-results))
              ranked (->> raw-results
                       (map-indexed
                         (fn [idx node]
                           (let [page-id (:page.node/page-id node)
-                                page-v (get-page-vitality page-id)
+                                page-v (cached-page-vitality page-id)
                                 node-v (compute-node-vitality (:score page-v) (:page.node/type node))
                                 ;; Relevance: 1.0 for first result, decreasing
                                 relevance (- 1.0 (/ (double idx) total))
@@ -667,7 +663,7 @@
               :page/index (:page/index page)
               :page/created-at now
               :page/last-accessed now
-              :page/access-count 0.0}
+              :page/access-count 1.0}  ;; ingestion counts as first access
      :page-id page-id}))
 
 (defn- build-page-node-entity
@@ -795,16 +791,19 @@
    (compute-page-vitality access-count created-at last-accessed children-count (java.util.Date.)))
   ([access-count created-at last-accessed children-count now]
    (let [d 0.5 ;; ACT-R decay parameter
-         lifetime-ms (max 1 (- (.getTime ^java.util.Date now) (.getTime ^java.util.Date created-at)))
-         lifetime-days (max 0.001 (/ lifetime-ms 86400000.0))
+         ;; Use time-since-last-access as primary decay driver (not lifetime).
+         ;; Re-accessing a page resets its decay clock — core ACT-R behavior.
+         recency-ms (max 1 (- (.getTime ^java.util.Date now) (.getTime ^java.util.Date last-accessed)))
+         recency-days (max 0.001 (/ recency-ms 86400000.0))
          access (max 0.01 (double access-count)) ;; avoid ln(0)
-         ;; ACT-R base-level activation
+         ;; ACT-R base-level activation: B = ln(n/(1-d)) - d*ln(T)
+         ;; where n = access count, T = days since last access
          B (- (Math/log (/ access (- 1.0 d)))
-              (* d (Math/log lifetime-days)))
+              (* d (Math/log recency-days)))
          ;; Sigmoid to [0, 1]
          base-vitality (/ 1.0 (+ 1.0 (Math/exp (- B))))
-         ;; Structural boost: pages with many children resist decay
-         structural-boost (+ 1.0 (* 0.1 (min children-count 10)))
+         ;; Structural boost: pages with many children resist decay (max 1.5x)
+         structural-boost (+ 1.0 (* 0.05 (min children-count 10)))
          ;; Final score clamped to [0, 1]
          score (min 1.0 (* base-vitality structural-boost))]
      {:score score
@@ -820,10 +819,13 @@
    Returns map with :score and :zone."
   [page-vitality-score node-type]
   (let [metabolic-rate (get METABOLIC_RATES node-type 1.0)
-        ;; Lower metabolic rate = slower decay = higher effective vitality
-        ;; rate 0.3 means node retains 70% more vitality than base
-        effective-score (min 1.0 (+ (* page-vitality-score metabolic-rate)
-                                    (* (- 1.0 metabolic-rate) 1.0)))]
+        ;; Power law: effective = page_v ^ metabolic_rate
+        ;; rate 0.3 (section): 0.1^0.3 = 0.50 (slow decay), 0.0^0.3 = 0.0 (dead is dead)
+        ;; rate 1.0 (paragraph): 0.1^1.0 = 0.10 (normal decay)
+        ;; rate 0.1 (toc-entry): 0.1^0.1 = 0.79 (very slow decay)
+        effective-score (if (pos? page-vitality-score)
+                          (Math/pow page-vitality-score metabolic-rate)
+                          0.0)]
     {:score effective-score
      :zone (vitality-zone effective-score)}))
 
@@ -858,14 +860,15 @@
    or nil if page not found."
   [{:keys [conn]} page-id]
   (when conn
-    (let [page (d/pull (d/db conn)
+    (let [db (d/db conn)
+          page (d/pull db
                  [:page/created-at :page/last-accessed :page/access-count :page/index]
                  [:page/id page-id])
-          ;; Count children (nodes on this page)
+          ;; Count children (nodes on this page) — same DB snapshot
           children-count (or (first (d/q '[:find [(count ?n)]
                                            :in $ ?pid
                                            :where [?n :page.node/page-id ?pid]]
-                                      (d/db conn) page-id))
+                                      db page-id))
                            0)]
       (when (:page/created-at page)
         (let [{:keys [score zone]} (compute-page-vitality
