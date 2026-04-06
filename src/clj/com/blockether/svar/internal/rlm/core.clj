@@ -387,36 +387,45 @@ OUTPUT STYLE:
       ;; Check for final answer in spec response
       (if-let [final-data (:final parsed)]
         (let [raw-answer (str (:answer final-data))
-              ;; Auto-repair final answer parens (model's final may have unbalanced brackets
-              ;; that paren-repair silently fixed during self-test but weren't stored)
               final-answer (paren-repair/repair-code raw-answer)
               confidence (or (:confidence final-data) :high)
               code-blocks (vec (remove str/blank? (or (:code parsed) [])))
-              ;; Reject empty-code finals on first iteration (model skipped self-test)
+              ;; Execute code blocks BEFORE accepting final (self-test gate)
+              exec-results (when (seq code-blocks)
+                             (mapv (fn [code] (execute-code rlm-env code)) code-blocks))
+              exec-errors (when exec-results
+                            (seq (filter :error exec-results)))
               untested? (and (zero? (or iteration 0)) (empty? code-blocks))
-              ;; Spec-level validator - model declares answer-type + language
               validation-error (or (when untested?
                                      "You submitted final without running any code. Run the self-test first.")
+                                 (when exec-errors
+                                   (str "Code errors before final: " (:error (first exec-errors))))
                                  (validate-final {:answer final-answer
                                                   :answer-type (:answer-type final-data)
-                                                  :language (:language final-data)}))]
+                                                  :language (:language final-data)}))
+              executions (when exec-results
+                           (mapv (fn [idx code result]
+                                   {:id idx :code code
+                                    :result (:result result) :stdout (:stdout result)
+                                    :stderr (:stderr result) :error (:error result)
+                                    :execution-time-ms (:execution-time-ms result)
+                                    :repaired? (:repaired? result)})
+                             (range) code-blocks exec-results))]
           (if validation-error
-            ;; Final answer has detectable code error - reject and ask model to fix
             (do (rlm-debug! {:final-answer (str-truncate final-answer 200)
-                             :validation-error validation-error} "FINAL rejected - code error")
+                             :validation-error validation-error} "FINAL rejected")
                 {:response nil :thinking thinking :next-optimize next-optimize
-                 :executions [{:id 0 :code final-answer :result nil :stdout "" :stderr ""
-                               :error (str "Your final answer has a code error: " validation-error
-                                        ". Fix it and submit a corrected final.")}]
+                 :executions (or executions
+                               [{:id 0 :code final-answer :result nil :stdout "" :stderr ""
+                                 :error validation-error}])
                  :final-result nil :api-usage api-usage})
-            ;; Valid final
             (let [final-result {:final? true
                                 :answer {:result final-answer :type String}
                                 :confidence confidence}]
               (rlm-debug! {:final-answer (str-truncate final-answer 200)
-                           :confidence confidence} "Final answer in response")
+                           :confidence confidence} "Final answer accepted")
               {:response nil :thinking thinking :next-optimize next-optimize
-               :executions [] :final-result final-result :api-usage api-usage})))
+               :executions (or executions []) :final-result final-result :api-usage api-usage})))
         ;; Normal path: execute code blocks
         (let [raw-blocks (vec (remove str/blank? (or (:code parsed) [])))
               ;; Coalesce fragments: when model splits one expression across multiple
