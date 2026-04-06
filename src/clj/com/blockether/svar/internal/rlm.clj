@@ -2172,12 +2172,22 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (let [{:keys [pages toc]} (postprocess-toc pages)
         text-model (:text-model opts)
         abstract-opts {:rlm-router router :text-model text-model}
-        document-abstract (generate-document-abstract pages abstract-opts)
+        document-abstract (try
+                            (generate-document-abstract pages abstract-opts)
+                            (catch Exception e
+                              (trove/log! {:level :warn :data {:error (ex-message e)}
+                                           :msg "Abstract generation failed — skipping"})
+                              nil))
         metadata-title (:title file-metadata)
         inferred-title (when-not metadata-title
-                         (vision/infer-document-title pages
-                           (cond-> {:rlm-router router}
-                             text-model (assoc :text-model text-model))))
+                         (try
+                           (vision/infer-document-title pages
+                             (cond-> {:rlm-router router}
+                               text-model (assoc :text-model text-model)))
+                           (catch Exception e
+                             (trove/log! {:level :warn :data {:error (ex-message e)}
+                                          :msg "Title inference failed — skipping"})
+                             nil)))
         final-title (or metadata-title inferred-title)
         now (Instant/now)]
     (trove/log! {:level :info :data {:document/name doc-name

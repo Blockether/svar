@@ -1038,7 +1038,8 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                          :messages [(llm/system objective)
                                                     (llm/user task (llm/image base64-image "image/png"))]
                                          :check-context? false
-                                         :timeout-ms timeout-ms})
+                                         :timeout-ms timeout-ms
+                                         :extra-body {:max_tokens 15000}})
           raw-nodes (get-in response [:result :nodes] [])
           ;; Enrich visual nodes with PDFBox-extracted images by index
           nodes (enrich-visual-nodes raw-nodes page-pdf-images page-index)
@@ -1243,7 +1244,8 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
                                                               "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
                                                               "<document_content>\n" content "\n</document_content>"))]
                                        :check-context? false
-                                       :timeout-ms timeout-ms})
+                                       :timeout-ms timeout-ms
+                                       :extra-body {:max_tokens 15000}})
         nodes (get-in response [:result :nodes] [])
         section-count (count (filter :page.node/description nodes))
         heading-count (count (filter :page.node/level nodes))]

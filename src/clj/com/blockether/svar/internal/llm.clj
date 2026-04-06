@@ -605,14 +605,16 @@
         (let [ctx (or (:context model-map) 8192)
               auto-params (cond-> {:max_tokens (long (* 0.25 ctx))}
                             (seq (:reasoning-params model-map))
-                            (merge (:reasoning-params model-map)))]
+                            (merge (:reasoning-params model-map)))
+              ;; Caller's :extra-body overrides auto-params (e.g. lower max_tokens for vision).
+              merged-body (merge auto-params (:extra-body opts))]
           (ask!* router
             (assoc opts
               :model (:name model-map)
               :api-key (:api-key provider)
               :base-url (:base-url provider)
               :provider-id (:id provider)
-              :extra-body auto-params)))))))
+              :extra-body merged-body)))))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
