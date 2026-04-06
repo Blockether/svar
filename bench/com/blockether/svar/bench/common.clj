@@ -20,7 +20,7 @@
 ;; Constants
 ;; =============================================================================
 
-(def problem-timeout-ms 300000)  ;; 5 minutes per problem
+(def problem-timeout-ms 600000)  ;; 10 minutes per problem
 (def pi-timeout-ms 300000)       ;; 5 minutes for pi agent
 (def parallelism 4)              ;; 4 problems at once
 
@@ -314,7 +314,7 @@
                       batch)]
         (doseq [f futures]
           (let [[q-num item eval-result] (deref f problem-timeout-ms
-                                           [0 nil {:error "Batch timeout" :correct? false :duration-ms 0}])
+                                           [0 nil {:error "Task timeout (10 min)" :correct? false :duration-ms 0}])
                 correct?   (boolean (:correct? eval-result))
                 error?     (boolean (:error eval-result))
                 result-rec (result-fn q-num item eval-result)]
