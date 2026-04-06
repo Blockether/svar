@@ -1,6 +1,5 @@
 (ns com.blockether.svar.internal.rlm.tools
   (:require
-   [clojure.java.process :as proc]
    #_{:clj-kondo/ignore [:unused-namespace]}
    [clojure.set :as set]
    [clojure.string :as str]
@@ -488,7 +487,9 @@
                                      'java.time.LocalDate java.time.LocalDate
                                      'java.time.Period java.time.Period
                                      'java.util.UUID java.util.UUID
-                                     'clojure.lang.PersistentQueue clojure.lang.PersistentQueue}
+                                     'clojure.lang.PersistentQueue clojure.lang.PersistentQueue
+                                     'java.math.BigInteger java.math.BigInteger
+                                     'java.math.BigDecimal java.math.BigDecimal}
                            ;; Bare class imports matching Clojure/Babashka defaults
                            :imports '{Boolean java.lang.Boolean
                                       Byte java.lang.Byte
@@ -514,7 +515,9 @@
                                       Pattern java.util.regex.Pattern
                                       Matcher java.util.regex.Matcher
                                       LocalDate java.time.LocalDate
-                                      PersistentQueue clojure.lang.PersistentQueue}
+                                      PersistentQueue clojure.lang.PersistentQueue
+                                      BigInteger java.math.BigInteger
+                                      BigDecimal java.math.BigDecimal}
                            :deny '[]})]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
