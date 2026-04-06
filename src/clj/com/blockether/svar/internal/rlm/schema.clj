@@ -159,19 +159,20 @@
 
 (defn validate-final
   "Validates a final answer based on its declared type and language.
+   answer-type is a required enum in FINAL_SPEC - always present.
    Returns nil if valid, or an error string if broken."
   [{:keys [answer answer-type language]}]
   (let [s (str answer)]
-    (case answer-type
-      "code" (case language
+    (case (or answer-type "code")
+      "code" (case (or language "clojure")
                "clojure" (validate-clojure-code s)
                "python"  (validate-python s)
-               nil)
+               (validate-clojure-code s))
       "data" (case language
                "json" (validate-json s)
                "edn"  (validate-edn s)
                nil)
-      nil)))
+      "text" nil)))
 
 (def FINAL_SPEC
   "Nested spec for final answer in iteration response."

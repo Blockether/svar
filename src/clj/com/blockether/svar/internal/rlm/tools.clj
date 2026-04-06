@@ -433,8 +433,9 @@
         str-ns  (sci/create-ns 'clojure.string nil)
         set-ns  (sci/create-ns 'clojure.set nil)
         walk-ns (sci/create-ns 'clojure.walk nil)
-        ;; zprint: can't use copy-ns (macros/.cljc crash), manual requiring-resolve
+        ;; zprint/lazytest: can't use copy-ns (macros), manual requiring-resolve
         zp-resolve (fn [sym] (deref (requiring-resolve (symbol "zprint.core" (str sym)))))
+        lt-resolve (fn [sym] (deref (requiring-resolve (symbol "lazytest.core" (str sym)))))
         sci-ctx (sci/init {:namespaces {'user all-bindings
                                         'clojure.string (sci/copy-ns clojure.string str-ns)
                                         'clojure.set (sci/copy-ns clojure.set set-ns)
@@ -452,6 +453,15 @@
                                                       'configure-all! (zp-resolve 'configure-all!)}
                                         'clojure.pprint {'pprint (zp-resolve 'zprint)
                                                          'pprint-str (zp-resolve 'zprint-str)}
+                                        ;; lazytest: fn-based API for testing in sandbox
+                                        'lazytest.core {'expect-fn (lt-resolve 'expect-fn)
+                                                        'ok? (lt-resolve 'ok?)
+                                                        'throws? (lt-resolve 'throws?)
+                                                        'causes? (lt-resolve 'causes?)
+                                                        'causes-with-msg? (lt-resolve 'causes-with-msg?)}
+                                        ;; clojure.test alias -> lazytest fn API for model compat
+                                        'clojure.test {'is (lt-resolve 'expect-fn)
+                                                       'throws? (lt-resolve 'throws?)}
                                         ;; charred: ns->sci-map (no macros, works fine)
                                         'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
@@ -461,7 +471,9 @@
                                         'pp 'clojure.pprint
                                         'set 'clojure.set
                                         'walk 'clojure.walk
-                                        'json 'charred.api}
+                                        'json 'charred.api
+                                        'lt 'lazytest.core
+                                        'test 'clojure.test}
                            :classes {'java.lang.Character Character
                                      'java.lang.Math Math
                                      'java.lang.String String
