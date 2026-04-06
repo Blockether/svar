@@ -8,6 +8,7 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [com.blockether.svar.core :as svar]
+   [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm.trajectory :as trajectory]
    [datalevin.core :as d]
    [taoensso.trove :as trove])
@@ -141,12 +142,20 @@
 ;; =============================================================================
 
 (defn strip-code-fence
-  "Strips markdown code fences and backticks from a string."
+  "Extracts code from markdown output. Tries in order:
+   1. Last fenced code block (```...```)
+   2. Last inline backtick (`...`)
+   3. Full string as-is if no markdown found."
   [s]
-  (let [trimmed (str/trim (str s))]
-    (if-let [m (re-find #"(?s)^```\w*\s*(.*?)\s*```$" trimmed)]
-      (str/trim (second m))
-      (str/replace trimmed #"^`|`$" ""))))
+  (let [trimmed (str/trim (str s))
+        ;; Try fenced code blocks — take the last one
+        fenced (re-seq #"(?s)```\w*\s*(.*?)\s*```" trimmed)
+        ;; Try inline backticks — take the last one
+        inline (re-seq #"`([^`]+)`" trimmed)]
+    (cond
+      (seq fenced) (str/trim (second (last fenced)))
+      (seq inline) (str/trim (second (last inline)))
+      :else        trimmed)))
 
 ;; =============================================================================
 ;; Pi agent execution
@@ -174,6 +183,25 @@
       {:output      (deref output-future 5000 "")
        :duration-ms duration
        :timed-out?  false})))
+
+(defn run-pi-local!
+  "Runs a single-shot LLM call via router (for local providers like lmstudio).
+   Same interface as run-pi! — returns {:output :duration-ms :timed-out?}."
+  [prompt router]
+  (let [start (System/currentTimeMillis)]
+    (try
+      (let [result (llm/routed-chat-completion router
+                     [{:role "system" :content "You are a Clojure coding assistant. Return ONLY the answer expression, no markdown, no explanation."}
+                      {:role "user" :content prompt}]
+                     {})]
+        {:output      (or (:content result) "")
+         :duration-ms (- (System/currentTimeMillis) start)
+         :timed-out?  false})
+      (catch Exception e
+        (trove/log! {:level :warn :id ::pi-local-error
+                     :data {:error (ex-message e)}
+                     :msg "Pi-local LLM call failed"})
+        {:output nil :duration-ms (- (System/currentTimeMillis) start) :timed-out? true}))))
 
 ;; =============================================================================
 ;; Results persistence

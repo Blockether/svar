@@ -266,7 +266,7 @@
                                     (if-let [cached (get @page-vitality-cache page-id)]
                                       cached
                                       (let [v (or (get-page-vitality db-info page-id)
-                                                  {:score 1.0 :zone :active})]
+                                                {:score 1.0 :zone :active})]
                                         (swap! page-vitality-cache assoc page-id v)
                                         v)))
              ;; Assign relevance rank (position in fulltext results = relevance signal)
@@ -767,7 +767,7 @@
   "Classifies a vitality score into a zone: :active, :stale, :fading, or :archived."
   [score]
   (or (some (fn [[threshold zone]] (when (>= score threshold) zone)) VITALITY_ZONES)
-      :archived))
+    :archived))
 
 (defn compute-page-vitality
   "Computes vitality score (0.0–1.0) for a page using ACT-R base-level activation.
@@ -799,7 +799,7 @@
          ;; ACT-R base-level activation: B = ln(n/(1-d)) - d*ln(T)
          ;; where n = access count, T = days since last access
          B (- (Math/log (/ access (- 1.0 d)))
-              (* d (Math/log recency-days)))
+             (* d (Math/log recency-days)))
          ;; Sigmoid to [0, 1]
          base-vitality (/ 1.0 (+ 1.0 (Math/exp (- B))))
          ;; Structural boost: pages with many children resist decay (max 1.5x)

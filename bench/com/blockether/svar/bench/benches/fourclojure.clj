@@ -158,13 +158,18 @@
                      :cost        (:cost result)
                      :duration-ms duration}))}))
 
-(defn- eval-pi! [problem model]
-  (let [pi-result (common/run-pi! (build-prompt problem) model)]
+(defn- eval-pi! [problem model & {:keys [router]}]
+  (let [pi-result (if router
+                    (common/run-pi-local! (build-prompt problem) router)
+                    (common/run-pi! (build-prompt problem) model))]
     (if (:timed-out? pi-result)
       {:correct? false :answer nil :duration-ms (:duration-ms pi-result)
        :failures [{:error "pi timed out"}]}
       (let [answer (common/strip-code-fence (:output pi-result))
-            score  (verify-with-bb (:tests problem) answer)]
+            score  (if (str/blank? answer)
+                     {:all-passed? false :passed 0 :total (count (:tests problem))
+                      :failures [{:error "Empty answer"}]}
+                     (verify-with-bb (:tests problem) answer))]
         {:correct?    (:all-passed? score)
          :answer      answer
          :passed      (:passed score)
@@ -226,8 +231,11 @@
         problems (vec (cond->> filtered limit (take limit)))
 
         debug?   (get opts :debug? false)
+        local?   (contains? #{:lmstudio :ollama} provider)
         eval-fn  (case agent-name
                    :query-env (fn [problem] (eval-query-env! router problem model run-ts debug?))
-                   :pi        (fn [problem] (eval-pi! problem pi-model)))]
+                   :pi        (if local?
+                                (fn [problem] (eval-pi! problem pi-model :router router))
+                                (fn [problem] (eval-pi! problem pi-model))))]
 
     (common/run-parallel-bench! "4clojure" agent-name model problems total-ds eval-fn make-result-rec)))
