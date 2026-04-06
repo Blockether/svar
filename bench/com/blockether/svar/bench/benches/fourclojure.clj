@@ -44,11 +44,12 @@
 ;; bb verification
 ;; =============================================================================
 
-(defn- substitute-blank [test-form candidate]
-  (str/replace test-form "__" candidate))
+(defn- substitute-blank [test-form candidate-sym]
+  (str/replace test-form "__" candidate-sym))
 
 (defn- build-bb-script [tests candidate]
-  (let [filled-tests (mapv #(substitute-blank % candidate) tests)
+  (let [;; Bind candidate to __ so complex expressions don't break test-form parens
+        filled-tests (mapv #(substitute-blank % "__bb_ans__") tests)
         test-forms   (str/join "\n"
                        (map-indexed
                          (fn [_i test-str]
@@ -58,6 +59,8 @@
                              test-str (pr-str test-str) test-str (pr-str test-str)))
                          filled-tests))]
     (str "(def results (atom []))\n"
+      "(def is identity)\n"
+      "(def __bb_ans__ " candidate ")\n"
       test-forms "\n"
       "(let [rs @results
              passed (count (filter #(= :pass %) rs))
@@ -140,8 +143,11 @@
      :prompt-fn  build-prompt
      :query-opts (cond-> {} debug? (assoc :debug? true))
      :score-fn  (fn [p result duration]
-                  (let [answer (str/trim (str (:answer result)))
-                        score  (verify-with-bb (:tests p) answer)]
+                  (let [answer (str/trim (str (or (:answer result) "")))
+                        score  (if (str/blank? answer)
+                                 {:all-passed? false :passed 0 :total (count (:tests p))
+                                  :failures [{:error "Empty answer"}]}
+                                 (verify-with-bb (:tests p) answer))]
                     {:correct?    (:all-passed? score)
                      :answer      answer
                      :passed      (:passed score)
@@ -217,7 +223,7 @@
         filtered (if ids
                    (filter #(contains? ids (:id %)) dataset)
                    (drop offset dataset))
-        problems (vec (cond->> (shuffle filtered) limit (take limit)))
+        problems (vec (cond->> filtered limit (take limit)))
 
         debug?   (get opts :debug? false)
         eval-fn  (case agent-name

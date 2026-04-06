@@ -155,7 +155,8 @@
    {}
 
    :lmstudio
-   {"gemma-4-21b-reap-tool-calling-mlx" {:pricing {:input 0.0 :output 0.0} :context 32000}}})
+   {"gemma-4-21b-reap-tool-calling-mlx"          {:pricing {:input 0.0 :output 0.0} :context 32000}
+    "qwen3.5-27b-claude-4.6-opus-distilled-mlx"  {:pricing {:input 0.0 :output 0.0} :context 32000}}})
 
 ;; =============================================================================
 ;; Derived compatibility maps

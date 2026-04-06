@@ -10,6 +10,8 @@
 (declare db-list-page-nodes)
 (declare db-list-toc-entries)
 (declare db-list-entities)
+(declare get-page-vitality)
+(declare compute-node-vitality)
 
 (defn str-truncate [s n] (when s (if (> (count s) n) (subs s 0 n) s)))
 
@@ -220,6 +222,7 @@
 
 (defn- brevify-node
   "Strips full content from a page node, replacing with a 150-char preview.
+   Preserves vitality fields (:vitality-score, :vitality-zone) if present.
    The LLM uses fetch-content to load full content into P when needed."
   [node]
   (let [content (or (:page.node/content node) (:page.node/description node) "")
@@ -232,33 +235,66 @@
         :content-length (count content)))))
 
 (defn db-search-page-nodes
-  "Searches page nodes by text content, optionally filtered by document and type.
-   
-   Returns BRIEF results by default — metadata + 150-char preview.
+  "Searches page nodes by text content with vitality-weighted reranking.
+
+   Returns BRIEF results — metadata + 150-char preview + vitality score/zone.
    Use fetch-content to fetch full content into a variable.
-   
+
+   Results are ranked by: 0.7 × text-relevance + 0.3 × vitality-score.
+   Archived nodes (vitality < 0.1) are filtered by default.
+
    Params:
-   `db-info` - Map with :store key.
+   `db-info` - Map with :conn key.
    `query` - String. Case-insensitive text search over content and description.
              When nil/blank, falls back to list mode.
    `opts` - Map, optional:
      - :top-k - Integer. Max results (default: 10).
      - :document-id - String. Filter by document.
      - :type - Keyword. Filter by node type (:paragraph, :heading, etc.).
-   
+     - :min-vitality - Double. Minimum vitality threshold (default: 0.1, set 0.0 to include archived).
+
    Returns:
-   Vector of brief page node maps: {:page.node/id :page.node/type :page.node/page-id
-                                     :page.node/document-id :preview :content-length}"
+   Vector of brief page node maps with :vitality-score, :vitality-zone added."
   ([db-info query] (db-search-page-nodes db-info query {}))
-  ([{:keys [conn] :as db-info} query {:keys [top-k document-id type] :or {top-k 10}}]
+  ([{:keys [conn] :as db-info} query {:keys [top-k document-id type min-vitality]
+                                      :or {top-k 10 min-vitality 0.1}}]
    (if (str/blank? (str query))
      (mapv brevify-node (db-list-page-nodes db-info {:document-id document-id :type type :limit top-k}))
      (when conn
-       (->> (search-page-nodes-raw conn query)
-         (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
-         (filter #(or (nil? type) (= type (:page.node/type %))))
-         (take top-k)
-         (mapv brevify-node))))))
+       (let [raw-results (->> (search-page-nodes-raw conn query)
+                           (filter #(or (nil? document-id) (= document-id (:page.node/document-id %))))
+                           (filter #(or (nil? type) (= type (:page.node/type %)))))
+             ;; Cache page vitality lookups (many nodes share the same page)
+             page-vitality-cache (atom {})
+             get-page-vitality (fn [page-id]
+                                 (if-let [cached (get @page-vitality-cache page-id)]
+                                   cached
+                                   (let [v (or (get-page-vitality db-info page-id)
+                                               {:score 1.0 :zone :active})]
+                                     (swap! page-vitality-cache assoc page-id v)
+                                     v)))
+             ;; Assign relevance rank (position in fulltext results = relevance signal)
+             total (max 1 (count raw-results))
+             ranked (->> raw-results
+                      (map-indexed
+                        (fn [idx node]
+                          (let [page-id (:page.node/page-id node)
+                                page-v (get-page-vitality page-id)
+                                node-v (compute-node-vitality (:score page-v) (:page.node/type node))
+                                ;; Relevance: 1.0 for first result, decreasing
+                                relevance (- 1.0 (/ (double idx) total))
+                                ;; Combined score
+                                combined (+ (* 0.7 relevance) (* 0.3 (:score node-v)))]
+                            (assoc node
+                              ::combined-score combined
+                              :vitality-score (:score node-v)
+                              :vitality-zone (:zone node-v)))))
+                      ;; Filter by min-vitality
+                      (filter #(>= (:vitality-score %) min-vitality))
+                      ;; Sort by combined score descending
+                      (sort-by ::combined-score #(compare %2 %1))
+                      (take top-k))]
+         (mapv #(-> % (dissoc ::combined-score) brevify-node) ranked))))))
 
 (defn db-get-page-node
   "Gets a page node by ID with full details.
@@ -621,10 +657,17 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- build-page-entity
-  "Builds a page datom without transacting."
+  "Builds a page datom without transacting.
+   Initializes vitality tracking fields: created-at = now, access-count = 0."
   [page doc-id]
-  (let [page-id (str doc-id "-page-" (:page/index page))]
-    {:entity {:page/id page-id :page/document-id doc-id :page/index (:page/index page)}
+  (let [page-id (str doc-id "-page-" (:page/index page))
+        now (java.util.Date.)]
+    {:entity {:page/id page-id
+              :page/document-id doc-id
+              :page/index (:page/index page)
+              :page/created-at now
+              :page/last-accessed now
+              :page/access-count 0.0}
      :page-id page-id}))
 
 (defn- build-page-node-entity
@@ -696,6 +739,146 @@
      :pages-stored page-count
      :nodes-stored node-count
      :toc-entries-stored (count toc-entities)}))
+
+;; -----------------------------------------------------------------------------
+;; Vitality: ACT-R Memory Decay with Type-Aware Metabolic Rates
+;; -----------------------------------------------------------------------------
+
+(def ^:private METABOLIC_RATES
+  "Decay speed multipliers per node type. Lower = slower decay (more persistent).
+   Section/Heading are structural scaffolding, TocEntry is navigation — they persist.
+   Paragraph/ListItem are content that ages normally."
+  {:section   0.3
+   :heading   0.3
+   :paragraph 1.0
+   :list-item 1.0
+   :toc-entry 0.1
+   :table     0.5
+   :image     0.5
+   :header    0.8
+   :footer    0.8
+   :metadata  0.3
+   :entity    0.8})
+
+(def ^:private VITALITY_ZONES
+  "Zone classification thresholds. Sorted descending for first-match."
+  [[0.6 :active]
+   [0.3 :stale]
+   [0.1 :fading]
+   [0.0 :archived]])
+
+(defn vitality-zone
+  "Classifies a vitality score into a zone: :active, :stale, :fading, or :archived."
+  [score]
+  (or (some (fn [[threshold zone]] (when (>= score threshold) zone)) VITALITY_ZONES)
+      :archived))
+
+(defn compute-page-vitality
+  "Computes vitality score (0.0–1.0) for a page using ACT-R base-level activation.
+
+   Formula:
+     B = ln(access-count / (1 - d)) - d × ln(lifetime-days)
+     base-vitality = sigmoid(B) = 1 / (1 + e^(-B))
+
+   Then modulated by:
+     structural-boost = 1 + 0.1 × min(children-count, 10)
+
+   Returns map with :score (0.0–1.0) and :zone (:active/:stale/:fading/:archived).
+
+   Params:
+   `access-count` - Double. Accumulated access count (fetch=1.0, search-hit=0.2).
+   `created-at`   - java.util.Date. When the page was ingested.
+   `last-accessed` - java.util.Date. Last access time.
+   `children-count` - Long. Number of child nodes on this page.
+   `now`           - java.util.Date, optional. Current time (default: now)."
+  ([access-count created-at last-accessed children-count]
+   (compute-page-vitality access-count created-at last-accessed children-count (java.util.Date.)))
+  ([access-count created-at last-accessed children-count now]
+   (let [d 0.5 ;; ACT-R decay parameter
+         lifetime-ms (max 1 (- (.getTime ^java.util.Date now) (.getTime ^java.util.Date created-at)))
+         lifetime-days (max 0.001 (/ lifetime-ms 86400000.0))
+         access (max 0.01 (double access-count)) ;; avoid ln(0)
+         ;; ACT-R base-level activation
+         B (- (Math/log (/ access (- 1.0 d)))
+              (* d (Math/log lifetime-days)))
+         ;; Sigmoid to [0, 1]
+         base-vitality (/ 1.0 (+ 1.0 (Math/exp (- B))))
+         ;; Structural boost: pages with many children resist decay
+         structural-boost (+ 1.0 (* 0.1 (min children-count 10)))
+         ;; Final score clamped to [0, 1]
+         score (min 1.0 (* base-vitality structural-boost))]
+     {:score score
+      :zone (vitality-zone score)})))
+
+(defn compute-node-vitality
+  "Computes vitality for a specific node, combining page vitality with type metabolic rate.
+
+   Params:
+   `page-vitality-score` - Double. The page's vitality score (0.0–1.0).
+   `node-type`           - Keyword. The node type (:section, :paragraph, etc.).
+
+   Returns map with :score and :zone."
+  [page-vitality-score node-type]
+  (let [metabolic-rate (get METABOLIC_RATES node-type 1.0)
+        ;; Lower metabolic rate = slower decay = higher effective vitality
+        ;; rate 0.3 means node retains 70% more vitality than base
+        effective-score (min 1.0 (+ (* page-vitality-score metabolic-rate)
+                                    (* (- 1.0 metabolic-rate) 1.0)))]
+    {:score effective-score
+     :zone (vitality-zone effective-score)}))
+
+(defn record-page-access!
+  "Records a page access in Datalevin. Updates last-accessed and increments access-count.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-id` - String. The page ID to update.
+   `weight`  - Double. Access weight (1.0 for fetch, 0.2 for search hit)."
+  [{:keys [conn]} page-id weight]
+  (when conn
+    (try
+      (let [now (java.util.Date.)
+            existing (d/pull (d/db conn) [:page/access-count] [:page/id page-id])
+            current-count (or (:page/access-count existing) 0.0)]
+        (d/transact! conn [{:page/id page-id
+                            :page/last-accessed now
+                            :page/access-count (+ current-count (double weight))}]))
+      (catch Exception e
+        (trove/log! {:level :warn :data {:page-id page-id :error (ex-message e)}
+                     :msg "Failed to record page access"})))))
+
+(defn get-page-vitality
+  "Fetches page temporal data and computes its vitality.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-id` - String. The page ID.
+
+   Returns map with :score, :zone, :access-count, :last-accessed, :created-at
+   or nil if page not found."
+  [{:keys [conn]} page-id]
+  (when conn
+    (let [page (d/pull (d/db conn)
+                 [:page/created-at :page/last-accessed :page/access-count :page/index]
+                 [:page/id page-id])
+          ;; Count children (nodes on this page)
+          children-count (or (first (d/q '[:find [(count ?n)]
+                                           :in $ ?pid
+                                           :where [?n :page.node/page-id ?pid]]
+                                      (d/db conn) page-id))
+                           0)]
+      (when (:page/created-at page)
+        (let [{:keys [score zone]} (compute-page-vitality
+                                     (or (:page/access-count page) 0.0)
+                                     (:page/created-at page)
+                                     (or (:page/last-accessed page) (:page/created-at page))
+                                     children-count)]
+          {:score score
+           :zone zone
+           :access-count (or (:page/access-count page) 0.0)
+           :last-accessed (:page/last-accessed page)
+           :created-at (:page/created-at page)
+           :children-count children-count})))))
 
 ;; -----------------------------------------------------------------------------
 ;; TOC Entry SCI Functions (for LLM to call during execution)

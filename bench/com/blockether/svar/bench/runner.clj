@@ -11,6 +11,7 @@
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [com.blockether.svar.bench.common :as common]
    [com.blockether.svar.bench.benches.fourclojure :as fourclojure]
    [com.blockether.svar.bench.benches.humaneval :as humaneval]
    [com.blockether.svar.bench.benches.swebench-verified :as swebench]
@@ -32,13 +33,16 @@
 
 (defn- make-bench-router
   "Creates a benchmark router for a provider + model.
-   Uses router/KNOWN_PROVIDERS for base-url and env-key resolution."
+   Uses router/KNOWN_PROVIDERS for base-url and env-key resolution.
+   Local providers (lmstudio, ollama) with empty env-keys use no API key."
   [provider-id model]
-  (let [api-key (resolve-provider-key provider-id)]
-    (if api-key
-      (svar/make-router [{:id provider-id :api-key api-key
+  (let [known (get router/KNOWN_PROVIDERS provider-id)
+        api-key (resolve-provider-key provider-id)]
+    (if (or api-key (empty? (:env-keys known)))
+      ;; Has key OR is a local provider (no key needed)
+      (svar/make-router [{:id provider-id :api-key (or api-key "")
                           :models [{:name model}]}])
-      ;; Fallback: try all known providers
+      ;; Remote provider without key — try fallback
       (let [[pid key] (some (fn [[pid _cfg]]
                               (when-let [k (resolve-provider-key pid)]
                                 [pid k]))
@@ -272,12 +276,14 @@
           (= k "--limit")  (recur (drop 2 remaining) (assoc acc :limit (Long/parseLong v)))
           (= k "--offset") (recur (drop 2 remaining) (assoc acc :offset (Long/parseLong v)))
           (= k "--ids")    (recur (drop 2 remaining) (assoc acc :ids (set (str/split v #","))))
+          (= k "--parallel") (recur (drop 2 remaining) (assoc acc :parallel (Long/parseLong v)))
           (= k "--debug") (recur (rest remaining) (assoc acc :debug? true))
           :else            (recur (rest remaining) acc))))))
 
 (defn- run-one! [bench-name opts]
   (if-let [bench (find-bench bench-name)]
-    (let [result ((:run-fn bench) opts)]
+    (let [result (binding [common/parallelism (get opts :parallel common/parallelism)]
+                   ((:run-fn bench) opts))]
       (print-summary result)
       (if-let [f (:saved-to result)]
         (println (format "\nResults saved to: %s" f))

@@ -300,9 +300,13 @@
    :document/updated-at {:db/valueType :db.type/instant}
 
    ;; Pages
-   :page/id          {:db/valueType :db.type/string :db/unique :db.unique/identity}
-   :page/document-id {:db/valueType :db.type/string}
-   :page/index       {:db/valueType :db.type/long}
+   :page/id           {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :page/document-id  {:db/valueType :db.type/string}
+   :page/index        {:db/valueType :db.type/long}
+   ;; Vitality tracking (ACT-R memory decay)
+   :page/created-at   {:db/valueType :db.type/instant}
+   :page/last-accessed {:db/valueType :db.type/instant}
+   :page/access-count {:db/valueType :db.type/double}
 
    ;; Page Nodes (content)
    :page.node/id           {:db/valueType :db.type/string :db/unique :db.unique/identity}

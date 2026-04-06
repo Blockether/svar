@@ -324,6 +324,7 @@
         extract-fn   (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
         _ (trove/log! {:level :info :id ::llm-request
                        :data {:model model
+                              :url chat-url
                               :msg-count (count messages)
                               :input-tokens input-tokens
                               :timeout-ms timeout-ms
@@ -332,8 +333,16 @@
     (try
       (with-retry
         (fn []
-          (let [parsed (http-post! chat-url request-body headers timeout-ms)]
-            (extract-fn parsed)))
+          (try
+            (let [parsed (http-post! chat-url request-body headers timeout-ms)]
+              (extract-fn parsed))
+            (catch clojure.lang.ExceptionInfo e
+              (when-let [body (:body (ex-data e))]
+                (trove/log! {:level :warn :id ::llm-error-body
+                             :data {:status (:status (ex-data e))
+                                    :body (if (string? body) (subs body 0 (min 500 (count body))) (str body))}
+                             :msg "LLM error response body"}))
+              (throw e))))
         retry-opts)
       (catch Exception e
         ;; Check for API key configuration errors

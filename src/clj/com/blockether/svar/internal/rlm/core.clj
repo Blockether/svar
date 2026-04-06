@@ -121,11 +121,10 @@
 
 (defn execute-code [{:keys [sci-ctx locals-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
-    (let [opens  (count (filter #{\( \[ \{} code))
-          closes (count (filter #{\) \] \}} code))
+    (let [bal (paren-repair/paren-balance code)
           _ (rlm-debug! {:code code
                          :code-len (count code)
-                         :paren-balance (- opens closes)} "Executing code (full)")
+                         :paren-balance bal} "Executing code (full)")
           start-time (System/currentTimeMillis)
           lint-error (detect-common-mistakes code)]
       (if lint-error
@@ -411,10 +410,17 @@ OUTPUT STYLE:
               exec-errors (when exec-results
                             (seq (filter :error exec-results)))
               untested? (and (zero? (or iteration 0)) (empty? code-blocks))
+              ;; Try to read+eval the final answer in SCI to catch bare list literals etc.
+              eval-check (try
+                           (sci/eval-string* (:sci-ctx rlm-env) final-answer)
+                           nil
+                           (catch Throwable e
+                             (str "Final answer fails to evaluate: " (ex-message e))))
               validation-error (or (when untested?
                                      "You submitted final without running any code. Run the self-test first.")
                                  (when exec-errors
                                    (str "Code errors before final: " (:error (first exec-errors))))
+                                 eval-check
                                  (validate-final {:answer final-answer
                                                   :answer-type (:answer-type final-data)
                                                   :language (:language final-data)}))
@@ -528,6 +534,16 @@ OUTPUT STYLE:
         ;; recur tail position
         (re-find #"recur.*tail" e)
         "recur must be the last expression in a loop/fn body."
+
+        ;; Unmatched delimiter inside map with char literals (\} \{)
+        (and (str/includes? e "Unmatched delimiter")
+          (str/includes? e "}"))
+        "Map literals with \\} or \\{ as keys/values confuse the reader. Use (hash-map \\) \\( \\] \\[ \\} \\{) instead of {\\} \\{ ...}."
+
+        ;; EOF in map/fn context — might be char literal issue
+        (and (str/includes? e "EOF while reading")
+          (str/includes? e "match {"))
+        "If your map contains bracket char literals like \\} \\{, use (hash-map ...) instead of a map literal."
 
         :else nil))))
 

@@ -22,7 +22,7 @@
 
 (def problem-timeout-ms 600000)  ;; 10 minutes per problem
 (def pi-timeout-ms 300000)       ;; 5 minutes for pi agent
-(def parallelism 4)              ;; 4 problems at once
+(def ^:dynamic parallelism 4)    ;; 4 problems at once, overridable via --parallel
 
 (def trajectories-root "bench/trajectories")
 
@@ -309,14 +309,19 @@
                                              (eval-fn item)
                                              (catch Throwable e
                                                (trove/log! {:level :warn :id ::bench-error
-                                                            :data {:idx idx :error (ex-message e)}
+                                                            :data {:idx idx
+                                                                   :item (select-keys item [:id :title :task_id :instance_id])
+                                                                   :error (ex-message e)}
                                                             :msg "Evaluation failed"})
                                                {:error (ex-message e) :correct? false :duration-ms 0}))]
                             [(inc idx) item eval-result])))
                       batch)]
-        (doseq [f futures]
-          (let [[q-num item eval-result] (deref f problem-timeout-ms
-                                           [0 nil {:error "Task timeout (10 min)" :correct? false :duration-ms 0}])
+        (doseq [[f [idx orig-item]] (map vector futures batch)]
+          (let [[q-num item eval-result] (or (deref f problem-timeout-ms nil)
+                                             (do (trove/log! {:level :warn :id ::task-timeout
+                                                              :data {:idx idx :item (select-keys orig-item [:id :title :task_id :instance_id])}
+                                                              :msg "Task timed out (10 min)"})
+                                                 [(inc idx) orig-item {:error "Task timeout (10 min)" :correct? false :duration-ms 0}]))
                 correct?   (boolean (:correct? eval-result))
                 error?     (boolean (:error eval-result))
                 result-rec (result-fn q-num item eval-result)]

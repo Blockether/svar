@@ -8,7 +8,7 @@
    [com.blockether.svar.internal.rlm.db :as db
     :refer [db-get-entity db-get-page-node db-get-toc-entry
             db-list-relationships db-search-entities db-search-page-nodes
-            db-search-toc-entries str-truncate]]
+            db-search-toc-entries record-page-access! str-truncate]]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
@@ -244,10 +244,14 @@
     ([query] (search-documents query {}))
     ([query {:keys [in top-k document-id type] :or {top-k 10}}]
      (if-let [db-info @db-info-atom]
-       (let [do-pages #(db-search-page-nodes db-info query
-                         (cond-> {:top-k top-k}
-                           document-id (assoc :document-id document-id)
-                           type (assoc :type type)))
+       (let [do-pages #(let [results (db-search-page-nodes db-info query
+                                       (cond-> {:top-k top-k}
+                                         document-id (assoc :document-id document-id)
+                                         type (assoc :type type)))]
+                         ;; Track search hit access (weight 0.2) for returned pages
+                         (doseq [page-id (distinct (keep :page.node/page-id results))]
+                           (record-page-access! db-info page-id 0.2))
+                         results)
              do-toc #(db-search-toc-entries db-info query {:top-k top-k})
              do-ents #(db-search-entities db-info query
                         (cond-> {:top-k top-k}
@@ -285,13 +289,20 @@
           (case attr
             :page.node/id
             (when-let [node (db-get-page-node db-info id)]
+              ;; Track page access (weight 1.0) — resolve node's page-id
+              (when-let [page-id (:page.node/page-id node)]
+                (record-page-access! db-info page-id 1.0))
               (or (:page.node/content node) (:page.node/description node) ""))
 
             :document/id
             (let [nodes (d/q '[:find [(pull ?e [:page.node/content :page.node/page-id]) ...]
                                :in $ ?doc-id
                                :where [?e :page.node/document-id ?doc-id]]
-                          (d/db conn) id)]
+                          (d/db conn) id)
+                  ;; Track access for all pages in document (weight 1.0)
+                  page-ids (distinct (keep :page.node/page-id nodes))]
+              (doseq [pid page-ids]
+                (record-page-access! db-info pid 1.0))
               (when (seq nodes)
                 (let [full-text (->> nodes
                                   (sort-by :page.node/page-id)
