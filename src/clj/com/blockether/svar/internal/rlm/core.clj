@@ -376,6 +376,9 @@ COMMON ERRORS AND FIXES:
 - \"Can only recur from tail position\" -> recur must be the last expression in a loop/fn body.
 - Transducers: (dedupe), (map f), (filter f) without a collection return a transducer, NOT a result.
   Wrap: (fn [coll] (sequence (dedupe) coll)) or (fn [coll] (into [] (map f) coll)).
+- Vectors: use (nth v idx), (get v idx), (subvec v start end). Do NOT call (v idx1 idx2) - vectors take 1 arg only.
+- LazySeq + conj/peek/pop: these need a vector, not a lazy seq. Use (vec my-seq) first.
+- NullPointerException: you called a method on nil. Add nil checks: (when x (.method x)).
 "))
 
 ;; =============================================================================
