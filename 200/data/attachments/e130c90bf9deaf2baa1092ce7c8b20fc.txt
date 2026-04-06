@@ -1,0 +1,2 @@
+2026-04-06T13:02:57.119385264Z :info com.blockether.svar.internal.llm [240 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :msg-count 3, :input-tokens 937, :timeout-ms 300000, :max-tokens nil}
