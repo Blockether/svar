@@ -429,13 +429,36 @@ COMMON ERRORS AND FIXES:
       (if-let [final-data (:final parsed)]
         (let [final-answer (str (:answer final-data))
               confidence (or (:confidence final-data) :high)
-              final-result {:final? true
-                            :answer {:result final-answer :type String}
-                            :confidence confidence}]
-          (rlm-debug! {:final-answer (str-truncate final-answer 200)
-                       :confidence confidence} "Final answer in response")
-          {:response nil :thinking thinking :next-optimize next-optimize
-           :executions [] :final-result final-result :api-usage api-usage})
+              ;; Validate final if it looks like Clojure code (starts with ( or #)
+              looks-like-code? (re-find #"^\s*[\(#\[]" final-answer)
+              lint-error (when looks-like-code? (detect-common-mistakes final-answer))
+              parse-error (when (and looks-like-code? (not lint-error))
+                            (try (sci/eval-string* (:sci-ctx rlm-env)
+                                   (str "(do " final-answer " nil)"))
+                                 nil
+                                 (catch Exception e
+                                   (let [msg (ex-message e)]
+                                     (when (or (paren-repair/parse-error? msg)
+                                             (str/includes? (str msg) "Nested fn"))
+                                       msg)))))
+              validation-error (or lint-error parse-error)]
+          (if validation-error
+            ;; Final answer has detectable code error - reject and ask model to fix
+            (do (rlm-debug! {:final-answer (str-truncate final-answer 200)
+                             :validation-error validation-error} "FINAL rejected - code error")
+                {:response nil :thinking thinking :next-optimize next-optimize
+                 :executions [{:id 0 :code final-answer :result nil :stdout "" :stderr ""
+                               :error (str "Your final answer has a code error: " validation-error
+                                        ". Fix it and submit a corrected final.")}]
+                 :final-result nil :api-usage api-usage})
+            ;; Valid final
+            (let [final-result {:final? true
+                                :answer {:result final-answer :type String}
+                                :confidence confidence}]
+              (rlm-debug! {:final-answer (str-truncate final-answer 200)
+                           :confidence confidence} "Final answer in response")
+              {:response nil :thinking thinking :next-optimize next-optimize
+               :executions [] :final-result final-result :api-usage api-usage})))
         ;; Normal path: execute code blocks
         (let [raw-blocks (vec (remove str/blank? (or (:code parsed) [])))
               ;; Coalesce fragments: when model splits one expression across multiple
