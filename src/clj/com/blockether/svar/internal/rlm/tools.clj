@@ -494,7 +494,18 @@
                                         'set 'clojure.set
                                         'walk 'clojure.walk
                                         'json 'charred.api}
-                           :classes {'java.lang.Character Character
+                           :classes {;; Bare aliases (model writes Character/isUpperCase, not java.lang.Character/isUpperCase)
+                                     'Character Character
+                                     'Math Math
+                                     'String String
+                                     'Integer Integer
+                                     'Long Long
+                                     'Double Double
+                                     'Boolean Boolean
+                                     'Collections java.util.Collections
+                                     'Arrays java.util.Arrays
+                                     ;; Full qualified (both work)
+                                     'java.lang.Character Character
                                      'java.lang.Math Math
                                      'java.lang.String String
                                      'java.lang.Integer Integer
