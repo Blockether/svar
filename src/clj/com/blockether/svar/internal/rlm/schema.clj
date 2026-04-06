@@ -1,9 +1,12 @@
 (ns com.blockether.svar.internal.rlm.schema
   (:require
+   [charred.api :as json]
+   [clojure.java.process :as proc]
    [clojure.spec.alpha :as s]
    [clojure.string :as str]
    [com.blockether.svar.internal.paren-repair :as paren-repair]
-   [com.blockether.svar.internal.spec :as spec])
+   [com.blockether.svar.internal.spec :as spec]
+   [fast-edn.core :as edn])
   (:import
    [java.util Base64]))
 
@@ -119,13 +122,46 @@
 
         :else nil))))
 
+(defn validate-json
+  "Validates a JSON string. Returns nil if valid, error string if broken."
+  [s]
+  (try (json/read-json (str s)) nil
+       (catch Exception e (str "Invalid JSON: " (ex-message e)))))
+
+(defn validate-edn
+  "Validates an EDN string. Returns nil if valid, error string if broken."
+  [s]
+  (try (edn/read-string (str s)) nil
+       (catch Exception e (str "Invalid EDN: " (ex-message e)))))
+
+(defn validate-python
+  "Validates Python syntax via python3 compile(). Returns nil if valid."
+  [s]
+  (try
+    (let [code (str s)
+          p (proc/start {:err :stdout} "python3" "-c"
+              (str "compile(" (pr-str code) ", '<answer>', 'exec')"))
+          ok (.waitFor p 5000 java.util.concurrent.TimeUnit/MILLISECONDS)]
+      (if (and ok (zero? (.exitValue p)))
+        nil
+        (let [out (slurp (.getInputStream p))]
+          (str "Python syntax error: " (str/trim out)))))
+    (catch Exception e (str "Python validation failed: " (ex-message e)))))
+
 (defn validate-final
   "Validates a final answer based on its declared type and language.
    Returns nil if valid, or an error string if broken."
   [{:keys [answer answer-type language]}]
-  (when (= answer-type "code")
-    (case language
-      "clojure" (validate-clojure-code (str answer))
+  (let [s (str answer)]
+    (case answer-type
+      "code" (case language
+               "clojure" (validate-clojure-code s)
+               "python"  (validate-python s)
+               nil)
+      "data" (case language
+               "json" (validate-json s)
+               "edn"  (validate-edn s)
+               nil)
       nil)))
 
 (def FINAL_SPEC
