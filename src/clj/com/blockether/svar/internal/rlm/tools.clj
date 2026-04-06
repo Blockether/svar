@@ -93,8 +93,9 @@
 (def ^:private REALIZE_LAZY_LIMIT
   "Upper bound on elements pulled from a lazy sequence by `realize-value`.
    Prevents OOM when models feed infinite seqs like `(range)` or
-   `(iterate inc 0)` into the result path."
-  10000)
+   `(iterate inc 0)` into the result path. Kept low (100) by default -
+   the model can explicitly `(vec (take n my-seq))` for larger slices."
+  100)
 
 (defn realize-value
   "Recursively realizes lazy sequences in a value to prevent opaque LazySeq@hash.
