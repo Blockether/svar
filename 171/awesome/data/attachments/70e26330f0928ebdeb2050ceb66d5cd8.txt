@@ -1,2 +1,0 @@
-2026-04-06T07:21:30.745924351Z :warn com.blockether.svar.internal.guard [271 14] Static guard detected prompt injection 
-  data: {:input-length 37, :pattern "forbidden phrase", :type :custom, :duration-ms 0.010384}
