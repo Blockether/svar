@@ -101,7 +101,7 @@
 ;; =============================================================================
 
 (defn- build-prompt [{:keys [title description tests restricted]}]
-  (str "Solve this Clojure problem.\n\n"
+  (str "4CLOJURE PROBLEM\n\n"
     "Title: " title "\n"
     "Description: " (str/replace description "\n" " ") "\n\n"
     "Test forms (your expression replaces __):\n"
@@ -109,13 +109,22 @@
     (if (seq restricted)
       (str "\n\nRestricted (do NOT use these): " (str/join ", " restricted))
       "")
-    "\n\nRULES:\n"
-    "- Your solution MUST run in Babashka (bb). Standard clojure.core only.\n"
-    "- Nested #() is ILLEGAL in Clojure. Use (fn [...] ...) for inner lambdas.\n"
-    "- List literals MUST be quoted: '(1 2 3) not (1 2 3). Bare (1 2 3) calls 1 as a function.\n"
-    "- Return an INLINE expression, not a named reference like my-fn. The expression replaces __.\n"
-    "- DO NOT write files. Compute in-memory only.\n"
-    "- No markdown, no explanation, no code fences. Just the raw Clojure expression."))
+    "\n\nWORKFLOW:\n"
+    "1. Read the problem and tests\n"
+    "2. Write your solution: (def solution ...)\n"
+    "3. SELF-TEST by running this block (replace YOUR_SOLUTION with your answer):\n"
+    "   (let [__ YOUR_SOLUTION]\n"
+    (str/join "\n" (map #(str "     (assert " % ")") tests))
+    "\n     :all-tests-pass)\n"
+    "4. If all asserts pass, submit final with answer-type: code, language: clojure\n"
+    "5. If an assert fails, fix and re-test\n\n"
+    "RULES:\n"
+    "- Final answer = single inline Clojure expression that replaces __\n"
+    "- Nested #() is ILLEGAL. Use (fn [...] ...) for inner lambdas.\n"
+    "- Quote list literals: '(1 2 3) not (1 2 3)\n"
+    "- % args only work inside #(). Don't use them standalone.\n"
+    "- No named refs like my-fn. Return the expression itself.\n"
+    "- No files. In-memory only."))
 
 ;; =============================================================================
 ;; Agent eval functions
@@ -123,13 +132,14 @@
 
 (defn- eval-query-env! [router problem model run-ts]
   (common/run-query-env-task!
-    {:bench     "4clojure"
-     :router    router
-     :task      problem
-     :model     model
-     :run-ts    run-ts
-     :task-id   (or (:id problem) (:title problem) (str (hash problem)))
-     :prompt-fn build-prompt
+    {:bench      "4clojure"
+     :router     router
+     :task       problem
+     :model      model
+     :run-ts     run-ts
+     :task-id    (or (:id problem) (:title problem) (str (hash problem)))
+     :prompt-fn  build-prompt
+     :query-opts {}
      :score-fn  (fn [p result duration]
                   (let [answer (str/trim (str (:answer result)))
                         score  (verify-with-bb (:tests p) answer)]

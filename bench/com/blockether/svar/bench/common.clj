@@ -117,16 +117,18 @@
      :prompt-fn (task) -> String - builds the user prompt from the task
      :score-fn  (task result duration-ms) -> result-map - scores the outcome
                 and shapes the final per-task record
+     :query-opts Map, optional - extra opts merged into query-env! call
+                 (e.g. :system-prompt for bench-specific instructions)
 
    Returns whatever score-fn returns."
-  [{:keys [bench router task model run-ts task-id prompt-fn score-fn]}]
+  [{:keys [bench router task model run-ts task-id prompt-fn score-fn query-opts]}]
   (let [edn-path (trajectory-edn-path bench model run-ts task-id)
         db-path  (trajectory-temp-db-path task-id)
         env      (svar/create-env router {:path db-path})
         start    (System/currentTimeMillis)]
     (try
       (let [result   (svar/query-env! env (prompt-fn task)
-                       (assoc DEFAULT_QUERY_ENV_OPTS :model model))
+                       (merge DEFAULT_QUERY_ENV_OPTS {:model model} query-opts))
             duration (- (System/currentTimeMillis) start)]
         (persist-trajectory! env edn-path)
         (score-fn task result duration))
