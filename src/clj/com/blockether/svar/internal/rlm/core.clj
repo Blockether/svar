@@ -428,8 +428,32 @@ COMMON ERRORS AND FIXES:
           {:response nil :thinking thinking :next-optimize next-optimize
            :executions [] :final-result final-result :api-usage api-usage})
         ;; Normal path: execute code blocks
-        (let [code-blocks (vec (remove str/blank? (or (:code parsed) [])))
+        (let [raw-blocks (vec (remove str/blank? (or (:code parsed) [])))
+              ;; Coalesce fragments: when model splits one expression across multiple
+              ;; array entries (one line per string), join unbalanced blocks with the
+              ;; next until parens balance. Prevents paren-repair from "fixing" each
+              ;; line individually into a broken zero-body form.
+              code-blocks (loop [remaining raw-blocks
+                                 result []]
+                            (if (empty? remaining)
+                              result
+                              (let [block (first remaining)
+                                    opens  (count (filter #{\( \[ \{} block))
+                                    closes (count (filter #{\) \] \}} block))]
+                                (if (and (> opens closes) (next remaining))
+                                  ;; Unbalanced opener - join with subsequent blocks
+                                  (let [[joined rest-blocks]
+                                        (loop [acc block
+                                               rem (rest remaining)]
+                                          (let [o (count (filter #{\( \[ \{} acc))
+                                                c (count (filter #{\) \] \}} acc))]
+                                            (if (or (>= c o) (empty? rem))
+                                              [acc rem]
+                                              (recur (str acc "\n" (first rem)) (rest rem)))))]
+                                    (recur rest-blocks (conj result joined)))
+                                  (recur (rest remaining) (conj result block))))))
               _ (rlm-debug! {:code-block-count (count code-blocks)
+                             :raw-count (count raw-blocks)
                              :code-previews (mapv #(str-truncate % 120) code-blocks)} "Code blocks extracted")
               execution-results (mapv (fn [code]
                                         (execute-code rlm-env code))
