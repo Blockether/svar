@@ -339,6 +339,9 @@ RULES:
 - If <var_index> or <context> already answers the query, finalize immediately
 
 CODE STYLE:
+- Each entry in 'code' MUST be a complete, evaluable Clojure expression.
+  Do NOT split one form across multiple strings. Wrong: [\"(defn foo [x]\", \"  (+ x 1))\"]
+  Right: [\"(defn foo [x] (+ x 1))\"] or [\"(defn foo [x]\\n  (+ x 1))\"]
 - Simplest working solution. No over-engineering.
 - No abstractions for single-use operations.
 - No speculative features or \"you might also want...\"
