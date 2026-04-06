@@ -1,0 +1,1 @@
+{"id":"b600ba895f2bbecca2fbdedcce1be742","fullName":"com.blockether.svar.internal.rlm-test.entity-bindings-test.fetch-content returns nil for non-existent entity lookup","name":"entity-bindings-test > fetch-content returns nil for non-existent entity lookup","status":"passed","testResultsByEnv":{"default":"a48963dcfa53c06b3c170e11a3d5bf7a"}}
