@@ -116,6 +116,11 @@
         (re-find #"\b__\b" s)
         "Your answer contains '__' placeholder. Replace __ with your actual expression."
 
+        ;; Bare % args outside #() - model wrote (first (drop %2 %1)) instead of #(first (drop %2 %1))
+        (and (re-find #"(?<!\w)%[1-9&]?" s)
+          (not (str/starts-with? s "#(")))
+        "Your answer uses % args (%1, %2) outside #(). Wrap it: #(your-expression) or use (fn [a b] ...)."
+
         ;; Nested #() - illegal in Clojure
         (re-find #"#\([^)]*#\(" s)
         "Nested #() is illegal in Clojure. Rewrite inner #() as (fn [...] ...)"
