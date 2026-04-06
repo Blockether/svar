@@ -112,6 +112,10 @@
   (let [s (str/trim (str s))]
     (when (re-find #"^\s*[\(#\[\{]" s)
       (cond
+        ;; __ placeholder left in answer - model didn't replace it
+        (re-find #"\b__\b" s)
+        "Your answer contains '__' placeholder. Replace __ with your actual expression."
+
         ;; Nested #() - illegal in Clojure
         (re-find #"#\([^)]*#\(" s)
         "Nested #() is illegal in Clojure. Rewrite inner #() as (fn [...] ...)"
