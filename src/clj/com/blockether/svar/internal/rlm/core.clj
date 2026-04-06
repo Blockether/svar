@@ -494,7 +494,7 @@ OUTPUT STYLE:
 
         ;; NullPointerException
         (str/includes? e "NullPointerException")
-        "Method called on nil. Add a nil check: (when x (.method x))."
+        "Something is nil unexpectedly. Debug with (prn suspect-value) to find which value is nil."
 
         ;; recur tail position
         (re-find #"recur.*tail" e)
