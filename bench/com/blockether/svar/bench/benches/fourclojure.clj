@@ -109,15 +109,14 @@
     (if (seq restricted)
       (str "\n\nRestricted (do NOT use these): " (str/join ", " restricted))
       "")
-    "\n\nWORKFLOW:\n"
-    "1. Read the problem and tests\n"
-    "2. Write your solution: (def solution ...)\n"
-    "3. SELF-TEST by running this block (replace YOUR_SOLUTION with your answer):\n"
+    "\n\nWORKFLOW (MANDATORY - do NOT skip steps):\n"
+    "1. Write your solution: (def solution ...)\n"
+    "2. Run ALL tests in code[] BEFORE submitting final:\n"
     "   (let [__ YOUR_SOLUTION]\n"
     (str/join "\n" (map #(str "     (assert " % ")") tests))
     "\n     :all-tests-pass)\n"
-    "4. If all asserts pass, submit final with answer-type: code, language: clojure\n"
-    "5. If an assert fails, fix and re-test\n\n"
+    "3. ONLY after seeing :all-tests-pass, submit final\n"
+    "NEVER finalize without running the test block first. Even for trivial problems.\n\n"
     "RULES:\n"
     "- Final answer = single inline Clojure expression that replaces __\n"
     "- Nested #() is ILLEGAL. Use (fn [...] ...) for inner lambdas.\n"

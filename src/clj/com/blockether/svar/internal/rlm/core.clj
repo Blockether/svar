@@ -388,10 +388,15 @@ OUTPUT STYLE:
       (if-let [final-data (:final parsed)]
         (let [final-answer (str (:answer final-data))
               confidence (or (:confidence final-data) :high)
+              code-blocks (vec (remove str/blank? (or (:code parsed) [])))
+              ;; Reject empty-code finals on first iteration (model skipped self-test)
+              untested? (and (zero? (or iteration 0)) (empty? code-blocks))
               ;; Spec-level validator - model declares answer-type + language
-              validation-error (validate-final {:answer final-answer
-                                                :answer-type (:answer-type final-data)
-                                                :language (:language final-data)})]
+              validation-error (or (when untested?
+                                     "You submitted final without running any code. Run the self-test first.")
+                                 (validate-final {:answer final-answer
+                                                  :answer-type (:answer-type final-data)
+                                                  :language (:language final-data)}))]
           (if validation-error
             ;; Final answer has detectable code error - reject and ask model to fix
             (do (rlm-debug! {:final-answer (str-truncate final-answer 200)
