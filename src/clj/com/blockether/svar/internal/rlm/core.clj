@@ -386,7 +386,10 @@ OUTPUT STYLE:
                      :prompt_tokens_details {:cached_tokens (get-in ask-result [:tokens :cached] 0)}}]
       ;; Check for final answer in spec response
       (if-let [final-data (:final parsed)]
-        (let [final-answer (str (:answer final-data))
+        (let [raw-answer (str (:answer final-data))
+              ;; Auto-repair final answer parens (model's final may have unbalanced brackets
+              ;; that paren-repair silently fixed during self-test but weren't stored)
+              final-answer (paren-repair/repair-code raw-answer)
               confidence (or (:confidence final-data) :high)
               code-blocks (vec (remove str/blank? (or (:code parsed) [])))
               ;; Reject empty-code finals on first iteration (model skipped self-test)
