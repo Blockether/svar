@@ -1,6 +1,7 @@
 (ns com.blockether.svar.internal.rlm.tools
   (:require
    [clojure.java.process :as proc]
+   #_{:clj-kondo/ignore [:unused-namespace]}
    [clojure.set :as set]
    [clojure.string :as str]
    #_{:clj-kondo/ignore [:unused-namespace]}
@@ -8,8 +9,7 @@
    [com.blockether.svar.internal.rlm.db :as db
     :refer [db-get-entity db-get-page-node db-get-toc-entry
             db-list-relationships db-search-entities db-search-page-nodes
-            db-search-toc-entries
-            str-includes? str-lower str-truncate]]
+            db-search-toc-entries str-truncate]]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
@@ -29,42 +29,12 @@
 
 (def EXTRA_BINDINGS
   "Extra bindings beyond what SCI provides by default.
-   SCI already ships with all of clojure.core. We only add:
-   - Clojure 1.11/1.12 additions (abs, parse-*, infinite?, NaN?)
-   - set-* convenience aliases for clojure.set fns in user ns"
-  {;; Clojure 1.11/1.12 additions SCI doesn't have yet
-   'abs abs, 'parse-long parse-long, 'parse-double parse-double,
+   SCI already ships with all of clojure.core. We only add
+   Clojure 1.11/1.12 additions that SCI doesn't have yet.
+   Models use str/join, set/union etc. via namespace aliases."
+  {'abs abs, 'parse-long parse-long, 'parse-double parse-double,
    'parse-boolean parse-boolean, 'parse-uuid parse-uuid,
-   'infinite? infinite?, 'NaN? NaN?,
-   ;; Set functions (set- prefix to avoid collision with core/set)
-   'set-union set/union, 'set-intersection set/intersection,
-   'set-difference set/difference, 'set-subset? set/subset?,
-   'set-superset? set/superset?})
-
-;; =============================================================================
-;; String Helper Functions
-;; =============================================================================
-
-(defn- str-lines [s] (when s (str/split-lines s)))
-
-(defn- str-words [s] (when s (str/split (str/trim s) #"\s+")))
-
-(defn- str-join [sep coll] (str/join sep coll))
-
-(defn- str-split [s re]
-  (when s (str/split s (if (string? re) (re-pattern re) re))))
-
-(defn- str-replace [s match replacement] (when s (str/replace s match replacement)))
-
-(defn- str-trim [s] (when s (str/trim s)))
-
-(defn- str-upper [s] (when s (str/upper-case s)))
-
-(defn- str-blank? [s] (str/blank? s))
-
-(defn- str-starts-with? [s prefix] (when s (str/starts-with? s prefix)))
-
-(defn- str-ends-with? [s suffix] (when s (str/ends-with? s suffix)))
+   'infinite? infinite?, 'NaN? NaN?})
 
 ;; =============================================================================
 ;; Debug Logging
@@ -449,11 +419,6 @@
                        'sh run-sh
                        'spec spec/spec
                        'field spec/field
-                       'str-join str-join 'str-split str-split 'str-replace str-replace
-                       'str-trim str-trim 'str-lower str-lower 'str-upper str-upper
-                       'str-blank? str-blank? 'str-includes? str-includes?
-                       'str-starts-with? str-starts-with? 'str-ends-with? str-ends-with?
-                       'str-lines str-lines 'str-words str-words 'str-truncate str-truncate
                        ;; Date helper functions
                        'parse-date parse-date 'date-before? date-before? 'date-after? date-after?
                        'days-between days-between 'date-plus-days date-plus-days
@@ -547,9 +512,6 @@
                             ['field "Create a spec field." '([& kvs])]
                             ['sh "Run a shell command. Returns {:exit N :out \"...\"}.\n  (sh \"python3\" \"-c\" \"print(1+1)\") -> {:exit 0 :out \"2\\n\"}\n  (sh {:timeout 60000} \"python3\" \"slow.py\") - custom timeout\n  (sh {:env {\"FOO\" \"bar\"}} \"bash\" \"-c\" \"echo $FOO\") - env vars\n  (sh {:in \"data\"} \"cat\") - pipe stdin\n  (sh {:dir \"/tmp\"} \"ls\") - working directory" '([& args])]
                             ['context "The data context passed to query-env!." nil]
-                            ['str-truncate "Truncate string to n chars." '([s n])]
-                            ['str-join "Join strings with separator." '([sep coll])]
-                            ['str-split "Split string by regex." '([s re])]
                             ['parse-date "Parse ISO date string to LocalDate." '([s])]
                             ['today-str "Today as ISO-8601 string." '([])]
                              ;; Document navigation — 2 unified tools
