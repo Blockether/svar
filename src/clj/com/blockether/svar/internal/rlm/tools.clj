@@ -509,21 +509,32 @@
                                      'java.time.Period java.time.Period
                                      'java.util.UUID java.util.UUID
                                      'clojure.lang.PersistentQueue clojure.lang.PersistentQueue}
-                           ;; Bare class imports so model can write Math/sqrt instead of java.lang.Math/sqrt
-                           :imports {'Character 'java.lang.Character
-                                     'Math 'java.lang.Math
-                                     'String 'java.lang.String
-                                     'Integer 'java.lang.Integer
-                                     'Long 'java.lang.Long
-                                     'Double 'java.lang.Double
-                                     'Boolean 'java.lang.Boolean
-                                     'Collections 'java.util.Collections
-                                     'Arrays 'java.util.Arrays
-                                     'Pattern 'java.util.regex.Pattern
-                                     'Matcher 'java.util.regex.Matcher
-                                     'LocalDate 'java.time.LocalDate
-                                     'UUID 'java.util.UUID
-                                     'PersistentQueue 'clojure.lang.PersistentQueue}
+                           ;; Bare class imports matching Clojure/Babashka defaults
+                           :imports '{Boolean java.lang.Boolean
+                                      Byte java.lang.Byte
+                                      Character java.lang.Character
+                                      Class java.lang.Class
+                                      Comparable java.lang.Comparable
+                                      Double java.lang.Double
+                                      Exception java.lang.Exception
+                                      Float java.lang.Float
+                                      Integer java.lang.Integer
+                                      Long java.lang.Long
+                                      Math java.lang.Math
+                                      Number java.lang.Number
+                                      Object java.lang.Object
+                                      Short java.lang.Short
+                                      String java.lang.String
+                                      StringBuilder java.lang.StringBuilder
+                                      Thread java.lang.Thread
+                                      ;; Extra: common utility classes
+                                      Arrays java.util.Arrays
+                                      Collections java.util.Collections
+                                      UUID java.util.UUID
+                                      Pattern java.util.regex.Pattern
+                                      Matcher java.util.regex.Matcher
+                                      LocalDate java.time.LocalDate
+                                      PersistentQueue clojure.lang.PersistentQueue}
                            :deny '[require import ns eval load-string read-string]})]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
