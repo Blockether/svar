@@ -491,8 +491,9 @@
                                         'clojure.walk (ns->sci-map 'clojure.walk)
                                         'fast-edn.core (ns->sci-map 'fast-edn.core)
                                         'clojure.edn (ns->sci-map 'fast-edn.core)
-                                        'zprint.core (ns->sci-map 'zprint.core)
-                                        'clojure.pprint (ns->sci-map 'zprint.core)
+                                        'zprint.core {'zprint-str (requiring-resolve 'zprint.core/zprint-str)
+                                                      'zprint (requiring-resolve 'zprint.core/zprint)}
+                                        'clojure.pprint {'pprint (requiring-resolve 'zprint.core/zprint)}
                                         'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
                                         'edn 'fast-edn.core
