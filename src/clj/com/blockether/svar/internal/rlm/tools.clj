@@ -1,6 +1,5 @@
 (ns com.blockether.svar.internal.rlm.tools
   (:require
-   [clojure.java.process :as proc]
    #_{:clj-kondo/ignore [:unused-namespace]}
    [clojure.set :as set]
    [clojure.string :as str]
@@ -445,7 +444,8 @@
                                      'java.math.BigInteger java.math.BigInteger
                                      'java.math.BigDecimal java.math.BigDecimal}
                            ;; Bare class imports matching Clojure/Babashka defaults
-                           :imports '{Boolean java.lang.Boolean
+                           :imports '{;; Safe java.lang types (NO Object, Thread, Class - reflection/DoS)
+                                      Boolean java.lang.Boolean
                                       Byte java.lang.Byte
                                       Character java.lang.Character
                                       Comparable java.lang.Comparable
@@ -456,11 +456,10 @@
                                       Long java.lang.Long
                                       Math java.lang.Math
                                       Number java.lang.Number
-                                      Object java.lang.Object
                                       Short java.lang.Short
                                       String java.lang.String
                                       StringBuilder java.lang.StringBuilder
-                                      ;; Extra: common utility classes
+                                      ;; Utility classes
                                       Arrays java.util.Arrays
                                       Collections java.util.Collections
                                       UUID java.util.UUID
