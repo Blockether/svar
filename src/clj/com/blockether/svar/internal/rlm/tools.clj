@@ -499,7 +499,11 @@
                                                         'zprint-file-str (r 'zprint-file-str)
                                                         'set-options! (r 'set-options!)
                                                         'configure-all! (r 'configure-all!)})
-                                        'clojure.pprint (ns->sci-map 'clojure.pprint)
+                                        'clojure.pprint (let [zr #(deref (requiring-resolve (symbol "zprint.core" (str %))))
+                                                              pp (ns->sci-map 'clojure.pprint)]
+                                                          (merge pp
+                                                            {'pprint (zr 'zprint)
+                                                             'pprint-str (zr 'zprint-str)}))
                                         'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
                                         'edn 'fast-edn.core
