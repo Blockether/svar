@@ -1,1 +1,0 @@
-{"id":"c8fa21e7a683fc304af2c14a31056909","fullName":"com.blockether.svar.internal.rlm-test.entity-bindings-test.get-document-entity returns nil for non-existent entity","name":"entity-bindings-test > get-document-entity returns nil for non-existent entity","status":"passed","testResultsByEnv":{"default":"d057e4fdd376170d8e2d91b1db87b1dd"}}
