@@ -491,9 +491,15 @@
                                         'clojure.walk (ns->sci-map 'clojure.walk)
                                         'fast-edn.core (ns->sci-map 'fast-edn.core)
                                         'clojure.edn (ns->sci-map 'fast-edn.core)
-                                        'zprint.core {'zprint-str (requiring-resolve 'zprint.core/zprint-str)
-                                                      'zprint (requiring-resolve 'zprint.core/zprint)}
-                                        'clojure.pprint {'pprint (requiring-resolve 'zprint.core/zprint)}
+                                        'zprint.core (let [r #(deref (requiring-resolve (symbol "zprint.core" (str %))))]
+                                                       {'zprint-str (r 'zprint-str)
+                                                        'zprint (r 'zprint)
+                                                        'czprint-str (r 'czprint-str)
+                                                        'czprint (r 'czprint)
+                                                        'zprint-file-str (r 'zprint-file-str)
+                                                        'set-options! (r 'set-options!)
+                                                        'configure-all! (r 'configure-all!)})
+                                        'clojure.pprint {'pprint (deref (requiring-resolve 'zprint.core/zprint))}
                                         'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
                                         'edn 'fast-edn.core
