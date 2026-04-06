@@ -109,13 +109,13 @@
     (if (seq restricted)
       (str "\n\nRestricted (do NOT use these): " (str/join ", " restricted))
       "")
-    "\n\nRUNTIME: Your solution MUST run in Babashka (bb). "
-    "Use only functions available in bb's clojure.core and standard libs. "
-    "No JVM-only classes, no external deps.\n"
-    "DO NOT write any files to disk. DO NOT create scripts, tests, or helper files. "
-    "Compute everything in-memory only.\n"
-    "Return ONLY a valid Clojure expression that replaces __. "
-    "No markdown, no explanation, no code fences. Just the raw Clojure expression."))
+    "\n\nRULES:\n"
+    "- Your solution MUST run in Babashka (bb). Standard clojure.core only.\n"
+    "- Nested #() is ILLEGAL in Clojure. Use (fn [...] ...) for inner lambdas.\n"
+    "- List literals MUST be quoted: '(1 2 3) not (1 2 3). Bare (1 2 3) calls 1 as a function.\n"
+    "- Return an INLINE expression, not a named reference like my-fn. The expression replaces __.\n"
+    "- DO NOT write files. Compute in-memory only.\n"
+    "- No markdown, no explanation, no code fences. Just the raw Clojure expression."))
 
 ;; =============================================================================
 ;; Agent eval functions
