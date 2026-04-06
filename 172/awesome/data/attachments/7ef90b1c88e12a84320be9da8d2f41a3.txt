@@ -1,0 +1,2 @@
+2026-04-06T07:24:59.533424235Z :warn com.blockether.svar.internal.guard [286 14] Static guard detected multiple violations 
+  data: {:input-length 39, :patterns-matched 2, :types #{:instruction-override :jailbreak}, :duration-ms 0.045928}
