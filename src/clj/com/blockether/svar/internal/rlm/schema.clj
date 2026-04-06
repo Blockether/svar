@@ -119,6 +119,15 @@
 
         :else nil))))
 
+(defn validate-final
+  "Validates a final answer based on its declared type and language.
+   Returns nil if valid, or an error string if broken."
+  [{:keys [answer answer-type language]}]
+  (when (= answer-type "code")
+    (case language
+      "clojure" (validate-clojure-code (str answer))
+      nil)))
+
 (def FINAL_SPEC
   "Nested spec for final answer in iteration response."
   (spec/spec
@@ -127,8 +136,23 @@
     (spec/field {::spec/name :answer
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "The final answer"
-                 ::spec/validator validate-clojure-code})
+                 ::spec/description "The final answer"})
+    (spec/field {::spec/name :answer-type
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "What kind of answer is this?"
+                 ::spec/values {"code" "Source code (will be validated)"
+                                "text" "Natural language / prose"
+                                "data" "Structured data (EDN, JSON, etc.)"}})
+    (spec/field {::spec/name :language
+                 ::spec/type :spec.type/keyword
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/required false
+                 ::spec/description "Programming language (when answer-type is code)"
+                 ::spec/values {"clojure" "Clojure code"
+                                "python" "Python code"
+                                "json" "JSON data"
+                                "edn" "EDN data"}})
     (spec/field {::spec/name :confidence
                  ::spec/type :spec.type/keyword
                  ::spec/cardinality :spec.cardinality/one
