@@ -1,0 +1,2 @@
+2026-04-06T23:06:50.801913027Z :warn com.blockether.svar.internal.guard [271 14] Static guard detected prompt injection 
+  data: {:input-length 57, :pattern "ignore previous instructions", :type :instruction-override, :duration-ms 0.084888}
