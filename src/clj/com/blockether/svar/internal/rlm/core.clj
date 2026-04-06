@@ -260,6 +260,7 @@ ARCHITECTURE:
 - <execution_results> shows what your last code returned.
 - Use (doc fn-name) to discover any function's purpose and args.
 - Use (llm-query \"question\") to ask a sub-LLM for help.
+- Use (sh \"cmd\" \"arg1\" ...) to run shell commands (python3, bb, curl, etc.)
 - The SCI sandbox is your REPL: test ANY expression before finalizing. No need
   to connect to an external REPL - just (def x ...) or inline-eval and iterate.
 
