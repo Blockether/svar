@@ -1,5 +1,6 @@
 (ns com.blockether.svar.internal.rlm.tools
   (:require
+   [clojure.java.process :as proc]
    #_{:clj-kondo/ignore [:unused-namespace]}
    [clojure.set :as set]
    [clojure.string :as str]
@@ -355,52 +356,6 @@
     (vec @claims-atom)))
 
 ;; =============================================================================
-;; Shell execution (via clojure.java.process)
-;; =============================================================================
-
-(def ^:private SH_DEFAULT_TIMEOUT_MS
-  "Default timeout for (sh ...) commands. 10 seconds."
-  10000)
-
-(defn- run-sh
-  "Executes a shell command. Returns {:exit N :out \"...\" :err \"...\"}.
-   First arg can be an opts map:
-     :env     {\"VAR\" \"val\"} - extra env vars
-     :dir     \"path\"         - working directory
-     :timeout 30000           - timeout in ms (default 10s)
-     :in      \"stdin data\"   - string piped to stdin
-   Remaining args are the command + arguments.
-
-   Examples:
-     (sh \"python3\" \"-c\" \"print(1+1)\")
-     (sh {:env {\"FOO\" \"bar\"}} \"bash\" \"-c\" \"echo $FOO\")
-     (sh {:timeout 60000} \"python3\" \"slow_script.py\")
-     (sh {:in \"hello\"} \"cat\")"
-  [& args]
-  (let [[opts cmd-args] (if (map? (first args))
-                          [(first args) (rest args)]
-                          [{} args])
-        timeout (or (:timeout opts) SH_DEFAULT_TIMEOUT_MS)
-        proc-opts (cond-> {:err :stdout}
-                    (:env opts) (assoc :env (:env opts))
-                    (:dir opts) (assoc :dir (:dir opts)))
-        proc (apply proc/start proc-opts cmd-args)
-        ;; Feed stdin if provided
-        _ (when-let [in-data (:in opts)]
-            (with-open [w (java.io.OutputStreamWriter. (.getOutputStream proc))]
-              (.write w (str in-data))
-              (.flush w)))
-        _ (.close (.getOutputStream proc))
-        out-future (future (slurp (.getInputStream proc)))
-        finished?  (.waitFor proc timeout java.util.concurrent.TimeUnit/MILLISECONDS)]
-    (if finished?
-      {:exit (.exitValue proc)
-       :out  (deref out-future 2000 "")}
-      (do (.destroyForcibly proc)
-          (future-cancel out-future)
-          {:exit -1 :out (str "timeout after " timeout "ms")}))))
-
-;; =============================================================================
 ;; SCI Context Creation
 ;; =============================================================================
 
@@ -415,7 +370,6 @@
   [context-data llm-query-fn db-info-atom custom-bindings]
   (let [base-bindings {'context context-data
                        'llm-query llm-query-fn
-                       'sh run-sh
                        'spec spec/spec
                        'field spec/field
                        ;; Date helper functions
@@ -494,7 +448,6 @@
                            :imports '{Boolean java.lang.Boolean
                                       Byte java.lang.Byte
                                       Character java.lang.Character
-                                      Class java.lang.Class
                                       Comparable java.lang.Comparable
                                       Double java.lang.Double
                                       Exception java.lang.Exception
@@ -507,7 +460,6 @@
                                       Short java.lang.Short
                                       String java.lang.String
                                       StringBuilder java.lang.StringBuilder
-                                      Thread java.lang.Thread
                                       ;; Extra: common utility classes
                                       Arrays java.util.Arrays
                                       Collections java.util.Collections
@@ -518,14 +470,23 @@
                                       PersistentQueue clojure.lang.PersistentQueue
                                       BigInteger java.math.BigInteger
                                       BigDecimal java.math.BigDecimal}
-                           :deny '[]})]
+                           :deny '[;; No code loading / evaluation
+                                   require import ns eval load-string load-file
+                                   read-string resolve ns-resolve find-ns
+                                   ;; No filesystem I/O
+                                   slurp spit
+                                   ;; No var mutation from sandbox
+                                   alter-var-root intern
+                                   ;; No shell / process execution
+                                   sh
+                                   ;; No IO handles
+                                   *in* *out* *err* *command-line-args*]})]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
                             ['llm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
                             ['request-more-iterations "Request n more iterations. Returns {:granted n :new-budget N}." '([n])]
                             ['spec "Create a structured output spec." '([& fields])]
                             ['field "Create a spec field." '([& kvs])]
-                            ['sh "Run a shell command. Returns {:exit N :out \"...\"}.\n  (sh \"python3\" \"-c\" \"print(1+1)\") -> {:exit 0 :out \"2\\n\"}\n  (sh {:timeout 60000} \"python3\" \"slow.py\") - custom timeout\n  (sh {:env {\"FOO\" \"bar\"}} \"bash\" \"-c\" \"echo $FOO\") - env vars\n  (sh {:in \"data\"} \"cat\") - pipe stdin\n  (sh {:dir \"/tmp\"} \"ls\") - working directory" '([& args])]
                             ['context "The data context passed to query-env!." nil]
                             ['parse-date "Parse ISO date string to LocalDate." '([s])]
                             ['today-str "Today as ISO-8601 string." '([])]
