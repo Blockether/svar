@@ -50,23 +50,24 @@
       (and (instance? clojure.lang.ExceptionInfo e)
         (some-> cause retryable-exception?)))))
 
+(def ^:private shared-http-client
+  "Single shared HttpClient reused across ALL LLM requests. Without this each
+   http/post call constructs a new JDK HttpClient with its own SelectorManager
+   thread, which never gets GC'd before the JVM runs out of thread stack. Ran
+   into this during the 4clojure benchmark (OOM after ~108 tasks).
+   Uses a virtual-thread-per-task executor so blocked HTTP calls cost almost
+   nothing and don't pin OS threads."
+  (delay
+    (let [vt-executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor)]
+      (http/client (assoc http/default-client-opts :executor vt-executor)))))
+
 (defn- http-post!
   "Makes an HTTP POST request with JSON body and OAuth token.
-   
-   Params:
-   `url` - String. The URL to POST to.
-   `body` - Map. Request body to serialize as JSON.
-   `api-key` - String. OAuth bearer token.
-   `timeout-ms` - Integer. Request timeout in milliseconds.
-   
-   Returns:
-   Map. Parsed JSON response.
-   
-   Throws:
-   ExceptionInfo on HTTP errors."
+   Reuses the shared HttpClient to avoid thread/resource leaks."
   [url body api-key timeout-ms]
   (let [response (http/post url
-                   {:headers {"Authorization" (str "Bearer " api-key)
+                   {:client @shared-http-client
+                    :headers {"Authorization" (str "Bearer " api-key)
                               "Content-Type" "application/json"}
                     :body (json/write-json-str body)
                     :timeout timeout-ms})]
@@ -74,16 +75,11 @@
 
 (defn- http-get!
   "Makes an HTTP GET request with OAuth token.
-   
-   Params:
-   `url` - String. The URL to GET.
-   `api-key` - String. OAuth bearer token.
-   
-   Returns:
-   Map. Parsed JSON response."
+   Reuses the shared HttpClient to avoid thread/resource leaks."
   [url api-key]
   (let [response (http/get url
-                   {:headers {"Authorization" (str "Bearer " api-key)
+                   {:client @shared-http-client
+                    :headers {"Authorization" (str "Bearer " api-key)
                               "Content-Type" "application/json"}})]
     (json/read-json (:body response) :key-fn keyword)))
 

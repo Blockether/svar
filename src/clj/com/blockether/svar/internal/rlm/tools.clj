@@ -12,6 +12,16 @@
    [datalevin.core :as d]
    [sci.core :as sci]))
 
+(defn- ns->sci-map
+  "Builds an SCI :namespaces entry map from a Clojure namespace's public vars.
+   Pulls the entire ns-publics surface so models can use everything a real
+   namespace offers without us enumerating fns manually."
+  [ns-sym]
+  (require ns-sym)
+  (into {} (for [[sym v] (ns-publics (the-ns ns-sym))
+                 :when (and (var? v) (not (:macro (meta v))))]
+             [sym @v])))
+
 (def SAFE_BINDINGS
   "Map of safe clojure.core functions exposed to SCI sandbox."
   {'+ +, '- -, '* *, '/ /,
@@ -80,12 +90,25 @@
 ;; Debug Logging
 ;; =============================================================================
 
+(def ^:private REALIZE_LAZY_LIMIT
+  "Upper bound on elements pulled from a lazy sequence by `realize-value`.
+   Prevents OOM when models feed infinite seqs like `(range)` or
+   `(iterate inc 0)` into the result path."
+  10000)
+
 (defn realize-value
   "Recursively realizes lazy sequences in a value to prevent opaque LazySeq@hash.
-   Converts lazy seqs to vectors, walks into maps/vectors/sets."
+   Converts lazy seqs to vectors (bounded), walks into maps/vectors/sets.
+   Lazy seqs longer than REALIZE_LAZY_LIMIT are truncated with a trailing
+   marker so downstream code can still serialize them safely."
   [v]
   (cond
-    (instance? clojure.lang.LazySeq v) (mapv realize-value v)
+    (instance? clojure.lang.LazySeq v)
+    (let [head (take (inc REALIZE_LAZY_LIMIT) v)
+          realized (mapv realize-value (take REALIZE_LAZY_LIMIT head))]
+      (if (> (count head) REALIZE_LAZY_LIMIT)
+        (conj realized (str "...<truncated lazy seq at " REALIZE_LAZY_LIMIT " elements>"))
+        realized))
     (map? v) (persistent! (reduce-kv (fn [m k val] (assoc! m k (realize-value val))) (transient {}) v))
     (vector? v) (mapv realize-value v)
     (set? v) (into #{} (map realize-value) v)
@@ -414,18 +437,14 @@
         all-bindings (merge SAFE_BINDINGS base-bindings db-bindings
                        (or custom-bindings {}))
         sci-ctx (sci/init {:namespaces {'user all-bindings
-                                        'clojure.string {'split str/split 'join str/join 'replace str/replace
-                                                         'trim str/trim 'lower-case str/lower-case 'upper-case str/upper-case
-                                                         'starts-with? str/starts-with? 'ends-with? str/ends-with?
-                                                         'includes? str/includes? 'blank? str/blank?
-                                                         'split-lines str/split-lines 'triml str/triml 'trimr str/trimr
-                                                         'capitalize str/capitalize 'reverse str/reverse
-                                                         're-quote-replacement str/re-quote-replacement}
-                                        'clojure.set {'union clojure.set/union 'intersection clojure.set/intersection
-                                                      'difference clojure.set/difference 'subset? clojure.set/subset?
-                                                      'superset? clojure.set/superset?}}
+                                        'clojure.string (ns->sci-map 'clojure.string)
+                                        'clojure.set (ns->sci-map 'clojure.set)
+                                        'clojure.walk (ns->sci-map 'clojure.walk)
+                                        'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
-                                        'set 'clojure.set}
+                                        'set 'clojure.set
+                                        'walk 'clojure.walk
+                                        'json 'charred.api}
                            :classes {'java.lang.Character Character
                                      'java.lang.Math Math
                                      'java.lang.String String
@@ -439,7 +458,8 @@
                                      'java.util.regex.Matcher java.util.regex.Matcher
                                      'java.time.LocalDate java.time.LocalDate
                                      'java.time.Period java.time.Period
-                                     'java.util.UUID java.util.UUID}
+                                     'java.util.UUID java.util.UUID
+                                     'clojure.lang.PersistentQueue clojure.lang.PersistentQueue}
                            :deny '[require import ns eval load-string read-string]})]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]

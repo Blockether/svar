@@ -263,6 +263,12 @@ ARCHITECTURE:
 - The SCI sandbox is your REPL: test ANY expression before finalizing. No need
   to connect to an external REPL - just (def x ...) or inline-eval and iterate.
 
+AVAILABLE NAMESPACES (with aliases):
+- clojure.string / str  - full public API (str/split str/join str/replace str/trim ...)
+- clojure.set    / set  - full public API (set/union set/intersection set/difference ...)
+- clojure.walk   / walk - postwalk, prewalk, keywordize-keys, stringify-keys
+- charred.api    / json - (json/read-json s) parses JSON; (json/write-json-str x) serializes
+
 CLOJURE DATA LITERALS (critical - wrong form = runtime error):
 - List literal:   '(1 2 3)       ; bare (1 2 3) is a FUNCTION CALL -> Long cannot be cast to IFn
 - Vector:         [1 2 3]
