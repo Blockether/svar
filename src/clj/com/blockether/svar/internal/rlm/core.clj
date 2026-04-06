@@ -274,7 +274,8 @@
 ARCHITECTURE:
 - Single-shot: each iteration is a fresh prompt. No message history.
 - State lives in def'd vars - they persist across iterations.
-- <var_index> shows your vars. <execution_results> shows last results.
+- <var_index> shows all your vars (name, type, size, docstring).
+- <execution_results> shows what your last code returned.
 - (doc fn-name) for any function. (sh \"cmd\" ...) for shell. (llm-query \"q\") for sub-LLM.
 - Aliases: str/ set/ walk/ edn/ json/ zp/ pp/
 
@@ -315,10 +316,23 @@ RESPONSE FORMAT:
 Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high\"}}
 
 RULES:
-- (def name \"docstring\" value) - docstrings are your memory
-- Test code before finalizing. Combine steps in one iteration.
-- Never repeat a failed call - try a different approach.
-- If <var_index> or <context> already answers the query, finalize immediately.
+- Always (def name \"docstring\" value) - docstrings are your memory
+- Test code before finalizing
+- Never repeat a failed call - try a different approach
+- Combine steps in one iteration
+- If <var_index> or <context> already answers the query, finalize immediately
+
+CODE STYLE:
+- Each entry in 'code' MUST be a complete, evaluable Clojure expression.
+  Do NOT split one form across multiple strings.
+- Simplest working solution. No over-engineering.
+- No abstractions for single-use operations.
+- No speculative features.
+- No error handling for scenarios that cannot happen.
+
+OUTPUT STYLE:
+- Put the answer in 'final'. Explanation only if non-obvious.
+- No boilerplate. No filler prose.
 "))
 
 ;; =============================================================================
@@ -440,16 +454,39 @@ RULES:
           {:response nil :thinking thinking :next-optimize next-optimize
            :executions executions :final-result nil :api-usage api-usage})))))
 
+(def ^:private ERROR_HINTS
+  "Conditional hints injected into error feedback only when relevant.
+   NOT in system prompt — zero cost on iterations without errors."
+  [[#"Unable to resolve symbol" "Define it first: (def X ...) or check spelling."]
+   [#"Wrong number of args" "Check arglists with (doc fn-name)."]
+   [#"cannot be cast to clojure.lang.IFn" "Bare (1 2 3) calls 1 as fn. Use '(1 2 3) or (list 1 2 3)."]
+   [#"Nested fn" "Nested #() illegal. Use (fn [...] ...) for inner lambdas."]
+   [#"No such namespace" "Use aliases: str/ set/ walk/ edn/ json/"]
+   [#"PersistentVector" "Vectors take 1 arg: (v idx). Use (subvec v start end) or (nth v idx)."]
+   [#"unbound fn" "Your (defn ...) failed earlier. Fix the defn first."]
+   [#"recur.*tail position" "recur must be the last expression in loop/fn body."]
+   [#"LazySeq.*IPersistentStack" "conj/peek/pop need a vector. Use (vec my-seq) first."]
+   [#"NullPointerException" "Method called on nil. Add nil check: (when x (.method x))."]])
+
+(defn- error-hint [error-msg]
+  (when error-msg
+    (some (fn [[pattern hint]]
+            (when (re-find pattern error-msg) hint))
+      ERROR_HINTS)))
+
 (defn format-executions
   "Formats executions for LLM feedback as EDN.
-   All results shown inline — context budget handles size naturally."
+   All results shown inline — context budget handles size naturally.
+   Error hints injected only when an error matches a known pattern."
   [executions]
   (str/join "\n"
     (map (fn [{:keys [code error result stdout repaired?]}]
            (let [code-str (str/trim (or code ""))
+                 hint (when error (error-hint error))
                  val-part (cond
                             error
-                            (str ":error " (pr-str error))
+                            (str ":error " (pr-str error)
+                              (when hint (str " :hint " (pr-str hint))))
 
                             (fn? result)
                             (str ":error \"" code-str " is a function object. Call it: (" code-str ")\"")
