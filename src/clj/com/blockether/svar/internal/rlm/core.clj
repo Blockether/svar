@@ -374,6 +374,8 @@ COMMON ERRORS AND FIXES:
 - \"Wrong number of args (2) passed to PersistentVector\" -> vectors take 1 arg (index): (v 0), not (v 0 1). Use (subvec v start end) or (nth v idx).
 - \"Attempting to call unbound fn\" -> your (defn ...) failed earlier. Check the error above and fix the defn.
 - \"Can only recur from tail position\" -> recur must be the last expression in a loop/fn body.
+- Transducers: (dedupe), (map f), (filter f) without a collection return a transducer, NOT a result.
+  Wrap: (fn [coll] (sequence (dedupe) coll)) or (fn [coll] (into [] (map f) coll)).
 "))
 
 ;; =============================================================================
