@@ -1,0 +1,1 @@
+{"id":"d70f12e15af53b4b73f290dbd81fa808","fullName":"com.blockether.svar.internal.rlm-test.disposable-db-test.dispose-rlm-conn!.does not throw when called on a fresh conn","name":"disposable-db-test > dispose-rlm-conn! > does not throw when called on a fresh conn","status":"passed","testResultsByEnv":{"default":"d3642a5cdabd5c788cb290b3f41e5ec7"}}
