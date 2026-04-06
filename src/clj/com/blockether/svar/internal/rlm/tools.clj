@@ -489,8 +489,12 @@
                                         'clojure.string (ns->sci-map 'clojure.string)
                                         'clojure.set (ns->sci-map 'clojure.set)
                                         'clojure.walk (ns->sci-map 'clojure.walk)
+                                        'clojure.edn (ns->sci-map 'clojure.edn)
+                                        'clojure.pprint (ns->sci-map 'clojure.pprint)
                                         'charred.api (ns->sci-map 'charred.api)}
                            :ns-aliases {'str 'clojure.string
+                                        'edn 'clojure.edn
+                                        'pp 'clojure.pprint
                                         'set 'clojure.set
                                         'walk 'clojure.walk
                                         'json 'charred.api}
