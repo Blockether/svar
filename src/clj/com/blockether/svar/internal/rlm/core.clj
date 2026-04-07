@@ -730,9 +730,9 @@ OUTPUT STYLE:
   "Injects previous final-result-N vars into SCI context from Datalevin.
    Final results are now terminal iterations (with non-nil :iteration/answer).
    Returns the list of final results for conversation thread rendering."
-  [sci-ctx db-info-atom]
+  [sci-ctx db-info-atom conversation-ref]
   (when db-info-atom
-    (let [results (db-list-final-results @db-info-atom)]
+    (let [results (db-list-final-results @db-info-atom {:conversation-ref conversation-ref})]
       (doseq [[idx result] (map-indexed vector results)]
         (let [var-name (str "final-result-" (inc idx))
               answer (:iteration/answer result)
@@ -848,19 +848,25 @@ OUTPUT STYLE:
                                     :reasoning reasoning-tokens :cached cached-tokens
                                     :total total-tokens}
                            :cost cost}))
-        ;; Cache var-index rendering across iterations.
-        ;; SCI namespace maps are persistent; if no defs changed, map identity stays stable.
-        var-index-cache-atom (atom {:sandbox nil :index nil})
+        ;; Cache var-index by env-level execution revision so it survives across queries.
+        ;; SCI may keep stable sandbox map identity across (def ...) updates.
+        var-index-cache-atom (or (:var-index-cache-atom rlm-env) (atom {:revision -1 :index nil}))
+        var-index-revision-atom (or (:var-index-revision-atom rlm-env) (atom 0))
         get-var-index (fn []
-                        (let [sandbox-map (get-in @(:env (:sci-ctx rlm-env)) [:namespaces 'sandbox])
-                              {:keys [sandbox index]} @var-index-cache-atom]
-                          (if (identical? sandbox-map sandbox)
+                        (let [var-index-revision @var-index-revision-atom
+                              {:keys [revision index]} @var-index-cache-atom]
+                          (if (= revision var-index-revision)
                             index
-                            (let [idx (build-var-index (:sci-ctx rlm-env) (:initial-ns-keys rlm-env) sandbox-map)]
-                              (reset! var-index-cache-atom {:sandbox sandbox-map :index idx})
+                            (let [sandbox-map (get-in @(:env (:sci-ctx rlm-env)) [:namespaces 'sandbox])
+                                  idx (build-var-index (:sci-ctx rlm-env) (:initial-ns-keys rlm-env) sandbox-map)]
+                              (reset! var-index-cache-atom {:revision var-index-revision :index idx})
                               idx))))
-         ;; Rehydrate previous final-result-N vars into SCI context
-        prev-final-results (rehydrate-final-results! (:sci-ctx rlm-env) (:db-info-atom rlm-env))
+        ;; Rehydrate previous final-result-N vars into SCI context
+        prev-final-results (rehydrate-final-results! (:sci-ctx rlm-env)
+                             (:db-info-atom rlm-env)
+                             (:conversation-ref rlm-env))
+        ;; Rehydration mutates SCI vars; mark var-index as stale.
+        _ (swap! var-index-revision-atom inc)
         conversation-thread (render-conversation-thread prev-final-results query)]
     (rlm-debug! {:query query :max-iterations max-iterations :model effective-model
                  :has-output-spec? (some? output-spec) :has-pre-fetched? (some? pre-fetched-context)
@@ -1042,6 +1048,8 @@ OUTPUT STYLE:
                                      :feedback-len (count user-feedback)} "Iteration feedback")
                         (let [had-successful-execution? (some #(nil? (:error %)) executions)
                               next-errors (if had-successful-execution? 0 (inc consecutive-errors))
+                              _ (when had-successful-execution?
+                                  (swap! var-index-revision-atom inc))
                               journal-entry {:iteration iteration
                                              :thinking thinking
                                              :var-names (extract-def-names executions)}]

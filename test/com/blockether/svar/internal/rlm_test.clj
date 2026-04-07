@@ -181,6 +181,27 @@
                            (let [result (#'rlm-core/execute-code env "(vec (re-seq #\"\\d+\" \"a1b2c3\"))")]
                              (expect (= ["1" "2" "3"] (:result result)))))))))
 
+(defdescribe final-results-scoping-test
+  (it "filters final results by conversation-ref"
+    (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (try
+        (let [conv-a (rlm-db/store-conversation! db-info {:env-id "env-a" :system-prompt "" :model "m"})
+              conv-b (rlm-db/store-conversation! db-info {:env-id "env-b" :system-prompt "" :model "m"})
+              query-a (rlm-db/store-query! db-info {:conversation-ref conv-a :text "qa" :status :running})
+              query-b (rlm-db/store-query! db-info {:conversation-ref conv-b :text "qb" :status :running})]
+          (rlm-db/store-iteration! db-info {:query-ref query-a :index 0 :executions [] :answer "answer-a"})
+          (rlm-db/store-iteration! db-info {:query-ref query-b :index 0 :executions [] :answer "answer-b"})
+          (let [a-only (rlm-db/db-list-final-results db-info {:conversation-ref conv-a})
+                b-only (rlm-db/db-list-final-results db-info {:conversation-ref conv-b})
+                all-finals (rlm-db/db-list-final-results db-info)]
+            (expect (= 1 (count a-only)))
+            (expect (= "answer-a" (:iteration/answer (first a-only))))
+            (expect (= 1 (count b-only)))
+            (expect (= "answer-b" (:iteration/answer (first b-only))))
+            (expect (= 2 (count all-finals)))))
+        (finally
+          (#'rlm-db/dispose-rlm-conn! db-info))))))
+
 (defdescribe max-iterations-fallback-test
   (it "returns nil answer on max-iterations and includes locals only in debug mode"
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
@@ -1750,20 +1771,27 @@
           env (sut/create-env router {:path dir})]
       (try
         (sut/ingest-to-env! env [(make-test-single-page-document)])
-        (let [db (d/db (:conn @(:db-info-atom env)))
-              revision {:document-count (or (d/q '[:find (count ?e) . :where [?e :document/id _]] db) 0)
-                        :toc-count (or (d/q '[:find (count ?e) . :where [?e :document.toc/id _]] db) 0)
-                        :node-count (or (d/q '[:find (count ?e) . :where [?e :page.node/id _]] db) 0)}
-              cached {:document-count (:document-count revision)
-                      :toc-count (:toc-count revision)
-                      :node-count (:node-count revision)
+        (let [revision (rlm-db/get-corpus-revision @(:db-info-atom env))
+              cached {:revision revision
+                      :document-count 1
+                      :toc-count 0
+                      :node-count 2
                       :content-hash "sha256:cached"}]
           (reset! (:qa-corpus-snapshot-cache-atom env) {:revision revision :snapshot cached})
           (expect (= cached (#'sut/qa-corpus-snapshot env @(:db-info-atom env))))
+          (expect (= 1 (:hits (sut/qa-corpus-snapshot-stats env))))
 
           ;; Any ingest mutation should invalidate cache immediately.
           (sut/ingest-to-env! env [(make-test-single-page-document)])
-          (expect (nil? @(:qa-corpus-snapshot-cache-atom env))))
+          (expect (nil? @(:qa-corpus-snapshot-cache-atom env)))
+          (expect (> (rlm-db/get-corpus-revision @(:db-info-atom env)) revision))
+
+          ;; First call after invalidation is a miss and records digest timing.
+          (#'sut/qa-corpus-snapshot env @(:db-info-atom env))
+          (let [{:keys [misses last-digest-ms last-revision]} (sut/qa-corpus-snapshot-stats env)]
+            (expect (= 1 misses))
+            (expect (number? last-digest-ms))
+            (expect (= (rlm-db/get-corpus-revision @(:db-info-atom env)) last-revision))))
         (finally
           (sut/dispose-env! env)
           (fs/delete-tree dir))))))
@@ -1805,14 +1833,9 @@
           (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
           (expect (= 1 @query-calls))
 
-          ;; Mutate corpus content: fingerprint should change even with same opts.
-          (d/transact! (:conn @(:db-info-atom env))
-            [{:page.node/id "node-extra"
-              :page.node/document-id "doc-extra"
-              :page.node/page-id "page-extra"
-              :page.node/type :paragraph
-              :page.node/local-id "n1"
-              :page.node/content "This content changes fingerprint."}])
+          ;; Mutate corpus via ingestion path: bumps revision and invalidates snapshot cache.
+          (sut/ingest-to-env! env [(assoc (make-test-single-page-document)
+                                     :document/name "single-page-extra")])
 
           ;; Third run with same opts after corpus change: should reset + rerun.
           (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})

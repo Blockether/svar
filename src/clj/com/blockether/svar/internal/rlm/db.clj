@@ -28,6 +28,30 @@
   ^java.util.Date []
   (java.util.Date.))
 
+(def ^:private corpus-meta-id :global)
+
+(defn get-corpus-revision
+  "Returns current corpus revision (long), defaulting to 0 if uninitialized."
+  [{:keys [conn]}]
+  (if-not conn
+    0
+    (or (some-> (d/pull (d/db conn) [:rlm.meta/corpus-revision] [:rlm.meta/id corpus-meta-id])
+          :rlm.meta/corpus-revision)
+      0)))
+
+(defn bump-corpus-revision!
+  "Atomically increments corpus revision and updates timestamp.
+   Returns the new revision."
+  [{:keys [conn] :as db-info}]
+  (if-not conn
+    0
+    (let [new-revision (inc (long (get-corpus-revision db-info)))
+          ts (now)]
+      (d/transact! conn [{:rlm.meta/id corpus-meta-id
+                          :rlm.meta/corpus-revision new-revision
+                          :rlm.meta/updated-at ts}])
+      new-revision)))
+
 (defn- days-since-date
   "Returns the number of days elapsed between `now` and `past-date`.
    Returns 0.0 if past-date is nil."
@@ -109,7 +133,7 @@
   (when-let [conn (:conn db-info)]
     (let [existing (d/q '[:find ?id . :in $ ?env-id
                           :where [?e :conversation/env-id ?env-id]
-                                 [?e :entity/id ?id]]
+                          [?e :entity/id ?id]]
                      (d/db conn) env-id)]
       (if existing
         [:entity/id existing]
@@ -153,10 +177,10 @@
   (let [parent-id (when query-ref (second query-ref))
         code-strs (mapv :code (or executions []))
         result-strs (mapv #(try (pr-str (:result %))
-                            (catch Exception e
-                              (trove/log! {:level :warn :data {:error (ex-message e)}
-                                           :msg "Failed to serialize execution result"})
-                              "???"))
+                             (catch Exception e
+                               (trove/log! {:level :warn :data {:error (ex-message e)}
+                                            :msg "Failed to serialize execution result"})
+                               "???"))
                       (or executions []))]
     (store-entity! db-info
       (cond-> {:entity/type :iteration
@@ -276,7 +300,7 @@
   "Search page nodes with fulltext, falling back to scan."
   [conn query]
   (try (fulltext-page-nodes conn query)
-       (catch Exception _ (scan-page-nodes conn query))))
+    (catch Exception _ (scan-page-nodes conn query))))
 
 (defn- brevify-node
   "Strips full content from a page node, replacing with a 150-char preview.
@@ -400,7 +424,7 @@
                                          existing (get acc id)]
                                      (if (or (nil? existing)
                                            (> (or (:vitality-score node) 0)
-                                              (or (:vitality-score existing) 0)))
+                                             (or (:vitality-score existing) 0)))
                                        (assoc acc id node)
                                        acc)))
                            {} all-results))]
@@ -566,7 +590,7 @@
   "Search TOC entries with fulltext, falling back to scan."
   [conn query]
   (try (fulltext-toc-entries conn query)
-       (catch Exception _ (scan-toc-entries conn query))))
+    (catch Exception _ (scan-toc-entries conn query))))
 
 (defn- normalize-toc-entry
   "Normalize a raw TOC entry into a clean result map."
@@ -794,7 +818,7 @@
       :distance, :vitality-score, :vitality-zone, :via-relationship}"
   ([db-info anchor-id] (find-related db-info anchor-id {}))
   ([{:keys [conn] :as db-info} anchor-id {:keys [depth min-vitality limit]
-                                           :or {depth 2 min-vitality 0.1 limit 50}}]
+                                          :or {depth 2 min-vitality 0.1 limit 50}}]
    (when conn
      (let [depth (min depth 5)
            db (d/db conn)
@@ -817,13 +841,13 @@
            ;; Expand canonical-id: find all entities sharing canonical-id with anchor
            anchor-canonical (d/q '[:find ?cid . :in $ ?eid
                                    :where [?e :entity/id ?eid]
-                                          [?e :entity/canonical-id ?cid]]
+                                   [?e :entity/canonical-id ?cid]]
                               db anchor-id)
            anchor-set (if anchor-canonical
                         (set (d/q '[:find [?eid ...]
                                     :in $ ?cid
                                     :where [?e :entity/canonical-id ?cid]
-                                           [?e :entity/id ?eid]]
+                                    [?e :entity/id ?eid]]
                                db anchor-canonical))
                         #{anchor-id})
            ;; BFS with vitality priority
@@ -844,13 +868,13 @@
                  ;; Also visit canonical siblings
                  (let [canonical (d/q '[:find ?cid . :in $ ?eid
                                         :where [?e :entity/id ?eid]
-                                               [?e :entity/canonical-id ?cid]]
+                                        [?e :entity/canonical-id ?cid]]
                                    db neighbor-id)
                        siblings (if canonical
                                   (set (d/q '[:find [?eid ...]
                                               :in $ ?cid
                                               :where [?e :entity/canonical-id ?cid]
-                                                     [?e :entity/id ?eid]]
+                                              [?e :entity/id ?eid]]
                                          db canonical))
                                   #{neighbor-id})]
                    (swap! visited into siblings)
@@ -1006,19 +1030,38 @@
    `db-info` - Map with :conn key.
 
    Returns:
-   Vector of iteration entity maps with answer, sorted by created-at."
-  [{:keys [conn]}]
-  (if conn
-    (->> (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type
-                                 :entity/parent-id :entity/created-at
-                                 :iteration/index :iteration/answer
-                                 :iteration/code :iteration/results]) ...]
-                :where [?e :entity/type :iteration]
-                       [?e :iteration/answer _]]
-           (d/db conn))
-      (sort-by :entity/created-at)
-      vec)
-    []))
+   Vector of iteration entity maps with answer, sorted by created-at.
+
+   Options:
+   - :conversation-ref - Lookup ref [:entity/id uuid]. When provided, only
+     returns finals belonging to queries in this conversation."
+  ([db-info] (db-list-final-results db-info {}))
+  ([{:keys [conn]} {:keys [conversation-ref]}]
+   (if conn
+     (let [db (d/db conn)
+           conversation-id (second conversation-ref)]
+       (->> (if conversation-id
+              (d/q '[:find [(pull ?iter [:entity/id :entity/name :entity/type
+                                         :entity/parent-id :entity/created-at
+                                         :iteration/index :iteration/answer
+                                         :iteration/code :iteration/results]) ...]
+                     :in $ ?conversation-id
+                     :where [?iter :entity/type :iteration]
+                     [?iter :iteration/answer _]
+                     [?iter :entity/parent-id ?query-id]
+                     [?query :entity/id ?query-id]
+                     [?query :entity/parent-id ?conversation-id]]
+                db conversation-id)
+              (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type
+                                      :entity/parent-id :entity/created-at
+                                      :iteration/index :iteration/answer
+                                      :iteration/code :iteration/results]) ...]
+                     :where [?e :entity/type :iteration]
+                     [?e :iteration/answer _]]
+                db))
+         (sort-by :entity/created-at)
+         vec))
+     [])))
 
 ;; -----------------------------------------------------------------------------
 ;; High-Level Document Storage
@@ -1255,11 +1298,11 @@
   (when conn
     (try
       (set (d/q '[:find [?pid ...]
-                   :in $ ?cutoff
-                   :where
-                   [?e :page/id ?pid]
-                   [?e :page/last-accessed ?la]
-                   [(>= ?la ?cutoff)]]
+                  :in $ ?cutoff
+                  :where
+                  [?e :page/id ?pid]
+                  [?e :page/last-accessed ?la]
+                  [(>= ?la ?cutoff)]]
              (d/db conn) since))
       (catch Exception e
         (trove/log! {:level :debug :data {:error (ex-message e)}
@@ -1305,28 +1348,28 @@
                              (d/q '[:find [?cid ...]
                                     :in $ ?doc-id ?pidx
                                     :where [?e :entity/document-id ?doc-id]
-                                           [?e :entity/page ?pidx]
-                                           [?e :entity/canonical-id ?cid]]
+                                    [?e :entity/page ?pidx]
+                                    [?e :entity/canonical-id ?cid]]
                                db doc-id (or page-idx -1)))
              ;; Find pages of canonical siblings (different from source page)
              sibling-page-ids (when (seq canonical-ids)
                                 (d/q '[:find [?pid ...]
                                        :in $ [?cid ...] ?exclude-pid
                                        :where [?e :entity/canonical-id ?cid]
-                                              [?e :entity/document-id ?did]
-                                              [?e :entity/page ?eidx]
-                                              [?p :page/document-id ?did]
-                                              [?p :page/index ?eidx]
-                                              [?p :page/id ?pid]
-                                              [(not= ?pid ?exclude-pid)]]
+                                       [?e :entity/document-id ?did]
+                                       [?e :entity/page ?eidx]
+                                       [?p :page/document-id ?did]
+                                       [?p :page/index ?eidx]
+                                       [?p :page/id ?pid]
+                                       [(not= ?pid ?exclude-pid)]]
                                   db canonical-ids page-id))
              ;; Path 2: relationship neighbors via find-related
              page-entity-ids (when doc-id
                                (d/q '[:find [?eid ...]
                                       :in $ ?doc-id ?pidx
                                       :where [?e :entity/document-id ?doc-id]
-                                             [?e :entity/page ?pidx]
-                                             [?e :entity/id ?eid]]
+                                      [?e :entity/page ?pidx]
+                                      [?e :entity/id ?eid]]
                                  db doc-id (or page-idx -1)))
              rel-neighbor-page-ids (when (seq page-entity-ids)
                                      (->> page-entity-ids
@@ -1336,8 +1379,8 @@
                                                  (first (d/q '[:find [?pid ...]
                                                                :in $ ?did ?pidx
                                                                :where [?p :page/document-id ?did]
-                                                                      [?p :page/index ?pidx]
-                                                                      [?p :page/id ?pid]]
+                                                               [?p :page/index ?pidx]
+                                                               [?p :page/id ?pid]]
                                                           db (:entity/document-id e) (:entity/page e))))))
                                        distinct))
              ;; Merge both paths, remove self
@@ -1427,12 +1470,12 @@
         ;; Single query: get all co-occurrence edges involving any of our pages
         edges (d/q '[:find [(pull ?e [:page-cooccurrence/page-a :page-cooccurrence/page-b
                                       :page-cooccurrence/strength :page-cooccurrence/last-seen]) ...]
-                      :in $ ?page-set
-                      :where
-                      [?e :page-cooccurrence/page-a ?a]
-                      [(?page-set ?a)]
-                      [?e :page-cooccurrence/page-b ?b]]
-                 (d/db conn) all-page-ids)
+                     :in $ ?page-set
+                     :where
+                     [?e :page-cooccurrence/page-a ?a]
+                     [(?page-set ?a)]
+                     [?e :page-cooccurrence/page-b ?b]]
+                (d/db conn) all-page-ids)
         recent-set (set recent-page-ids)]
     (reduce
       (fn [acc {:keys [page-cooccurrence/page-a page-cooccurrence/page-b
@@ -1465,18 +1508,18 @@
       (double
         (reduce
           (fn [acc recent-pid]
-          (if (= page-id recent-pid)
-            acc
-            (let [[_ _ id] (cooccurrence-pair page-id recent-pid)
-                  edge (d/pull (d/db conn) [:page-cooccurrence/strength :page-cooccurrence/last-seen]
-                         [:page-cooccurrence/id id])]
-              (if-let [strength (:page-cooccurrence/strength edge)]
-                (let [last-seen (:page-cooccurrence/last-seen edge)
-                      decayed (cooccurrence-decay strength (days-since-date now last-seen))]
-                  (+ acc decayed))
-                acc))))
-        0.0
-        recent-page-ids)))))
+            (if (= page-id recent-pid)
+              acc
+              (let [[_ _ id] (cooccurrence-pair page-id recent-pid)
+                    edge (d/pull (d/db conn) [:page-cooccurrence/strength :page-cooccurrence/last-seen]
+                           [:page-cooccurrence/id id])]
+                (if-let [strength (:page-cooccurrence/strength edge)]
+                  (let [last-seen (:page-cooccurrence/last-seen edge)
+                        decayed (cooccurrence-decay strength (days-since-date now last-seen))]
+                    (+ acc decayed))
+                  acc))))
+          0.0
+          recent-page-ids)))))
 
 (defn- recently-accessed-page-ids
   "Returns set of page IDs accessed within the last hour."
@@ -1485,11 +1528,11 @@
     (try
       (let [cutoff (java.util.Date. (- (System/currentTimeMillis) 3600000))]
         (set (d/q '[:find [?pid ...]
-                     :in $ ?cutoff
-                     :where
-                     [?e :page/id ?pid]
-                     [?e :page/last-accessed ?la]
-                     [(>= ?la ?cutoff)]]
+                    :in $ ?cutoff
+                    :where
+                    [?e :page/id ?pid]
+                    [?e :page/last-accessed ?la]
+                    [(>= ?la ?cutoff)]]
                (d/db conn) cutoff)))
       (catch Exception e
         (trove/log! {:level :debug :data {:error (ex-message e)}

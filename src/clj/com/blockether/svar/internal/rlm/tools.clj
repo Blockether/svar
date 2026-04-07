@@ -537,6 +537,9 @@
 ;; Var Index
 ;; =============================================================================
 
+(def ^:private ^:const MAX_VAR_INDEX_ROWS 40)
+(def ^:private ^:const MAX_VAR_INDEX_COUNT 1000)
+
 (defn build-var-index
   "Builds a formatted var index table from user-def'd vars in the SCI context.
    Filters out initial bindings (tools, helpers) using initial-ns-keys.
@@ -548,15 +551,13 @@
    (build-var-index sci-ctx initial-ns-keys nil))
   ([sci-ctx initial-ns-keys sandbox]
    (try
-     (let [var-info (if sandbox
-                      (into {}
-                        (for [[s v] sandbox
-                              :when (symbol? s)]
-                          [s {:val (if (instance? clojure.lang.IDeref v) @v v)
-                              :doc (:doc (meta v))
-                              :arglists (:arglists (meta v))}]))
-                      (sci/eval-string* sci-ctx
-                        "(into {} (for [[s v] (ns-publics 'sandbox)] [s {:val @v :doc (:doc (meta v)) :arglists (:arglists (meta v))}]))"))
+     (let [sandbox-map (or sandbox (get-in @(:env sci-ctx) [:namespaces 'sandbox]))
+           var-info (into {}
+                      (for [[s v] sandbox-map
+                            :when (symbol? s)]
+                        [s {:val (if (instance? clojure.lang.IDeref v) @v v)
+                            :doc (:doc (meta v))
+                            :arglists (:arglists (meta v))}]))
            entries (->> var-info
                      (remove (fn [[sym _]] (contains? initial-ns-keys sym)))
                      (sort-by key)
@@ -578,21 +579,31 @@
                                    size (cond
                                           (nil? val) "\u2014"
                                           (string? val) (str (count val) " chars")
-                                          (coll? val) (str (count val) " items")
+                                          (or (map? val) (vector? val) (set? val))
+                                          (str (count val) " items")
+                                          (sequential? val)
+                                          (let [n (bounded-count MAX_VAR_INDEX_COUNT val)]
+                                            (if (= n MAX_VAR_INDEX_COUNT)
+                                              (str MAX_VAR_INDEX_COUNT "+ items")
+                                              (str n " items")))
                                           :else "\u2014")]
                                {:name (str sym) :type type-label :size size
                                 :doc (if doc (str-truncate doc 80) "\u2014")}))))]
        (when (seq entries)
-         (let [max-name (max 4 (apply max (map #(count (:name %)) entries)))
-               max-type (max 4 (apply max (map #(count (:type %)) entries)))
-               max-size (max 4 (apply max (map #(count (:size %)) entries)))
+         (let [visible (vec (take MAX_VAR_INDEX_ROWS entries))
+               omitted (- (count entries) (count visible))
+               max-name (max 4 (apply max (map #(count (:name %)) visible)))
+               max-type (max 4 (apply max (map #(count (:type %)) visible)))
+               max-size (max 4 (apply max (map #(count (:size %)) visible)))
                pad (fn [s n] (str s (apply str (repeat (max 0 (- n (count s))) \space))))
                header (str "  " (pad "name" max-name) " | " (pad "type" max-type) " | " (pad "size" max-size) " | doc")
                sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+----")
                rows (map (fn [{:keys [name type size doc]}]
                            (str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc))
-                      entries)]
-           (str/join "\n" (concat [header sep] rows)))))
+                      visible)
+               footer (when (pos? omitted)
+                        (str "  ... " omitted " more vars omitted"))]
+           (str/join "\n" (concat [header sep] rows (when footer [footer]))))))
      (catch Exception _ nil))))
 
 ;; =============================================================================

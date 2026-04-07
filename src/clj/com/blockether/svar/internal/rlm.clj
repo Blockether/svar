@@ -118,7 +118,10 @@
         custom-docs-atom (atom [])
         db-info (rlm-db/create-rlm-conn {:conn conn :path path})
         db-info-atom (atom db-info)
+        var-index-cache-atom (atom {:revision -1 :index nil})
+        var-index-revision-atom (atom 0)
         qa-corpus-snapshot-cache-atom (atom nil)
+        qa-corpus-snapshot-stats-atom (atom {:hits 0 :misses 0 :last-digest-ms nil :last-revision 0})
         llm-query-fn (rlm-routing/make-routed-llm-query-fn {} depth-atom router)
         sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:optimize :cost} depth-atom router)
         env-id (str (util/uuid))
@@ -134,13 +137,29 @@
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
+     :var-index-cache-atom var-index-cache-atom
+     :var-index-revision-atom var-index-revision-atom
      :qa-corpus-snapshot-cache-atom qa-corpus-snapshot-cache-atom
+     :qa-corpus-snapshot-stats-atom qa-corpus-snapshot-stats-atom
      :sci-ctx sci-ctx
      :sandbox-ns sandbox-ns
      :initial-ns-keys initial-ns-keys
      :router router
      :llm-query-fn llm-query-fn
      :sub-llm-query-fn sub-llm-query-fn}))
+
+(defn- invalidate-qa-corpus-snapshot-cache!
+  [env]
+  (when-let [cache-atom (:qa-corpus-snapshot-cache-atom env)]
+    (reset! cache-atom nil)))
+
+(defn qa-corpus-snapshot-stats
+  "Returns QA corpus snapshot cache stats for observability.
+   Shape: {:hits N :misses N :last-digest-ms ms|nil :last-revision rev}."
+  [env]
+  (if-let [stats-atom (:qa-corpus-snapshot-stats-atom env)]
+    @stats-atom
+    {:hits 0 :misses 0 :last-digest-ms nil :last-revision 0}))
 
 (defn register-env-fn!
   "Registers a function in the RLM environment's SCI sandbox.
@@ -270,9 +289,12 @@
                              (merge base-result extraction-result)))
                      documents base-results)
                    base-results)]
-      ;; Invalidate cached corpus digest after any ingest mutation.
-     (when-let [cache-atom (:qa-corpus-snapshot-cache-atom env)]
-       (reset! cache-atom nil))
+     (when (seq documents)
+       (let [revision (rlm-db/bump-corpus-revision! db-info)]
+          ;; Invalidate cached corpus digest after corpus mutation.
+         (invalidate-qa-corpus-snapshot-cache! env)
+         (when-let [stats-atom (:qa-corpus-snapshot-stats-atom env)]
+           (swap! stats-atom assoc :last-revision revision))))
      results)))
 
 (defn dispose-env!
@@ -1107,7 +1129,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   "Creates a lightweight fork of the env for parallel query-env! calls.
    Uses sci/fork for cheap SCI context isolation — new vars don't leak back to parent."
   [env]
-  (assoc env :sci-ctx (sci/fork (:sci-ctx env))))
+  (assoc env
+    :sci-ctx (sci/fork (:sci-ctx env))
+    ;; Fork-local var index cache/revision (must not be shared across SCI forks).
+    :var-index-cache-atom (atom {:revision -1 :index nil})
+    :var-index-revision-atom (atom 0)))
 
 ;; -----------------------------------------------------------------------------
 ;; QA Manifest — crash-resumable generate-qa-env!
@@ -1131,51 +1157,107 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   ^String [^MessageDigest digest]
   (str "sha256:" (apply str (map #(format "%02x" %) (.digest digest)))))
 
+(defn- qa-corpus-revision
+  [db-info]
+  (long (rlm-db/get-corpus-revision db-info)))
+
+(defn- qa-corpus-documents
+  [db]
+  (->> (d/q '[:find [(pull ?e [:document/id :document/name :document/title
+                               :document/extension :document/abstract]) ...]
+              :where [?e :document/id _]]
+         db)
+    (sort-by (juxt :document/id :document/name))
+    vec))
+
+(defn- qa-corpus-toc-entries
+  [db]
+  (->> (d/q '[:find [(pull ?e [:document.toc/id :document.toc/document-id
+                               :document.toc/title :document.toc/level
+                               :document.toc/target-page :document.toc/target-section-id
+                               :document.toc/description]) ...]
+              :where [?e :document.toc/id _]]
+         db)
+    (sort-by (juxt :document.toc/document-id :document.toc/target-page
+               :document.toc/level :document.toc/title :document.toc/id))
+    vec))
+
+(defn- qa-corpus-page-nodes
+  [db]
+  (->> (d/q '[:find [(pull ?e [:page.node/id :page.node/document-id :page.node/page-id
+                               :page.node/type :page.node/local-id
+                               :page.node/content :page.node/description]) ...]
+              :where [?e :page.node/id _]]
+         db)
+    (sort-by (juxt :page.node/document-id :page.node/page-id
+               :page.node/local-id :page.node/id))
+    vec))
+
+(defn- qa-corpus-content-hash
+  [docs toc nodes]
+  (let [digest (MessageDigest/getInstance "SHA-256")]
+    (doseq [doc docs] (digest-update! digest doc))
+    (doseq [entry toc] (digest-update! digest entry))
+    (doseq [node nodes] (digest-update! digest node))
+    (digest->sha256 digest)))
+
+(defn- qa-corpus-cache-hit!
+  [env revision]
+  (let [stats (when-let [stats-atom (:qa-corpus-snapshot-stats-atom env)]
+                (swap! stats-atom #(-> %
+                                     (update :hits (fnil inc 0))
+                                     (assoc :last-revision revision))))]
+    (trove/log! {:level :info :id ::qa-corpus-cache-hit
+                 :data {:revision revision
+                        :hits (:hits stats)
+                        :misses (:misses stats)}
+                 :msg "QA corpus snapshot cache hit"})))
+
+(defn- qa-corpus-cache-miss!
+  [env revision digest-ms]
+  (let [stats (when-let [stats-atom (:qa-corpus-snapshot-stats-atom env)]
+                (swap! stats-atom #(-> %
+                                     (update :misses (fnil inc 0))
+                                     (assoc :last-digest-ms digest-ms)
+                                     (assoc :last-revision revision))))]
+    (trove/log! {:level :info :id ::qa-corpus-cache-miss
+                 :data {:revision revision
+                        :digest-ms digest-ms
+                        :hits (:hits stats)
+                        :misses (:misses stats)}
+                 :msg "QA corpus snapshot cache miss"})))
+
+(defn- compute-qa-corpus-snapshot
+  [db revision]
+  (let [docs (qa-corpus-documents db)
+        toc (qa-corpus-toc-entries db)
+        nodes (qa-corpus-page-nodes db)]
+    {:revision revision
+     :document-count (count docs)
+     :toc-count (count toc)
+     :node-count (count nodes)
+     :content-hash (qa-corpus-content-hash docs toc nodes)}))
+
 (defn- qa-corpus-snapshot
   "Returns deterministic corpus stats + content hash for manifest fingerprinting.
    Hash includes document metadata, TOC entries, and full page-node text payloads."
-  [env {:keys [conn]}]
+  [env {:keys [conn] :as db-info}]
   (if-not conn
-    {:document-count 0 :toc-count 0 :node-count 0 :content-hash "sha256:0"}
+    {:revision 0 :document-count 0 :toc-count 0 :node-count 0 :content-hash "sha256:0"}
     (let [cache-atom (:qa-corpus-snapshot-cache-atom env)
           db (d/db conn)
-          revision {:document-count (or (d/q '[:find (count ?e) . :where [?e :document/id _]] db) 0)
-                    :toc-count (or (d/q '[:find (count ?e) . :where [?e :document.toc/id _]] db) 0)
-                    :node-count (or (d/q '[:find (count ?e) . :where [?e :page.node/id _]] db) 0)}
+          revision (qa-corpus-revision db-info)
           cached (when cache-atom @cache-atom)]
       (if (and cached (= revision (:revision cached)))
-        (:snapshot cached)
-        (let [docs (->> (d/q '[:find [(pull ?e [:document/id :document/name :document/title
-                                                :document/extension :document/abstract]) ...]
-                               :where [?e :document/id _]]
-                          db)
-                     (sort-by (juxt :document/id :document/name))
-                     vec)
-              toc (->> (d/q '[:find [(pull ?e [:document.toc/id :document.toc/document-id
-                                               :document.toc/title :document.toc/level
-                                               :document.toc/target-page :document.toc/target-section-id
-                                               :document.toc/description]) ...]
-                              :where [?e :document.toc/id _]]
-                         db)
-                    (sort-by (juxt :document.toc/document-id :document.toc/target-page
-                               :document.toc/level :document.toc/title :document.toc/id))
-                    vec)
-              nodes (->> (d/q '[:find [(pull ?e [:page.node/id :page.node/document-id :page.node/page-id
-                                                 :page.node/type :page.node/local-id
-                                                 :page.node/content :page.node/description]) ...]
-                                :where [?e :page.node/id _]]
-                           db)
-                      (sort-by (juxt :page.node/document-id :page.node/page-id
-                                 :page.node/local-id :page.node/id))
-                      vec)
-              digest (MessageDigest/getInstance "SHA-256")
-              snapshot (do
-                         (doseq [doc docs] (digest-update! digest doc))
-                         (doseq [entry toc] (digest-update! digest entry))
-                         (doseq [node nodes] (digest-update! digest node))
-                         (assoc revision :content-hash (digest->sha256 digest)))]
+        (do
+          (qa-corpus-cache-hit! env revision)
+          (:snapshot cached))
+        (let [start (System/nanoTime)
+              snapshot (compute-qa-corpus-snapshot db revision)
+              digest-ms (/ (- (System/nanoTime) start) 1000000.0)]
           (when cache-atom
             (reset! cache-atom {:revision revision :snapshot snapshot}))
+          (qa-corpus-cache-miss! env revision digest-ms)
           snapshot)))))
 
 (defn- qa-manifest-fingerprint

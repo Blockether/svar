@@ -202,13 +202,13 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
   "Validates a JSON string. Returns nil if valid, error string if broken."
   [s]
   (try (json/read-json (str s)) nil
-       (catch Exception e (str "Invalid JSON: " (ex-message e)))))
+    (catch Exception e (str "Invalid JSON: " (ex-message e)))))
 
 (defn validate-edn
   "Validates an EDN string. Returns nil if valid, error string if broken."
   [s]
   (try (edn/read-string (str s)) nil
-       (catch Exception e (str "Invalid EDN: " (ex-message e)))))
+    (catch Exception e (str "Invalid EDN: " (ex-message e)))))
 
 (defn validate-python
   "Validates Python syntax via python3 compile(). Returns nil if valid."
@@ -359,7 +359,12 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
 
 (def RLM_SCHEMA
   "Datalevin schema for all RLM data. Public so callers can merge into their own DB."
-  {;; Documents
+  {;; Global RLM metadata
+   :rlm.meta/id              {:db/valueType :db.type/keyword :db/unique :db.unique/identity}
+   :rlm.meta/corpus-revision {:db/valueType :db.type/long}
+   :rlm.meta/updated-at      {:db/valueType :db.type/instant}
+
+   ;; Documents
    :document/id         {:db/valueType :db.type/string :db/unique :db.unique/identity}
    :document/name       {:db/valueType :db.type/string}
    :document/title      {:db/valueType :db.type/string :db/fulltext true}
