@@ -393,7 +393,11 @@
                        'fetch-content (make-fetch-content-fn db-info-atom)
                        'find-related (fn find-related
                                        ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
-                                       ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))})
+                                       ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
+                       'search-batch (fn search-batch
+                                       ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
+                                       ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
+                       'results->md (fn results->md [results] (db/results->markdown results))})
         all-bindings (merge EXTRA_BINDINGS base-bindings db-bindings
                        (or custom-bindings {}))
         ;; Proper SCI namespaces via sci/copy-ns (preserves doc, arglists, meta)
@@ -508,7 +512,9 @@
                              ;; Document navigation — 2 unified tools
                             ['search-documents "Search across documents. No :in = search everywhere (pages+toc+entities).\n  (search-documents \"query\") → {:pages [...] :toc [...] :entities [...]}\n  (search-documents \"query\" {:in :pages})      ;; pages only\n  (search-documents \"query\" {:in :toc})        ;; TOC only\n  (search-documents \"query\" {:in :entities})   ;; entities only\n  Opts: :top-k :document-id :type" '([query] [query opts])]
                             ['fetch-content "Fetch full content by lookup ref.\n  [:page.node/id \"id\"]    → page text\n  [:document/id \"id\"]     → vector of ~4K char pages\n  [:document.toc/id \"id\"] → TOC entry description\n  [:entity/id \"id\"]       → {:entity {...} :relationships [...]}" '([lookup-ref])]
-                            ['find-related "BFS graph traversal from an anchor entity.\n  (find-related entity-id)              ;; depth 2\n  (find-related entity-id {:depth 3})   ;; deeper\n  Returns related entities sorted by distance, with cross-document canonical linking." '([entity-id] [entity-id opts])]]]
+                            ['find-related "BFS graph traversal from an anchor entity.\n  (find-related entity-id)              ;; depth 2\n  (find-related entity-id {:depth 3})   ;; deeper\n  Returns related entities sorted by distance, with cross-document canonical linking." '([entity-id] [entity-id opts])]
+                            ['search-batch "Parallel multi-query search. Deduplicates, ranks by vitality.\n  (search-batch [\"schemas\" \"modes\" \"treatment\"])\n  (search-batch [\"q1\" \"q2\"] {:top-k 5 :limit 20})" '([queries] [queries opts])]
+                            ['results->md "Convert search results to compact markdown for LLM.\n  (results->md (search-batch [...]))\n  (results->md (search-documents \"query\"))" '([results])]]]
       (when (sci/eval-string* sci-ctx (str "(resolve '" sym ")"))
         (sci/eval-string* sci-ctx
           (str "(def ^{:doc " (pr-str doc)

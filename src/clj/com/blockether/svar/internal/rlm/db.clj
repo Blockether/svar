@@ -330,6 +330,100 @@
                       (take top-k))]
          (mapv #(-> % (dissoc ::combined-score) brevify-node) ranked))))))
 
+(defn db-search-batch
+  "Parallel multi-query search. Runs multiple queries, merges and deduplicates results.
+   Keeps highest vitality score per node across all queries.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `queries` - Vector of query strings.
+   `opts` - Map, optional:
+     - :top-k - Integer. Max results per query (default: 10).
+     - :min-vitality - Double. Minimum vitality (default: 0.1).
+     - :limit - Integer. Max total results (default: 30).
+     - :document-id - String. Filter by document.
+
+   Returns:
+   Vector of brief page node maps, deduplicated, ranked by combined score."
+  ([db-info queries] (db-search-batch db-info queries {}))
+  ([db-info queries {:keys [top-k limit document-id min-vitality]
+                     :or {top-k 10 limit 30 min-vitality 0.1}}]
+   (when (seq queries)
+     (let [per-query-opts (cond-> {:top-k top-k :min-vitality min-vitality}
+                            document-id (assoc :document-id document-id))
+           ;; Run all queries in parallel
+           all-results (into [] (mapcat identity)
+                         (pmap #(db-search-page-nodes db-info % per-query-opts) queries))
+           ;; Deduplicate by page.node/id — keep highest vitality
+           deduped (vals (reduce (fn [acc node]
+                                   (let [id (:page.node/id node)
+                                         existing (get acc id)]
+                                     (if (or (nil? existing)
+                                           (> (or (:vitality-score node) 0)
+                                              (or (:vitality-score existing) 0)))
+                                       (assoc acc id node)
+                                       acc)))
+                           {} all-results))]
+       (->> deduped
+         (sort-by #(- (or (:vitality-score %) 0)))
+         (take limit)
+         vec)))))
+
+(defn results->markdown
+  "Converts search results to compact, token-efficient markdown for LLM consumption.
+
+   Accepts the output of db-search-page-nodes, db-search-batch, or a map with
+   :pages, :toc, :entities keys (from search-documents).
+
+   Output format:
+   - Page nodes: grouped by page, with type prefix and vitality zone tag
+   - TOC entries: bulleted list with level and page ref
+   - Entities: bulleted list with type and description
+
+   Params:
+   `results` - Vector of node maps, or {:pages [...] :toc [...] :entities [...]}"
+  [results]
+  (let [;; Normalize input
+        {:keys [pages toc entities]}
+        (if (map? results)
+          results
+          {:pages results})
+        sb (StringBuilder.)]
+    ;; Page nodes
+    (when (seq pages)
+      (let [by-page (group-by :page.node/page-id pages)]
+        (doseq [[page-id nodes] (sort-by key by-page)]
+          (.append sb (str "## " (or page-id "unknown") "\n"))
+          (doseq [node nodes]
+            (let [t (some-> (:page.node/type node) name)
+                  zone (some-> (:vitality-zone node) name)
+                  preview (or (:preview node) "")]
+              (.append sb (str "- **" t "**"
+                            (when zone (str " [" zone "]"))
+                            " " preview "\n"))))
+          (.append sb "\n"))))
+    ;; TOC entries
+    (when (seq toc)
+      (.append sb "## TOC\n")
+      (doseq [entry toc]
+        (let [title (or (:document.toc/title entry) "")
+              level (or (:document.toc/level entry) "")
+              page (:document.toc/target-page entry)]
+          (.append sb (str "- " level " " title
+                        (when page (str " (p." page ")"))
+                        "\n"))))
+      (.append sb "\n"))
+    ;; Entities
+    (when (seq entities)
+      (.append sb "## Entities\n")
+      (doseq [entity entities]
+        (let [name (or (:entity/name entity) "")
+              etype (some-> (:entity/type entity) clojure.core/name)
+              desc (or (:entity/description entity) "")]
+          (.append sb (str "- **" name "** (" etype ") " (str-truncate desc 80) "\n"))))
+      (.append sb "\n"))
+    (str sb)))
+
 (defn db-get-page-node
   "Gets a page node by ID with full details.
 
