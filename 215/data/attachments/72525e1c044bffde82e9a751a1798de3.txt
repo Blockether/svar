@@ -1,0 +1,2 @@
+2026-04-07T00:32:29.513651066Z :warn com.blockether.svar.internal.rlm.core [1122 13] Failed to store entity 
+  data: {:error "class java.lang.String cannot be cast to class clojure.lang.Named (java.lang.String is in module java.base of loader 'bootstrap'; clojure.lang.Named is in unnamed module of loader 'app')"}
