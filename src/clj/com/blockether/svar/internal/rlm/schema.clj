@@ -431,7 +431,8 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :conversation/model         {:db/valueType :db.type/string  :db/doc "Root model used"}
 
    ;; Query-specific attrs (entity/type = :query, parent = conversation)
-   :query/text          {:db/valueType :db.type/string  :db/fulltext true :db/doc "User query text (extracted from messages)"}
+   :query/messages      {:db/valueType :db.type/string  :db/doc "pr-str of original messages vector (with base64 images)"}
+   :query/text          {:db/valueType :db.type/string  :db/fulltext true :db/doc "Extracted text from messages (for fulltext search)"}
    :query/answer        {:db/valueType :db.type/string  :db/doc "Final answer"}
    :query/iterations    {:db/valueType :db.type/long    :db/doc "Number of iterations"}
    :query/duration-ms   {:db/valueType :db.type/long    :db/doc "Total wall-clock time"}

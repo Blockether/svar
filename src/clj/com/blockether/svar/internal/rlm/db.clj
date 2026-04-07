@@ -104,8 +104,9 @@
            :conversation/model (or model "")})))))
 
 (defn store-query!
-  "Stores a query entity linked to a conversation via parent-id."
-  [db-info {:keys [conversation-ref text answer iterations duration-ms status eval-score]}]
+  "Stores a query entity linked to a conversation via parent-id.
+   Stores both extracted text (for search) and full messages (with images)."
+  [db-info {:keys [conversation-ref text messages answer iterations duration-ms status eval-score]}]
   (let [parent-id (when conversation-ref (second conversation-ref))]
     (store-entity! db-info
       (cond-> {:entity/type :query
@@ -116,6 +117,7 @@
                :query/iterations (or iterations 0)
                :query/duration-ms (or duration-ms 0)
                :query/status (or status :unknown)}
+        messages (assoc :query/messages (pr-str messages))
         eval-score (assoc :query/eval-score (float eval-score))))))
 
 (defn update-query!
@@ -629,6 +631,118 @@
                   :relationship/target-entity-id (:relationship/target-entity-id r)
                   :relationship/description (when-not (= "" (str (:relationship/description r)))
                                               (:relationship/description r))})))))))
+
+;; -----------------------------------------------------------------------------
+;; BFS Graph Traversal with Vitality-Priority Queue
+;; -----------------------------------------------------------------------------
+
+(defn find-related
+  "Undirected BFS over entity relationships with vitality-weighted priority.
+
+   Given an anchor entity, traverses relationships bidirectionally to find
+   related entities across documents. High-vitality entities are explored first.
+   Archived entities (vitality < min-vitality) are pruned.
+
+   Cross-document traversal: entities linked via :entity/canonical-id are
+   treated as the same node — accessing one reaches all canonical siblings.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `anchor-id` - UUID. Starting entity ID.
+   `opts` - Map, optional:
+     - :depth - Integer. Max hops (default: 2, max: 5).
+     - :min-vitality - Double. Minimum vitality threshold (default: 0.1).
+     - :limit - Integer. Max results (default: 50).
+
+   Returns:
+   Vector of maps sorted by [distance asc, vitality desc]:
+     {:entity/id, :entity/name, :entity/type, :entity/document-id,
+      :distance, :vitality-score, :vitality-zone, :via-relationship}"
+  ([db-info anchor-id] (find-related db-info anchor-id {}))
+  ([{:keys [conn] :as db-info} anchor-id {:keys [depth min-vitality limit]
+                                           :or {depth 2 min-vitality 0.1 limit 50}}]
+   (when conn
+     (let [depth (min depth 5)
+           db (d/db conn)
+           ;; Build adjacency: entity-id → [{:neighbor-id :rel-type :rel-description}]
+           all-rels (d/q '[:find [(pull ?e [:relationship/source-entity-id
+                                            :relationship/target-entity-id
+                                            :relationship/type
+                                            :relationship/description]) ...]
+                           :where [?e :relationship/id _]]
+                      db)
+           adjacency (reduce (fn [acc r]
+                               (let [src (:relationship/source-entity-id r)
+                                     tgt (:relationship/target-entity-id r)
+                                     rel-info {:type (:relationship/type r)
+                                               :description (:relationship/description r)}]
+                                 (-> acc
+                                   (update src (fnil conj []) (assoc rel-info :neighbor-id tgt))
+                                   (update tgt (fnil conj []) (assoc rel-info :neighbor-id src)))))
+                       {} all-rels)
+           ;; Expand canonical-id: find all entities sharing canonical-id with anchor
+           anchor-canonical (d/q '[:find ?cid . :in $ ?eid
+                                   :where [?e :entity/id ?eid]
+                                          [?e :entity/canonical-id ?cid]]
+                              db anchor-id)
+           anchor-set (if anchor-canonical
+                        (set (d/q '[:find [?eid ...]
+                                    :in $ ?cid
+                                    :where [?e :entity/canonical-id ?cid]
+                                           [?e :entity/id ?eid]]
+                               db anchor-canonical))
+                        #{anchor-id})
+           ;; BFS with vitality priority
+           visited (atom anchor-set)
+           results (atom [])
+           ;; Start queue: all anchor entity neighbors at distance 1
+           initial-queue (for [aid anchor-set
+                               neighbor (get adjacency aid)]
+                           (assoc neighbor :distance 1))]
+       ;; Process BFS levels
+       (loop [queue (vec initial-queue)
+              current-depth 1]
+         (when (and (seq queue) (<= current-depth depth))
+           (let [next-level (atom [])]
+             (doseq [{:keys [neighbor-id distance type description]} queue]
+               (when-not (contains? @visited neighbor-id)
+                 (swap! visited conj neighbor-id)
+                 ;; Also visit canonical siblings
+                 (let [canonical (d/q '[:find ?cid . :in $ ?eid
+                                        :where [?e :entity/id ?eid]
+                                               [?e :entity/canonical-id ?cid]]
+                                   db neighbor-id)
+                       siblings (if canonical
+                                  (set (d/q '[:find [?eid ...]
+                                              :in $ ?cid
+                                              :where [?e :entity/canonical-id ?cid]
+                                                     [?e :entity/id ?eid]]
+                                         db canonical))
+                                  #{neighbor-id})]
+                   (swap! visited into siblings)
+                   ;; Get entity info
+                   (when-let [entity (d/pull db [:entity/id :entity/name :entity/type
+                                                 :entity/document-id :entity/description
+                                                 :entity/page]
+                                       [:entity/id neighbor-id])]
+                     (when (:entity/id entity)
+                       (swap! results conj
+                         (assoc entity
+                           :distance distance
+                           :via-relationship {:type type :description description}))))
+                   ;; Queue next level neighbors
+                   (when (< distance depth)
+                     (doseq [sibling siblings]
+                       (doseq [neighbor (get adjacency sibling)]
+                         (when-not (contains? @visited (:neighbor-id neighbor))
+                           (swap! next-level conj
+                             (assoc neighbor :distance (inc distance))))))))))
+             (recur @next-level (inc current-depth)))))
+       ;; Sort by distance asc, then alphabetically; apply limit
+       (->> @results
+         (sort-by (juxt :distance :entity/name))
+         (take limit)
+         vec)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Final Result Persistence

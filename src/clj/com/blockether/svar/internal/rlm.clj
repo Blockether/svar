@@ -266,7 +266,9 @@
     
     Params:
     `env` - RLM environment from create-env.
-    `query-str` - String. The question to answer.
+    `messages` - Vector of message maps. Always a vector, e.g.:
+                 [(llm/user \"What is schema therapy?\")]
+                 [(llm/user \"Describe this\" (llm/image b64 \"image/png\"))]
    `opts` - Map, optional:
      - :context - Data to analyze. Per RLM paper: when string, becomes P (the symbolic handle)
                    with get-page and page-count for programmatic access. Structured data
@@ -301,19 +303,28 @@
       - :sources - Vector of source IDs the answer is based on (from LLM's FINAL call).
       - :reasoning - String summary of how the answer was derived (from LLM's FINAL call).
       - :status - Only present on failure, e.g. :max-iterations."
-  ([env query-str]
-   (query-env! env query-str {}))
-  ([env query-str {:keys [context spec model max-iterations max-refinements threshold
-                          max-context-tokens max-recursion-depth verify?
-                          system-prompt plan? debug? on-chunk]
-                   :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
-                        max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
-                        plan? false debug? false}}]
+  ([env messages]
+   (query-env! env messages {}))
+  ([env messages {:keys [context spec model max-iterations max-refinements threshold
+                         max-context-tokens max-recursion-depth verify?
+                         system-prompt plan? debug? on-chunk]
+                  :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
+                       max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
+                       plan? false debug? false}}]
    (when-not (:db-info-atom env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
-   (when-not query-str
-     (anomaly/incorrect! "Missing query" {:type :rlm/missing-query}))
-   (let [rlm-router (:router env)
+   (when-not (and (vector? messages) (seq messages))
+     (anomaly/incorrect! "messages must be a non-empty vector of message maps, e.g. [(llm/user \"...\")]"
+       {:type :rlm/invalid-messages :got (type messages)}))
+   (let [;; Extract text parts from messages for storage and logging
+         query-str (str/join "\n" (keep (fn [m]
+                                          (let [c (:content m)]
+                                            (cond
+                                              (string? c) c
+                                              (sequential? c) (str/join " " (keep #(when (= "text" (:type %)) (:text %)) c))
+                                              :else nil)))
+                                    messages))
+         rlm-router (:router env)
            ;; Resolve root model name for token counting / refine! config
          root-model (or (when rlm-router (rlm-routing/resolve-root-model rlm-router)) model)
            ;; Reuse env's locals-atom so get-local (closed over at env creation) sees updates
@@ -379,7 +390,7 @@
                ;; Create query record — iterations will link to it
                query-ref (rlm-db/store-query! db-info
                            {:conversation-ref (:conversation-ref env)
-                            :text query-str :status :running})
+                            :text query-str :messages messages :status :running})
                 ;; Optional planning phase — LLM outlines approach before code execution
                plan-result (when plan?
                              (llm/ask! rlm-router {:messages [(llm/system "You are a planning assistant. Given a query and available document tools, outline a clear 3-5 step approach to answer the query. Be specific about which tools to use and in what order. Do NOT write code — just describe the strategy.")
@@ -395,7 +406,8 @@
                                            :max-context-tokens max-context-tokens
                                            :custom-docs (into (or custom-docs []) cite-docs)
                                            :system-prompt system-prompt
-                                           :pre-fetched-context plan-context}
+                                           :pre-fetched-context plan-context
+                                           :user-messages messages}
                                     on-chunk (assoc :on-chunk on-chunk)))
                {answer :answer
                 trace :trace

@@ -730,7 +730,7 @@ OUTPUT STYLE:
 
 (defn iteration-loop [rlm-env query
                       {:keys [output-spec max-context-tokens custom-docs system-prompt
-                              pre-fetched-context on-chunk query-ref
+                              pre-fetched-context on-chunk query-ref user-messages
                               max-iterations max-consecutive-errors max-restarts]}]
   (let [max-iterations (or max-iterations 50)
         max-consecutive-errors (or max-consecutive-errors 5)
@@ -771,8 +771,13 @@ OUTPUT STYLE:
                                (when pre-fetched-context
                                  (str "\n :plan " (pr-str pre-fetched-context)))
                                "}")
-        initial-messages [{:role "system" :content system-prompt}
-                          {:role "user" :content initial-user-content}]
+        ;; Build initial messages: system + structured context/requirement + original user messages (multimodal)
+        initial-messages (into [{:role "system" :content system-prompt}
+                                {:role "user" :content initial-user-content}]
+                           (when (and user-messages
+                                      (some #(sequential? (:content %)) user-messages))
+                             ;; Include original multimodal messages (images etc.) as additional context
+                             user-messages))
         ;; Store initial messages if history tracking is enabled
         db-info (when-let [atom (:db-info-atom rlm-env)] @atom)
         env-id (:env-id rlm-env)
@@ -1123,9 +1128,22 @@ OUTPUT STYLE:
                               (if (and t-name (contains? ENTITY_TYPE_VALUES t-name))
                                 (keyword t-name)
                                 :concept))
+                ;; Cross-document linking: find existing entity with same name+type
+                canonical-id (or (first (d/q '[:find [?cid ...]
+                                               :in $ ?name-lower ?type
+                                               :where [?e :entity/name ?n]
+                                                      [?e :entity/type ?type]
+                                                      [?e :entity/canonical-id ?cid]
+                                                      [(clojure.string/lower-case ?n) ?nl]
+                                                      [(= ?nl ?name-lower)]]
+                                           (d/db conn)
+                                           (str/lower-case entity-name)
+                                           entity-type))
+                                 (util/uuid))
                 entity-data (cond-> {:entity/id entity-id
                                      :entity/name entity-name
                                      :entity/type entity-type
+                                     :entity/canonical-id canonical-id
                                      :entity/description (or (:entity/description entity) (:description entity) "")
                                      :entity/document-id (str doc-id)
                                      :entity/created-at (java.util.Date.)}
