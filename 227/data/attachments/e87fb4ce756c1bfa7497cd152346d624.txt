@@ -1,2 +1,0 @@
-2026-04-07T07:57:32.374266063Z :info com.blockether.svar.internal.llm [325 11] ::llm-request LLM request 
-  data: {:model "gpt-4o", :url "http://test/chat/completions", :msg-count 3, :input-tokens 791, :timeout-ms 300000, :max-tokens nil}
