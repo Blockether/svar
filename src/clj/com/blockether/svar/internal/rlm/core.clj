@@ -129,11 +129,19 @@
 
 (defn- parse-clojure-syntax
   "Validates Clojure syntax using edamame (same parser as SCI).
-   Returns nil if valid, or an error string if syntax is broken."
+   Checks both syntax (parse errors) and semantic issues (bare list literals).
+   Returns nil if valid, or an error string if broken."
   [code]
   (try
-    (edamame/parse-string-all code edamame-opts)
-    nil
+    (let [forms (edamame/parse-string-all code edamame-opts)
+          first-form (first forms)]
+      ;; Detect bare list literal: (6 7 8) parses fine but fails at eval
+      (when (and (= 1 (count forms))
+              (list? first-form) (seq first-form)
+              (not (symbol? (first first-form)))
+              (not (list? (first first-form))))
+        (str "Bare list literal: " (pr-str first-form)
+          ". Quote it: '(" (str/join " " first-form) ")")))
     (catch Throwable e
       (ex-message e))))
 
@@ -437,9 +445,8 @@ OUTPUT STYLE:
               exec-errors (when exec-results
                             (seq (filter :error exec-results)))
               untested? (and (zero? (or iteration 0)) (empty? code-blocks))
-              ;; Parse final answer with edamame to catch syntax errors
-              parse-check (when-let [err (parse-clojure-syntax final-answer)]
-                            (str "Final answer is not valid Clojure: " err))
+              ;; Parse final answer with edamame — syntax + bare list check
+              parse-check (parse-clojure-syntax final-answer)
               validation-error (or (when untested?
                                      "You submitted final without running any code. Run the self-test first.")
                                  (when exec-errors

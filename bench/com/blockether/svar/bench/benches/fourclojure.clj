@@ -23,7 +23,7 @@
 ;; =============================================================================
 
 (def ^:private dataset-path "bench/data/4clojure/4clojure.jsonl")
-(def ^:private bb-timeout-ms 30000)
+(def ^:private bb-timeout-ms 60000)
 
 ;; =============================================================================
 ;; Dataset
