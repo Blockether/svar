@@ -88,10 +88,11 @@
   [sci-ctx code]
   (let [stdout-writer (java.io.StringWriter.)
         stderr-writer (java.io.StringWriter.)
+        err-pw       (java.io.PrintWriter. stderr-writer true)
         exec-future (future
                       (try
-                        (let [result (binding [*out* stdout-writer
-                                               *err* (java.io.PrintWriter. stderr-writer true)]
+                        (let [result (sci/binding [sci/out stdout-writer
+                                                   sci/err err-pw]
                                        (sci/eval-string* sci-ctx code))]
                           {:result result :stdout (str stdout-writer) :stderr (str stderr-writer) :error nil})
                         (catch Throwable e
@@ -318,6 +319,7 @@ GOTCHAS:
 - Quote list literals: '(1 2 3) not (1 2 3). Bare parens = function call.
 - Nested #() is illegal. Use (fn [...] ...) for inner lambdas.
 - Each 'code' entry must be a complete expression, not a fragment.
+- Add docstrings to def'd vars: (def solution \"desc\" (fn [x] ...)). Helps <var_index>.
 "
     (when (and has-documents? document-summary)
       (str "

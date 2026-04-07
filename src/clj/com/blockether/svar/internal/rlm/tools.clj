@@ -525,14 +525,14 @@
   [sci-ctx initial-ns-keys]
   (try
     (let [var-info (sci/eval-string* sci-ctx
-                     "(into {} (for [[s v] (ns-publics 'user)] [s {:val @v :doc (:doc (meta v))}]))")
+                     "(into {} (for [[s v] (ns-publics 'user)] [s {:val @v :doc (:doc (meta v)) :arglists (:arglists (meta v))}]))")
           entries (->> var-info
                     (remove (fn [[sym _]] (contains? initial-ns-keys sym)))
-                    (remove (fn [[_ {:keys [val]}]] (fn? val)))
                     (sort-by key)
-                    (mapv (fn [[sym {:keys [val doc]}]]
+                    (mapv (fn [[sym {:keys [val doc arglists]}]]
                             (let [type-label (cond
                                                (nil? val) "nil"
+                                               (fn? val) (if arglists (str "fn " arglists) "fn")
                                                (map? val) "map"
                                                (vector? val) "vector"
                                                (set? val) "set"
