@@ -143,6 +143,9 @@
    :zai
    {"glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
     "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}
+    "minimax-m2.7:cloud"        {:pricing {:input 0.60  :output 2.20}  :context 200000}
+    "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
+    "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}
     "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
     "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}}
 

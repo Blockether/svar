@@ -27,6 +27,8 @@
    [taoensso.trove :as trove])
   (:import
    [java.io RandomAccessFile]
+   [java.nio.file AtomicMoveNotSupportedException CopyOption Files StandardCopyOption]
+   [java.security MessageDigest]
    [java.time Instant]
    [java.util Date]))
 
@@ -443,6 +445,7 @@
                 trace :trace
                 iterations :iterations
                 status :status
+                locals :locals
                 tokens :tokens
                 cost :cost
                 confidence :confidence
@@ -494,6 +497,7 @@
                                          :duration-ms duration-ms
                                          :tokens @total-tokens-atom
                                          :cost @total-cost-atom}
+                                  (some? locals) (assoc :locals locals)
                                   verify? (assoc :verified-claims (vec @claims-atom)))]
                  result-map))
               ;; Normal completion - refine and finalize
@@ -577,10 +581,10 @@
                      ;; (e.g., string "pass" → keyword :pass for :spec.type/keyword fields).
                      {:answer (if spec
                                 (try (spec/coerce-data-with-spec answer-value spec)
-                                     (catch Exception e
-                                       (trove/log! {:level :warn :data {:error (ex-message e)}
-                                                    :msg "Spec coercion failed, returning uncoerced answer"})
-                                       answer-value))
+                                  (catch Exception e
+                                    (trove/log! {:level :warn :data {:error (ex-message e)}
+                                                 :msg "Spec coercion failed, returning uncoerced answer"})
+                                    answer-value))
                                 answer-value)
                       :eval-scores nil
                       :refinement-count 0})
@@ -619,20 +623,20 @@
                        cited-page-ids (when (and (seq cited-source-ids) (:conn @db-info-atom))
                                         (let [conn (:conn @db-info-atom)]
                                           (set (d/q '[:find [?pid ...]
-                                                       :in $ [?sid ...]
-                                                       :where (or [?e :page.node/id ?sid]
-                                                                  [?e :page/id ?sid]
-                                                                  [?e :page.node/document-id ?sid])
-                                                       [?e :page.node/page-id ?pid]]
+                                                      :in $ [?sid ...]
+                                                      :where (or [?e :page.node/id ?sid]
+                                                               [?e :page/id ?sid]
+                                                               [?e :page.node/document-id ?sid])
+                                                      [?e :page.node/page-id ?pid]]
                                                  (d/db conn) (vec cited-source-ids)))))
                        max-iters (or @max-iterations-atom max-iterations)
                        high-reward (compute-q-reward eval-scores confidence iterations max-iters)]
                    (when (seq accessed)
                      (if (seq cited-page-ids)
                        (do (rlm-db/finalize-q-updates! @db-info-atom cited-page-ids high-reward)
-                           (let [uncited (set/difference accessed (or cited-page-ids #{}))]
-                             (when (seq uncited)
-                               (rlm-db/finalize-q-updates! @db-info-atom uncited Q_REWARD_UNCITED))))
+                         (let [uncited (set/difference accessed (or cited-page-ids #{}))]
+                           (when (seq uncited)
+                             (rlm-db/finalize-q-updates! @db-info-atom uncited Q_REWARD_UNCITED))))
                        (rlm-db/finalize-q-updates! @db-info-atom accessed Q_REWARD_UNCITED))))
                  (catch Exception e
                    (trove/log! {:level :debug :data {:error (ex-message e)}
@@ -1104,6 +1108,54 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 ;; QA Manifest — crash-resumable generate-qa-env!
 ;; -----------------------------------------------------------------------------
 
+(def ^:private ^:const QA_MANIFEST_VERSION 2)
+
+(defn- sha256-hex
+  ^String [^String s]
+  (let [digest (MessageDigest/getInstance "SHA-256")]
+    (.update digest (.getBytes s "UTF-8"))
+    (apply str (map #(format "%02x" %) (.digest digest)))))
+
+(defn- qa-manifest-fingerprint
+  "Returns a stable fingerprint for generate-qa-env! inputs.
+   Includes key generation options + corpus summary so resume only reuses
+   manifest state when run inputs are compatible."
+  [{:keys [conn] :as _db-info} qa-opts]
+  (let [docs (or (rlm-db/db-list-documents {:conn conn} {:limit 100000 :include-toc? true}) [])
+        docs-snapshot (->> docs
+                        (map (fn [d]
+                               (-> d
+                                 (select-keys [:document/id :document/name :document/title :document/extension :document/abstract :document/toc])
+                                 (update :document/toc
+                                   (fn [toc]
+                                     (->> (or toc [])
+                                       (map #(select-keys % [:title :level :page]))
+                                       (sort-by (juxt :level :page :title))
+                                       vec))))))
+                        (sort-by (juxt :document/id :document/name))
+                        vec)
+        node-count (if conn
+                     (or (first (d/q '[:find [(count ?e)] :where [?e :page.node/id _]] (d/db conn))) 0)
+                     0)
+        toc-count (if conn
+                    (or (first (d/q '[:find [(count ?e)] :where [?e :document.toc/id _]] (d/db conn))) 0)
+                    0)
+        payload {:manifest-version QA_MANIFEST_VERSION
+                 :options qa-opts
+                 :corpus {:documents docs-snapshot
+                          :node-count node-count
+                          :toc-count toc-count}}]
+    (str "sha256:" (sha256-hex (pr-str payload)))))
+
+(defn- fresh-qa-manifest
+  [fingerprint]
+  {:manifest-version QA_MANIFEST_VERSION
+   :fingerprint fingerprint
+   :started-at (str (Instant/now))
+   :completed-at nil
+   :phase1 {:status :pending}
+   :batches {}})
+
 (defn- qa-manifest-path
   "Returns qa-manifest.edn path for a persistent env, or nil for ephemeral envs."
   [env]
@@ -1121,13 +1173,27 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 (def ^:private qa-manifest-write-lock (Object.))
 
 (defn- write-qa-manifest!
-  "Writes qa-manifest.edn atomically via temp+rename. No-op for ephemeral envs."
+  "Writes qa-manifest.edn atomically via temp+move. No-op for ephemeral envs."
   [env manifest]
   (when-let [p (qa-manifest-path env)]
     (locking qa-manifest-write-lock
       (let [tmp (str p ".tmp")]
         (spit tmp (pr-str manifest))
-        (.renameTo (io/file tmp) (io/file p))))))
+        (try
+          (try
+            (Files/move (.toPath (io/file tmp))
+              (.toPath (io/file p))
+              (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING
+                                      StandardCopyOption/ATOMIC_MOVE]))
+            (catch AtomicMoveNotSupportedException _
+              (Files/move (.toPath (io/file tmp))
+                (.toPath (io/file p))
+                (into-array CopyOption [StandardCopyOption/REPLACE_EXISTING]))))
+          (when-not (.exists (io/file p))
+            (throw (ex-info "qa-manifest write failed" {:path p})))
+          (catch Exception e
+            (throw (ex-info "Failed to persist qa-manifest.edn"
+                     {:path p :tmp tmp :cause (ex-message e)} e))))))))
 
 (defn- update-qa-batch-status!
   "Updates a single batch's status in the manifest and persists immediately."
@@ -1202,32 +1268,51 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          config (:config env)
          rlm-router (:router env)
          effective-model (or model (:default-model config))
+         effective-selection-model (or selection-model effective-model)
+         db-info @(:db-info-atom env)
           ;; Select 1.5x passages for filtering headroom
          passage-count (int (Math/ceil (* count 1.5)))
+         qa-run-opts {:count count
+                      :difficulty (vec (sort difficulty))
+                      :categories (vec (sort categories))
+                      :model effective-model
+                      :selection-model effective-selection-model
+                      :batch-size batch-size
+                      :verify? verify?
+                      :parallel parallel
+                      :k-candidates k-candidates
+                      :multi-hop? (boolean multi-hop?)
+                      :personas (vec (sort (or personas #{})))}
+         qa-run-fingerprint (qa-manifest-fingerprint db-info qa-run-opts)
 
-         ;; ===== MANIFEST: Check for resumable state =====
+          ;; ===== MANIFEST: Check for resumable state =====
          existing-qa-manifest (read-qa-manifest env)
-         manifest-atom (atom (or existing-qa-manifest
-                               {:started-at (str (java.time.Instant/now))
-                                :completed-at nil
-                                :phase1 {:status :pending}
-                                :batches {}}))
-         _ (when (and existing-qa-manifest (not (:completed-at existing-qa-manifest)))
+         manifest-compatible? (= qa-run-fingerprint (:fingerprint existing-qa-manifest))
+         manifest-reset? (and existing-qa-manifest (not manifest-compatible?))
+         _ (when manifest-reset?
+             (trove/log! {:level :info :id ::qa-manifest-reset
+                          :data {:old-fingerprint (:fingerprint existing-qa-manifest)
+                                 :new-fingerprint qa-run-fingerprint}
+                          :msg "Resetting qa-manifest: run inputs changed"}))
+         manifest-atom (atom (if manifest-compatible?
+                               existing-qa-manifest
+                               (fresh-qa-manifest qa-run-fingerprint)))
+         _ (when (or (nil? existing-qa-manifest) manifest-reset?)
+             (write-qa-manifest! env @manifest-atom))
+         _ (when (and manifest-compatible? existing-qa-manifest (not (:completed-at existing-qa-manifest)))
              (trove/log! {:level :info :id ::qa-resume
                           :data {:batches-done (->> (:batches existing-qa-manifest)
                                                  (filter (fn [[_ v]] (= :done (:status v))))
                                                  clojure.core/count)}
                           :msg "Resuming generate-qa-env! from manifest"}))
 
-         ;; ===== PHASE 1: Passage Selection (fast-model TOC routing) =====
-         effective-selection-model (or selection-model effective-model)
-         db-info @(:db-info-atom env)
+          ;; ===== PHASE 1: Passage Selection (fast-model TOC routing) =====
          phase1 (if (= :done (get-in @manifest-atom [:phase1 :status]))
                   (do (trove/log! {:level :info :id ::qa-phase1-cached
                                    :data {:passages (clojure.core/count (get-in @manifest-atom [:phase1 :passages]))}
                                    :msg "Phase 1: Reusing cached passages from manifest"})
-                      {:passages (get-in @manifest-atom [:phase1 :passages])
-                       :trace [] :iterations 0})
+                    {:passages (get-in @manifest-atom [:phase1 :passages])
+                     :trace [] :iterations 0})
                   (do
                     (trove/log! {:level :info :id ::qa-phase1
                                  :data {:target-passages passage-count :target-questions count
@@ -1237,16 +1322,16 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                           corpus-toc (rlm-db/db-list-toc-entries db-info)
                           corpus-nodes (rlm-db/db-list-page-nodes db-info {:limit 500})
                           selection-prompt (build-toc-based-selection-prompt
-                                            {:count passage-count
-                                             :difficulty-dist difficulty
-                                             :category-dist categories
-                                             :documents corpus-documents
-                                             :toc-entries corpus-toc
-                                             :page-nodes corpus-nodes})
+                                             {:count passage-count
+                                              :difficulty-dist difficulty
+                                              :category-dist categories
+                                              :documents corpus-documents
+                                              :toc-entries corpus-toc
+                                              :page-nodes corpus-nodes})
                           selection-result (llm/ask! rlm-router {:spec CHUNK_SELECTION_SPEC
-                                                                  :messages [(llm/system "You are a passage selection engine for Q&A generation. Select diverse passages from the corpus based on the provided structure. Return your selections in the required JSON format.")
-                                                                             (llm/user selection-prompt)]
-                                                                  :routing {:optimize :cost}})
+                                                                 :messages [(llm/system "You are a passage selection engine for Q&A generation. Select diverse passages from the corpus based on the provided structure. Return your selections in the required JSON format.")
+                                                                            (llm/user selection-prompt)]
+                                                                 :routing {:optimize :cost}})
                           ps (or (:passages (:result selection-result)) [])]
                       (swap! manifest-atom assoc :phase1 {:status :done :passages ps})
                       (write-qa-manifest! env @manifest-atom)
@@ -1300,7 +1385,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                work-items))
          pending-items (vec (remove (fn [{:keys [batch-idx]}]
                                       (= :done (:status (get manifest-batches batch-idx))))
-                             work-items))
+                              work-items))
          _ (when (seq cached-results)
              (trove/log! {:level :info :id ::qa-phase2-cached
                           :data {:cached-batches (clojure.core/count cached-results)
@@ -1349,7 +1434,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                    :questions (:questions final-result)})
                                 final-result)
                               (do (Thread/sleep (* attempt 1000))
-                                  (recur (inc attempt)))))))))
+                                (recur (inc attempt)))))))))
                (async/to-chan! pending-items)))
          _ (when (empty? pending-items) (async/close! result-chan))
          ;; Collect new results + merge cached, sort by batch index
@@ -2041,7 +2126,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
     (integer? pages-spec)
     (do (validate-page-number pages-spec total-page-count)
-        #{(dec pages-spec)})
+      #{(dec pages-spec)})
 
     (vector? pages-spec)
     (if (and (= 2 (count pages-spec))
@@ -2056,7 +2141,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
                   (integer? item)
                   (do (validate-page-number item total-page-count)
-                      (conj acc (dec item)))
+                    (conj acc (dec item)))
 
                   :else
                   (anomaly/incorrect! (str "Invalid element in page spec: " (pr-str item))
@@ -2905,9 +2990,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                        ;; safe, but we still swallow interruption cleanly.
                        (doseq [^java.util.concurrent.Future f futures]
                          (try (.get f)
-                              (catch Exception e
-                   (trove/log! {:level :debug :data {:error (ex-message e)}
-                                :msg "Q-value update failed (non-fatal)"}))))
+                           (catch Exception e
+                             (trove/log! {:level :debug :data {:error (ex-message e)}
+                                          :msg "Q-value update failed (non-fatal)"}))))
                        (finally
                          (.shutdown pool))))
              ;; Fallback: file types without per-page tracking (e.g. unknown extensions)

@@ -181,6 +181,23 @@
                            (let [result (#'rlm-core/execute-code env "(vec (re-seq #\"\\d+\" \"a1b2c3\"))")]
                              (expect (= ["1" "2" "3"] (:result result)))))))))
 
+(defdescribe max-iterations-fallback-test
+  (it "returns nil answer on max-iterations and includes locals only in debug mode"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          env (sut/create-env router {})]
+      (try
+        (let [normal (sut/query-env! env [(llm/user "No-op")] {:max-iterations 0 :refine? false})
+              debug  (sut/query-env! env [(llm/user "No-op")] {:max-iterations 0 :refine? false :debug? true})]
+          (expect (= :max-iterations (:status normal)))
+          (expect (nil? (:answer normal)))
+          (expect (not (contains? normal :locals)))
+          (expect (= :max-iterations (:status debug)))
+          (expect (nil? (:answer debug)))
+          (expect (map? (:locals debug))))
+        (finally
+          (sut/dispose-env! env))))))
+
 ;; =============================================================================
 ;; String Helper Tests (SCI Bindings)
 ;; =============================================================================
@@ -1724,6 +1741,50 @@
 ;; =============================================================================
 ;; generate-qa-env! pipeline unit tests
 ;; =============================================================================
+
+(defdescribe generate-qa-manifest-resume-test
+  (it "reuses batches only when manifest fingerprint matches"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "qa-manifest-"}))
+          env (sut/create-env router {:path dir})
+          query-calls (atom 0)]
+      (try
+        (with-redefs [llm/ask! (fn [_router opts]
+                                 (if (= (:spec opts) sut/CHUNK_SELECTION_SPEC)
+                                   (make-mock-ask-response
+                                     {:passages [{:document-id "doc-1"
+                                                  :page 0
+                                                  :section-title "Intro"
+                                                  :content-summary "Summary"
+                                                  :suggested-difficulty :remember
+                                                  :suggested-category :factual}]})
+                                   (make-mock-ask-response {:keep-indices [0]})))
+                      sut/query-env! (fn [_env _prompt _opts]
+                                       (swap! query-calls inc)
+                                       {:answer {:questions [{:question "Q1"
+                                                              :answer "A1"
+                                                              :difficulty :remember
+                                                              :category :factual
+                                                              :source-document "doc-1"
+                                                              :source-page 0
+                                                              :evidence-span "Evidence"}]}
+                                        :trace []
+                                        :iterations 1})]
+          ;; First run: should execute generation and create manifest.
+          (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
+          (expect (= 1 @query-calls))
+
+          ;; Second run with same opts: should reuse cached batch and skip query-env!.
+          (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
+          (expect (= 1 @query-calls))
+
+          ;; Third run with changed opts: fingerprint mismatch should reset + rerun.
+          (sut/generate-qa-env! env {:count 3 :batch-size 5 :verify? false})
+          (expect (= 2 @query-calls)))
+        (finally
+          (sut/dispose-env! env)
+          (fs/delete-tree dir))))))
 
 (defdescribe compute-distribution-test
   (describe "compute-distribution"

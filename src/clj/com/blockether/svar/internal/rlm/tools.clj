@@ -414,97 +414,97 @@
         lt-resolve (fn [sym] (deref (requiring-resolve (symbol "lazytest.core" (str sym)))))
         sandbox-ns (sci/create-ns 'sandbox nil)
         sci-ctx (sci/init (sci-future/install {:namespaces {'sandbox all-bindings
-                                        'clojure.string (sci/copy-ns clojure.string str-ns)
-                                        'clojure.set (sci/copy-ns clojure.set set-ns)
-                                        'clojure.walk (sci/copy-ns clojure.walk walk-ns)
+                                                            'clojure.string (sci/copy-ns clojure.string str-ns)
+                                                            'clojure.set (sci/copy-ns clojure.set set-ns)
+                                                            'clojure.walk (sci/copy-ns clojure.walk walk-ns)
                                         ;; fast-edn: copy-ns may not work (.cljc), use ns->sci-map
-                                        'fast-edn.core (ns->sci-map 'fast-edn.core)
-                                        'clojure.edn (ns->sci-map 'fast-edn.core)
+                                                            'fast-edn.core (ns->sci-map 'fast-edn.core)
+                                                            'clojure.edn (ns->sci-map 'fast-edn.core)
                                         ;; zprint: manual bindings
-                                        'zprint.core {'zprint-str (zp-resolve 'zprint-str)
-                                                      'zprint (zp-resolve 'zprint)
-                                                      'czprint-str (zp-resolve 'czprint-str)
-                                                      'czprint (zp-resolve 'czprint)
-                                                      'zprint-file-str (zp-resolve 'zprint-file-str)
-                                                      'set-options! (zp-resolve 'set-options!)
-                                                      'configure-all! (zp-resolve 'configure-all!)}
-                                        'clojure.pprint {'pprint (zp-resolve 'zprint)
-                                                         'pprint-str (zp-resolve 'zprint-str)}
+                                                            'zprint.core {'zprint-str (zp-resolve 'zprint-str)
+                                                                          'zprint (zp-resolve 'zprint)
+                                                                          'czprint-str (zp-resolve 'czprint-str)
+                                                                          'czprint (zp-resolve 'czprint)
+                                                                          'zprint-file-str (zp-resolve 'zprint-file-str)
+                                                                          'set-options! (zp-resolve 'set-options!)
+                                                                          'configure-all! (zp-resolve 'configure-all!)}
+                                                            'clojure.pprint {'pprint (zp-resolve 'zprint)
+                                                                             'pprint-str (zp-resolve 'zprint-str)}
                                         ;; lazytest: fn-based API for testing in sandbox
-                                        'lazytest.core {'expect-fn (lt-resolve 'expect-fn)
-                                                        'ok? (lt-resolve 'ok?)
-                                                        'throws? (lt-resolve 'throws?)
-                                                        'causes? (lt-resolve 'causes?)
-                                                        'causes-with-msg? (lt-resolve 'causes-with-msg?)}
+                                                            'lazytest.core {'expect-fn (lt-resolve 'expect-fn)
+                                                                            'ok? (lt-resolve 'ok?)
+                                                                            'throws? (lt-resolve 'throws?)
+                                                                            'causes? (lt-resolve 'causes?)
+                                                                            'causes-with-msg? (lt-resolve 'causes-with-msg?)}
                                         ;; clojure.test alias -> lazytest fn API for model compat
-                                        'clojure.test {'is (lt-resolve 'expect-fn)
-                                                       'throws? (lt-resolve 'throws?)}
+                                                            'clojure.test {'is (lt-resolve 'expect-fn)
+                                                                           'throws? (lt-resolve 'throws?)}
                                         ;; charred: ns->sci-map (no macros, works fine)
-                                        'charred.api (ns->sci-map 'charred.api)}
-                           :ns-aliases {'str 'clojure.string
-                                        'edn 'fast-edn.core
-                                        'zp 'zprint.core
-                                        'pprint 'clojure.pprint
-                                        'pp 'clojure.pprint
-                                        'set 'clojure.set
-                                        'walk 'clojure.walk
-                                        'json 'charred.api
-                                        'lt 'lazytest.core
-                                        'test 'clojure.test}
-                           :classes {'java.lang.Character Character
-                                     'java.lang.Math Math
-                                     'java.lang.String String
-                                     'java.lang.Integer Integer
-                                     'java.lang.Long Long
-                                     'java.lang.Double Double
-                                     'java.lang.Boolean Boolean
-                                     'java.util.Collections java.util.Collections
-                                     'java.util.Arrays java.util.Arrays
-                                     'java.util.regex.Pattern java.util.regex.Pattern
-                                     'java.util.regex.Matcher java.util.regex.Matcher
-                                     'java.time.LocalDate java.time.LocalDate
-                                     'java.time.Period java.time.Period
-                                     'java.util.UUID java.util.UUID
-                                     'clojure.lang.PersistentQueue clojure.lang.PersistentQueue
-                                     'java.math.BigInteger java.math.BigInteger
-                                     'java.math.BigDecimal java.math.BigDecimal}
+                                                            'charred.api (ns->sci-map 'charred.api)}
+                                               :ns-aliases {'str 'clojure.string
+                                                            'edn 'fast-edn.core
+                                                            'zp 'zprint.core
+                                                            'pprint 'clojure.pprint
+                                                            'pp 'clojure.pprint
+                                                            'set 'clojure.set
+                                                            'walk 'clojure.walk
+                                                            'json 'charred.api
+                                                            'lt 'lazytest.core
+                                                            'test 'clojure.test}
+                                               :classes {'java.lang.Character Character
+                                                         'java.lang.Math Math
+                                                         'java.lang.String String
+                                                         'java.lang.Integer Integer
+                                                         'java.lang.Long Long
+                                                         'java.lang.Double Double
+                                                         'java.lang.Boolean Boolean
+                                                         'java.util.Collections java.util.Collections
+                                                         'java.util.Arrays java.util.Arrays
+                                                         'java.util.regex.Pattern java.util.regex.Pattern
+                                                         'java.util.regex.Matcher java.util.regex.Matcher
+                                                         'java.time.LocalDate java.time.LocalDate
+                                                         'java.time.Period java.time.Period
+                                                         'java.util.UUID java.util.UUID
+                                                         'clojure.lang.PersistentQueue clojure.lang.PersistentQueue
+                                                         'java.math.BigInteger java.math.BigInteger
+                                                         'java.math.BigDecimal java.math.BigDecimal}
                            ;; Bare class imports matching Clojure/Babashka defaults
-                           :imports '{;; Safe java.lang types (NO Object, Thread, Class - reflection/DoS)
-                                      Boolean java.lang.Boolean
-                                      Byte java.lang.Byte
-                                      Character java.lang.Character
-                                      Comparable java.lang.Comparable
-                                      Double java.lang.Double
-                                      Exception java.lang.Exception
-                                      Float java.lang.Float
-                                      Integer java.lang.Integer
-                                      Long java.lang.Long
-                                      Math java.lang.Math
-                                      Number java.lang.Number
-                                      Short java.lang.Short
-                                      String java.lang.String
-                                      StringBuilder java.lang.StringBuilder
+                                               :imports '{;; Safe java.lang types (NO Object, Thread, Class - reflection/DoS)
+                                                          Boolean java.lang.Boolean
+                                                          Byte java.lang.Byte
+                                                          Character java.lang.Character
+                                                          Comparable java.lang.Comparable
+                                                          Double java.lang.Double
+                                                          Exception java.lang.Exception
+                                                          Float java.lang.Float
+                                                          Integer java.lang.Integer
+                                                          Long java.lang.Long
+                                                          Math java.lang.Math
+                                                          Number java.lang.Number
+                                                          Short java.lang.Short
+                                                          String java.lang.String
+                                                          StringBuilder java.lang.StringBuilder
                                       ;; Utility classes
-                                      Arrays java.util.Arrays
-                                      Collections java.util.Collections
-                                      UUID java.util.UUID
-                                      Pattern java.util.regex.Pattern
-                                      Matcher java.util.regex.Matcher
-                                      LocalDate java.time.LocalDate
-                                      PersistentQueue clojure.lang.PersistentQueue
-                                      BigInteger java.math.BigInteger
-                                      BigDecimal java.math.BigDecimal}
-                           :deny '[;; No code loading / evaluation
-                                   require import ns eval load-string load-file
-                                   read-string find-ns
+                                                          Arrays java.util.Arrays
+                                                          Collections java.util.Collections
+                                                          UUID java.util.UUID
+                                                          Pattern java.util.regex.Pattern
+                                                          Matcher java.util.regex.Matcher
+                                                          LocalDate java.time.LocalDate
+                                                          PersistentQueue clojure.lang.PersistentQueue
+                                                          BigInteger java.math.BigInteger
+                                                          BigDecimal java.math.BigDecimal}
+                                               :deny '[;; No code loading / evaluation
+                                                       require import ns eval load-string load-file
+                                                       read-string find-ns
                                    ;; No filesystem I/O
-                                   slurp spit
+                                                       slurp spit
                                    ;; No var mutation from sandbox (alter-var-root allowed — needed by letfn in SCI)
-                                   intern
+                                                       intern
                                    ;; No shell / process execution
-                                   sh
+                                                       sh
                                    ;; No IO handles
-                                   *in* *out* *err* *command-line-args*]}))]
+                                                       *in* *out* *err* *command-line-args*]}))]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
                             ['llm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
@@ -544,47 +544,56 @@
 
    Each row shows: name | type | size | doc
    Doc comes from Clojure docstrings on def."
-  [sci-ctx initial-ns-keys]
-  (try
-    (let [var-info (sci/eval-string* sci-ctx
-                     "(into {} (for [[s v] (ns-publics 'sandbox)] [s {:val @v :doc (:doc (meta v)) :arglists (:arglists (meta v))}]))")
-          entries (->> var-info
-                    (remove (fn [[sym _]] (contains? initial-ns-keys sym)))
-                    (sort-by key)
-                    (mapv (fn [[sym {:keys [val doc arglists]}]]
-                            (let [type-label (cond
-                                               (nil? val) "nil"
-                                               (fn? val) (if arglists (str "fn " arglists) "fn")
-                                               (map? val) "map"
-                                               (vector? val) "vector"
-                                               (set? val) "set"
-                                               (sequential? val) "seq"
-                                               (string? val) "string"
-                                               (integer? val) "int"
-                                               (float? val) "float"
-                                               (boolean? val) "bool"
-                                               (keyword? val) "keyword"
-                                               (symbol? val) "symbol"
-                                               :else (.getSimpleName (class val)))
-                                  size (cond
-                                         (nil? val) "\u2014"
-                                         (string? val) (str (count val) " chars")
-                                         (coll? val) (str (count val) " items")
-                                         :else "\u2014")]
-                              {:name (str sym) :type type-label :size size
-                               :doc (if doc (str-truncate doc 80) "\u2014")}))))]
-      (when (seq entries)
-        (let [max-name (max 4 (apply max (map #(count (:name %)) entries)))
-              max-type (max 4 (apply max (map #(count (:type %)) entries)))
-              max-size (max 4 (apply max (map #(count (:size %)) entries)))
-              pad (fn [s n] (str s (apply str (repeat (max 0 (- n (count s))) \space))))
-              header (str "  " (pad "name" max-name) " | " (pad "type" max-type) " | " (pad "size" max-size) " | doc")
-              sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+----")
-              rows (map (fn [{:keys [name type size doc]}]
-                          (str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc))
-                     entries)]
-          (str/join "\n" (concat [header sep] rows)))))
-    (catch Exception _ nil)))
+  ([sci-ctx initial-ns-keys]
+   (build-var-index sci-ctx initial-ns-keys nil))
+  ([sci-ctx initial-ns-keys sandbox]
+   (try
+     (let [var-info (if sandbox
+                      (into {}
+                        (for [[s v] sandbox
+                              :when (symbol? s)]
+                          [s {:val (if (instance? clojure.lang.IDeref v) @v v)
+                              :doc (:doc (meta v))
+                              :arglists (:arglists (meta v))}]))
+                      (sci/eval-string* sci-ctx
+                        "(into {} (for [[s v] (ns-publics 'sandbox)] [s {:val @v :doc (:doc (meta v)) :arglists (:arglists (meta v))}]))"))
+           entries (->> var-info
+                     (remove (fn [[sym _]] (contains? initial-ns-keys sym)))
+                     (sort-by key)
+                     (mapv (fn [[sym {:keys [val doc arglists]}]]
+                             (let [type-label (cond
+                                                (nil? val) "nil"
+                                                (fn? val) (if arglists (str "fn " arglists) "fn")
+                                                (map? val) "map"
+                                                (vector? val) "vector"
+                                                (set? val) "set"
+                                                (sequential? val) "seq"
+                                                (string? val) "string"
+                                                (integer? val) "int"
+                                                (float? val) "float"
+                                                (boolean? val) "bool"
+                                                (keyword? val) "keyword"
+                                                (symbol? val) "symbol"
+                                                :else (.getSimpleName (class val)))
+                                   size (cond
+                                          (nil? val) "\u2014"
+                                          (string? val) (str (count val) " chars")
+                                          (coll? val) (str (count val) " items")
+                                          :else "\u2014")]
+                               {:name (str sym) :type type-label :size size
+                                :doc (if doc (str-truncate doc 80) "\u2014")}))))]
+       (when (seq entries)
+         (let [max-name (max 4 (apply max (map #(count (:name %)) entries)))
+               max-type (max 4 (apply max (map #(count (:type %)) entries)))
+               max-size (max 4 (apply max (map #(count (:size %)) entries)))
+               pad (fn [s n] (str s (apply str (repeat (max 0 (- n (count s))) \space))))
+               header (str "  " (pad "name" max-name) " | " (pad "type" max-type) " | " (pad "size" max-size) " | doc")
+               sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+----")
+               rows (map (fn [{:keys [name type size doc]}]
+                           (str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc))
+                      entries)]
+           (str/join "\n" (concat [header sep] rows)))))
+     (catch Exception _ nil))))
 
 ;; =============================================================================
 ;; SCI Context Helpers
