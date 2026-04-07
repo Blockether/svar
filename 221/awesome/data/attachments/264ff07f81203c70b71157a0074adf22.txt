@@ -1,0 +1,4 @@
+2026-04-07T01:02:52.961834968Z :warn com.blockether.svar.internal.spec [1660 7] Spec validation failed 
+  data: {:fields-count 2, :error-count 1, :duration-ms 0.031418}
+2026-04-07T01:02:52.961961153Z :warn com.blockether.svar.internal.spec [1660 7] Spec validation failed 
+  data: {:fields-count 2, :error-count 1, :duration-ms 0.249376}
