@@ -259,8 +259,8 @@
 (defdescribe build-system-prompt-test
   (it "includes basic environment info"
     (let [prompt (#'rlm-core/build-system-prompt {})]
-      (expect (str/includes? prompt "Clojure agent"))
-      (expect (str/includes? prompt "ARCHITECTURE"))
+      (expect (str/includes? prompt "SCI agent"))
+      (expect (str/includes? prompt "ARCH"))
       (expect (str/includes? prompt "final"))))
 
   (it "excludes learning helpers"
@@ -288,8 +288,8 @@
 
   (it "includes caveman output style"
     (let [prompt (#'rlm-core/build-system-prompt {})]
-      (expect (str/includes? prompt "OUTPUT STYLE"))
-      (expect (str/includes? prompt "Drop articles, filler, pleasantries")))))
+      (expect (str/includes? prompt "OUTPUT"))
+      (expect (str/includes? prompt "Abbreviate")))))
 
 ;; =============================================================================
 ;; System Prompt Tests

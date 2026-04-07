@@ -27,13 +27,9 @@
 
 (declare build-system-prompt run-iteration format-executions)
 
-(def ^:private CAVEMAN_LITE_PROMPT
-  "Drop articles, filler, pleasantries. Keep technical substance.
-- Drop: a, an, the, just, really, basically, actually, simply
-- Drop: sure, certainly, of course, happy to
-- Short synonyms: fix not \"implement a solution for\"
-- No hedging. Fragments fine. Technical terms exact.
-- Code blocks unchanged. Caveman English around code, not in code.")
+(def ^:private CAVEMAN_OUTPUT_PROMPT
+  "Abbreviate. Strip conjunctions. → for causality. One word when enough.
+Drop: articles, filler, hedging. Fragments OK. Tech terms exact. Code unchanged.")
 
 (defn rlm-debug!
   "Logs at :info level only when :rlm-debug? is true in *rlm-ctx*.
@@ -341,40 +337,36 @@
   "Builds the system prompt — compact, token-efficient.
    All tool documentation is discoverable via (doc fn-name) in SCI."
   [{:keys [output-spec custom-docs has-reasoning? has-documents? document-summary system-prompt]}]
-  (str "You are a Clojure agent in a SCI sandbox. Write code, execute, iterate.
+  (str "Clojure SCI agent. Write, exec, iterate.
 
-ARCHITECTURE:
-- Single-shot: each iteration is a fresh prompt. No message history.
-- State lives in def'd vars - they persist across iterations.
-- Pure Clojure: use the SCI sandbox. For I/O, deps, or full JVM: use REPL if connected.
-- <var_index> shows all your vars (name, type, size, docstring).
-- <execution_results> shows what your last code returned.
-- (doc fn-name) for any function. (llm-query \"q\") for sub-LLM.
+ARCH:
+- Single-shot. No msg history. State → def'd vars (persist).
+- <var_index> → vars (name, type, size, doc). <execution_results> → last return.
+- (doc fn) for docs. (llm-query \"q\") for sub-LLM.
 - Aliases: str/ set/ walk/ edn/ json/ zp/ pp/ lt/ test/
 
 GOTCHAS:
-- Quote list literals: '(1 2 3) not (1 2 3). Bare parens = function call.
-- Nested #() is illegal. Use (fn [...] ...) for inner lambdas.
-- Each 'code' entry must be a complete expression, not a fragment.
-- Add docstrings to def'd vars: (def solution \"desc\" (fn [x] ...)). Helps <var_index>.
-- Concurrency: future, pmap, promise, delay, deliver work in sandbox.
-  Use (deref f timeout-ms :timeout) for futures with timeout.
+- Quote lists: '(1 2 3). Bare () = fn call.
+- No nested #(). Use (fn [...] ...).
+- 'code' entry = complete expr. No fragments. No split across strings.
+- Docstring defs: (def x \"doc\" val) → aids <var_index>.
+- future/pmap/promise/deliver OK. (deref f ms :timeout).
 "
     (when (and has-documents? document-summary)
       (str "
 DOCUMENTS: " document-summary "
 
-Document tools (2 functions, polymorphic):
-1. (search-documents \"query\") - searches pages+toc+entities, returns {:pages [...] :toc [...] :entities [...]}
-   (search-documents \"query\" {:in :pages})    - narrow to :pages | :toc | :entities
-   (search-documents \"query\" {:top-k 20 :document-id \"doc-1\"})
-2. (fetch-content lookup-ref) - full content:
-   [:page.node/id \"id\"]    -> page text
-   [:document/id \"id\"]     -> vector of ~4K char pages
-   [:document.toc/id \"id\"] -> TOC description
-   [:entity/id \"id\"]       -> {:entity {...} :relationships [...]}
-Store in vars: (def pages (fetch-content [:document/id \"doc-1\"]))
-LANGUAGE: All indexed content is in English. Always search in English, even if the user's question is in another language — translate the query to English first.
+Doc tools (2 fns):
+1. (search-documents \"q\") → {:pages [...] :toc [...] :entities [...]}
+   (search-documents \"q\" {:in :pages})  — narrow to :pages|:toc|:entities
+   (search-documents \"q\" {:top-k 20 :document-id \"doc-1\"})
+2. (fetch-content ref) → full content:
+   [:page.node/id \"id\"] → page text
+   [:document/id \"id\"] → vec of ~4K char pages
+   [:document.toc/id \"id\"] → TOC desc
+   [:entity/id \"id\"] → {:entity {...} :relationships [...]}
+(def pages (fetch-content [:document/id \"doc-1\"]))
+Search in English. Translate non-EN queries first.
 "))
 
     (when system-prompt
@@ -388,29 +380,23 @@ LANGUAGE: All indexed content is in English. Always search in English, even if t
 RESPONSE FORMAT:
 " (spec/spec->prompt (if has-reasoning? ITERATION_SPEC_CODE_ONLY ITERATION_SPEC)) "
 " (if has-reasoning?
-    "Respond with valid JSON. Your reasoning is native - omit 'thinking'."
-    "Respond with valid JSON containing 'thinking' and 'code'.") "
-Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high\"}}
+    "JSON only. Native reasoning — omit 'thinking'."
+    "JSON with 'thinking' + 'code'.") "
+Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high|medium|low\"}}
 
 RULES:
-- Always (def name \"docstring\" value) - docstrings are your memory
-- NEVER guess. ALWAYS test. Untested answers are wrong answers.
-- Never repeat a failed call - try a different approach
-- Combine steps in one iteration
-- If <var_index> or <context> already answers the query, finalize immediately
+- ALWAYS test. Untested = wrong.
+- No repeat fail → different approach.
+- Combine steps per iter.
+- <var_index>|<context> answers query → finalize now.
 
-CODE STYLE:
-- Each entry in 'code' MUST be a complete, evaluable Clojure expression.
-  Do NOT split one form across multiple strings.
-- Simplest working solution. No over-engineering.
-- No abstractions for single-use operations.
-- No speculative features.
-- No error handling for scenarios that cannot happen.
+CODE:
+- Complete evaluable expr per entry. No split.
+- Simplest solution. No over-eng. No unused abstractions. No speculative features. No impossible-error handling.
 
-OUTPUT STYLE:
-" CAVEMAN_LITE_PROMPT "
-- Put the answer in 'final'. Explanation only if non-obvious.
-- No boilerplate. No filler prose.
+OUTPUT:
+" CAVEMAN_OUTPUT_PROMPT "
+Answer → 'final'. Explain only if non-obvious. No boilerplate.
 "))
 
 ;; =============================================================================
