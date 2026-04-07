@@ -12,6 +12,7 @@
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
+   [sci.addons.future :as sci-future]
    [sci.core :as sci]))
 
 (defn- ns->sci-map
@@ -400,7 +401,7 @@
         zp-resolve (fn [sym] (deref (requiring-resolve (symbol "zprint.core" (str sym)))))
         lt-resolve (fn [sym] (deref (requiring-resolve (symbol "lazytest.core" (str sym)))))
         sandbox-ns (sci/create-ns 'sandbox nil)
-        sci-ctx (sci/init {:namespaces {'sandbox all-bindings
+        sci-ctx (sci/init (sci-future/install {:namespaces {'sandbox all-bindings
                                         'clojure.string (sci/copy-ns clojure.string str-ns)
                                         'clojure.set (sci/copy-ns clojure.set set-ns)
                                         'clojure.walk (sci/copy-ns clojure.walk walk-ns)
@@ -491,7 +492,7 @@
                                    ;; No shell / process execution
                                    sh
                                    ;; No IO handles
-                                   *in* *out* *err* *command-line-args*]})]
+                                   *in* *out* *err* *command-line-args*]}))]
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
                             ['llm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
