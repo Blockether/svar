@@ -16,6 +16,7 @@
             validate-final bytes->base64 *rlm-ctx*]]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value build-var-index]]
    [com.blockether.svar.internal.paren-repair :as paren-repair]
+   [edamame.core :as edamame]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
@@ -119,6 +120,21 @@
       ;; Nothing wrong
       :else nil)))
 
+(def ^:private edamame-opts
+  "Edamame parser options matching Clojure/SCI syntax.
+   :all enables fn literals, deref, var, regex, quote, etc."
+  {:all true})
+
+(defn- parse-clojure-syntax
+  "Validates Clojure syntax using edamame (same parser as SCI).
+   Returns nil if valid, or an error string if syntax is broken."
+  [code]
+  (try
+    (edamame/parse-string-all code edamame-opts)
+    nil
+    (catch Throwable e
+      (ex-message e))))
+
 (defn execute-code [{:keys [sci-ctx locals-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
     (let [bal (paren-repair/paren-balance code)
@@ -132,55 +148,59 @@
         (do (rlm-debug! {:lint-error lint-error} "Pre-exec lint caught mistake")
             {:result nil :stdout "" :stderr "" :error lint-error
              :execution-time-ms 0 :timeout? false})
+        (if-let [parse-error (parse-clojure-syntax code)]
+          (do (rlm-debug! {:parse-error parse-error} "Edamame pre-parse failed")
+              {:result nil :stdout "" :stderr "" :error parse-error
+               :execution-time-ms 0 :timeout? false})
         ;; Normal execution path
-        (let [vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
-              execution-result (run-sci-code sci-ctx code)
-              execution-time (- (System/currentTimeMillis) start-time)]
-          (if (:timeout? execution-result)
-            (do
-              (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
-              (assoc execution-result :execution-time-ms execution-time :timeout? true))
-            (let [{:keys [error]} execution-result
-                  final-result (if (and error (paren-repair/parse-error? error))
-                                 (try
-                                   (let [repaired (paren-repair/repair-code code)]
-                                     (if (= repaired code)
-                                       (do (trove/log! {:level :debug :id ::repair-noop
-                                                        :data {:code-len (count code) :error error}
-                                                        :msg "Paren repair: no change needed"})
-                                           execution-result)
-                                       (let [retry (run-sci-code sci-ctx repaired)]
-                                         (if (:error retry)
-                                           (do (trove/log! {:level :warn :id ::repair-retry-failed
-                                                            :data {:original-error error
-                                                                   :retry-error (:error retry)
-                                                                   :code-len (count code)
-                                                                   :repaired-len (count repaired)
-                                                                   :added-chars (- (count repaired) (count code))
-                                                                   :repaired-tail (subs repaired (max 0 (- (count repaired) 80)))}
-                                                            :msg "Paren repair changed code but retry still failed"})
-                                               execution-result)
-                                           (do
-                                             (trove/log! {:level :info :id ::repair-applied
-                                                          :data {:original code :repaired repaired :sci-error error}
-                                                          :msg "Paren repair applied successfully"})
-                                             (assoc retry :repaired? true))))))
-                                   (catch Throwable _
-                                     execution-result))
-                                 execution-result)
-                  {:keys [result stdout stderr error]} final-result
-                  vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ vars-before))
-                  new-vars (apply dissoc vars-after (keys vars-before))]
-              (when (seq new-vars)
-                (swap! locals-atom merge (into {} (map (fn [[k v]] [k (deref v)]) new-vars))))
-              (rlm-debug! {:execution-time-ms execution-time
-                           :has-error? (some? error)
-                           :error error
-                           :result-preview (str-truncate (pr-str result) 200)
-                           :stdout-preview (when-not (str/blank? stdout) (str-truncate stdout 200))
-                           :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))
-                           :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
-              (assoc final-result :execution-time-ms execution-time :timeout? false))))))))
+          (let [vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
+                execution-result (run-sci-code sci-ctx code)
+                execution-time (- (System/currentTimeMillis) start-time)]
+            (if (:timeout? execution-result)
+              (do
+                (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
+                (assoc execution-result :execution-time-ms execution-time :timeout? true))
+              (let [{:keys [error]} execution-result
+                    final-result (if (and error (paren-repair/parse-error? error))
+                                   (try
+                                     (let [repaired (paren-repair/repair-code code)]
+                                       (if (= repaired code)
+                                         (do (trove/log! {:level :debug :id ::repair-noop
+                                                          :data {:code-len (count code) :error error}
+                                                          :msg "Paren repair: no change needed"})
+                                             execution-result)
+                                         (let [retry (run-sci-code sci-ctx repaired)]
+                                           (if (:error retry)
+                                             (do (trove/log! {:level :warn :id ::repair-retry-failed
+                                                              :data {:original-error error
+                                                                     :retry-error (:error retry)
+                                                                     :code-len (count code)
+                                                                     :repaired-len (count repaired)
+                                                                     :added-chars (- (count repaired) (count code))
+                                                                     :repaired-tail (subs repaired (max 0 (- (count repaired) 80)))}
+                                                              :msg "Paren repair changed code but retry still failed"})
+                                                 execution-result)
+                                             (do
+                                               (trove/log! {:level :info :id ::repair-applied
+                                                            :data {:original code :repaired repaired :sci-error error}
+                                                            :msg "Paren repair applied successfully"})
+                                               (assoc retry :repaired? true))))))
+                                     (catch Throwable _
+                                       execution-result))
+                                   execution-result)
+                    {:keys [result stdout stderr error]} final-result
+                    vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ vars-before))
+                    new-vars (apply dissoc vars-after (keys vars-before))]
+                (when (seq new-vars)
+                  (swap! locals-atom merge (into {} (map (fn [[k v]] [k (deref v)]) new-vars))))
+                (rlm-debug! {:execution-time-ms execution-time
+                             :has-error? (some? error)
+                             :error error
+                             :result-preview (str-truncate (pr-str result) 200)
+                             :stdout-preview (when-not (str/blank? stdout) (str-truncate stdout 200))
+                             :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))
+                             :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
+                (assoc final-result :execution-time-ms execution-time :timeout? false)))))))))
 
 (defn answer-str
   "Extracts a string representation from an RLM answer.
@@ -411,17 +431,14 @@ OUTPUT STYLE:
               exec-errors (when exec-results
                             (seq (filter :error exec-results)))
               untested? (and (zero? (or iteration 0)) (empty? code-blocks))
-              ;; Try to read+eval the final answer in SCI to catch bare list literals etc.
-              eval-check (try
-                           (sci/eval-string* (:sci-ctx rlm-env) final-answer)
-                           nil
-                           (catch Throwable e
-                             (str "Final answer fails to evaluate: " (ex-message e))))
+              ;; Parse final answer with edamame to catch syntax errors
+              parse-check (when-let [err (parse-clojure-syntax final-answer)]
+                            (str "Final answer is not valid Clojure: " err))
               validation-error (or (when untested?
                                      "You submitted final without running any code. Run the self-test first.")
                                  (when exec-errors
                                    (str "Code errors before final: " (:error (first exec-errors))))
-                                 eval-check
+                                 parse-check
                                  (validate-final {:answer final-answer
                                                   :answer-type (:answer-type final-data)
                                                   :language (:language final-data)}))
