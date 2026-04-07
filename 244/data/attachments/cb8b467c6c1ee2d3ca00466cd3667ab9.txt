@@ -1,0 +1,13 @@
+CHUNK 1 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance The discovery of penicillin revolutionized medicine by introducing antibiotics, which saved millions of lives and drastically changed the treatment of bacterial infections., :related-fields [microbiology pharmacology infectious disease medicine public health]}
+CHUNK 2 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance The discovery of penicillin revolutionized medicine by introducing antibiotics, which saved millions of lives and drastically changed the treatment of bacterial infections., :related-fields [microbiology pharmacology infectious disease medicine public health]}
+CHUNK 3 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance The discovery of penicillin revolutionized medicine by introducing antibiotics, which saved millions of lives and drastically changed the treatment of bacterial infections., :related-fields [microbiology pharmacology infectious disease medicine public health]}
+2026-04-07T16:11:22.159270479Z :info com.blockether.svar.internal.llm [823 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2605.387113, :content-len 400, :has-reasoning false, :input-tokens 151, :output-tokens 90, :reasoning-tokens 0}
+CHUNK 4 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance The discovery of penicillin revolutionized medicine by introducing antibiotics, which saved millions of lives and drastically changed the treatment of bacterial infections., :related-fields [microbiology pharmacology infectious disease medicine public health]}
+
+=== STREAMING RESULT ===
+Total chunks: 4
+Final: {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance The discovery of penicillin revolutionized medicine by introducing antibiotics, which saved millions of lives and drastically changed the treatment of bacterial infections., :related-fields [microbiology pharmacology infectious disease medicine public health]}
+Tokens: {:input 151, :output 90, :reasoning 0, :total 241} Cost: {:input-cost 3.775E-4, :output-cost 9.000000000000001E-4, :total-cost 0.0012775}
+========================
+
