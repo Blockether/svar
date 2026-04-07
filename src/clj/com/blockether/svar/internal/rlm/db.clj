@@ -165,7 +165,9 @@
   (when conn
     (let [entity (cond-> {:document/id doc-id
                           :document/name (:document/name doc)
-                          :document/extension (:document/extension doc)}
+                          :document/extension (:document/extension doc)
+                          :document/certainty-alpha 2.0
+                          :document/certainty-beta 1.0}
                    (:document/title doc) (assoc :document/title (:document/title doc))
                    (:document/abstract doc) (assoc :document/abstract (:document/abstract doc))
                    (:document/author doc) (assoc :document/author (:document/author doc))
@@ -839,6 +841,99 @@
          vec)))))
 
 ;; -----------------------------------------------------------------------------
+;; Bayesian Document Certainty
+;; -----------------------------------------------------------------------------
+
+(defn document-certainty
+  "Computes Bayesian certainty for a document using Beta distribution.
+
+   Certainty = alpha / (alpha + beta).
+   Alpha increases on confirmed access, beta increases over time and on re-index.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `doc-id` - String. Document ID.
+
+   Returns:
+   Map with :certainty (0.0-1.0), :alpha, :beta, or nil if not found."
+  [{:keys [conn]} doc-id]
+  (when conn
+    (let [doc (d/pull (d/db conn)
+                [:document/certainty-alpha :document/certainty-beta]
+                [:document/id doc-id])
+          alpha (or (:document/certainty-alpha doc) 2.0)
+          beta (or (:document/certainty-beta doc) 1.0)]
+      (when (:document/certainty-alpha doc)
+        {:certainty (/ alpha (+ alpha beta))
+         :alpha alpha
+         :beta beta}))))
+
+(defn record-document-access!
+  "Records a confirmed access on a document — increases certainty alpha.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `doc-id` - String. Document ID.
+   `boost` - Double. Alpha increment (default: 1.0)."
+  ([db-info doc-id] (record-document-access! db-info doc-id 1.0))
+  ([{:keys [conn]} doc-id boost]
+   (when conn
+     (try
+       (let [existing (d/pull (d/db conn) [:document/certainty-alpha] [:document/id doc-id])
+             alpha (or (:document/certainty-alpha existing) 2.0)]
+         (d/transact! conn [{:document/id doc-id
+                             :document/certainty-alpha (+ alpha (double boost))}]))
+       (catch Exception e
+         (trove/log! {:level :warn :data {:doc-id doc-id :error (ex-message e)}
+                      :msg "Failed to record document access"}))))))
+
+(defn decay-document-certainty!
+  "Applies time-based certainty decay to a document — increases beta.
+
+   Called periodically or at query time. Rate: 0.01 per day since last update.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `doc-id` - String. Document ID."
+  [{:keys [conn]} doc-id]
+  (when conn
+    (try
+      (let [db (d/db conn)
+            doc (d/pull db [:document/certainty-beta :document/updated-at] [:document/id doc-id])
+            beta (or (:document/certainty-beta doc) 1.0)
+            updated-at (:document/updated-at doc)
+            now (java.util.Date.)
+            days-since (if updated-at
+                         (/ (- (.getTime now) (.getTime ^java.util.Date updated-at)) 86400000.0)
+                         0.0)
+            beta-increase (* 0.01 days-since)]
+        (when (> beta-increase 0.001)
+          (d/transact! conn [{:document/id doc-id
+                              :document/certainty-beta (+ beta beta-increase)}])))
+      (catch Exception e
+        (trove/log! {:level :warn :data {:doc-id doc-id :error (ex-message e)}
+                     :msg "Failed to decay document certainty"})))))
+
+(defn reindex-certainty-jump!
+  "Applies a certainty beta jump when a document is re-indexed (content changed).
+
+   Params:
+   `db-info` - Map with :conn key.
+   `doc-id` - String. Document ID.
+   `jump` - Double. Beta increment (default: 5.0)."
+  ([db-info doc-id] (reindex-certainty-jump! db-info doc-id 5.0))
+  ([{:keys [conn]} doc-id jump]
+   (when conn
+     (try
+       (let [existing (d/pull (d/db conn) [:document/certainty-beta] [:document/id doc-id])
+             beta (or (:document/certainty-beta existing) 1.0)]
+         (d/transact! conn [{:document/id doc-id
+                             :document/certainty-beta (+ beta (double jump))}]))
+       (catch Exception e
+         (trove/log! {:level :warn :data {:doc-id doc-id :error (ex-message e)}
+                      :msg "Failed to apply reindex certainty jump"}))))))
+
+;; -----------------------------------------------------------------------------
 ;; Final Result Persistence
 ;; -----------------------------------------------------------------------------
 
@@ -1142,7 +1237,12 @@
                             :page/last-accessed now
                             :page/access-count (+ current-count (double weight))}])
         ;; Spread activation to connected pages (only for significant accesses)
-        (propagate-activation! db-info page-id weight))
+        (propagate-activation! db-info page-id weight)
+        ;; Boost document certainty on fetch
+        (when (>= weight 1.0)
+          (let [page (d/pull (d/db conn) [:page/document-id] [:page/id page-id])]
+            (when-let [doc-id (:page/document-id page)]
+              (record-document-access! db-info doc-id 0.5)))))
       (catch Exception e
         (trove/log! {:level :warn :data {:page-id page-id :error (ex-message e)}
                      :msg "Failed to record page access"})))))

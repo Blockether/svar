@@ -365,6 +365,9 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :document/page-count {:db/valueType :db.type/long}
    :document/created-at {:db/valueType :db.type/instant}
    :document/updated-at {:db/valueType :db.type/instant}
+   ;; Bayesian certainty (Beta distribution for document freshness)
+   :document/certainty-alpha {:db/valueType :db.type/double :db/doc "Beta dist alpha — increases on confirmed access"}
+   :document/certainty-beta  {:db/valueType :db.type/double :db/doc "Beta dist beta — increases over time, jumps on re-index"}
 
    ;; Pages
    :page/id           {:db/valueType :db.type/string :db/unique :db.unique/identity}

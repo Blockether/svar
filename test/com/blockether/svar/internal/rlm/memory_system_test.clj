@@ -246,3 +246,65 @@
           (let [related (db/find-related db-info e1-id {})]
             (expect (empty? related)))
           (finally (d/close conn)))))))
+
+;; =============================================================================
+;; Bayesian document certainty
+;; =============================================================================
+
+(defdescribe bayesian-certainty-test
+  (describe "document certainty"
+    (it "initializes with alpha=2.0 beta=1.0 on store"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:document/id "doc-test"
+                              :document/name "test"
+                              :document/extension "pdf"
+                              :document/certainty-alpha 2.0
+                              :document/certainty-beta 1.0}])
+          (let [c (db/document-certainty db-info "doc-test")]
+            (expect (some? c))
+            (expect (= 2.0 (:alpha c)))
+            (expect (= 1.0 (:beta c)))
+            ;; certainty = 2/(2+1) = 0.667
+            (expect (> (:certainty c) 0.6)))
+          (finally (d/close conn)))))
+
+    (it "access increases alpha (higher certainty)"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:document/id "doc-access"
+                              :document/name "test"
+                              :document/extension "pdf"
+                              :document/certainty-alpha 2.0
+                              :document/certainty-beta 1.0}])
+          (let [before (db/document-certainty db-info "doc-access")]
+            (db/record-document-access! db-info "doc-access" 1.0)
+            (let [after (db/document-certainty db-info "doc-access")]
+              (expect (> (:certainty after) (:certainty before)))
+              (expect (= 3.0 (:alpha after)))))
+          (finally (d/close conn)))))
+
+    (it "reindex jumps beta (lower certainty)"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:document/id "doc-reindex"
+                              :document/name "test"
+                              :document/extension "pdf"
+                              :document/certainty-alpha 2.0
+                              :document/certainty-beta 1.0}])
+          (let [before (db/document-certainty db-info "doc-reindex")]
+            (db/reindex-certainty-jump! db-info "doc-reindex")
+            (let [after (db/document-certainty db-info "doc-reindex")]
+              (expect (< (:certainty after) (:certainty before)))
+              (expect (= 6.0 (:beta after)))))
+          (finally (d/close conn)))))
+
+    (it "returns nil for non-existent document"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (expect (nil? (db/document-certainty db-info "nonexistent")))
+          (finally (d/close conn)))))))
