@@ -44,12 +44,11 @@
 ;; bb verification
 ;; =============================================================================
 
-(defn- substitute-blank [test-form candidate-sym]
-  (str/replace test-form "__" candidate-sym))
+(defn- substitute-blank [test-form candidate]
+  (str/replace test-form "__" candidate))
 
 (defn- build-bb-script [tests candidate]
-  (let [;; Bind candidate to __ so complex expressions don't break test-form parens
-        filled-tests (mapv #(substitute-blank % "__bb_ans__") tests)
+  (let [filled-tests (mapv #(substitute-blank % candidate) tests)
         test-forms   (str/join "\n"
                        (map-indexed
                          (fn [_i test-str]
@@ -60,7 +59,6 @@
                          filled-tests))]
     (str "(def results (atom []))\n"
       "(def is identity)\n"
-      "(def __bb_ans__ " candidate ")\n"
       test-forms "\n"
       "(let [rs @results
              passed (count (filter #(= :pass %) rs))
@@ -109,24 +107,13 @@
     "Description: " (str/replace description "\n" " ") "\n\n"
     "Test forms (your expression replaces __):\n"
     (str/join "\n" (map #(str "  " %) tests))
-    (if (seq restricted)
-      (str "\n\nRestricted (do NOT use these): " (str/join ", " restricted))
-      "")
-    "\n\nWORKFLOW (MANDATORY - do NOT skip steps):\n"
-    "1. Write your solution: (def solution ...)\n"
-    "2. Run ALL tests in code[] BEFORE submitting final:\n"
-    "   (let [__ YOUR_SOLUTION]\n"
-    (str/join "\n" (map #(str "     (assert " % ")") tests))
-    "\n     :all-tests-pass)\n"
-    "3. ONLY after seeing :all-tests-pass, submit final\n"
-    "NEVER finalize without running the test block first. Even for trivial problems.\n\n"
-    "RULES:\n"
-    "- Final answer = single inline Clojure expression that replaces __\n"
-    "- Nested #() is ILLEGAL. Use (fn [...] ...) for inner lambdas.\n"
-    "- Quote list literals: '(1 2 3) not (1 2 3)\n"
-    "- % args only work inside #(). Don't use them standalone.\n"
-    "- No named refs like my-fn. Return the expression itself.\n"
-    "- No files. In-memory only."))
+    (when (seq restricted)
+      (str "\n\nRestricted (do NOT use these): " (str/join ", " restricted)))
+    "\n\nSelf-test block (run in code[] BEFORE submitting final):\n"
+    "(let [__ YOUR_SOLUTION]\n"
+    (str/join "\n" (map #(str "  (assert " % ")") tests))
+    "\n  :all-tests-pass)\n"
+    "\nFinal answer = single inline Clojure expression that replaces __."))
 
 (defn- build-pi-prompt [{:keys [title description tests restricted]}]
   (str "4CLOJURE PROBLEM\n\n"
@@ -155,7 +142,8 @@
      :run-ts     run-ts
      :task-id    (or (:id problem) (:title problem) (str (hash problem)))
      :prompt-fn  build-prompt
-     :query-opts (cond-> {} debug? (assoc :debug? true))
+     :query-opts (cond-> {:system-prompt "ALWAYS run the self-test block in code[] before submitting final. Never skip testing."}
+                   debug? (assoc :debug? true))
      :score-fn  (fn [p result duration]
                   (let [answer (str/trim (str (or (:answer result) "")))
                         score  (if (str/blank? answer)

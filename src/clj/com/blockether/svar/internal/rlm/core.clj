@@ -288,6 +288,7 @@
 ARCHITECTURE:
 - Single-shot: each iteration is a fresh prompt. No message history.
 - State lives in def'd vars - they persist across iterations.
+- Pure Clojure: use the SCI sandbox. For I/O, deps, or full JVM: use REPL if connected.
 - <var_index> shows all your vars (name, type, size, docstring).
 - <execution_results> shows what your last code returned.
 - (doc fn-name) for any function. (llm-query \"q\") for sub-LLM.
