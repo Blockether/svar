@@ -338,6 +338,7 @@ Document tools (2 functions, polymorphic):
    [:document.toc/id \"id\"] -> TOC description
    [:entity/id \"id\"]       -> {:entity {...} :relationships [...]}
 Store in vars: (def pages (fetch-content [:document/id \"doc-1\"]))
+LANGUAGE: All indexed content is in English. Always search in English, even if the user's question is in another language — translate the query to English first.
 "))
 
     (when system-prompt

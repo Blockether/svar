@@ -47,9 +47,10 @@
 Your task is to parse the document into semantic nodes, preserving both reading order AND document hierarchy.
 Use parent-id to link content to its parent section. This creates a tree structure from a flat list.
 
-TEXT FIDELITY — copy, never rewrite:
-- For Paragraph/Heading/ListItem/Header/Footer/Metadata/TocEntry content, copy the wording, order, capitalization and punctuation EXACTLY as it appears on the page.
-- Do NOT invent or complete missing sentences, expand abbreviations, correct typos, normalize punctuation, paraphrase, summarize, or translate text content.
+TEXT FIDELITY + ENGLISH TRANSLATION:
+- If the document is in English: copy the wording, order, capitalization and punctuation EXACTLY as it appears on the page.
+- If the document is NOT in English: TRANSLATE all text content to English while preserving the original structure, hierarchy, and meaning. Translate headings, paragraphs, list items, captions — everything.
+- Do NOT invent or complete missing sentences, expand abbreviations, correct typos, paraphrase, or summarize.
 - If content is cut off at a page boundary, set continuation=true and copy only the visible text as-is; do NOT guess the rest.
 
 VISUAL DETECTION — capture everything you see:
@@ -838,7 +839,8 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   (let [refine-result (llm/refine! rlm-router {:spec vision-response-spec
                                                :messages [(llm/system (or objective DEFAULT_VISION_OBJECTIVE))
                                                           (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                                      "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                                      "Create Section nodes for headings, and link content to sections via parent-id. "
+                                                                      "If the text is not in English, translate ALL content to English while preserving structure.\n\n"
                                                                       "<document_content>\n" content "\n</document_content>"))]
                                                :strategy :root
                                                :iterations refine-iterations
@@ -1324,7 +1326,8 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
   (let [response (llm/ask! rlm-router (cond-> {:spec vision-response-spec
                                                :messages [(llm/system objective)
                                                           (llm/user (str "Extract all content from this document text as typed nodes with parent-id hierarchy. "
-                                                                      "Create Section nodes for headings, and link content to sections via parent-id.\n\n"
+                                                                      "Create Section nodes for headings, and link content to sections via parent-id. "
+                                                                      "If the text is not in English, translate ALL content to English while preserving structure.\n\n"
                                                                       "<document_content>\n" content "\n</document_content>"))]
                                                :check-context? false
                                                :timeout-ms timeout-ms
