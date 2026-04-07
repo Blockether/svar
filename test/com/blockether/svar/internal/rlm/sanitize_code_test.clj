@@ -10,7 +10,7 @@
   "Sanitize code then eval in SCI. Returns result or {:error msg}."
   [code]
   (let [sanitized (sanitize-code code)
-        ctx (sci/init {:namespaces {'user {'+ + '- - '* * '/ / 'str str 'count count
+        bindings {'+ + '- - '* * '/ / 'str str 'count count
                                            'map map 'filter filter 'reduce reduce 'mapv mapv
                                            'conj conj 'assoc assoc 'get get 'merge merge
                                            'inc inc 'dec dec 'vec vec 'into into
@@ -27,7 +27,8 @@
                                            'learn! (fn [text & [_pri]] (str "Learned: " text))
                                            'list-dir (fn [& _] {:path "." :entries [{:name "a.clj" :type "file"} {:name "b.clj" :type "file"}] :total 2})
                                            'read-file (fn [& _] "file contents")
-                                           'shell-exec (fn [& _] {:exit-code 0 :stdout "hello" :stderr "" :timed-out false})}}})]
+                                           'shell-exec (fn [& _] {:exit-code 0 :stdout "hello" :stderr "" :timed-out false})}
+        ctx (sci/init {:namespaces {'user bindings 'sandbox bindings}})]
     (try
       (sci/eval-string* ctx sanitized)
       (catch Exception e
