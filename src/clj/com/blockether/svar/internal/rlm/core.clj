@@ -467,16 +467,17 @@ OUTPUT STYLE:
         (let [raw-answer (str (:answer final-data))
               final-answer (paren-repair/repair-code raw-answer)
               confidence (or (:confidence final-data) :high)
+              ;; Language: SCI execution + validation only for Clojure
+              language (when-let [l (:language final-data)] (keyword l))
+              clojure? (or (= language :clojure) (nil? language))
               code-blocks (vec (remove str/blank? (or (:code parsed) [])))
-              ;; Execute code blocks BEFORE accepting final (self-test gate)
-              exec-results (when (seq code-blocks)
+              ;; Execute code blocks in SCI — only for Clojure
+              exec-results (when (and clojure? (seq code-blocks))
                              (mapv (fn [code] (execute-code rlm-env code)) code-blocks))
               exec-errors (when exec-results
                             (seq (filter :error exec-results)))
-              untested? (and (zero? (or iteration 0)) (empty? code-blocks))
-              ;; Parse final answer with edamame — only for Clojure answers
-              language (keyword (or (:language final-data) "clojure"))
-              parse-check (when (= language :clojure)
+              untested? (and clojure? (zero? (or iteration 0)) (empty? code-blocks))
+              parse-check (when clojure?
                             (parse-clojure-syntax final-answer))
               validation-error (or (when untested?
                                      "You submitted final without running any code. Run the self-test first.")
