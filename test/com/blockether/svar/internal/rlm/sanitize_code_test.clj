@@ -28,7 +28,7 @@
                                            'list-dir (fn [& _] {:path "." :entries [{:name "a.clj" :type "file"} {:name "b.clj" :type "file"}] :total 2})
                                            'read-file (fn [& _] "file contents")
                                            'shell-exec (fn [& _] {:exit-code 0 :stdout "hello" :stderr "" :timed-out false})}
-        ctx (sci/init {:namespaces {'user bindings 'sandbox bindings}})]
+        ctx (sci/init {:namespaces {'sandbox bindings}})]
     (try
       (sci/eval-string* ctx sanitized)
       (catch Exception e
