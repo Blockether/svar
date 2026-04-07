@@ -1167,29 +1167,34 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                         :persona (when persona (name persona))
                                         :multi-hop? multi-hop?}
                                  :msg (str "Generating batch " batch-idx)})
-                    (try
-                      (let [forked-env (fork-env-for-query env)
-                            prompt (build-generation-prompt batch batch-idx
-                                     {:persona persona
-                                      :k-candidates k-candidates
-                                      :multi-hop? multi-hop?})
-                            result (query-env! forked-env prompt
-                                     {:spec QUESTIONIFY_SPEC
-                                      :debug? debug?
-                                      :max-iterations 20
-                                      :model effective-model})]
-                        {:batch-idx batch-idx
-                         :questions (or (get-in result [:answer :questions]) [])
-                         :trace (:trace result)
-                         :iterations (or (:iterations result) 0)})
-                      (catch Exception e
-                        (trove/log! {:level :error :id ::qa-batch-error
-                                     :data {:batch batch-idx :error (ex-message e)}
-                                     :msg "Batch generation failed"})
-                        {:batch-idx batch-idx
-                         :questions []
-                         :trace []
-                         :iterations 0}))))
+                    (let [max-retries 3]
+                      (loop [attempt 1]
+                        (let [result
+                              (try
+                                (let [forked-env (fork-env-for-query env)
+                                      prompt (build-generation-prompt batch batch-idx
+                                               {:persona persona
+                                                :k-candidates k-candidates
+                                                :multi-hop? multi-hop?})
+                                      result (query-env! forked-env prompt
+                                               {:spec QUESTIONIFY_SPEC
+                                                :debug? debug?
+                                                :max-iterations 20
+                                                :model effective-model})]
+                                  {:batch-idx batch-idx
+                                   :questions (or (get-in result [:answer :questions]) [])
+                                   :trace (:trace result)
+                                   :iterations (or (:iterations result) 0)})
+                                (catch Exception e
+                                  (trove/log! {:level :warn :id ::qa-batch-retry
+                                               :data {:batch batch-idx :attempt attempt
+                                                      :max-retries max-retries :error (ex-message e)}
+                                               :msg (str "Batch " batch-idx " failed (attempt " attempt "/" max-retries ")")})
+                                  nil))]
+                          (if (or result (>= attempt max-retries))
+                            (or result {:batch-idx batch-idx :questions [] :trace [] :iterations 0})
+                            (do (Thread/sleep (* attempt 1000)) ;; backoff: 1s, 2s, 3s
+                                (recur (inc attempt)))))))))
              (async/to-chan! work-items))
          ;; Collect results from pipeline and sort by batch index for deterministic order
          generation-results (let [results (loop [acc []]
@@ -1465,46 +1470,51 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (let [nodes (:page/nodes page)
         ;; Build mapping of local-id -> UUID for all nodes on this page
         ;; Collect IDs from both :page.node/id and :document.toc/id
-        id-mapping (reduce
-                     (fn [acc node]
-                       (let [local-id (or (:page.node/id node) (:document.toc/id node))]
-                         (if local-id
-                           (assoc acc local-id (str (util/uuid)))
-                           acc)))
-                     {}
-                     nodes)
+        ;; Build separate mappings for page nodes and TOC entries to avoid ID collision.
+        ;; A paragraph with id="1" and TOC entry with id="1" must get different UUIDs.
+        node-id-mapping (reduce
+                          (fn [acc node]
+                            (if-let [local-id (:page.node/id node)]
+                              (assoc acc local-id (str (util/uuid)))
+                              acc))
+                          {} nodes)
+        toc-id-mapping (reduce
+                         (fn [acc node]
+                           (if-let [local-id (:document.toc/id node)]
+                             (assoc acc local-id (str (util/uuid)))
+                             acc))
+                         {} nodes)
         ;; Translate IDs in all nodes (both namespaces)
         translated-nodes (mapv
                            (fn [node]
                              (cond-> node
                                ;; Translate :page.node/id
                                (:page.node/id node)
-                               (assoc :page.node/id (get id-mapping (:page.node/id node)))
+                               (assoc :page.node/id (get node-id-mapping (:page.node/id node)))
 
-                               ;; Translate :page.node/parent-id (if exists and in mapping)
+                               ;; Translate :page.node/parent-id (references other page.node IDs)
                                (and (:page.node/parent-id node)
-                                 (get id-mapping (:page.node/parent-id node)))
-                               (assoc :page.node/parent-id (get id-mapping (:page.node/parent-id node)))
+                                 (get node-id-mapping (:page.node/parent-id node)))
+                               (assoc :page.node/parent-id (get node-id-mapping (:page.node/parent-id node)))
 
-                               ;; Translate :page.node/target-section-id (if exists and in mapping)
+                               ;; Translate :page.node/target-section-id (references page.node IDs)
                                (and (:page.node/target-section-id node)
-                                 (get id-mapping (:page.node/target-section-id node)))
-                               (assoc :page.node/target-section-id (get id-mapping (:page.node/target-section-id node)))
+                                 (get node-id-mapping (:page.node/target-section-id node)))
+                               (assoc :page.node/target-section-id (get node-id-mapping (:page.node/target-section-id node)))
 
                                ;; Translate :document.toc/id
                                (:document.toc/id node)
-                               (assoc :document.toc/id (get id-mapping (:document.toc/id node)))
+                               (assoc :document.toc/id (get toc-id-mapping (:document.toc/id node)))
 
-                               ;; Translate :document.toc/parent-id (if exists and in mapping)
+                               ;; Translate :document.toc/parent-id (references other TOC IDs)
                                (and (:document.toc/parent-id node)
-                                 (get id-mapping (:document.toc/parent-id node)))
-                               (assoc :document.toc/parent-id (get id-mapping (:document.toc/parent-id node)))
+                                 (get toc-id-mapping (:document.toc/parent-id node)))
+                               (assoc :document.toc/parent-id (get toc-id-mapping (:document.toc/parent-id node)))
 
-                               ;; Translate :document.toc/target-section-id (if exists and in mapping)
-                               ;; Note: This references a :page.node/id, so we use the same mapping
+                               ;; Translate :document.toc/target-section-id (references page.node IDs)
                                (and (:document.toc/target-section-id node)
-                                 (get id-mapping (:document.toc/target-section-id node)))
-                               (assoc :document.toc/target-section-id (get id-mapping (:document.toc/target-section-id node)))))
+                                 (get node-id-mapping (:document.toc/target-section-id node)))
+                               (assoc :document.toc/target-section-id (get node-id-mapping (:document.toc/target-section-id node)))))
                            nodes)]
     (assoc page :page/nodes translated-nodes)))
 

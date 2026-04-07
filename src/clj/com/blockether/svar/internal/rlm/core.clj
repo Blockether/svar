@@ -160,7 +160,7 @@
                 execution-time (- (System/currentTimeMillis) start-time)]
             (if (:timeout? execution-result)
               (do
-                (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out")
+                (rlm-debug! {:execution-time-ms execution-time} "Code execution timed out — break long-running code into smaller steps or use (deref (future ...) timeout-ms :timeout)")
                 (assoc execution-result :execution-time-ms execution-time :timeout? true))
               (let [{:keys [error]} execution-result
                     final-result (if (and error (paren-repair/parse-error? error))
@@ -830,7 +830,8 @@ OUTPUT STYLE:
         (if (>= iteration (effective-max-iterations))
           (let [locals (get-locals rlm-env)
                 useful-value (some->> locals vals (filter #(and (some? %) (not (fn? %)))) last)]
-            (trove/log! {:level :warn :data {:iteration iteration} :msg "Max iterations reached"})
+            (trove/log! {:level :warn :data {:iteration iteration :max (effective-max-iterations)}
+                        :msg "Max iterations reached — call (request-more-iterations N) earlier to extend budget"})
             (merge {:answer (if useful-value (pr-str useful-value) nil)
                     :status :max-iterations
                     :locals locals
@@ -858,7 +859,8 @@ OUTPUT STYLE:
                 (recur (inc iteration) restart-messages trace 0 (inc restarts)
                   nil -1 journal nil))
               (do (trove/log! {:level :warn :data {:iteration iteration :consecutive-errors consecutive-errors
-                                                   :restarts restarts} :msg "Error budget exhausted after restart"})
+                                                   :restarts restarts}
+                               :msg "Error budget exhausted — too many consecutive errors across restarts. Simplify your code or break the task into smaller steps."})
                   (merge {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration}
                     (finalize-cost))))
             (let [_ (rlm-debug! {:iteration iteration :msg-count (count messages)} "Iteration start")
