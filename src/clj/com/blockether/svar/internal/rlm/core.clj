@@ -5,12 +5,13 @@
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.rlm.db :as rlm-db
     :refer [create-rlm-conn dispose-rlm-conn!
-            db-list-documents db-store-final-result!
-            db-list-final-results db-store-pageindex-document! str-truncate]]
+            db-list-documents db-list-final-results
+            db-store-pageindex-document! store-entity! update-entity! str-truncate]]
    [com.blockether.svar.internal.rlm.routing
     :refer [make-routed-llm-query-fn resolve-root-model provider-has-reasoning?]]
    [com.blockether.svar.internal.rlm.schema
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
+            ENTITY_TYPE_VALUES RELATIONSHIP_TYPE_VALUES
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
             EVAL_TIMEOUT_MS
             validate-final bytes->base64 *rlm-ctx*]]
@@ -695,16 +696,16 @@ OUTPUT STYLE:
 
 (defn- rehydrate-final-results!
   "Injects previous final-result-N vars into SCI context from Datalevin.
-   Each var gets the summary as its docstring so it appears in var index.
+   Final results are now terminal iterations (with non-nil :iteration/answer).
    Returns the list of final results for conversation thread rendering."
   [sci-ctx db-info-atom]
   (when db-info-atom
     (let [results (db-list-final-results @db-info-atom)]
-      (doseq [{:keys [final-result/index final-result/answer
-                      final-result/confidence final-result/summary]} results]
-        (let [var-name (str "final-result-" index)
-              doc-str (or summary "Previous query result")
-              val-map {:answer answer :confidence confidence}]
+      (doseq [[idx result] (map-indexed vector results)]
+        (let [var-name (str "final-result-" (inc idx))
+              answer (:iteration/answer result)
+              doc-str (str-truncate (or answer "Previous query result") 100)
+              val-map {:answer answer}]
           (try
             (sci/eval-string* sci-ctx
               (str "(def ^{:doc " (pr-str doc-str) "} " var-name " " (pr-str val-map) ")"))
@@ -714,9 +715,11 @@ OUTPUT STYLE:
 (defn- render-conversation-thread
   "Renders compact conversation thread XML from previous final results and current query."
   [final-results current-query]
-  (let [prev-entries (map (fn [{:keys [final-result/index final-result/query]}]
-                            (str "  [" index "] " (pr-str (str-truncate (or query "") 100))
-                              " \u2192 final-result-" index))
+  (let [prev-entries (map-indexed (fn [idx result]
+                                    (let [parent-id (:entity/parent-id result)
+                                          answer-preview (str-truncate (or (:iteration/answer result) "") 100)]
+                                      (str "  [" (inc idx) "] " (pr-str answer-preview)
+                                        " \u2192 final-result-" (inc idx))))
                        final-results)
         current (str "  [current] " (pr-str (str-truncate current-query 100)))]
     (str "<conversation>\n"
@@ -902,7 +905,7 @@ OUTPUT STYLE:
                   ;; Store error iteration snapshot
                   (rlm-db/store-iteration! db-info
                     {:query-ref query-ref :index iteration
-                     :response nil :executions nil :thinking nil :duration-ms 0})
+                     :executions nil :thinking nil :duration-ms 0})
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
                     (conj trace trace-entry)
@@ -915,15 +918,9 @@ OUTPUT STYLE:
                       ;; Store iteration snapshot — exact input/output for fine-tuning
                       _traj-iter (rlm-db/store-iteration! db-info
                                    {:query-ref query-ref :index iteration
-                                    :response (cond-> {:thinking (or thinking "")
-                                                       :code (mapv :code executions)}
-                                                next-optimize (assoc :next-optimize next-optimize)
-                                                final-result (assoc :final
-                                                               {:answer (answer-str (:answer final-result))
-                                                                :confidence (:confidence final-result)}))
                                     :executions executions
                                     :thinking thinking
-                                    :final (when final-result (answer-str (:answer final-result)))
+                                    :answer (when final-result (answer-str (:answer final-result)))
                                     :duration-ms (get-in iteration-result [:api-usage :prompt_tokens] 0)})
                       trace-entry {:iteration iteration
                                    :response response
@@ -943,12 +940,7 @@ OUTPUT STYLE:
                                              :iterations (inc iteration)
                                              :status :success}
                                      :done? true}))
-                        ;; Persist final result to Datalevin for cross-session access
-                        (db-store-final-result! db-info
-                          {:answer (answer-str (:answer final-result))
-                           :confidence (:confidence final-result)
-                           :summary (:summary final-result)}
-                          query env-id)
+                        ;; Final result persisted via store-iteration! with :iteration/answer
                         (merge (cond-> {:answer (:answer final-result)
                                         :trace (conj trace trace-entry)
                                         :iterations (inc iteration)
@@ -968,7 +960,6 @@ OUTPUT STYLE:
                         ;; Store empty iteration snapshot
                         (rlm-db/store-iteration! db-info
                           {:query-ref query-ref :index iteration
-                           :response {:thinking (or thinking "") :code []}
                            :executions nil :thinking thinking :duration-ms 0})
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages
@@ -1127,9 +1118,14 @@ OUTPUT STYLE:
         (try
           (let [entity-id (util/uuid)
                 entity-name (or (:entity/name entity) (:name entity) "unknown")
+                raw-type (or (:entity/type entity) (:type entity))
+                entity-type (let [t-name (some-> raw-type name)]
+                              (if (and t-name (contains? ENTITY_TYPE_VALUES t-name))
+                                (keyword t-name)
+                                :concept))
                 entity-data (cond-> {:entity/id entity-id
                                      :entity/name entity-name
-                                     :entity/type (or (:entity/type entity) (:type entity) :unknown)
+                                     :entity/type entity-type
                                      :entity/description (or (:entity/description entity) (:description entity) "")
                                      :entity/document-id (str doc-id)
                                      :entity/created-at (java.util.Date.)}
@@ -1149,12 +1145,17 @@ OUTPUT STYLE:
                 src-id (get @name->uuid (some-> src-name str str/lower-case))
                 tgt-id (get @name->uuid (some-> tgt-name str str/lower-case))]
             (when (and src-id tgt-id)
-              (d/transact! conn [{:relationship/id (util/uuid)
-                                  :relationship/type (or (:relationship/type rel) (:type rel) :unknown)
-                                  :relationship/source-entity-id src-id
-                                  :relationship/target-entity-id tgt-id
-                                  :relationship/description (or (:relationship/description rel) (:description rel) "")
-                                  :relationship/document-id (str doc-id)}])))
+              (let [raw-rel-type (or (:relationship/type rel) (:type rel))
+                    rel-type (let [rt-name (some-> raw-rel-type name)]
+                               (if (and rt-name (contains? RELATIONSHIP_TYPE_VALUES rt-name))
+                                 (keyword rt-name)
+                                 :related-to))]
+                (d/transact! conn [{:relationship/id (util/uuid)
+                                    :relationship/type rel-type
+                                    :relationship/source-entity-id src-id
+                                    :relationship/target-entity-id tgt-id
+                                    :relationship/description (or (:relationship/description rel) (:description rel) "")
+                                    :relationship/document-id (str doc-id)}]))))
           (catch Exception e
             (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store relationship"}))))
       {:entities-extracted (count entities)

@@ -34,8 +34,73 @@
    Must be long enough for nested llm-query calls."
   120000)
 
+;; =============================================================================
+;; Closed Enums — Entity Types and Relationship Types
+;; =============================================================================
+
+(def ENTITY_TYPE_VALUES
+  "Closed enum of entity types with LLM-friendly descriptions.
+   Used in ENTITY_SPEC for structured extraction and in :entity/type schema field."
+  {"concept"      "Named idea, theory, schema, model, defined term, or domain keyword"
+   "person"       "Named individual — author, researcher, historical figure, practitioner"
+   "technique"    "Method, procedure, algorithm, intervention, protocol, or design pattern"
+   "organization" "Company, institution, research group, team, or standards body"
+   "project"      "Codebase, repository, product, or system"
+   "module"       "Namespace, package, component, service, or bounded context"
+   "file"         "Source file, config file, or resource"
+   "symbol"       "Function, var, class, method, API endpoint, or command"
+   "decision"     "Architectural or design choice with rationale"
+   "observation"  "Finding, insight, pattern noticed, or measurement"
+   "event"        "Deployment, incident, release, milestone, or significant occurrence"
+   "conversation" "RLM conversation session with user"
+   "query"        "Single query-env! call within a conversation"
+   "iteration"    "One LLM reasoning iteration within a query"})
+
+(def RELATIONSHIP_TYPE_VALUES
+  "Closed enum of relationship types with LLM-friendly descriptions.
+   Used in RELATIONSHIP_SPEC for structured extraction and in :relationship/type schema field."
+  {"defines"      "Source defines, creates, or introduces target"
+   "references"   "Source mentions, cites, or refers to target"
+   "depends-on"   "Source requires or depends on target to function"
+   "implements"   "Source implements, realizes, or concretizes target"
+   "supersedes"   "Source replaces, updates, or deprecates target"
+   "contradicts"  "Source conflicts with or opposes target"
+   "motivated"    "Source motivated, caused, or led to target"
+   "contains"     "Source contains or is parent of target"
+   "related-to"   "General semantic association between source and target"})
+
+;; =============================================================================
+;; Entity Extraction Specs (LLM structured output)
+;; =============================================================================
+
 (def ENTITY_EXTRACTION_OBJECTIVE
-  "Extract entities and relationships from the provided content.\n\nReturn only the fields in the schema.\nFocus on concrete entities, avoid duplication, and include page/section when known.")
+  "Extract entities and relationships from the provided content.
+
+Return only the fields in the schema. Focus on concrete entities, avoid duplication, and include page/section when known.
+
+ENTITY TYPES (pick exactly one per entity):
+- concept: Named idea, theory, schema, model, defined term, or domain keyword
+- person: Named individual — author, researcher, historical figure
+- technique: Method, procedure, algorithm, intervention, protocol, or design pattern
+- organization: Company, institution, research group, team
+- project: Codebase, repository, product, or system
+- module: Namespace, package, component, service, or bounded context
+- file: Source file, config file, or resource
+- symbol: Function, var, class, method, API endpoint, or command
+- decision: Architectural or design choice with rationale
+- observation: Finding, insight, pattern noticed, or measurement
+- event: Deployment, incident, release, milestone
+
+RELATIONSHIP TYPES (pick exactly one per relationship):
+- defines: Source defines/creates target
+- references: Source mentions/cites target
+- depends-on: Source requires target
+- implements: Source implements/realizes target
+- supersedes: Source replaces/deprecates target
+- contradicts: Source conflicts with target
+- motivated: Source caused/led to target
+- contains: Source contains target
+- related-to: General association")
 
 (def ENTITY_SPEC
   "Spec for extracted entities."
@@ -49,7 +114,8 @@
     (spec/field {::spec/name :type
                  ::spec/type :spec.type/keyword
                  ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Entity type (e.g. :party, :organization, :obligation, :term, :condition)"})
+                 ::spec/description "Entity type — must be one of the allowed types"
+                 ::spec/values ENTITY_TYPE_VALUES})
     (spec/field {::spec/name :description
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
@@ -81,7 +147,8 @@
     (spec/field {::spec/name :type
                  ::spec/type :spec.type/keyword
                  ::spec/cardinality :spec.cardinality/one
-                 ::spec/description "Relationship type (e.g. :owns, :obligates, :references, :defines)"})
+                 ::spec/description "Relationship type — must be one of the allowed types"
+                 ::spec/values RELATIONSHIP_TYPE_VALUES})
     (spec/field {::spec/name :description
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/one
@@ -337,25 +404,57 @@
    :document.toc/parent-id       {:db/valueType :db.type/string}
    :document.toc/created-at      {:db/valueType :db.type/instant}
 
-   ;; Entities
-   :entity/id          {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
-   :entity/name        {:db/valueType :db.type/string :db/fulltext true}
-   :entity/type        {:db/valueType :db.type/keyword}
-   :entity/description {:db/valueType :db.type/string :db/fulltext true}
-   :entity/document-id {:db/valueType :db.type/string}
-   :entity/page        {:db/valueType :db.type/long}
-   :entity/section     {:db/valueType :db.type/string}
-   :entity/created-at  {:db/valueType :db.type/instant}
+   ;; =========================================================================
+   ;; Unified Entity Model
+   ;; All data (knowledge entities, conversations, queries, iterations) are
+   ;; discriminated by :entity/type from a closed enum. Type-specific attrs
+   ;; live in their own namespaces (conversation/*, query/*, iteration/*).
+   ;; Hierarchy via :entity/parent-id. Cross-doc linking via :entity/canonical-id.
+   ;; =========================================================================
 
-   ;; Relationships
-   :relationship/id               {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
-   :relationship/type             {:db/valueType :db.type/keyword}
+   ;; Core entity fields (every entity has these)
+   :entity/id           {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :entity/type         {:db/valueType :db.type/keyword :db/doc "Closed enum — see ENTITY_TYPE_VALUES"}
+   :entity/name         {:db/valueType :db.type/string  :db/fulltext true}
+   :entity/description  {:db/valueType :db.type/string  :db/fulltext true}
+   :entity/parent-id    {:db/valueType :db.type/uuid    :db/doc "Hierarchical containment (conversation→query→iteration)"}
+   :entity/document-id  {:db/valueType :db.type/string  :db/doc "Source PageIndex document ID"}
+   :entity/page         {:db/valueType :db.type/long    :db/doc "Source page number (0-based)"}
+   :entity/section      {:db/valueType :db.type/string  :db/doc "Source section identifier"}
+   :entity/created-at   {:db/valueType :db.type/instant}
+   :entity/updated-at   {:db/valueType :db.type/instant}
+   :entity/canonical-id {:db/valueType :db.type/uuid    :db/doc "Cross-document linking — same name+type = same canonical"}
+
+   ;; Conversation-specific attrs (entity/type = :conversation)
+   :conversation/env-id        {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "RLM env-id"}
+   :conversation/system-prompt {:db/valueType :db.type/string  :db/doc "System prompt for this session"}
+   :conversation/model         {:db/valueType :db.type/string  :db/doc "Root model used"}
+
+   ;; Query-specific attrs (entity/type = :query, parent = conversation)
+   :query/text          {:db/valueType :db.type/string  :db/fulltext true :db/doc "User query text (extracted from messages)"}
+   :query/answer        {:db/valueType :db.type/string  :db/doc "Final answer"}
+   :query/iterations    {:db/valueType :db.type/long    :db/doc "Number of iterations"}
+   :query/duration-ms   {:db/valueType :db.type/long    :db/doc "Total wall-clock time"}
+   :query/status        {:db/valueType :db.type/keyword :db/doc ":success :max-iterations :error"}
+   :query/eval-score    {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0"}
+
+   ;; Iteration-specific attrs (entity/type = :iteration, parent = query)
+   :iteration/index       {:db/valueType :db.type/long    :db/doc "Iteration number (0-based)"}
+   :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
+   :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
+   :iteration/answer      {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
+   :iteration/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
+   :iteration/duration-ms {:db/valueType :db.type/long    :db/doc "LLM call duration"}
+
+   ;; Relationships (typed edges between any entities)
+   :relationship/id               {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
+   :relationship/type             {:db/valueType :db.type/keyword :db/doc "Closed enum — see RELATIONSHIP_TYPE_VALUES"}
    :relationship/source-entity-id {:db/valueType :db.type/uuid}
    :relationship/target-entity-id {:db/valueType :db.type/uuid}
    :relationship/description      {:db/valueType :db.type/string}
    :relationship/document-id      {:db/valueType :db.type/string}
 
-   ;; Claims
+   ;; Claims (citation verification)
    :claim/id                   {:db/valueType :db.type/uuid :db/unique :db.unique/identity}
    :claim/text                 {:db/valueType :db.type/string}
    :claim/document-id          {:db/valueType :db.type/string}
@@ -368,49 +467,9 @@
    :claim/verification-verdict {:db/valueType :db.type/string}
    :claim/created-at           {:db/valueType :db.type/instant}
 
-   ;; Final Results — persisted across sessions, available as final-result-N vars
-   :final-result/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :final-result/env-id      {:db/valueType :db.type/string  :db/doc "RLM environment that produced this result"}
-   :final-result/index       {:db/valueType :db.type/long    :db/doc "Sequential index (the N in final-result-N)"}
-   :final-result/answer      {:db/valueType :db.type/string  :db/fulltext true :db/doc "The final answer text"}
-   :final-result/confidence  {:db/valueType :db.type/keyword :db/doc ":high, :medium, or :low"}
-   :final-result/summary     {:db/valueType :db.type/string  :db/doc "One-line summary (used as var index docstring)"}
-   :final-result/query       {:db/valueType :db.type/string  :db/fulltext true :db/doc "The user query that produced this result"}
-   :final-result/timestamp   {:db/valueType :db.type/instant}
-
    ;; Raw documents (PageIndex source of truth, stored as EDN string)
    :raw-document/id      {:db/valueType :db.type/string :db/unique :db.unique/identity}
-   :raw-document/content {:db/valueType :db.type/string}
-
-   ;; Conversation — env session, holds system prompt and links queries
-   :conversation/id            {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :conversation/env-id        {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "RLM env-id"}
-   :conversation/system-prompt {:db/valueType :db.type/string  :db/doc "System prompt for this session"}
-   :conversation/model         {:db/valueType :db.type/string  :db/doc "Root model used"}
-   :conversation/timestamp     {:db/valueType :db.type/instant}
-
-   ;; Query — one query-env! call within a conversation
-   :query/id            {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :query/conversation  {:db/valueType :db.type/ref     :db/doc "Ref to parent conversation"}
-   :query/text          {:db/valueType :db.type/string  :db/fulltext true :db/doc "The user query"}
-   :query/answer        {:db/valueType :db.type/string  :db/doc "Final answer"}
-   :query/iterations    {:db/valueType :db.type/long    :db/doc "Number of iterations"}
-   :query/duration-ms   {:db/valueType :db.type/long    :db/doc "Total wall-clock time"}
-   :query/status        {:db/valueType :db.type/keyword :db/doc ":success :max-iterations :error"}
-   :query/eval-score    {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0"}
-   :query/timestamp     {:db/valueType :db.type/instant}
-
-   ;; Iteration — one LLM call within a query
-   :iteration/id          {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}
-   :iteration/query       {:db/valueType :db.type/ref     :db/doc "Ref to parent query"}
-   :iteration/index       {:db/valueType :db.type/long    :db/doc "Iteration number (0-based)"}
-   :iteration/response    {:db/valueType :db.type/string  :db/doc "pr-str of parsed ITERATION_SPEC response"}
-   :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
-   :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
-   :iteration/final       {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
-   :iteration/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
-   :iteration/duration-ms {:db/valueType :db.type/long    :db/doc "LLM call duration"}
-   :iteration/timestamp   {:db/valueType :db.type/instant}})
+   :raw-document/content {:db/valueType :db.type/string}})
 
 (def BLOOM_DIFFICULTIES
   "Bloom's taxonomy cognitive levels as difficulty progression."

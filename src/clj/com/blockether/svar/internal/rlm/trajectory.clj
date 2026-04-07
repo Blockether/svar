@@ -16,7 +16,7 @@
    [java.io BufferedWriter FileWriter]))
 
 (defn list-queries
-  "Lists query records from the database.
+  "Lists query entities from the database.
    opts:
      :status - Filter by status keyword (e.g., :success)
      :limit  - Max results (default: all)
@@ -24,29 +24,30 @@
   [{:keys [conn]} & [{:keys [status limit min-iterations] :or {min-iterations 0}}]]
   (when conn
     (let [all (d/q '[:find [(pull ?e [*]) ...]
-                     :where [?e :query/id _]]
+                     :where [?e :entity/type :query]]
                 (d/db conn))
           filtered (->> all
                      (filter #(>= (or (:query/iterations %) 0) min-iterations))
                      (filter #(if status (= (:query/status %) status) true))
-                     (sort-by :query/timestamp)
+                     (sort-by :entity/created-at)
                      reverse)]
       (if limit (take limit filtered) filtered))))
 
 (defn list-iterations
-  "Lists iteration snapshots for a query, sorted by index."
+  "Lists iteration entities for a query via parent-id, sorted by index."
   [{:keys [conn]} query-ref]
   (when conn
     (let [db (d/db conn)
-          query-eid (cond
-                      (vector? query-ref) (:db/id (d/entity db query-ref))
-                      (map? query-ref) (:db/id query-ref)
-                      :else query-ref)]
-      (when query-eid
+          query-id (cond
+                     (vector? query-ref) (second query-ref)
+                     (uuid? query-ref) query-ref
+                     :else nil)]
+      (when query-id
         (->> (d/q '[:find [(pull ?e [*]) ...]
-                    :in $ ?qeid
-                    :where [?e :iteration/query ?qeid]]
-               db query-eid)
+                    :in $ ?parent-id
+                    :where [?e :entity/type :iteration]
+                           [?e :entity/parent-id ?parent-id]]
+               db query-id)
           (sort-by :iteration/index))))))
 
 (defn score-query
@@ -70,7 +71,7 @@
                                     (catch Exception _ []))))
                      (str/join "\n"))
           iter-count (count iterations)
-          error-count (count (filter #(nil? (:iteration/response %)) iterations))
+          error-count (count (filter #(nil? (:iteration/code %)) iterations))
           score (atom 0)]
       (when (re-find #"\(def\s+" all-code) (swap! score + 2))
       (when (re-find #"\((?:llm-query|rlm-query)\s" all-code) (swap! score + 3))
@@ -79,7 +80,7 @@
       (when (and (pos? max-iterations) (< iter-count (/ max-iterations 2))) (swap! score + 2))
       (when (> error-count 2) (swap! score - 2))
       (when-let [last-iter (last iterations)]
-        (when (and (:iteration/final last-iter) (< (count (:iteration/final last-iter)) 20))
+        (when (and (:iteration/answer last-iter) (< (count (:iteration/answer last-iter)) 20))
           (swap! score - 1)))
       @score)))
 
@@ -107,7 +108,7 @@
                                      true)))
           scored (->> hard-filtered
                    (map (fn [q]
-                          (let [base-score (score-query db-info [:query/id (:query/id q)] max-iterations)
+                          (let [base-score (score-query db-info [:entity/id (:entity/id q)] max-iterations)
                                 eval-bonus (if-let [es (:query/eval-score q)]
                                              (cond (>= es 0.8) 3
                                                    (>= es 0.6) 1
@@ -129,25 +130,28 @@
     (let [iterations (list-iterations db-info query-ref)]
       (mapv (fn [it]
               (cond-> {:index (:iteration/index it)
-                       :response (try (edn/read-string (:iteration/response it)) (catch Exception _ nil))
                        :code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
                        :results (try (edn/read-string (:iteration/results it)) (catch Exception _ []))
                        :duration-ms (:iteration/duration-ms it)}
-                (:iteration/final it) (assoc :final (:iteration/final it))
+                (:iteration/answer it) (assoc :answer (:iteration/answer it))
                 (seq (:iteration/thinking it)) (assoc :thinking (:iteration/thinking it))))
         iterations))))
 
 (defn- format-for-training
   "Converts iteration snapshots to OpenAI messages format for fine-tuning.
 
-   Each iteration response is an assistant message with ITERATION_SPEC JSON."
+   Each iteration becomes an assistant message with thinking + code + answer."
   [query-text system-prompt iterations]
   (let [base [{"role" "system" "content" (or system-prompt "")}
               {"role" "user" "content" (or query-text "")}]]
     (->> iterations
-      (reduce (fn [msgs {:keys [response]}]
-                (conj msgs {"role" "assistant"
-                            "content" (if response (json/write-json-str response) "")}))
+      (reduce (fn [msgs {:keys [thinking code answer]}]
+                (let [content (cond-> {}
+                                (seq thinking) (assoc :thinking thinking)
+                                (seq code) (assoc :code code)
+                                answer (assoc :answer answer))]
+                  (conj msgs {"role" "assistant"
+                              "content" (json/write-json-str content)})))
         base)
       vec)))
 
@@ -176,15 +180,14 @@
         _ (when (empty? queries)
             (trove/log! {:level :warn :msg "No queries passed filtering"})
             (throw (ex-info "No queries to export" {:type :trajectory/empty})))
-        ;; Look up conversation for system-prompt
+        ;; Look up conversation (parent of query) for system-prompt
         get-system-prompt (fn [q]
-                            (when-let [conv-ref (:query/conversation q)]
-                              (let [eid (if (map? conv-ref) (:db/id conv-ref) conv-ref)
-                                    conv (d/pull (d/db conn) '[:conversation/system-prompt] eid)]
+                            (when-let [parent-id (:entity/parent-id q)]
+                              (let [conv (d/pull (d/db conn) '[:conversation/system-prompt] [:entity/id parent-id])]
                                 (:conversation/system-prompt conv))))
         exports (->> queries
                   (keep (fn [q]
-                          (let [qref [:query/id (:query/id q)]
+                          (let [qref [:entity/id (:entity/id q)]
                                 iters (seq (reconstruct-conversation db-info qref))]
                             (when iters
                               {:query q

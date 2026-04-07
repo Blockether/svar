@@ -48,66 +48,102 @@
       (catch Exception e
         (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to delete temp RLM DB"})))))
 
+(defn store-entity!
+  "Stores a unified entity in Datalevin. All data (conversations, queries,
+   iterations, knowledge entities) go through this function.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `attrs` - Map. Must include :entity/type (keyword from closed enum).
+             Core fields: :entity/name, :entity/description, :entity/parent-id,
+             :entity/document-id, :entity/page, :entity/section.
+             Type-specific fields in their namespaces (conversation/*, query/*, iteration/*).
+
+   Returns:
+   Lookup ref [:entity/id uuid]."
+  [{:keys [conn]} attrs]
+  (when conn
+    (let [id (or (:entity/id attrs) (java.util.UUID/randomUUID))
+          now (java.util.Date.)
+          entity (merge {:entity/id id
+                         :entity/type (:entity/type attrs)
+                         :entity/created-at now}
+                   (dissoc attrs :entity/id :entity/created-at)
+                   (when-not (:entity/updated-at attrs) {:entity/updated-at now}))]
+      (d/transact! conn [entity])
+      [:entity/id id])))
+
+(defn update-entity!
+  "Updates an existing entity by :entity/id. Merges provided attrs.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `entity-ref` - Lookup ref [:entity/id uuid].
+   `attrs` - Map of attrs to update (merged onto existing)."
+  [{:keys [conn]} entity-ref attrs]
+  (when conn
+    (let [id (second entity-ref)
+          now (java.util.Date.)]
+      (d/transact! conn [(merge {:entity/id id :entity/updated-at now} attrs)]))))
+
 (defn store-conversation!
   "Stores or retrieves a conversation entity for an env session."
-  [{:keys [conn]} {:keys [env-id system-prompt model]}]
-  (when conn
-    (let [existing (d/q '[:find ?e . :in $ ?env-id :where [?e :conversation/env-id ?env-id]]
+  [db-info {:keys [env-id system-prompt model]}]
+  (when-let [conn (:conn db-info)]
+    (let [existing (d/q '[:find ?id . :in $ ?env-id
+                          :where [?e :conversation/env-id ?env-id]
+                                 [?e :entity/id ?id]]
                      (d/db conn) env-id)]
-      (or existing
-        (let [conv-id (java.util.UUID/randomUUID)]
-          (d/transact! conn [{:conversation/id conv-id
-                              :conversation/env-id env-id
-                              :conversation/system-prompt (or system-prompt "")
-                              :conversation/model (or model "")
-                              :conversation/timestamp (java.util.Date.)}])
-          [:conversation/id conv-id])))))
+      (if existing
+        [:entity/id existing]
+        (store-entity! db-info
+          {:entity/type :conversation
+           :entity/name (or env-id "session")
+           :conversation/env-id env-id
+           :conversation/system-prompt (or system-prompt "")
+           :conversation/model (or model "")})))))
 
 (defn store-query!
-  "Stores a query outcome linked to a conversation."
-  [{:keys [conn]} {:keys [conversation-ref text answer iterations duration-ms status eval-score]}]
-  (when conn
-    (let [query-id (java.util.UUID/randomUUID)]
-      (d/transact! conn [(cond-> {:query/id query-id
-                                  :query/conversation conversation-ref
-                                  :query/text (or text "")
-                                  :query/answer (or (when answer (pr-str answer)) "")
-                                  :query/iterations (or iterations 0)
-                                  :query/duration-ms (or duration-ms 0)
-                                  :query/status (or status :unknown)
-                                  :query/timestamp (java.util.Date.)}
-                           eval-score (assoc :query/eval-score (float eval-score)))])
-      [:query/id query-id])))
+  "Stores a query entity linked to a conversation via parent-id."
+  [db-info {:keys [conversation-ref text answer iterations duration-ms status eval-score]}]
+  (let [parent-id (when conversation-ref (second conversation-ref))]
+    (store-entity! db-info
+      (cond-> {:entity/type :query
+               :entity/name (str-truncate (or text "") 100)
+               :entity/parent-id parent-id
+               :query/text (or text "")
+               :query/answer (or (when answer (pr-str answer)) "")
+               :query/iterations (or iterations 0)
+               :query/duration-ms (or duration-ms 0)
+               :query/status (or status :unknown)}
+        eval-score (assoc :query/eval-score (float eval-score))))))
 
 (defn update-query!
-  "Updates a query record with final outcome."
-  [{:keys [conn]} query-ref {:keys [answer iterations duration-ms status eval-score]}]
-  (when conn
-    (d/transact! conn [(cond-> {:query/id (second query-ref)
-                                :query/answer (or (when answer (pr-str answer)) "")
-                                :query/iterations (or iterations 0)
-                                :query/duration-ms (or duration-ms 0)
-                                :query/status (or status :unknown)}
-                         eval-score (assoc :query/eval-score (float eval-score)))])))
+  "Updates a query entity with final outcome."
+  [db-info query-ref {:keys [answer iterations duration-ms status eval-score]}]
+  (update-entity! db-info query-ref
+    (cond-> {:query/answer (or (when answer (pr-str answer)) "")
+             :query/iterations (or iterations 0)
+             :query/duration-ms (or duration-ms 0)
+             :query/status (or status :unknown)}
+      eval-score (assoc :query/eval-score (float eval-score)))))
 
 (defn store-iteration!
-  "Stores an iteration snapshot linked to a query."
-  [{:keys [conn]} {:keys [query-ref index response executions thinking final duration-ms]}]
-  (when conn
-    (let [iter-id (java.util.UUID/randomUUID)
-          code-strs (mapv :code (or executions []))
-          result-strs (mapv #(try (pr-str (:result %)) (catch Exception _ "???")) (or executions []))]
-      (d/transact! conn [(cond-> {:iteration/id iter-id
-                                  :iteration/query query-ref
-                                  :iteration/index (or index 0)
-                                  :iteration/response (pr-str response)
-                                  :iteration/code (pr-str code-strs)
-                                  :iteration/results (pr-str result-strs)
-                                  :iteration/thinking (or thinking "")
-                                  :iteration/duration-ms (or duration-ms 0)
-                                  :iteration/timestamp (java.util.Date.)}
-                           final (assoc :iteration/final final))])
-      [:iteration/id iter-id])))
+  "Stores an iteration entity linked to a query via parent-id."
+  [db-info {:keys [query-ref index executions thinking answer duration-ms]}]
+  (let [parent-id (when query-ref (second query-ref))
+        code-strs (mapv :code (or executions []))
+        result-strs (mapv #(try (pr-str (:result %)) (catch Exception _ "???")) (or executions []))]
+    (store-entity! db-info
+      (cond-> {:entity/type :iteration
+               :entity/name (str "iteration-" (or index 0))
+               :entity/parent-id parent-id
+               :iteration/index (or index 0)
+               :iteration/code (pr-str code-strs)
+               :iteration/results (pr-str result-strs)
+               :iteration/thinking (or thinking "")
+               :iteration/duration-ms (or duration-ms 0)}
+        answer (assoc :iteration/answer answer)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Document Storage
@@ -598,53 +634,25 @@
 ;; Final Result Persistence
 ;; -----------------------------------------------------------------------------
 
-(defn db-store-final-result!
-  "Stores a final result in Datalevin for cross-session persistence.
-
-   Params:
-   `db-info` - Map with :conn key.
-   `result` - Map with :answer, :confidence, :summary keys.
-   `query` - String. The user query that produced this result.
-   `env-id` - String. RLM environment ID.
-
-   Returns:
-   Map with :final-result/id and :final-result/index."
-  [{:keys [conn]} result query env-id]
-  (when conn
-    (let [;; Count existing final results to determine next index
-          existing (d/q '[:find (count ?e) .
-                          :where [?e :final-result/id _]]
-                     (d/db conn))
-          idx (inc (or existing 0))
-          id (util/uuid)
-          entity {:final-result/id id
-                  :final-result/env-id (or env-id "unknown")
-                  :final-result/index idx
-                  :final-result/answer (str (:answer result))
-                  :final-result/confidence (or (:confidence result) :high)
-                  :final-result/summary (or (:summary result) "")
-                  :final-result/query (or query "")
-                  :final-result/timestamp (java.util.Date.)}]
-      (d/transact! conn [entity])
-      {:final-result/id id :final-result/index idx})))
-
 (defn db-list-final-results
-  "Lists all final results from Datalevin, ordered by index.
+  "Lists terminal iterations (those with non-nil :iteration/answer).
+   These are the final results — replaces the old :final-result/* namespace.
 
    Params:
    `db-info` - Map with :conn key.
 
    Returns:
-   Vector of maps with :final-result/* keys."
+   Vector of iteration entity maps with answer, sorted by created-at."
   [{:keys [conn]}]
   (if conn
-    (->> (d/q '[:find [(pull ?e [:final-result/id :final-result/index
-                                 :final-result/answer :final-result/confidence
-                                 :final-result/summary :final-result/query
-                                 :final-result/timestamp]) ...]
-                :where [?e :final-result/id _]]
+    (->> (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type
+                                 :entity/parent-id :entity/created-at
+                                 :iteration/index :iteration/answer
+                                 :iteration/code :iteration/results]) ...]
+                :where [?e :entity/type :iteration]
+                       [?e :iteration/answer _]]
            (d/db conn))
-      (sort-by :final-result/index)
+      (sort-by :entity/created-at)
       vec)
     []))
 
