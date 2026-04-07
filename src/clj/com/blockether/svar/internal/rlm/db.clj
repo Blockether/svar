@@ -1045,46 +1045,14 @@
     {:score effective-score
      :zone (vitality-zone effective-score)}))
 
-(defn- find-connected-pages
-  "Finds pages connected to the given page through shared entities.
-   A page is connected if it shares an entity (by canonical-id) with the source page.
-
-   Returns vector of {:page-id :distance} maps, max 2 hops."
-  [{:keys [conn]} page-id {:keys [max-depth] :or {max-depth 2}}]
-  (when conn
-    (let [db (d/db conn)
-          ;; Find document-id for this page
-          page (d/pull db [:page/document-id :page/index] [:page/id page-id])
-          doc-id (:page/document-id page)
-          page-idx (:page/index page)]
-      (when doc-id
-        ;; Find entities on this page (by document-id + page index)
-        (let [entity-ids (d/q '[:find [?eid ...]
-                                :in $ ?doc-id ?page-idx
-                                :where [?e :entity/document-id ?doc-id]
-                                       [?e :entity/page ?page-idx]
-                                       [?e :entity/canonical-id ?eid]]
-                           db doc-id (or page-idx -1))
-              ;; Find other pages that share these canonical entities
-              connected (when (seq entity-ids)
-                          (d/q '[:find [?pid ...]
-                                 :in $ [?cid ...] ?exclude-page
-                                 :where [?e :entity/canonical-id ?cid]
-                                        [?e :entity/document-id ?did]
-                                        [?e :entity/page ?pidx]
-                                        [?p :page/document-id ?did]
-                                        [?p :page/index ?pidx]
-                                        [?p :page/id ?pid]
-                                        [(not= ?pid ?exclude-page)]]
-                            db entity-ids page-id))]
-          (mapv (fn [pid] {:page-id pid :distance 1}) (or connected [])))))))
-
 (defn propagate-activation!
   "Spreads activation from an accessed page to connected pages.
 
-   Connected pages (sharing entities via canonical-id) receive a damped
-   access-count boost: boost = weight × damping^distance.
+   Two connection paths:
+   1. Canonical siblings: pages sharing entities with same canonical-id (cross-doc)
+   2. Relationship neighbors: pages whose entities are related via find-related BFS
 
+   Each connected page receives a damped access-count boost.
    Only propagates for significant accesses (weight >= 1.0, i.e. fetch).
 
    Params:
@@ -1096,13 +1064,60 @@
   ([{:keys [conn] :as db-info} page-id weight damping]
    (when (and conn (>= weight 1.0))
      (try
-       (let [connected (find-connected-pages db-info page-id {})
+       (let [db (d/db conn)
+             page (d/pull db [:page/document-id :page/index] [:page/id page-id])
+             doc-id (:page/document-id page)
+             page-idx (:page/index page)
+             ;; Path 1: canonical siblings — find entities on this page, expand by canonical-id
+             canonical-ids (when doc-id
+                             (d/q '[:find [?cid ...]
+                                    :in $ ?doc-id ?pidx
+                                    :where [?e :entity/document-id ?doc-id]
+                                           [?e :entity/page ?pidx]
+                                           [?e :entity/canonical-id ?cid]]
+                               db doc-id (or page-idx -1)))
+             ;; Find pages of canonical siblings (different from source page)
+             sibling-page-ids (when (seq canonical-ids)
+                                (d/q '[:find [?pid ...]
+                                       :in $ [?cid ...] ?exclude-pid
+                                       :where [?e :entity/canonical-id ?cid]
+                                              [?e :entity/document-id ?did]
+                                              [?e :entity/page ?eidx]
+                                              [?p :page/document-id ?did]
+                                              [?p :page/index ?eidx]
+                                              [?p :page/id ?pid]
+                                              [(not= ?pid ?exclude-pid)]]
+                                  db canonical-ids page-id))
+             ;; Path 2: relationship neighbors via find-related
+             page-entity-ids (when doc-id
+                               (d/q '[:find [?eid ...]
+                                      :in $ ?doc-id ?pidx
+                                      :where [?e :entity/document-id ?doc-id]
+                                             [?e :entity/page ?pidx]
+                                             [?e :entity/id ?eid]]
+                                 db doc-id (or page-idx -1)))
+             rel-neighbor-page-ids (when (seq page-entity-ids)
+                                     (->> page-entity-ids
+                                       (mapcat #(find-related db-info % {:depth 1 :limit 10}))
+                                       (keep (fn [e]
+                                               (when (and (:entity/document-id e) (:entity/page e))
+                                                 (first (d/q '[:find [?pid ...]
+                                                               :in $ ?did ?pidx
+                                                               :where [?p :page/document-id ?did]
+                                                                      [?p :page/index ?pidx]
+                                                                      [?p :page/id ?pid]]
+                                                          db (:entity/document-id e) (:entity/page e))))))
+                                       distinct))
+             ;; Merge both paths, remove self
+             all-connected (->> (concat (or sibling-page-ids []) (or rel-neighbor-page-ids []))
+                             distinct
+                             (remove #(= % page-id)))
              now (java.util.Date.)]
-         (doseq [{:keys [page-id distance]} connected]
-           (let [boost (* weight (Math/pow damping distance))
-                 existing (d/pull (d/db conn) [:page/access-count] [:page/id page-id])
+         (doseq [pid all-connected]
+           (let [boost (* weight (Math/pow damping 1))
+                 existing (d/pull (d/db conn) [:page/access-count] [:page/id pid])
                  current-count (or (:page/access-count existing) 0.0)]
-             (d/transact! conn [{:page/id page-id
+             (d/transact! conn [{:page/id pid
                                  :page/last-accessed now
                                  :page/access-count (+ current-count boost)}]))))
        (catch Exception e

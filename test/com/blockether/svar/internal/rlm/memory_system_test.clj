@@ -37,18 +37,23 @@
     {:conn conn :db-info db-info :page-ids [p1-id p2-id p3-id]}))
 
 (defn- seed-entities!
-  "Seeds entities with canonical-id linking across documents."
+  "Seeds entities with canonical-id linking and relationships across documents."
   [{:keys [conn]} p1-id p3-id]
-  (let [canonical-id (util/uuid)]
+  (let [canonical-id (util/uuid)
+        e1-id (util/uuid)
+        e2-id (util/uuid)]
     ;; Same concept "Schema Therapy" in doc1 and doc2 — same canonical-id
-    (d/transact! conn [{:entity/id (util/uuid) :entity/type :concept
+    (d/transact! conn [{:entity/id e1-id :entity/type :concept
                         :entity/name "Schema Therapy" :entity/description "An integrative therapy approach"
                         :entity/document-id "doc1" :entity/page 0
                         :entity/canonical-id canonical-id :entity/created-at (java.util.Date.)}
-                       {:entity/id (util/uuid) :entity/type :concept
+                       {:entity/id e2-id :entity/type :concept
                         :entity/name "Schema Therapy" :entity/description "Therapy for personality disorders"
                         :entity/document-id "doc2" :entity/page 0
-                        :entity/canonical-id canonical-id :entity/created-at (java.util.Date.)}])
+                        :entity/canonical-id canonical-id :entity/created-at (java.util.Date.)}
+                       ;; Relationship between the two entities
+                       {:relationship/id (util/uuid) :relationship/type :references
+                        :relationship/source-entity-id e1-id :relationship/target-entity-id e2-id}])
     canonical-id))
 
 ;; =============================================================================
