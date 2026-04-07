@@ -154,7 +154,7 @@
               {:result nil :stdout "" :stderr "" :error parse-error
                :execution-time-ms 0 :timeout? false})
         ;; Normal execution path
-          (let [vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ {}))
+          (let [vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'sandbox)") (catch Exception _ {}))
                 execution-result (run-sci-code sci-ctx code)
                 execution-time (- (System/currentTimeMillis) start-time)]
             (if (:timeout? execution-result)
@@ -190,7 +190,7 @@
                                        execution-result))
                                    execution-result)
                     {:keys [result stdout stderr error]} final-result
-                    vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'user)") (catch Exception _ vars-before))
+                    vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'sandbox)") (catch Exception _ vars-before))
                     new-vars (apply dissoc vars-after (keys vars-before))]
                 (when (seq new-vars)
                   (swap! locals-atom merge (into {} (map (fn [[k v]] [k (deref v)]) new-vars))))
@@ -539,8 +539,8 @@ OUTPUT STYLE:
         "Nested #() is illegal. Rewrite inner #() as (fn [x] ...)."
 
         ;; Unbound fn
-        (re-find #"unbound fn: #'user/(\S+)" e)
-        (let [[_ sym] (re-find #"unbound fn: #'user/(\S+)" e)]
+        (re-find #"unbound fn: #'sandbox/(\S+)" e)
+        (let [[_ sym] (re-find #"unbound fn: #'sandbox/(\S+)" e)]
           (str "'" sym "' was declared but its defn failed. Fix the defn above first."))
 
         ;; LazySeq cast

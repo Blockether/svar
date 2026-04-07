@@ -399,7 +399,8 @@
         ;; zprint/lazytest: can't use copy-ns (macros), manual requiring-resolve
         zp-resolve (fn [sym] (deref (requiring-resolve (symbol "zprint.core" (str sym)))))
         lt-resolve (fn [sym] (deref (requiring-resolve (symbol "lazytest.core" (str sym)))))
-        sci-ctx (sci/init {:namespaces {'user all-bindings
+        sandbox-ns (sci/create-ns 'sandbox nil)
+        sci-ctx (sci/init {:namespaces {'sandbox all-bindings
                                         'clojure.string (sci/copy-ns clojure.string str-ns)
                                         'clojure.set (sci/copy-ns clojure.set set-ns)
                                         'clojure.walk (sci/copy-ns clojure.walk walk-ns)
@@ -508,8 +509,10 @@
           (str "(def ^{:doc " (pr-str doc)
             (when args (str " :arglists (quote " (pr-str args) ")"))
             "} " sym " " sym ")"))))
+    ;; Set default namespace to 'sandbox instead of 'user
+    (sci/alter-var-root sci/ns (constantly sandbox-ns))
     {:sci-ctx sci-ctx
-     :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'user)")))}))
+     :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'sandbox)")))}))
 
 ;; =============================================================================
 ;; Var Index
@@ -525,7 +528,7 @@
   [sci-ctx initial-ns-keys]
   (try
     (let [var-info (sci/eval-string* sci-ctx
-                     "(into {} (for [[s v] (ns-publics 'user)] [s {:val @v :doc (:doc (meta v)) :arglists (:arglists (meta v))}]))")
+                     "(into {} (for [[s v] (ns-publics 'sandbox)] [s {:val @v :doc (:doc (meta v)) :arglists (:arglists (meta v))}]))")
           entries (->> var-info
                     (remove (fn [[sym _]] (contains? initial-ns-keys sym)))
                     (sort-by key)
@@ -573,7 +576,7 @@
    Ensures the symbol is a real SCI var before interning the value,
    since bindings from sci/init :namespaces are not SCI vars."
   [sci-ctx sym val]
-  (let [ns-obj (sci/find-ns sci-ctx 'user)]
+  (let [ns-obj (sci/find-ns sci-ctx 'sandbox)]
     ;; Promote to SCI var if needed (sci/init :namespaces creates plain values)
     (sci/eval-string* sci-ctx (str "(def " sym " nil)"))
     (sci/intern sci-ctx ns-obj sym val)))
