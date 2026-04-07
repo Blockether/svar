@@ -1045,14 +1045,79 @@
     {:score effective-score
      :zone (vitality-zone effective-score)}))
 
+(defn- find-connected-pages
+  "Finds pages connected to the given page through shared entities.
+   A page is connected if it shares an entity (by canonical-id) with the source page.
+
+   Returns vector of {:page-id :distance} maps, max 2 hops."
+  [{:keys [conn]} page-id {:keys [max-depth] :or {max-depth 2}}]
+  (when conn
+    (let [db (d/db conn)
+          ;; Find document-id for this page
+          page (d/pull db [:page/document-id :page/index] [:page/id page-id])
+          doc-id (:page/document-id page)
+          page-idx (:page/index page)]
+      (when doc-id
+        ;; Find entities on this page (by document-id + page index)
+        (let [entity-ids (d/q '[:find [?eid ...]
+                                :in $ ?doc-id ?page-idx
+                                :where [?e :entity/document-id ?doc-id]
+                                       [?e :entity/page ?page-idx]
+                                       [?e :entity/canonical-id ?eid]]
+                           db doc-id (or page-idx -1))
+              ;; Find other pages that share these canonical entities
+              connected (when (seq entity-ids)
+                          (d/q '[:find [?pid ...]
+                                 :in $ [?cid ...] ?exclude-page
+                                 :where [?e :entity/canonical-id ?cid]
+                                        [?e :entity/document-id ?did]
+                                        [?e :entity/page ?pidx]
+                                        [?p :page/document-id ?did]
+                                        [?p :page/index ?pidx]
+                                        [?p :page/id ?pid]
+                                        [(not= ?pid ?exclude-page)]]
+                            db entity-ids page-id))]
+          (mapv (fn [pid] {:page-id pid :distance 1}) (or connected [])))))))
+
+(defn propagate-activation!
+  "Spreads activation from an accessed page to connected pages.
+
+   Connected pages (sharing entities via canonical-id) receive a damped
+   access-count boost: boost = weight × damping^distance.
+
+   Only propagates for significant accesses (weight >= 1.0, i.e. fetch).
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-id` - String. The accessed page ID.
+   `weight`  - Double. Original access weight.
+   `damping` - Double, optional. Decay per hop (default: 0.6)."
+  ([db-info page-id weight] (propagate-activation! db-info page-id weight 0.6))
+  ([{:keys [conn] :as db-info} page-id weight damping]
+   (when (and conn (>= weight 1.0))
+     (try
+       (let [connected (find-connected-pages db-info page-id {})
+             now (java.util.Date.)]
+         (doseq [{:keys [page-id distance]} connected]
+           (let [boost (* weight (Math/pow damping distance))
+                 existing (d/pull (d/db conn) [:page/access-count] [:page/id page-id])
+                 current-count (or (:page/access-count existing) 0.0)]
+             (d/transact! conn [{:page/id page-id
+                                 :page/last-accessed now
+                                 :page/access-count (+ current-count boost)}]))))
+       (catch Exception e
+         (trove/log! {:level :debug :data {:page-id page-id :error (ex-message e)}
+                      :msg "Spreading activation failed (non-fatal)"}))))))
+
 (defn record-page-access!
-  "Records a page access in Datalevin. Updates last-accessed and increments access-count.
+  "Records a page access in Datalevin. Updates last-accessed, increments access-count,
+   and propagates activation to connected pages (for fetch-weight accesses).
 
    Params:
    `db-info` - Map with :conn key.
    `page-id` - String. The page ID to update.
    `weight`  - Double. Access weight (1.0 for fetch, 0.2 for search hit)."
-  [{:keys [conn]} page-id weight]
+  [{:keys [conn] :as db-info} page-id weight]
   (when conn
     (try
       (let [now (java.util.Date.)
@@ -1060,7 +1125,9 @@
             current-count (or (:page/access-count existing) 0.0)]
         (d/transact! conn [{:page/id page-id
                             :page/last-accessed now
-                            :page/access-count (+ current-count (double weight))}]))
+                            :page/access-count (+ current-count (double weight))}])
+        ;; Spread activation to connected pages (only for significant accesses)
+        (propagate-activation! db-info page-id weight))
       (catch Exception e
         (trove/log! {:level :warn :data {:page-id page-id :error (ex-message e)}
                      :msg "Failed to record page access"})))))
