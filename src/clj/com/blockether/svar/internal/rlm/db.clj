@@ -847,8 +847,9 @@
 (defn document-certainty
   "Computes Bayesian certainty for a document using Beta distribution.
 
-   Certainty = alpha / (alpha + beta).
-   Alpha increases on confirmed access, beta increases over time and on re-index.
+   Certainty = alpha / (alpha + effective-beta).
+   Alpha increases on confirmed access. Beta increases are computed lazily:
+   stored beta + time-decay (0.01/day since last update). No DB write needed.
 
    Params:
    `db-info` - Map with :conn key.
@@ -859,14 +860,22 @@
   [{:keys [conn]} doc-id]
   (when conn
     (let [doc (d/pull (d/db conn)
-                [:document/certainty-alpha :document/certainty-beta]
+                [:document/certainty-alpha :document/certainty-beta
+                 :document/updated-at :document/created-at]
                 [:document/id doc-id])
           alpha (or (:document/certainty-alpha doc) 2.0)
-          beta (or (:document/certainty-beta doc) 1.0)]
+          stored-beta (or (:document/certainty-beta doc) 1.0)
+          ;; Lazy time-decay: add 0.01/day since last update (pure computation)
+          updated-at (or (:document/updated-at doc) (:document/created-at doc))
+          now (java.util.Date.)
+          days-since (if updated-at
+                       (/ (- (.getTime now) (.getTime ^java.util.Date updated-at)) 86400000.0)
+                       0.0)
+          effective-beta (+ stored-beta (* 0.01 days-since))]
       (when (:document/certainty-alpha doc)
-        {:certainty (/ alpha (+ alpha beta))
+        {:certainty (/ alpha (+ alpha effective-beta))
          :alpha alpha
-         :beta beta}))))
+         :beta effective-beta}))))
 
 (defn record-document-access!
   "Records a confirmed access on a document — increases certainty alpha.
@@ -1269,9 +1278,6 @@
                                       db page-id))
                            0)]
       (when (:page/created-at page)
-        ;; Apply time-based certainty decay before reading
-        (when-let [doc-id (:page/document-id page)]
-          (decay-document-certainty! db-info doc-id))
         (let [{:keys [score zone]} (compute-page-vitality
                                      (or (:page/access-count page) 0.0)
                                      (:page/created-at page)
