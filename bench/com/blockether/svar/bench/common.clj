@@ -123,6 +123,10 @@
 
    Returns whatever score-fn returns."
   [{:keys [bench router task model run-ts task-id prompt-fn score-fn query-opts]}]
+  ;; Reset circuit breakers before each task — prevents cascading failures
+  ;; when a single timeout trips the breaker for all subsequent tasks
+  (doseq [p (:providers router)]
+    (llm/reset-provider! router (:id p)))
   (let [edn-path (trajectory-edn-path bench model run-ts task-id)
         db-path  (trajectory-temp-db-path task-id)
         env      (svar/create-env router {:path db-path})
