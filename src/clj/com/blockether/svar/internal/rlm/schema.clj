@@ -377,6 +377,16 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :page/created-at   {:db/valueType :db.type/instant}
    :page/last-accessed {:db/valueType :db.type/instant}
    :page/access-count {:db/valueType :db.type/double}
+   ;; RL Q-value for self-improving retrieval
+   :page/q-value        {:db/valueType :db.type/double}   ;; 0.0-1.0, default 0.5 = neutral
+   :page/q-update-count {:db/valueType :db.type/long}
+
+   ;; Page co-occurrence edges (Ebbinghaus decay)
+   :page-cooccurrence/id        {:db/valueType :db.type/string :db/unique :db.unique/identity}
+   :page-cooccurrence/page-a    {:db/valueType :db.type/string}
+   :page-cooccurrence/page-b    {:db/valueType :db.type/string}
+   :page-cooccurrence/strength  {:db/valueType :db.type/double}
+   :page-cooccurrence/last-seen {:db/valueType :db.type/instant}
 
    ;; Page Nodes (content)
    :page.node/id           {:db/valueType :db.type/string :db/unique :db.unique/identity}

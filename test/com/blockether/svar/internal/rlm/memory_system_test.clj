@@ -307,4 +307,167 @@
             db-info {:conn conn}]
         (try
           (expect (nil? (db/document-certainty db-info "nonexistent")))
+          (finally (d/close conn)))))
+
+    (it "normalizes alpha+beta when sum exceeds threshold"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          ;; Start with high alpha to trigger normalization on next access
+          (d/transact! conn [{:document/id "doc-norm"
+                              :document/name "test"
+                              :document/extension "pdf"
+                              :document/certainty-alpha 48.0
+                              :document/certainty-beta 1.0}])
+          (let [before (db/document-certainty db-info "doc-norm")]
+            ;; Access pushes alpha to 49, sum=50 — triggers normalization
+            (db/record-document-access! db-info "doc-norm" 2.0)
+            (let [after (db/document-certainty db-info "doc-norm")]
+              ;; Sum should be normalized down to ~20
+              (expect (<= (+ (:alpha after) (:beta after)) 21.0))
+              ;; Ratio (certainty) should be preserved within epsilon
+              (expect (< (abs (- (:certainty before) (:certainty after))) 0.01))))
+          (finally (d/close conn)))))
+
+    (it "reindex jump has meaningful impact even after many accesses (normalization)"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:document/id "doc-many"
+                              :document/name "test"
+                              :document/extension "pdf"
+                              :document/certainty-alpha 2.0
+                              :document/certainty-beta 1.0}])
+          ;; Simulate 100 accesses
+          (dotimes [_ 100]
+            (db/record-document-access! db-info "doc-many" 1.0))
+          (let [before (db/document-certainty db-info "doc-many")]
+            (db/reindex-certainty-jump! db-info "doc-many")
+            (let [after (db/document-certainty db-info "doc-many")
+                  drop (- (:certainty before) (:certainty after))]
+              ;; Jump should still cause >5% certainty drop
+              (expect (> drop 0.05))))
           (finally (d/close conn)))))))
+
+;; =============================================================================
+;; Page co-occurrence edges
+;; =============================================================================
+
+(defdescribe cooccurrence-test
+  (describe "co-occurrence tracking"
+    (it "creates co-occurrence edge between two pages"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (db/record-cooccurrence! db-info "page-a" "page-b")
+          (let [boost (db/get-cooccurrence-boost db-info "page-a" #{"page-b"})]
+            (expect (> boost 0.0)))
+          (finally (d/close conn)))))
+
+    (it "strengthens on repeated co-occurrence"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (db/record-cooccurrence! db-info "page-a" "page-b")
+          (let [boost1 (db/get-cooccurrence-boost db-info "page-a" #{"page-b"})]
+            (db/record-cooccurrence! db-info "page-a" "page-b")
+            (let [boost2 (db/get-cooccurrence-boost db-info "page-a" #{"page-b"})]
+              (expect (> boost2 boost1))))
+          (finally (d/close conn)))))
+
+    (it "is order-independent (a,b same as b,a)"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (db/record-cooccurrence! db-info "page-x" "page-y")
+          (let [boost-xy (db/get-cooccurrence-boost db-info "page-x" #{"page-y"})
+                boost-yx (db/get-cooccurrence-boost db-info "page-y" #{"page-x"})]
+            (expect (= boost-xy boost-yx)))
+          (finally (d/close conn)))))
+
+    (it "returns 0.0 for unrelated pages"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (let [boost (db/get-cooccurrence-boost db-info "page-a" #{"page-z"})]
+            (expect (= 0.0 boost)))
+          (finally (d/close conn)))))
+
+    (it "handles empty recent-pages set"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (let [boost (db/get-cooccurrence-boost db-info "page-a" #{})]
+            (expect (= 0.0 boost)))
+          (finally (d/close conn)))))))
+
+;; =============================================================================
+;; RL Q-values
+;; =============================================================================
+
+(defdescribe q-value-test
+  (describe "Q-value tracking"
+    (it "defaults to 0.5 for pages without Q history"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:page/id "p1" :page/document-id "doc1" :page/index 0
+                              :page/created-at (java.util.Date.) :page/last-accessed (java.util.Date.)
+                              :page/access-count 1.0}])
+          (expect (= 0.5 (db/get-page-q-value db-info "p1")))
+          (finally (d/close conn)))))
+
+    (it "increases Q-value with high reward"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:page/id "p1" :page/document-id "doc1" :page/index 0
+                              :page/created-at (java.util.Date.) :page/last-accessed (java.util.Date.)
+                              :page/access-count 1.0}])
+          (db/update-page-q-value! db-info "p1" 1.0)
+          (let [q (db/get-page-q-value db-info "p1")]
+            (expect (> q 0.5)))
+          (finally (d/close conn)))))
+
+    (it "decreases Q-value with low reward"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:page/id "p1" :page/document-id "doc1" :page/index 0
+                              :page/created-at (java.util.Date.) :page/last-accessed (java.util.Date.)
+                              :page/access-count 1.0}])
+          (db/update-page-q-value! db-info "p1" 0.0)
+          (let [q (db/get-page-q-value db-info "p1")]
+            (expect (< q 0.5)))
+          (finally (d/close conn)))))
+
+    (it "EMA learning rate decreases with updates"
+      (let [conn (temp-conn)
+            db-info {:conn conn}]
+        (try
+          (d/transact! conn [{:page/id "p1" :page/document-id "doc1" :page/index 0
+                              :page/created-at (java.util.Date.) :page/last-accessed (java.util.Date.)
+                              :page/access-count 1.0}])
+          ;; First update: large jump (alpha ~1.0)
+          (db/update-page-q-value! db-info "p1" 1.0)
+          (let [q1 (db/get-page-q-value db-info "p1")]
+            ;; Many updates to stabilize
+            (dotimes [_ 20]
+              (db/update-page-q-value! db-info "p1" 0.5))
+            (let [q2 (db/get-page-q-value db-info "p1")]
+              ;; After many 0.5 rewards, should converge back toward 0.5
+              (expect (< (abs (- q2 0.5)) (abs (- q1 0.5))))))
+          (finally (d/close conn)))))
+
+    (it "high Q-value produces higher vitality than low Q-value"
+      (let [page-v 0.5
+            high-q (db/compute-node-vitality page-v :paragraph 0.9)
+            low-q (db/compute-node-vitality page-v :paragraph 0.1)
+            neutral (db/compute-node-vitality page-v :paragraph 0.5)]
+        (expect (> (:score high-q) (:score neutral)))
+        (expect (< (:score low-q) (:score neutral)))))
+
+    (it "2-arity compute-node-vitality defaults to Q=0.5 (backward compat)"
+      (let [two-arity (db/compute-node-vitality 0.5 :paragraph)
+            three-arity (db/compute-node-vitality 0.5 :paragraph 0.5)]
+        (expect (= (:score two-arity) (:score three-arity)))))))

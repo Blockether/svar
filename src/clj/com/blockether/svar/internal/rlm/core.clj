@@ -68,8 +68,8 @@
              (doseq [doc documents]
                (db-store-pageindex-document! @db-info-atom doc)))
          llm-query-fn (make-routed-llm-query-fn {} depth-atom router)
-         {:keys [sci-ctx initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil)]
-     {:sci-ctx sci-ctx :initial-ns-keys initial-ns-keys :context context-data
+         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil)]
+     {:sci-ctx sci-ctx :sandbox-ns sandbox-ns :initial-ns-keys initial-ns-keys :context context-data
       :llm-query-fn llm-query-fn
       :locals-atom locals-atom :db-info-atom db-info-atom
       :router router})))
@@ -85,8 +85,9 @@
 
 (defn- run-sci-code
   "Evaluate `code` in `sci-ctx` with captured stdout/stderr.
+   Uses eval-string+ with :ns to ensure code runs in sandbox namespace.
    Returns {:result :stdout :stderr :error} with writers already closed."
-  [sci-ctx code]
+  [sci-ctx code & {:keys [sandbox-ns]}]
   (let [stdout-writer (java.io.StringWriter.)
         stderr-writer (java.io.StringWriter.)
         err-pw       (java.io.PrintWriter. stderr-writer true)
@@ -94,7 +95,9 @@
                       (try
                         (let [result (sci/binding [sci/out stdout-writer
                                                    sci/err err-pw]
-                                       (sci/eval-string* sci-ctx code))]
+                                       (let [ns (or (sci/find-ns sci-ctx 'sandbox) sandbox-ns)]
+                                         (:val (sci/eval-string+ sci-ctx code
+                                                 (when ns {:ns ns})))))]
                           {:result result :stdout (str stdout-writer) :stderr (str stderr-writer) :error nil})
                         (catch Throwable e
                           {:result nil :stdout (str stdout-writer) :stderr (str stderr-writer)
@@ -139,8 +142,9 @@
   (let [first-form (first forms)]
     (when (and (= 1 (count forms))
             (list? first-form) (seq first-form)
-            (not (symbol? (first first-form)))
-            (not (list? (first first-form))))
+            (let [head (first first-form)]
+              (not (or (symbol? head) (keyword? head)
+                       (list? head) (set? head) (map? head) (vector? head)))))
       (str "Bare list literal: " (pr-str first-form)
         ". Quote it: '(" (str/join " " first-form) ")"))))
 
@@ -156,7 +160,7 @@
     (catch Throwable e
       (ex-message e))))
 
-(defn execute-code [{:keys [sci-ctx locals-atom]} code]
+(defn execute-code [{:keys [sci-ctx sandbox-ns locals-atom]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
     (let [bal (paren-repair/paren-balance code)
           _ (rlm-debug! {:code code
@@ -175,7 +179,7 @@
                :execution-time-ms 0 :timeout? false})
         ;; Normal execution path
           (let [vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'sandbox)") (catch Exception _ {}))
-                execution-result (run-sci-code sci-ctx code)
+                execution-result (run-sci-code sci-ctx code :sandbox-ns sandbox-ns)
                 execution-time (- (System/currentTimeMillis) start-time)]
             (if (:timeout? execution-result)
               (do
@@ -190,7 +194,7 @@
                                                           :data {:code-len (count code) :error error}
                                                           :msg "Paren repair: no change needed"})
                                              execution-result)
-                                         (let [retry (run-sci-code sci-ctx repaired)]
+                                         (let [retry (run-sci-code sci-ctx repaired :sandbox-ns sandbox-ns)]
                                            (if (:error retry)
                                              (do (trove/log! {:level :warn :id ::repair-retry-failed
                                                               :data {:original-error error

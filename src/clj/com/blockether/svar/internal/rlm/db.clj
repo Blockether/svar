@@ -12,6 +12,10 @@
 (declare db-list-entities)
 (declare get-page-vitality)
 (declare compute-node-vitality)
+(declare recently-accessed-page-ids)
+(declare get-cooccurrence-boost)
+(declare get-page-q-value)
+(declare batch-cooccurrence-boosts)
 
 (defn str-truncate [s n] (when s (if (> (count s) n) (subs s 0 n) s)))
 
@@ -309,18 +313,34 @@
                                                 {:score 1.0 :zone :active})]
                                         (swap! page-vitality-cache assoc page-id v)
                                         v)))
+             page-q-cache (atom {})
              ;; Assign relevance rank (position in fulltext results = relevance signal)
              total (max 1 (count raw-results))
+             recent-pages (or (recently-accessed-page-ids db-info) #{})
+             ;; Batch co-occurrence lookup: single query for all result pages × recent pages
+             result-page-ids (distinct (keep :page.node/page-id raw-results))
+             cooc-boost-map (if (and (seq recent-pages) (seq result-page-ids))
+                              (try
+                                (batch-cooccurrence-boosts conn result-page-ids recent-pages)
+                                (catch Exception _ {}))
+                              {})
              ranked (->> raw-results
                       (map-indexed
                         (fn [idx node]
                           (let [page-id (:page.node/page-id node)
                                 page-v (cached-page-vitality page-id)
-                                node-v (compute-node-vitality (:score page-v) (:page.node/type node))
+                                q-val (if-let [cached (get @page-q-cache page-id)]
+                                        cached
+                                        (let [q (get-page-q-value db-info page-id)]
+                                          (swap! page-q-cache assoc page-id q)
+                                          q))
+                                node-v (compute-node-vitality (:score page-v) (:page.node/type node) q-val)
                                 ;; Relevance: 1.0 for first result, decreasing
                                 relevance (- 1.0 (/ (double idx) total))
+                                ;; Co-occurrence boost (pre-computed batch)
+                                cooc-bonus (* 0.05 (get cooc-boost-map page-id 0.0))
                                 ;; Combined score
-                                combined (+ (* 0.7 relevance) (* 0.3 (:score node-v)))]
+                                combined (+ (* 0.7 relevance) (* 0.3 (:score node-v)) cooc-bonus)]
                             (assoc node
                               ::combined-score combined
                               :vitality-score (:score node-v)
@@ -877,8 +897,25 @@
          :alpha alpha
          :beta effective-beta}))))
 
+(def ^:private ^:const CERTAINTY_NORM_THRESHOLD 50.0)
+(def ^:private ^:const CERTAINTY_NORM_TARGET 20.0)
+
+(defn- normalize-certainty-params!
+  "When alpha+beta exceeds threshold, scale both down to target-sum preserving ratio."
+  [conn doc-id]
+  (let [doc (d/pull (d/db conn) [:document/certainty-alpha :document/certainty-beta] [:document/id doc-id])
+        alpha (or (:document/certainty-alpha doc) 2.0)
+        beta (or (:document/certainty-beta doc) 1.0)
+        total (+ alpha beta)]
+    (when (> total CERTAINTY_NORM_THRESHOLD)
+      (let [scale (/ CERTAINTY_NORM_TARGET total)]
+        (d/transact! conn [{:document/id doc-id
+                            :document/certainty-alpha (* alpha scale)
+                            :document/certainty-beta (* beta scale)}])))))
+
 (defn record-document-access!
   "Records a confirmed access on a document — increases certainty alpha.
+   Normalizes alpha+beta when sum exceeds threshold to keep jumps effective.
 
    Params:
    `db-info` - Map with :conn key.
@@ -891,7 +928,8 @@
        (let [existing (d/pull (d/db conn) [:document/certainty-alpha] [:document/id doc-id])
              alpha (or (:document/certainty-alpha existing) 2.0)]
          (d/transact! conn [{:document/id doc-id
-                             :document/certainty-alpha (+ alpha (double boost))}]))
+                             :document/certainty-alpha (+ alpha (double boost))}])
+         (normalize-certainty-params! conn doc-id))
        (catch Exception e
          (trove/log! {:level :warn :data {:doc-id doc-id :error (ex-message e)}
                       :msg "Failed to record document access"}))))))
@@ -925,6 +963,7 @@
 
 (defn reindex-certainty-jump!
   "Applies a certainty beta jump when a document is re-indexed (content changed).
+   Normalizes alpha+beta when sum exceeds threshold to keep jumps effective.
 
    Params:
    `db-info` - Map with :conn key.
@@ -937,7 +976,8 @@
        (let [existing (d/pull (d/db conn) [:document/certainty-beta] [:document/id doc-id])
              beta (or (:document/certainty-beta existing) 1.0)]
          (d/transact! conn [{:document/id doc-id
-                             :document/certainty-beta (+ beta (double jump))}]))
+                             :document/certainty-beta (+ beta (double jump))}])
+         (normalize-certainty-params! conn doc-id))
        (catch Exception e
          (trove/log! {:level :warn :data {:doc-id doc-id :error (ex-message e)}
                       :msg "Failed to apply reindex certainty jump"}))))))
@@ -1131,23 +1171,96 @@
 
 (defn compute-node-vitality
   "Computes vitality for a specific node, combining page vitality with type metabolic rate.
+   Optional Q-value modulates the metabolic rate — high-Q pages decay slower.
 
    Params:
    `page-vitality-score` - Double. The page's vitality score (0.0–1.0).
    `node-type`           - Keyword. The node type (:section, :paragraph, etc.).
+   `q-value`             - Double, optional. RL Q-value (0.0–1.0, default 0.5 = neutral).
 
    Returns map with :score and :zone."
-  [page-vitality-score node-type]
-  (let [metabolic-rate (get METABOLIC_RATES node-type 1.0)
-        ;; Power law: effective = page_v ^ metabolic_rate
-        ;; rate 0.3 (section): 0.1^0.3 = 0.50 (slow decay), 0.0^0.3 = 0.0 (dead is dead)
-        ;; rate 1.0 (paragraph): 0.1^1.0 = 0.10 (normal decay)
-        ;; rate 0.1 (toc-entry): 0.1^0.1 = 0.79 (very slow decay)
-        effective-score (if (pos? page-vitality-score)
-                          (Math/pow page-vitality-score metabolic-rate)
-                          0.0)]
-    {:score effective-score
-     :zone (vitality-zone effective-score)}))
+  ([page-vitality-score node-type]
+   (compute-node-vitality page-vitality-score node-type 0.5))
+  ([page-vitality-score node-type q-value]
+   (let [base-rate (get METABOLIC_RATES node-type 1.0)
+         ;; Q-value modulation: high Q → slower decay, low Q → faster decay
+         ;; q_bonus range: -0.2 to +0.2 (neutral at q=0.5 → 0.0)
+         q-bonus (* (- (double q-value) 0.5) 0.4)
+         metabolic-rate (max 0.01 (* base-rate (- 1.0 q-bonus)))
+         ;; Power law: effective = page_v ^ metabolic_rate
+         effective-score (if (pos? page-vitality-score)
+                           (Math/pow page-vitality-score metabolic-rate)
+                           0.0)]
+     {:score effective-score
+      :zone (vitality-zone effective-score)})))
+
+;; -----------------------------------------------------------------------------
+;; RL Q-values for self-improving retrieval
+;; -----------------------------------------------------------------------------
+
+(defn update-page-q-value!
+  "Updates page Q-value using EMA: Q' = Q + alpha × (reward - Q).
+   Alpha decreases with update count for stability.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-id` - String. The page ID.
+   `reward`  - Double. Reward signal (0.0–1.0)."
+  [{:keys [conn]} page-id reward]
+  (when conn
+    (try
+      (let [page (d/pull (d/db conn) [:page/q-value :page/q-update-count] [:page/id page-id])
+            q (or (:page/q-value page) 0.5)
+            cnt (or (:page/q-update-count page) 0)
+            alpha (max 0.05 (/ 1.0 (+ 1.0 (/ cnt 10.0))))
+            new-q (+ q (* alpha (- (double reward) q)))]
+        (d/transact! conn [{:page/id page-id
+                            :page/q-value (min 1.0 (max 0.0 new-q))
+                            :page/q-update-count (inc cnt)}]))
+      (catch Exception e
+        (trove/log! {:level :debug :data {:page-id page-id :error (ex-message e)}
+                     :msg "Q-value update failed (non-fatal)"})))))
+
+(defn get-page-q-value
+  "Returns the Q-value for a page (default 0.5 if not set).
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-id` - String. The page ID."
+  [{:keys [conn]} page-id]
+  (if conn
+    (let [page (d/pull (d/db conn) [:page/q-value] [:page/id page-id])]
+      (or (:page/q-value page) 0.5))
+    0.5))
+
+(defn pages-accessed-since
+  "Returns set of page IDs accessed since a given time.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `since` - java.util.Date. Cutoff time."
+  [{:keys [conn]} since]
+  (when conn
+    (try
+      (set (d/q '[:find [?pid ...]
+                   :in $ ?cutoff
+                   :where
+                   [?e :page/id ?pid]
+                   [?e :page/last-accessed ?la]
+                   [(>= ?la ?cutoff)]]
+             (d/db conn) since))
+      (catch Exception _ #{}))))
+
+(defn finalize-q-updates!
+  "Updates Q-values for all pages accessed during a query session.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `accessed-page-ids` - Collection of page ID strings accessed during the query.
+   `reward` - Double. Reward signal derived from query outcome."
+  [db-info accessed-page-ids reward]
+  (doseq [page-id (distinct accessed-page-ids)]
+    (update-page-q-value! db-info page-id reward)))
 
 (defn propagate-activation!
   "Spreads activation from an accessed page to connected pages.
@@ -1227,6 +1340,146 @@
        (catch Exception e
          (trove/log! {:level :debug :data {:page-id page-id :error (ex-message e)}
                       :msg "Spreading activation failed (non-fatal)"}))))))
+
+;; -----------------------------------------------------------------------------
+;; Page Co-occurrence Tracking
+;; -----------------------------------------------------------------------------
+
+(def ^:private ^:const COOCCURRENCE_DECAY_TAU 7.0)
+(def ^:private ^:const COOCCURRENCE_MAX_PAIRS 20)
+
+(defn- cooccurrence-pair
+  "Returns [sorted-a sorted-b id] for a page pair (order-independent)."
+  [page-a page-b]
+  (let [[a b] (if (neg? (compare page-a page-b)) [page-a page-b] [page-b page-a])]
+    [a b (str a "|" b)]))
+
+(defn record-cooccurrence!
+  "Records or strengthens co-occurrence between two pages.
+   Strength uses Ebbinghaus decay: new = old × e^(-days/half-life) + 1.0
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-a` - String. First page ID.
+   `page-b` - String. Second page ID."
+  [{:keys [conn]} page-a page-b]
+  (when (and conn (not= page-a page-b))
+    (try
+      (let [[a b id] (cooccurrence-pair page-a page-b)
+            now (java.util.Date.)
+            existing (d/pull (d/db conn) [:page-cooccurrence/strength :page-cooccurrence/last-seen]
+                       [:page-cooccurrence/id id])
+            old-strength (or (:page-cooccurrence/strength existing) 0.0)
+            last-seen (:page-cooccurrence/last-seen existing)
+            days-since (if last-seen
+                         (/ (- (.getTime now) (.getTime ^java.util.Date last-seen)) 86400000.0)
+                         0.0)
+            decay (Math/exp (- (/ days-since COOCCURRENCE_DECAY_TAU)))
+            new-strength (+ (* old-strength decay) 1.0)]
+        (d/transact! conn [{:page-cooccurrence/id id
+                            :page-cooccurrence/page-a a
+                            :page-cooccurrence/page-b b
+                            :page-cooccurrence/strength new-strength
+                            :page-cooccurrence/last-seen now}]))
+      (catch Exception e
+        (trove/log! {:level :debug :data {:page-a page-a :page-b page-b :error (ex-message e)}
+                     :msg "Co-occurrence record failed (non-fatal)"})))))
+
+(defn record-cooccurrences!
+  "Records co-occurrence for all pairs in a set of page-ids.
+   Caps at COOCCURRENCE_MAX_PAIRS pages to avoid O(n^2) explosion.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-ids` - Collection of page ID strings."
+  [db-info page-ids]
+  (let [ids (vec (take COOCCURRENCE_MAX_PAIRS (distinct page-ids)))]
+    (when (> (count ids) 1)
+      (doseq [i (range (count ids))
+              j (range (inc i) (count ids))]
+        (record-cooccurrence! db-info (nth ids i) (nth ids j))))))
+
+(defn- batch-cooccurrence-boosts
+  "Batch-fetches co-occurrence boosts for result pages against recent pages.
+   Single Datalog query instead of N×M individual pulls.
+   Returns {page-id -> total-decayed-boost}."
+  [conn result-page-ids recent-page-ids]
+  (let [now (java.util.Date.)
+        all-page-ids (set (concat result-page-ids recent-page-ids))
+        ;; Single query: get all co-occurrence edges involving any of our pages
+        edges (d/q '[:find [(pull ?e [:page-cooccurrence/page-a :page-cooccurrence/page-b
+                                      :page-cooccurrence/strength :page-cooccurrence/last-seen]) ...]
+                      :in $ ?page-set
+                      :where
+                      [?e :page-cooccurrence/page-a ?a]
+                      [(?page-set ?a)]
+                      [?e :page-cooccurrence/page-b ?b]]
+                 (d/db conn) all-page-ids)
+        recent-set (set recent-page-ids)]
+    (reduce
+      (fn [acc {:keys [page-cooccurrence/page-a page-cooccurrence/page-b
+                       page-cooccurrence/strength page-cooccurrence/last-seen]}]
+        (let [;; Determine which side is the result page and which is recent
+              [result-pid] (cond
+                             (and (recent-set page-b) (not (recent-set page-a))) [page-a]
+                             (and (recent-set page-a) (not (recent-set page-b))) [page-b]
+                             ;; Both are recent — boost both as result pages if applicable
+                             :else nil)]
+          (if (and result-pid strength)
+            (let [days-since (if last-seen
+                               (/ (- (.getTime now) (.getTime ^java.util.Date last-seen)) 86400000.0)
+                               0.0)
+                  decayed (* strength (Math/exp (- (/ days-since COOCCURRENCE_DECAY_TAU))))]
+              (update acc result-pid (fnil + 0.0) decayed))
+            acc)))
+      {}
+      edges)))
+
+(defn get-cooccurrence-boost
+  "Computes co-occurrence boost for a page relative to recently accessed pages.
+   Returns a double (0.0 if no co-occurrences found).
+
+   Params:
+   `db-info` - Map with :conn key.
+   `page-id` - String. The page to check.
+   `recent-page-ids` - Set of recently accessed page IDs."
+  [{:keys [conn]} page-id recent-page-ids]
+  (if (or (empty? recent-page-ids) (nil? conn))
+    0.0
+    (let [now (java.util.Date.)]
+      (double
+        (reduce
+          (fn [acc recent-pid]
+          (if (= page-id recent-pid)
+            acc
+            (let [[_ _ id] (cooccurrence-pair page-id recent-pid)
+                  edge (d/pull (d/db conn) [:page-cooccurrence/strength :page-cooccurrence/last-seen]
+                         [:page-cooccurrence/id id])]
+              (if-let [strength (:page-cooccurrence/strength edge)]
+                (let [last-seen (:page-cooccurrence/last-seen edge)
+                      days-since (if last-seen
+                                   (/ (- (.getTime now) (.getTime ^java.util.Date last-seen)) 86400000.0)
+                                   0.0)
+                      decayed (* strength (Math/exp (- (/ days-since COOCCURRENCE_DECAY_TAU))))]
+                  (+ acc decayed))
+                acc))))
+        0.0
+        recent-page-ids)))))
+
+(defn- recently-accessed-page-ids
+  "Returns set of page IDs accessed within the last hour."
+  [{:keys [conn]}]
+  (when conn
+    (try
+      (let [cutoff (java.util.Date. (- (System/currentTimeMillis) 3600000))]
+        (set (d/q '[:find [?pid ...]
+                     :in $ ?cutoff
+                     :where
+                     [?e :page/id ?pid]
+                     [?e :page/last-accessed ?la]
+                     [(>= ?la ?cutoff)]]
+               (d/db conn) cutoff)))
+      (catch Exception _ #{}))))
 
 (defn record-page-access!
   "Records a page access in Datalevin. Updates last-accessed, increments access-count,

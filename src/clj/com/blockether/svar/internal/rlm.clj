@@ -378,6 +378,7 @@
              (doseq [[sym val] per-query]
                (when val
                  (rlm-tools/sci-update-binding! sci-ctx sym val))))
+         query-start-time (java.util.Date.)
          rlm-env (assoc env :context context :max-iterations-atom max-iterations-atom)
          env-id (:env-id env)]
      (binding [schema/*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
@@ -448,6 +449,14 @@
                  (catch Exception e
                    (trove/log! {:level :warn :data {:error (ex-message e)}
                                 :msg "Failed to update query (max iterations)"})))
+               ;; Q-value update: low reward for max-iterations/error
+               (try
+                 (let [accessed (rlm-db/pages-accessed-since @db-info-atom query-start-time)]
+                   (when (seq accessed)
+                     (rlm-db/finalize-q-updates! @db-info-atom accessed 0.1)))
+                 (catch Exception e
+                   (trove/log! {:level :debug :data {:error (ex-message e)}
+                                :msg "Q-value update failed (non-fatal)"})))
                (let [result-map (cond-> {:answer nil
                                          :raw-answer (:result answer answer)
                                          :status status
@@ -566,6 +575,26 @@
                  (catch Exception e
                    (trove/log! {:level :warn :data {:error (ex-message e)}
                                 :msg "Failed to update query (success)"})))
+               ;; Q-value update: reward from confidence + iteration efficiency
+               ;; confidence :high → 0.9 base, :medium → 0.6, :low → 0.3, nil → 0.5
+               ;; efficiency bonus: fewer iterations = higher reward (up to +0.1)
+               ;; eval-score overrides when available (from refine!)
+               (try
+                 (let [accessed (rlm-db/pages-accessed-since @db-info-atom query-start-time)
+                       max-iters (or @max-iterations-atom max-iterations)
+                       efficiency (- 1.0 (/ (double iterations) (double (max 1 max-iters))))
+                       base-reward (cond
+                                     (and eval-scores (number? eval-scores)) (double eval-scores)
+                                     (= confidence :high) 0.9
+                                     (= confidence :medium) 0.6
+                                     (= confidence :low) 0.3
+                                     :else 0.5)
+                       reward (min 1.0 (+ base-reward (* 0.1 efficiency)))]
+                   (when (seq accessed)
+                     (rlm-db/finalize-q-updates! @db-info-atom accessed reward)))
+                 (catch Exception e
+                   (trove/log! {:level :debug :data {:error (ex-message e)}
+                                :msg "Q-value update failed (non-fatal)"})))
                (let [result-map (cond-> {:answer final-answer
                                          :raw-answer answer-value
                                          :eval-scores eval-scores
@@ -1030,8 +1059,44 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   [env]
   (assoc env :locals-atom (atom {})))
 
+;; -----------------------------------------------------------------------------
+;; QA Manifest — crash-resumable generate-qa-env!
+;; -----------------------------------------------------------------------------
+
+(defn- qa-manifest-path
+  "Returns qa-manifest.edn path for a persistent env, or nil for ephemeral envs."
+  [env]
+  (when-let [path (:path @(:db-info-atom env))]
+    (str path "/qa-manifest.edn")))
+
+(defn- read-qa-manifest
+  "Reads qa-manifest.edn. Returns nil if not found or ephemeral env."
+  [env]
+  (when-let [p (qa-manifest-path env)]
+    (let [f (io/file p)]
+      (when (.exists f)
+        (edn/read-string (slurp f))))))
+
+(def ^:private qa-manifest-write-lock (Object.))
+
+(defn- write-qa-manifest!
+  "Writes qa-manifest.edn atomically via temp+rename. No-op for ephemeral envs."
+  [env manifest]
+  (when-let [p (qa-manifest-path env)]
+    (locking qa-manifest-write-lock
+      (let [tmp (str p ".tmp")]
+        (spit tmp (pr-str manifest))
+        (.renameTo (io/file tmp) (io/file p))))))
+
+(defn- update-qa-batch-status!
+  "Updates a single batch's status in the manifest and persists immediately."
+  [env manifest-atom batch-idx status-map]
+  (swap! manifest-atom assoc-in [:batches batch-idx] status-map)
+  (write-qa-manifest! env @manifest-atom))
+
 (defn generate-qa-env!
   "Generates question-answer pairs from ingested documents.
+   Supports crash-resume via qa-manifest.edn for persistent envs.
 
    Uses a multi-stage pipeline leveraging the RLM's iterative code execution:
 
@@ -1099,33 +1164,59 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
           ;; Select 1.5x passages for filtering headroom
          passage-count (int (Math/ceil (* count 1.5)))
 
+         ;; ===== MANIFEST: Check for resumable state =====
+         existing-qa-manifest (read-qa-manifest env)
+         manifest-atom (atom (or existing-qa-manifest
+                               {:started-at (str (java.time.Instant/now))
+                                :completed-at nil
+                                :phase1 {:status :pending}
+                                :batches {}}))
+         _ (when (and existing-qa-manifest (not (:completed-at existing-qa-manifest)))
+             (trove/log! {:level :info :id ::qa-resume
+                          :data {:batches-done (->> (:batches existing-qa-manifest)
+                                                 (filter (fn [[_ v]] (= :done (:status v))))
+                                                 clojure.core/count)}
+                          :msg "Resuming generate-qa-env! from manifest"}))
+
          ;; ===== PHASE 1: Passage Selection (fast-model TOC routing) =====
          effective-selection-model (or selection-model effective-model)
          db-info @(:db-info-atom env)
-         _ (trove/log! {:level :info :id ::qa-phase1
-                        :data {:target-passages passage-count :target-questions count
-                               :selection-model effective-selection-model}
-                        :msg "Phase 1: Selecting passages via fast-model TOC routing"})
-          ;; Gather corpus structure programmatically (no SCI loop)
-         corpus-documents (rlm-db/db-list-documents db-info)
-         corpus-toc (rlm-db/db-list-toc-entries db-info)
-         corpus-nodes (rlm-db/db-list-page-nodes db-info {:limit 500})
-         selection-prompt (build-toc-based-selection-prompt
-                            {:count passage-count
-                             :difficulty-dist difficulty
-                             :category-dist categories
-                             :documents corpus-documents
-                             :toc-entries corpus-toc
-                             :page-nodes corpus-nodes})
-         selection-result (llm/ask! rlm-router {:spec CHUNK_SELECTION_SPEC
-                                                :messages [(llm/system "You are a passage selection engine for Q&A generation. Select diverse passages from the corpus based on the provided structure. Return your selections in the required JSON format.")
-                                                           (llm/user selection-prompt)]
-                                                :routing {:optimize :cost}})
-         passages (or (:passages (:result selection-result)) [])
-         _ (trove/log! {:level :info :id ::qa-phase1-done
-                        :data {:passages-selected (clojure.core/count passages)
-                               :model-used effective-selection-model}
-                        :msg "Phase 1 complete"})
+         phase1 (if (= :done (get-in @manifest-atom [:phase1 :status]))
+                  (do (trove/log! {:level :info :id ::qa-phase1-cached
+                                   :data {:passages (clojure.core/count (get-in @manifest-atom [:phase1 :passages]))}
+                                   :msg "Phase 1: Reusing cached passages from manifest"})
+                      {:passages (get-in @manifest-atom [:phase1 :passages])
+                       :trace [] :iterations 0})
+                  (do
+                    (trove/log! {:level :info :id ::qa-phase1
+                                 :data {:target-passages passage-count :target-questions count
+                                        :selection-model effective-selection-model}
+                                 :msg "Phase 1: Selecting passages via fast-model TOC routing"})
+                    (let [corpus-documents (rlm-db/db-list-documents db-info)
+                          corpus-toc (rlm-db/db-list-toc-entries db-info)
+                          corpus-nodes (rlm-db/db-list-page-nodes db-info {:limit 500})
+                          selection-prompt (build-toc-based-selection-prompt
+                                            {:count passage-count
+                                             :difficulty-dist difficulty
+                                             :category-dist categories
+                                             :documents corpus-documents
+                                             :toc-entries corpus-toc
+                                             :page-nodes corpus-nodes})
+                          selection-result (llm/ask! rlm-router {:spec CHUNK_SELECTION_SPEC
+                                                                  :messages [(llm/system "You are a passage selection engine for Q&A generation. Select diverse passages from the corpus based on the provided structure. Return your selections in the required JSON format.")
+                                                                             (llm/user selection-prompt)]
+                                                                  :routing {:optimize :cost}})
+                          ps (or (:passages (:result selection-result)) [])]
+                      (swap! manifest-atom assoc :phase1 {:status :done :passages ps})
+                      (write-qa-manifest! env @manifest-atom)
+                      (trove/log! {:level :info :id ::qa-phase1-done
+                                   :data {:passages-selected (clojure.core/count ps)
+                                          :model-used effective-selection-model}
+                                   :msg "Phase 1 complete"})
+                      {:passages ps
+                       :trace (:trace selection-result)
+                       :iterations (or (:iterations selection-result) 0)})))
+         passages (:passages phase1)
 
          ;; ===== PHASE 2: Batched Q&A Generation (parallel via core.async) =====
          ;; Prepare persona rotation
@@ -1156,52 +1247,76 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                            :persona persona :multi-hop? is-multi-hop?
                            :k-candidates k-candidates}))
                       all-batches)
-         result-chan (async/chan batch-count)
-         _ (async/pipeline-blocking
-             parallel
-
-             result-chan
-             (map (fn [{:keys [batch-idx batch persona multi-hop? k-candidates]}]
-                    (trove/log! {:level :debug :id ::qa-batch
-                                 :data {:batch batch-idx :passages-in-batch (clojure.core/count batch)
-                                        :persona (when persona (name persona))
-                                        :multi-hop? multi-hop?}
-                                 :msg (str "Generating batch " batch-idx)})
-                    (let [max-retries 3]
-                      (loop [attempt 1]
-                        (let [result
-                              (try
-                                (let [forked-env (fork-env-for-query env)
-                                      prompt (build-generation-prompt batch batch-idx
-                                               {:persona persona
-                                                :k-candidates k-candidates
-                                                :multi-hop? multi-hop?})
-                                      result (query-env! forked-env prompt
-                                               {:spec QUESTIONIFY_SPEC
-                                                :debug? debug?
-                                                :max-iterations 20
-                                                :model effective-model})]
-                                  {:batch-idx batch-idx
-                                   :questions (or (get-in result [:answer :questions]) [])
-                                   :trace (:trace result)
-                                   :iterations (or (:iterations result) 0)})
-                                (catch Exception e
-                                  (trove/log! {:level :warn :id ::qa-batch-retry
-                                               :data {:batch batch-idx :attempt attempt
-                                                      :max-retries max-retries :error (ex-message e)}
-                                               :msg (str "Batch " batch-idx " failed (attempt " attempt "/" max-retries ")")})
-                                  nil))]
-                          (if (or result (>= attempt max-retries))
-                            (or result {:batch-idx batch-idx :questions [] :trace [] :iterations 0})
-                            (do (Thread/sleep (* attempt 1000)) ;; backoff: 1s, 2s, 3s
-                                (recur (inc attempt)))))))))
-             (async/to-chan! work-items))
-         ;; Collect results from pipeline and sort by batch index for deterministic order
-         generation-results (let [results (loop [acc []]
-                                            (if-let [result (async/<!! result-chan)]
-                                              (recur (conj acc result))
-                                              acc))]
-                              (vec (sort-by :batch-idx results)))
+         ;; Filter out already-done batches from manifest
+         manifest-batches (:batches @manifest-atom)
+         cached-results (vec (keep (fn [{:keys [batch-idx]}]
+                                     (when-let [mb (get manifest-batches batch-idx)]
+                                       (when (= :done (:status mb))
+                                         {:batch-idx batch-idx
+                                          :questions (or (:questions mb) [])
+                                          :trace []
+                                          :iterations 0})))
+                               work-items))
+         pending-items (vec (remove (fn [{:keys [batch-idx]}]
+                                      (= :done (:status (get manifest-batches batch-idx))))
+                             work-items))
+         _ (when (seq cached-results)
+             (trove/log! {:level :info :id ::qa-phase2-cached
+                          :data {:cached-batches (clojure.core/count cached-results)
+                                 :pending-batches (clojure.core/count pending-items)}
+                          :msg "Phase 2: Reusing cached batch results from manifest"}))
+         result-chan (async/chan (max 1 (clojure.core/count pending-items)))
+         _ (when (seq pending-items)
+             (async/pipeline-blocking
+               parallel
+               result-chan
+               (map (fn [{:keys [batch-idx batch persona multi-hop? k-candidates]}]
+                      (trove/log! {:level :debug :id ::qa-batch
+                                   :data {:batch batch-idx :passages-in-batch (clojure.core/count batch)
+                                          :persona (when persona (name persona))
+                                          :multi-hop? multi-hop?}
+                                   :msg (str "Generating batch " batch-idx)})
+                      (let [max-retries 3]
+                        (loop [attempt 1]
+                          (let [result
+                                (try
+                                  (let [forked-env (fork-env-for-query env)
+                                        prompt (build-generation-prompt batch batch-idx
+                                                 {:persona persona
+                                                  :k-candidates k-candidates
+                                                  :multi-hop? multi-hop?})
+                                        result (query-env! forked-env prompt
+                                                 {:spec QUESTIONIFY_SPEC
+                                                  :debug? debug?
+                                                  :max-iterations 20
+                                                  :model effective-model})]
+                                    {:batch-idx batch-idx
+                                     :questions (or (get-in result [:answer :questions]) [])
+                                     :trace (:trace result)
+                                     :iterations (or (:iterations result) 0)})
+                                  (catch Exception e
+                                    (trove/log! {:level :warn :id ::qa-batch-retry
+                                                 :data {:batch batch-idx :attempt attempt
+                                                        :max-retries max-retries :error (ex-message e)}
+                                                 :msg (str "Batch " batch-idx " failed (attempt " attempt "/" max-retries ")")})
+                                    nil))]
+                            (if (or result (>= attempt max-retries))
+                              (let [final-result (or result {:batch-idx batch-idx :questions [] :trace [] :iterations 0})]
+                                ;; Checkpoint batch to manifest
+                                (update-qa-batch-status! env manifest-atom batch-idx
+                                  {:status (if result :done :error)
+                                   :questions (:questions final-result)})
+                                final-result)
+                              (do (Thread/sleep (* attempt 1000))
+                                  (recur (inc attempt)))))))))
+               (async/to-chan! pending-items)))
+         _ (when (empty? pending-items) (async/close! result-chan))
+         ;; Collect new results + merge cached, sort by batch index
+         new-results (loop [acc []]
+                       (if-let [result (async/<!! result-chan)]
+                         (recur (conj acc result))
+                         acc))
+         generation-results (vec (sort-by :batch-idx (into cached-results new-results)))
          all-questions (vec (mapcat :questions generation-results))
          _ (trove/log! {:level :info :id ::qa-phase2-done
                         :data {:total-generated (clojure.core/count all-questions)}
@@ -1248,7 +1363,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
          ;; ===== Build stats =====
          duration-ms (util/elapsed-since start-time)
-         total-iterations (+ (or (:iterations selection-result) 0)
+         total-iterations (+ (or (:iterations phase1) 0)
                             (reduce + 0 (map :iterations generation-results))
                             ver-iterations)
          stats {:total-generated (clojure.core/count all-questions)
@@ -1262,10 +1377,14 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
      (trove/log! {:level :info :id ::qa-done :data stats
                   :msg "generate-qa-env! complete"})
 
+     ;; Mark manifest as completed
+     (swap! manifest-atom assoc :completed-at (str (java.time.Instant/now)))
+     (write-qa-manifest! env @manifest-atom)
+
      {:questions final-questions
       :dropped-questions dropped
       :verification-results results
-      :phase-traces {:selection (:trace selection-result)
+      :phase-traces {:selection (:trace phase1)
                      :generation (mapv :trace generation-results)
                      :verification ver-trace}
       :stats stats
@@ -2500,7 +2619,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
    If the source file hash changes, a full re-index is performed automatically.
    Set :force? true to force full re-index even when hash matches.
 
-   Returns map with :document, :output-path, :cached?, :pages-processed, :errors-count."
+   Returns map with :document, :output-path, :cached?, :hash-changed?, :pages-processed, :errors-count.
+   When :hash-changed? is true, callers with db-info should call reindex-certainty-jump!."
   ([file-path] (index! file-path {}))
   ([file-path {:keys [router output vision-model text-model parallel parallel-refine
                       refine? refine-model refine-iterations
@@ -2612,6 +2732,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                {:document existing-document
                 :output-path output-path
                 :cached? true
+                :hash-changed? false
                 :pages-processed 0
                 :errors-count 0})
 
@@ -2743,7 +2864,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                        ;; safe, but we still swallow interruption cleanly.
                        (doseq [^java.util.concurrent.Future f futures]
                          (try (.get f)
-                              (catch Exception _)))
+                              (catch Exception e
+                   (trove/log! {:level :debug :data {:error (ex-message e)}
+                                :msg "Q-value update failed (non-fatal)"}))))
                        (finally
                          (.shutdown pool))))
              ;; Fallback: file types without per-page tracking (e.g. unknown extensions)
@@ -2830,6 +2953,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                      {:document (when-not all-failed? final-document)
                       :output-path output-path
                       :cached? false
+                      :hash-changed? (boolean needs-full-reindex?)
                       :pages-processed @processed-count
                       :errors-count @errors-count})))))))))))
 

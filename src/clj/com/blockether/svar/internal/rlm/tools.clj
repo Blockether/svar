@@ -250,8 +250,11 @@
                                          document-id (assoc :document-id document-id)
                                          type (assoc :type type)))]
                          ;; Track search hit access (weight 0.2) for returned pages
-                         (doseq [page-id (distinct (keep :page.node/page-id results))]
-                           (record-page-access! db-info page-id 0.2))
+                         (let [page-ids (distinct (keep :page.node/page-id results))]
+                           (doseq [page-id page-ids]
+                             (record-page-access! db-info page-id 0.2))
+                           ;; Record co-occurrence for search result pages
+                           (db/record-cooccurrences! db-info page-ids))
                          results)
              do-toc #(db-search-toc-entries db-info query {:top-k top-k})
              do-ents #(db-search-entities db-info query
@@ -304,6 +307,8 @@
                   page-ids (distinct (keep :page.node/page-id nodes))]
               (doseq [pid page-ids]
                 (record-page-access! db-info pid 1.0))
+              ;; Record co-occurrence for all pages in document
+              (db/record-cooccurrences! db-info page-ids)
               (when (seq nodes)
                 (let [full-text (->> nodes
                                   (sort-by :page.node/page-id)
@@ -520,9 +525,12 @@
           (str "(def ^{:doc " (pr-str doc)
             (when args (str " :arglists (quote " (pr-str args) ")"))
             "} " sym " " sym ")"))))
-    ;; Set default namespace to 'sandbox instead of 'user
+    ;; Set default namespace to 'sandbox (per-context via eval-string+ :ns option)
+    ;; Note: sci/alter-var-root on sci/ns is GLOBAL, not per-context.
+    ;; We return sandbox-ns so callers can use (sci/eval-string+ ctx code {:ns sandbox-ns}).
     (sci/alter-var-root sci/ns (constantly sandbox-ns))
     {:sci-ctx sci-ctx
+     :sandbox-ns sandbox-ns
      :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'sandbox)")))}))
 
 ;; =============================================================================

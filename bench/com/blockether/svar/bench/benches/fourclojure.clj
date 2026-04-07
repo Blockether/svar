@@ -11,6 +11,7 @@
    [charred.api :as json]
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [edamame.core :as edamame]
    [com.blockether.svar.bench.common :as common]
    [com.blockether.svar.core :as svar]
    [taoensso.trove :as trove])
@@ -44,21 +45,27 @@
 ;; bb verification
 ;; =============================================================================
 
-(defn- substitute-blank [test-form candidate]
-  (str/replace test-form "__" candidate))
+(defn- single-form?
+  "Returns true if candidate is a single Clojure form (safe for def binding)."
+  [s]
+  (try
+    (= 1 (count (edamame/parse-string-all s {:all true})))
+    (catch Exception _ false)))
 
 (defn- build-bb-script [tests candidate]
-  (let [filled-tests (mapv #(substitute-blank % candidate) tests)
-        test-forms   (str/join "\n"
-                       (map-indexed
-                         (fn [_i test-str]
-                           (format "(let [result (try (if %s :pass [:fail %s (pr-str (try %s (catch Exception e (str \"error: \" (ex-message e)))))])
-                                                     (catch Exception e [:error %s (ex-message e)]))]
-                                     (swap! results conj result))"
-                             test-str (pr-str test-str) test-str (pr-str test-str)))
-                         filled-tests))]
+  (let [use-def? (single-form? candidate)
+        filled-tests (if use-def?
+                       tests ;; tests keep __ literal, resolved via (def __)
+                       (mapv #(str/replace % "__" candidate) tests))
+        test-forms (str/join "\n"
+                     (map-indexed
+                       (fn [i test-str]
+                         (format "(swap! results conj (try (if %s :pass [:fail %d]) (catch Exception e [:error %d (ex-message e)])))"
+                           test-str i i))
+                       filled-tests))]
     (str "(def results (atom []))\n"
       "(def is identity)\n"
+      (when use-def? (str "(def __ " candidate ")\n"))
       test-forms "\n"
       "(let [rs @results
              passed (count (filter #(= :pass %) rs))
@@ -71,6 +78,7 @@
                (make-array java.nio.file.attribute.FileAttribute 0))
         path (.toFile tmp)]
     (spit path script)
+    (spit "/tmp/last-bb-script.clj" script)
     (try
       (let [pb (ProcessBuilder. (into-array String ["bb" (.getAbsolutePath path)]))
             _  (.redirectErrorStream pb true)
