@@ -388,6 +388,15 @@
           avg-iters (if (= agent-name :query-env)
                       (/ (double (:total-iterations s)) n)
                       nil)
+          durations (sort (keep :duration-ms (:results s)))
+          dur-count (count durations)
+          percentile (fn [p] (when (pos? dur-count)
+                               (nth durations (min (dec dur-count) (int (* p dur-count))))))
+          median    (percentile 0.5)
+          std-dev   (when (> dur-count 1)
+                      (let [mean avg-dur
+                            variance (/ (reduce + (map #(Math/pow (- (double %) mean) 2.0) durations)) dur-count)]
+                        (Math/sqrt variance)))
           saved     (save-results! bench-name agent-name model (:results s))]
       {:bench            bench-name
        :mode             agent-name
@@ -399,6 +408,10 @@
        :errors           (:errors s)
        :accuracy         accuracy
        :avg-duration-ms  avg-dur
+       :median-ms        median
+       :p90-ms           (percentile 0.9)
+       :p99-ms           (percentile 0.99)
+       :std-dev-ms       std-dev
        :avg-iterations   avg-iters
        :avg-tokens       avg-toks
        :total-cost       (:total-cost s)

@@ -214,6 +214,60 @@
 (defn- find-bench [name]
   (first (filter #(= name (:name %)) BENCHMARKS)))
 
+(defn- compare-runs
+  "Compares two EDNL result files side by side."
+  [file-a file-b]
+  (let [load-run (fn [f]
+                   (let [entries (read-ednl-lines (io/file f))
+                         results (vec (filter #(or (nil? (:type %)) (= :result (:type %))) entries))
+                         correct (count (filter :correct? results))
+                         total   (count results)
+                         durations (sort (keep :duration-ms results))
+                         n (count durations)
+                         pct (fn [p] (when (pos? n) (nth durations (min (dec n) (int (* p n))))))
+                         mean (when (pos? n) (/ (reduce + 0.0 durations) n))]
+                     {:file f :total total :correct correct
+                      :accuracy (if (pos? total) (* 100.0 (/ (double correct) total)) 0.0)
+                      :errors (count (filter :error results))
+                      :avg-ms mean :median-ms (pct 0.5) :p90-ms (pct 0.9) :p99-ms (pct 0.99)
+                      :by-id (into {} (map (fn [r] [(or (:problem-id r) (:task-id r)) r]) results))}))
+        a (load-run file-a)
+        b (load-run file-b)
+        fmt (fn [label va vb]
+              (println (format "  %-16s %12s  %12s  %s"
+                         label (str va) (str vb)
+                         (cond (= va vb) ""
+                           (and (number? va) (number? vb)) (let [d (- (double vb) (double va))]
+                                                             (format "%+.1f" d))
+                           :else ""))))]
+    (println (format "\nCompare: %s vs %s\n" file-a file-b))
+    (println (format "  %-16s %12s  %12s  %s" "" "A" "B" "delta"))
+    (println (format "  %-16s %12s  %12s  %s" (apply str (repeat 16 \-)) (apply str (repeat 12 \-)) (apply str (repeat 12 \-)) "-----"))
+    (fmt "Total" (:total a) (:total b))
+    (fmt "Correct" (:correct a) (:correct b))
+    (fmt "Accuracy %" (format "%.1f" (:accuracy a)) (format "%.1f" (:accuracy b)))
+    (fmt "Errors" (:errors a) (:errors b))
+    (fmt "Avg ms" (when (:avg-ms a) (long (:avg-ms a))) (when (:avg-ms b) (long (:avg-ms b))))
+    (fmt "Median ms" (:median-ms a) (:median-ms b))
+    (fmt "P90 ms" (:p90-ms a) (:p90-ms b))
+    (fmt "P99 ms" (:p99-ms a) (:p99-ms b))
+    ;; Show per-problem diffs
+    (let [all-ids (sort (distinct (concat (keys (:by-id a)) (keys (:by-id b)))))
+          diffs (filter (fn [id]
+                          (let [ra (get-in a [:by-id id])
+                                rb (get-in b [:by-id id])]
+                            (not= (boolean (:correct? ra)) (boolean (:correct? rb)))))
+                  all-ids)]
+      (when (seq diffs)
+        (println (format "\n  Changed problems (%d):" (count diffs)))
+        (doseq [id diffs]
+          (let [ra (get-in a [:by-id id])
+                rb (get-in b [:by-id id])]
+            (println (format "    #%-4s %-30s  %s -> %s"
+                       id (or (:title ra) (:title rb) "?")
+                       (if (:correct? ra) "PASS" "FAIL")
+                       (if (:correct? rb) "PASS" "FAIL")))))))))
+
 ;; =============================================================================
 ;; Unified summary printer
 ;; =============================================================================
@@ -221,7 +275,8 @@
 (defn print-summary
   "Prints a unified summary from any benchmark result map."
   [{:keys [bench mode model total-questions total-dataset correct incorrect errors
-           accuracy avg-duration-ms avg-iterations avg-tokens total-cost]}]
+           accuracy avg-duration-ms median-ms p90-ms p99-ms std-dev-ms
+           avg-iterations avg-tokens total-cost]}]
   (println)
   (println (format "%s Benchmark Results" (or bench "?")))
   (println "=======================")
@@ -231,18 +286,20 @@
   (println (format "Correct:    %d (%.1f%%)" correct (* 100.0 (double (or accuracy 0)))))
   (println (format "Incorrect:  %d" incorrect))
   (println (format "Errors:     %d" errors))
-  (println (format "Avg duration: %.1fs" (/ (double (or avg-duration-ms 0)) 1000.0)))
-  (if avg-iterations
-    (println (format "Avg iterations: %.1f" (double avg-iterations)))
-    nil)
-  (if avg-tokens
+  (println (format "Duration:   avg=%.1fs  median=%.1fs  p90=%.1fs  p99=%.1fs  std=%.1fs"
+             (/ (double (or avg-duration-ms 0)) 1000.0)
+             (/ (double (or median-ms 0)) 1000.0)
+             (/ (double (or p90-ms 0)) 1000.0)
+             (/ (double (or p99-ms 0)) 1000.0)
+             (/ (double (or std-dev-ms 0)) 1000.0)))
+  (when avg-iterations
+    (println (format "Avg iterations: %.1f" (double avg-iterations))))
+  (when avg-tokens
     (println (format "Avg tokens: {input: %d, output: %d}"
                (long (:input avg-tokens 0))
-               (long (:output avg-tokens 0))))
-    nil)
-  (if total-cost
-    (println (format "Total cost: $%.4f" (double total-cost)))
-    nil))
+               (long (:output avg-tokens 0)))))
+  (when total-cost
+    (println (format "Total cost: $%.4f" (double total-cost)))))
 
 ;; =============================================================================
 ;; CLI
@@ -278,6 +335,7 @@
           (= k "--ids")    (recur (drop 2 remaining) (assoc acc :ids (set (str/split v #","))))
           (= k "--parallel") (recur (drop 2 remaining) (assoc acc :parallel (Long/parseLong v)))
           (= k "--debug") (recur (rest remaining) (assoc acc :debug? true))
+          (= k "--compare") (recur (drop 3 remaining) (assoc acc :compare [(second remaining) (nth remaining 2)]))
           :else            (recur (rest remaining) acc))))))
 
 (defn- run-one! [bench-name opts]
@@ -318,8 +376,9 @@
                  (if (some #(contains? parsed %) [:model :limit :offset])
                    "4clojure"
                    nil))
-        opts   (dissoc parsed :bench :list? :scores?)]
+        opts   (dissoc parsed :bench :list? :scores? :compare)]
     (cond
+      (:compare parsed)   (let [[a b] (:compare parsed)] (compare-runs a b))
       (:list? parsed)     (print-list)
       (:scores? parsed)   (print-aggregated-scores)
       (nil? bench)        (do (println "Error: --bench <name> is required (or --list to see options)")
