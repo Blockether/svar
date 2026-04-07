@@ -77,14 +77,17 @@
   (when db-info-atom (dispose-rlm-conn! @db-info-atom)))
 
 (defn get-locals
-  "Returns user-defined vars from the SCI sandbox (excludes built-in bindings)."
-  [{:keys [sci-ctx sandbox-ns initial-ns-keys]}]
+  "Returns {sym → val} of user-defined vars in SCI sandbox (excludes built-ins).
+   Direct atom read from SCI env — zero eval overhead."
+  [{:keys [sci-ctx initial-ns-keys]}]
   (try
-    (let [ns-obj (or sandbox-ns (sci/find-ns sci-ctx 'sandbox))
-          all-interns (:val (sci/eval-string+ sci-ctx "(ns-interns 'sandbox)" {:ns ns-obj}))]
-      (into {} (comp (remove (fn [[k _]] (contains? initial-ns-keys k)))
-                     (map (fn [[k v]] [k (deref v)])))
-        all-interns))
+    (let [sandbox (get-in @(:env sci-ctx) [:namespaces 'sandbox])]
+      (persistent!
+        (reduce-kv (fn [acc k v]
+                     (if (or (contains? initial-ns-keys k) (keyword? k))
+                       acc
+                       (assoc! acc k (if (instance? clojure.lang.IDeref v) @v v))))
+          (transient {}) sandbox)))
     (catch Exception _ {})))
 
 ;; =============================================================================
