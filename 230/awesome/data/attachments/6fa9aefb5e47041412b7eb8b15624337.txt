@@ -1,0 +1,6 @@
+2026-04-07T08:28:24.121203202Z :info com.blockether.svar.internal.rlm [2143 11] Starting text extraction from file 
+  data: {:file "resources-test/example.pdf"}
+2026-04-07T08:28:24.374325043Z :info com.blockether.svar.internal.rlm [2086 7] Rendered full-page PNGs 
+  data: {:pages 1, :output-dir "/tmp/pageindex-output-13867961277051750319"}
+2026-04-07T08:28:24.377001903Z :info com.blockether.svar.internal.rlm [2205 5] Text extraction complete 
+  data: {:document/name "example", :pages 1, :toc-entries 0, :has-metadata true, :title-inferred false, :has-abstract false}
