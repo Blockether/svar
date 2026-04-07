@@ -1,4 +1,0 @@
-2026-04-07T09:06:33.221007447Z :info com.blockether.svar.internal.rlm [2252 5] Starting text extraction from string content 
-  data: {:doc-name "sample", :content-type :txt}
-2026-04-07T09:06:33.221434705Z :info com.blockether.svar.internal.rlm [2281 7] Text extraction complete 
-  data: {:document/name "sample", :pages 1, :toc-entries 0, :title-inferred false, :has-abstract false}
