@@ -1,0 +1,10 @@
+2026-04-07T20:05:04.159943150Z :warn com.blockether.svar.internal.rlm.core [895 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 0, :max 0}
+2026-04-07T20:05:04.164227977Z :info com.blockether.svar.internal.rlm.core [43 5] RLM query-env! started 
+  data: {:query "No-op", :root-model "gpt-4o", :max-iterations 0, :verify? false, :plan? false, :refine-mode :final-confidence, :rlm-phase :query}
+2026-04-07T20:05:04.169129782Z :info com.blockether.svar.internal.rlm.core [43 5] Iteration loop started 
+  data: {:rlm-phase :query, :prev-final-results 0, :max-iterations 0, :has-pre-fetched? false, :msg-count 2, :has-output-spec? false, :has-reasoning? false, :query "No-op", :model "gpt-4o"}
+2026-04-07T20:05:04.170316931Z :warn com.blockether.svar.internal.rlm.core [895 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 0, :max 0}
+2026-04-07T20:05:04.170392061Z :info com.blockether.svar.internal.rlm.core [43 5] RLM query-env! finished (max iterations) 
+  data: {:status :max-iterations, :iterations 0, :duration-ms 6.034583, :rlm-phase :query}
