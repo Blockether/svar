@@ -320,7 +320,8 @@ GOTCHAS:
 - Nested #() is illegal. Use (fn [...] ...) for inner lambdas.
 - Each 'code' entry must be a complete expression, not a fragment.
 - Add docstrings to def'd vars: (def solution \"desc\" (fn [x] ...)). Helps <var_index>.
-- Concurrency: future, pmap, promise, delay, deliver all work in sandbox.
+- Concurrency: future, pmap, promise, delay, deliver work in sandbox.
+  Use (deref f timeout-ms :timeout) for futures with timeout.
 "
     (when (and has-documents? document-summary)
       (str "
