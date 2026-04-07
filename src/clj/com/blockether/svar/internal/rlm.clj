@@ -1116,35 +1116,64 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (.update digest (.getBytes s "UTF-8"))
     (apply str (map #(format "%02x" %) (.digest digest)))))
 
+(defn- digest-update!
+  [^MessageDigest digest x]
+  (.update digest (.getBytes (pr-str x) "UTF-8"))
+  (.update digest (.getBytes "\n" "UTF-8"))
+  digest)
+
+(defn- digest->sha256
+  ^String [^MessageDigest digest]
+  (str "sha256:" (apply str (map #(format "%02x" %) (.digest digest)))))
+
+(defn- qa-corpus-snapshot
+  "Returns deterministic corpus stats + content hash for manifest fingerprinting.
+   Hash includes document metadata, TOC entries, and full page-node text payloads."
+  [{:keys [conn]}]
+  (if-not conn
+    {:document-count 0 :toc-count 0 :node-count 0 :content-hash "sha256:0"}
+    (let [db (d/db conn)
+          docs (->> (d/q '[:find [(pull ?e [:document/id :document/name :document/title
+                                            :document/extension :document/abstract]) ...]
+                           :where [?e :document/id _]]
+                      db)
+                 (sort-by (juxt :document/id :document/name))
+                 vec)
+          toc (->> (d/q '[:find [(pull ?e [:document.toc/id :document.toc/document-id
+                                           :document.toc/title :document.toc/level
+                                           :document.toc/target-page :document.toc/target-section-id
+                                           :document.toc/description]) ...]
+                          :where [?e :document.toc/id _]]
+                     db)
+                (sort-by (juxt :document.toc/document-id :document.toc/target-page
+                           :document.toc/level :document.toc/title :document.toc/id))
+                vec)
+          nodes (->> (d/q '[:find [(pull ?e [:page.node/id :page.node/document-id :page.node/page-id
+                                             :page.node/type :page.node/local-id
+                                             :page.node/content :page.node/description]) ...]
+                            :where [?e :page.node/id _]]
+                       db)
+                  (sort-by (juxt :page.node/document-id :page.node/page-id
+                             :page.node/local-id :page.node/id))
+                  vec)
+          digest (MessageDigest/getInstance "SHA-256")]
+      (doseq [doc docs] (digest-update! digest doc))
+      (doseq [entry toc] (digest-update! digest entry))
+      (doseq [node nodes] (digest-update! digest node))
+      {:document-count (count docs)
+       :toc-count (count toc)
+       :node-count (count nodes)
+       :content-hash (digest->sha256 digest)})))
+
 (defn- qa-manifest-fingerprint
   "Returns a stable fingerprint for generate-qa-env! inputs.
    Includes key generation options + corpus summary so resume only reuses
    manifest state when run inputs are compatible."
   [{:keys [conn] :as _db-info} qa-opts]
-  (let [docs (or (rlm-db/db-list-documents {:conn conn} {:limit 100000 :include-toc? true}) [])
-        docs-snapshot (->> docs
-                        (map (fn [d]
-                               (-> d
-                                 (select-keys [:document/id :document/name :document/title :document/extension :document/abstract :document/toc])
-                                 (update :document/toc
-                                   (fn [toc]
-                                     (->> (or toc [])
-                                       (map #(select-keys % [:title :level :page]))
-                                       (sort-by (juxt :level :page :title))
-                                       vec))))))
-                        (sort-by (juxt :document/id :document/name))
-                        vec)
-        node-count (if conn
-                     (or (first (d/q '[:find [(count ?e)] :where [?e :page.node/id _]] (d/db conn))) 0)
-                     0)
-        toc-count (if conn
-                    (or (first (d/q '[:find [(count ?e)] :where [?e :document.toc/id _]] (d/db conn))) 0)
-                    0)
+  (let [corpus (qa-corpus-snapshot {:conn conn})
         payload {:manifest-version QA_MANIFEST_VERSION
                  :options qa-opts
-                 :corpus {:documents docs-snapshot
-                          :node-count node-count
-                          :toc-count toc-count}}]
+                 :corpus corpus}]
     (str "sha256:" (sha256-hex (pr-str payload)))))
 
 (defn- fresh-qa-manifest

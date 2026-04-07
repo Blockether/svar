@@ -1779,9 +1779,38 @@
           (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
           (expect (= 1 @query-calls))
 
-          ;; Third run with changed opts: fingerprint mismatch should reset + rerun.
+          ;; Mutate corpus content: fingerprint should change even with same opts.
+          (d/transact! (:conn @(:db-info-atom env))
+            [{:page.node/id "node-extra"
+              :page.node/document-id "doc-extra"
+              :page.node/page-id "page-extra"
+              :page.node/type :paragraph
+              :page.node/local-id "n1"
+              :page.node/content "This content changes fingerprint."}])
+
+          ;; Third run with same opts after corpus change: should reset + rerun.
+          (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
+          (expect (= 2 @query-calls))
+
+          ;; Fourth run with changed opts: fingerprint mismatch should reset + rerun.
           (sut/generate-qa-env! env {:count 3 :batch-size 5 :verify? false})
-          (expect (= 2 @query-calls)))
+          (expect (= 3 @query-calls)))
+        (finally
+          (sut/dispose-env! env)
+          (fs/delete-tree dir))))))
+
+(defdescribe qa-manifest-write-failure-test
+  (it "throws when target manifest path cannot be replaced"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "qa-manifest-fail-"}))
+          env (sut/create-env router {:path dir})
+          blocked-target (str dir "/qa-manifest.edn")]
+      (try
+        ;; Block replacement by creating a directory at the target file path.
+        (fs/create-dirs blocked-target)
+        (expect (throws? clojure.lang.ExceptionInfo
+                  #(#'sut/write-qa-manifest! env {:hello :world})))
         (finally
           (sut/dispose-env! env)
           (fs/delete-tree dir))))))
