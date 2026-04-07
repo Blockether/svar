@@ -127,21 +127,32 @@
    :all enables fn literals, deref, var, regex, quote, etc."
   {:all true})
 
+(defn- check-syntax
+  "Parses code with edamame. Returns parsed forms or throws."
+  [code]
+  (edamame/parse-string-all code edamame-opts))
+
+(defn- check-bare-list
+  "Detects unquoted list literals like (6 7 8) that parse fine but fail at eval.
+   Returns error string or nil."
+  [forms]
+  (let [first-form (first forms)]
+    (when (and (= 1 (count forms))
+            (list? first-form) (seq first-form)
+            (not (symbol? (first first-form)))
+            (not (list? (first first-form))))
+      (str "Bare list literal: " (pr-str first-form)
+        ". Quote it: '(" (str/join " " first-form) ")"))))
+
 (defn- parse-clojure-syntax
   "Validates Clojure syntax using edamame (same parser as SCI).
-   Checks both syntax (parse errors) and semantic issues (bare list literals).
+   Runs all checks: syntax parse, bare list detection.
    Returns nil if valid, or an error string if broken."
   [code]
   (try
-    (let [forms (edamame/parse-string-all code edamame-opts)
-          first-form (first forms)]
-      ;; Detect bare list literal: (6 7 8) parses fine but fails at eval
-      (when (and (= 1 (count forms))
-              (list? first-form) (seq first-form)
-              (not (symbol? (first first-form)))
-              (not (list? (first first-form))))
-        (str "Bare list literal: " (pr-str first-form)
-          ". Quote it: '(" (str/join " " first-form) ")")))
+    (let [forms (check-syntax code)]
+      (or (check-bare-list forms)
+          nil))
     (catch Throwable e
       (ex-message e))))
 
