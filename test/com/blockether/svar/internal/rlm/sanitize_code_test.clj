@@ -11,23 +11,23 @@
   [code]
   (let [sanitized (sanitize-code code)
         bindings {'+ + '- - '* * '/ / 'str str 'count count
-                                           'map map 'filter filter 'reduce reduce 'mapv mapv
-                                           'conj conj 'assoc assoc 'get get 'merge merge
-                                           'inc inc 'dec dec 'vec vec 'into into
-                                           'println println 'pr-str pr-str 'keyword keyword
-                                           'first first 'rest rest 'seq seq 'nil? nil?
-                                           'last last 'butlast butlast 'take take 'drop drop
-                                           '> > '< < '= = 'not not 'true? true? 'some some
-                                           'keys keys 'vals vals 'select-keys select-keys
-                                           'FINAL (fn
-                                                    ([answer] {:rlm/final true :answer answer})
-                                                    ([answer opts] (merge {:rlm/final true :answer answer} opts)))
-                                           'ctx-add! (fn [text] (str "Added: " text))
-                                           'ctx-remove! (fn [idx] (str "Removed: " idx))
-                                           'learn! (fn [text & [_pri]] (str "Learned: " text))
-                                           'list-dir (fn [& _] {:path "." :entries [{:name "a.clj" :type "file"} {:name "b.clj" :type "file"}] :total 2})
-                                           'read-file (fn [& _] "file contents")
-                                           'shell-exec (fn [& _] {:exit-code 0 :stdout "hello" :stderr "" :timed-out false})}
+                  'map map 'filter filter 'reduce reduce 'mapv mapv
+                  'conj conj 'assoc assoc 'get get 'merge merge
+                  'inc inc 'dec dec 'vec vec 'into into
+                  'println println 'pr-str pr-str 'keyword keyword
+                  'first first 'rest rest 'seq seq 'nil? nil?
+                  'last last 'butlast butlast 'take take 'drop drop
+                  '> > '< < '= = 'not not 'true? true? 'some some
+                  'keys keys 'vals vals 'select-keys select-keys
+                  'FINAL (fn
+                           ([answer] {:rlm/final true :answer answer})
+                           ([answer opts] (merge {:rlm/final true :answer answer} opts)))
+                  'ctx-add! (fn [text] (str "Added: " text))
+                  'ctx-remove! (fn [idx] (str "Removed: " idx))
+                  'learn! (fn [text & [_pri]] (str "Learned: " text))
+                  'list-dir (fn [& _] {:path "." :entries [{:name "a.clj" :type "file"} {:name "b.clj" :type "file"}] :total 2})
+                  'read-file (fn [& _] "file contents")
+                  'shell-exec (fn [& _] {:exit-code 0 :stdout "hello" :stderr "" :timed-out false})}
         sandbox-ns (sci/create-ns 'sandbox nil)
         ctx (sci/init {:namespaces {'sandbox bindings}})]
     ;; Match production: default namespace is 'sandbox (set by tools.clj:524)

@@ -177,10 +177,10 @@
   (let [parent-id (when query-ref (second query-ref))
         code-strs (mapv :code (or executions []))
         result-strs (mapv #(try (pr-str (:result %))
-                             (catch Exception e
-                               (trove/log! {:level :warn :data {:error (ex-message e)}
-                                            :msg "Failed to serialize execution result"})
-                               "???"))
+                                (catch Exception e
+                                  (trove/log! {:level :warn :data {:error (ex-message e)}
+                                               :msg "Failed to serialize execution result"})
+                                  "???"))
                       (or executions []))]
     (store-entity! db-info
       (cond-> {:entity/type :iteration
@@ -300,7 +300,7 @@
   "Search page nodes with fulltext, falling back to scan."
   [conn query]
   (try (fulltext-page-nodes conn query)
-    (catch Exception _ (scan-page-nodes conn query))))
+       (catch Exception _ (scan-page-nodes conn query))))
 
 (defn- brevify-node
   "Strips full content from a page node, replacing with a 150-char preview.
@@ -590,7 +590,7 @@
   "Search TOC entries with fulltext, falling back to scan."
   [conn query]
   (try (fulltext-toc-entries conn query)
-    (catch Exception _ (scan-toc-entries conn query))))
+       (catch Exception _ (scan-toc-entries conn query))))
 
 (defn- normalize-toc-entry
   "Normalize a raw TOC entry into a clean result map."

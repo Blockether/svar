@@ -27,6 +27,14 @@
 
 (declare build-system-prompt run-iteration format-executions)
 
+(def ^:private CAVEMAN_LITE_PROMPT
+  "Drop articles, filler, pleasantries. Keep technical substance.
+- Drop: a, an, the, just, really, basically, actually, simply
+- Drop: sure, certainly, of course, happy to
+- Short synonyms: fix not \"implement a solution for\"
+- No hedging. Fragments fine. Technical terms exact.
+- Code blocks unchanged. Caveman English around code, not in code.")
+
 (defn rlm-debug!
   "Logs at :info level only when :rlm-debug? is true in *rlm-ctx*.
    Includes :rlm-phase from context automatically in data."
@@ -400,6 +408,7 @@ CODE STYLE:
 - No error handling for scenarios that cannot happen.
 
 OUTPUT STYLE:
+" CAVEMAN_LITE_PROMPT "
 - Put the answer in 'final'. Explanation only if non-obvious.
 - No boilerplate. No filler prose.
 "))
@@ -465,8 +474,10 @@ OUTPUT STYLE:
               exec-errors (when exec-results
                             (seq (filter :error exec-results)))
               untested? (and (zero? (or iteration 0)) (empty? code-blocks))
-              ;; Parse final answer with edamame — syntax + bare list check
-              parse-check (parse-clojure-syntax final-answer)
+              ;; Parse final answer with edamame — only for Clojure answers
+              language (keyword (or (:language final-data) "clojure"))
+              parse-check (when (= language :clojure)
+                            (parse-clojure-syntax final-answer))
               validation-error (or (when untested?
                                      "You submitted final without running any code. Run the self-test first.")
                                  (when exec-errors

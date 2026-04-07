@@ -46,7 +46,7 @@
         (->> (d/q '[:find [(pull ?e [*]) ...]
                     :in $ ?parent-id
                     :where [?e :entity/type :iteration]
-                           [?e :entity/parent-id ?parent-id]]
+                    [?e :entity/parent-id ?parent-id]]
                db query-id)
           (sort-by :iteration/index))))))
 

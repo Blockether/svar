@@ -102,8 +102,8 @@
 
     (it "renders TOC entries"
       (let [md (db/results->markdown {:pages [] :toc [{:document.toc/title "Chapter 1"
-                                                        :document.toc/level "l1"
-                                                        :document.toc/target-page 5}]
+                                                       :document.toc/level "l1"
+                                                       :document.toc/target-page 5}]
                                       :entities []})]
         (expect (re-find #"Chapter 1" md))
         (expect (re-find #"p\.5" md))))

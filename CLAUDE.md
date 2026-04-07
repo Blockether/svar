@@ -12,6 +12,21 @@ This development environment is automatically wired with **Blockether One** — 
 
 3. **Config creation** is the only exception — `(def config (svar/make-config ...))` may be wrapped in `(comment ...)` since API keys are environment-specific. Everything downstream that uses `config` should run.
 
+## Communication Style
+
+Caveman mode. Drop articles, filler, pleasantries. Keep technical substance.
+
+- Drop: a, an, the, just, really, basically, actually, simply
+- Drop: sure, certainly, of course, happy to
+- Short synonyms: fix not "implement a solution for"
+- No hedging. Fragments fine. Technical terms exact.
+- Code blocks unchanged. Caveman English around code, not in code.
+
+Escalate to full sentences only:
+- Destructive/risky actions (data loss, security, infra, billing)
+- Architectural trade-offs and migration plans
+- User explicitly asks for deep explanation
+
 ## Test Framework
 
 - Use **lazytest**, not `clojure.test`

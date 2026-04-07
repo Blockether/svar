@@ -202,13 +202,13 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
   "Validates a JSON string. Returns nil if valid, error string if broken."
   [s]
   (try (json/read-json (str s)) nil
-    (catch Exception e (str "Invalid JSON: " (ex-message e)))))
+       (catch Exception e (str "Invalid JSON: " (ex-message e)))))
 
 (defn validate-edn
   "Validates an EDN string. Returns nil if valid, error string if broken."
   [s]
   (try (edn/read-string (str s)) nil
-    (catch Exception e (str "Invalid EDN: " (ex-message e)))))
+       (catch Exception e (str "Invalid EDN: " (ex-message e)))))
 
 (defn validate-python
   "Validates Python syntax via python3 compile(). Returns nil if valid."

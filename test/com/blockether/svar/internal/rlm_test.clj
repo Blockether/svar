@@ -284,7 +284,12 @@
                                    svar/REQUIRED true
                                    svar/DESCRIPTION "Name field"}))
           prompt (#'rlm-core/build-system-prompt {:output-spec test-spec})]
-      (expect (str/includes? prompt "OUTPUT SCHEMA")))))
+      (expect (str/includes? prompt "OUTPUT SCHEMA"))))
+
+  (it "includes caveman output style"
+    (let [prompt (#'rlm-core/build-system-prompt {})]
+      (expect (str/includes? prompt "OUTPUT STYLE"))
+      (expect (str/includes? prompt "Drop articles, filler, pleasantries")))))
 
 ;; =============================================================================
 ;; System Prompt Tests

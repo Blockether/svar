@@ -840,10 +840,10 @@ Inject custom functions and constants into the RLM's sandboxed SCI environment. 
     {:spec my-output-spec          ;; structured output (parsed with spec)
      :context {:extra "data"}      ;; additional data context
      :model "gpt-4o"               ;; override default model
-     :max-iterations 30            ;; max code iterations (default: 50)
-     :max-refinements 2            ;; max refine loops (default: 1)
-     :threshold 0.85               ;; min eval score 0.0-1.0 (default: 0.8)
-     :refine? true                 ;; enable self-critique refinement (default: true)
+      :max-iterations 30            ;; max code iterations (default: 50)
+      :max-refinements 2            ;; max refine loops (default: 1)
+      :threshold 0.85               ;; min eval score 0.0-1.0 (default: 0.8)
+      :refine? true                 ;; enable self-critique refinement (default: true)
      :plan? true                   ;; LLM outlines a strategy before executing code (default: false)
      :verify? true                 ;; CoVe fact-checking: LLM cites sources, verified post-query (default: false)
      :max-context-tokens 8000      ;; token budget for context window
