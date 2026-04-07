@@ -274,7 +274,11 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
                  ::spec/description "Confidence level"
                  ::spec/values {"high" "Very confident in the answer"
                                 "medium" "Somewhat confident"
-                                "low" "Uncertain, best guess"}})))
+                                "low" "Uncertain, best guess"}})
+    (spec/field {::spec/name :sources
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/description "IDs of sources used to derive the answer. Include page.node IDs, document IDs, or entity IDs that you fetched/searched and actually used. REQUIRED when you used search-documents or fetch-content."})))
 
 (def ITERATION_SPEC
   "Spec for each RLM iteration response. Forces structured output from LLM.

@@ -58,8 +58,7 @@
   ([context-data depth-atom router {:keys [db path documents]}]
    (when-not router
      (throw (ex-info "Router is required for RLM environment" {:type :rlm/missing-router})))
-   (let [locals-atom (atom {})
-         db-info (cond
+   (let [db-info (cond
                    (false? db) nil
                    (and (map? db) (:conn db)) (assoc db :owned? false)
                    :else (create-rlm-conn path))
@@ -71,13 +70,22 @@
          {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil)]
      {:sci-ctx sci-ctx :sandbox-ns sandbox-ns :initial-ns-keys initial-ns-keys :context context-data
       :llm-query-fn llm-query-fn
-      :locals-atom locals-atom :db-info-atom db-info-atom
+      :db-info-atom db-info-atom
       :router router})))
 
 (defn dispose-rlm-env! [{:keys [db-info-atom]}]
   (when db-info-atom (dispose-rlm-conn! @db-info-atom)))
 
-(defn get-locals [rlm-env] @(:locals-atom rlm-env))
+(defn get-locals
+  "Returns user-defined vars from the SCI sandbox (excludes built-in bindings)."
+  [{:keys [sci-ctx sandbox-ns initial-ns-keys]}]
+  (try
+    (let [ns-obj (or sandbox-ns (sci/find-ns sci-ctx 'sandbox))
+          all-interns (:val (sci/eval-string+ sci-ctx "(ns-interns 'sandbox)" {:ns ns-obj}))]
+      (into {} (comp (remove (fn [[k _]] (contains? initial-ns-keys k)))
+                     (map (fn [[k v]] [k (deref v)])))
+        all-interns))
+    (catch Exception _ {})))
 
 ;; =============================================================================
 ;; Code Execution
@@ -160,7 +168,7 @@
     (catch Throwable e
       (ex-message e))))
 
-(defn execute-code [{:keys [sci-ctx sandbox-ns locals-atom]} code]
+(defn execute-code [{:keys [sci-ctx sandbox-ns]} code]
   (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :execute-code})]
     (let [bal (paren-repair/paren-balance code)
           _ (rlm-debug! {:code code
@@ -178,8 +186,7 @@
               {:result nil :stdout "" :stderr "" :error parse-error
                :execution-time-ms 0 :timeout? false})
         ;; Normal execution path
-          (let [vars-before (try (sci/eval-string* sci-ctx "(ns-interns 'sandbox)") (catch Exception _ {}))
-                execution-result (run-sci-code sci-ctx code :sandbox-ns sandbox-ns)
+          (let [execution-result (run-sci-code sci-ctx code :sandbox-ns sandbox-ns)
                 execution-time (- (System/currentTimeMillis) start-time)]
             (if (:timeout? execution-result)
               (do
@@ -214,17 +221,13 @@
                                        execution-result))
                                    execution-result)
                     {:keys [result stdout stderr error]} final-result
-                    vars-after (try (sci/eval-string* sci-ctx "(ns-interns 'sandbox)") (catch Exception _ vars-before))
-                    new-vars (apply dissoc vars-after (keys vars-before))]
-                (when (seq new-vars)
-                  (swap! locals-atom merge (into {} (map (fn [[k v]] [k (deref v)]) new-vars))))
+                    ]
                 (rlm-debug! {:execution-time-ms execution-time
                              :has-error? (some? error)
                              :error error
                              :result-preview (str-truncate (pr-str result) 200)
                              :stdout-preview (when-not (str/blank? stdout) (str-truncate stdout 200))
-                             :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))
-                             :new-vars (when (seq new-vars) (vec (keys new-vars)))} "Code execution complete")
+                             :stderr-preview (when-not (str/blank? stderr) (str-truncate stderr 200))} "Code execution complete")
                 (assoc final-result :execution-time-ms execution-time :timeout? false)))))))))
 
 (defn answer-str
@@ -486,11 +489,15 @@ OUTPUT STYLE:
                                [{:id 0 :code final-answer :result nil :stdout "" :stderr ""
                                  :error validation-error}])
                  :final-result nil :api-usage api-usage})
-            (let [final-result {:final? true
-                                :answer {:result final-answer :type String}
-                                :confidence confidence}]
+            (let [sources (vec (or (:sources final-data) []))
+                  final-result (cond-> {:final? true
+                                        :answer {:result final-answer :type String}
+                                        :confidence confidence}
+                                 (seq sources) (assoc :sources sources)
+                                 (:reasoning final-data) (assoc :reasoning (:reasoning final-data)))]
               (rlm-debug! {:final-answer (str-truncate final-answer 200)
-                           :confidence confidence} "Final answer accepted")
+                           :confidence confidence
+                           :sources-count (count sources)} "Final answer accepted")
               {:response nil :thinking thinking :next-optimize next-optimize
                :executions (or executions []) :final-result final-result :api-usage api-usage})))
         ;; Normal path: execute code blocks
@@ -730,8 +737,10 @@ OUTPUT STYLE:
               doc-str (str-truncate (or answer "Previous query result") 100)
               val-map {:answer answer}]
           (try
-            (sci/eval-string* sci-ctx
-              (str "(def ^{:doc " (pr-str doc-str) "} " var-name " " (pr-str val-map) ")"))
+            (let [sandbox-ns (sci/find-ns sci-ctx 'sandbox)]
+              (sci/eval-string+ sci-ctx
+                (str "(def ^{:doc " (pr-str doc-str) "} " var-name " " (pr-str val-map) ")")
+                {:ns sandbox-ns}))
             (catch Exception _ nil))))
       results)))
 

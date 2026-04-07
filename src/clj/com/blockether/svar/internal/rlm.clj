@@ -19,6 +19,7 @@
    [com.blockether.svar.internal.rlm.schema :as schema]
    [com.blockether.svar.internal.rlm.trajectory :as trajectory]
    [com.blockether.svar.internal.rlm.tools :as rlm-tools]
+   [sci.core :as sci]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
@@ -44,6 +45,37 @@
 (def CHUNK_SELECTION_SPEC schema/CHUNK_SELECTION_SPEC)
 (def QUESTIONIFY_SPEC schema/QUESTIONIFY_SPEC)
 (def VERIFICATION_SPEC schema/VERIFICATION_SPEC)
+
+;; -----------------------------------------------------------------------------
+;; Q-value Reward Constants
+;; -----------------------------------------------------------------------------
+
+(def ^:private ^:const Q_REWARD_UNCITED
+  "Penalty reward for pages fetched but not cited in the final answer."
+  0.3)
+
+(def ^:private ^:const Q_REWARD_FAILURE
+  "Low reward for queries that hit max iterations or errored."
+  0.1)
+
+(defn- confidence->base-reward
+  "Maps eval-scores or confidence level to a base Q-value reward (0.0-1.0).
+   Prefers numeric eval-scores when available."
+  [eval-scores confidence]
+  (cond
+    (and eval-scores (number? eval-scores)) (double eval-scores)
+    (= confidence :high) 0.9
+    (= confidence :medium) 0.6
+    (= confidence :low) 0.3
+    :else 0.5))
+
+(defn- compute-q-reward
+  "Computes the high reward for cited pages, incorporating iteration efficiency.
+   Returns a reward clamped to [0.0, 1.0]."
+  ^double [eval-scores confidence iterations max-iters]
+  (let [efficiency (- 1.0 (/ (double iterations) (double (max 1 max-iters))))
+        base-reward (confidence->base-reward eval-scores confidence)]
+    (min 1.0 (+ base-reward (* 0.1 efficiency)))))
 
 (defn create-env
   "Creates an RLM environment (component) for document ingestion and querying.
@@ -80,7 +112,6 @@
   (when-not router
     (anomaly/incorrect! "Missing router" {:type :rlm/missing-router}))
   (let [depth-atom (atom 0)
-        locals-atom (atom {})
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
         db-info (rlm-db/create-rlm-conn {:conn conn :path path})
@@ -93,15 +124,15 @@
         system-prompt (rlm-core/build-system-prompt {:has-reasoning? has-reasoning?})
         conversation-ref (rlm-db/store-conversation! db-info
                            {:env-id env-id :model root-model :system-prompt system-prompt})
-        {:keys [sci-ctx initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
+        {:keys [sci-ctx sandbox-ns initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
     {:env-id env-id
      :conversation-ref conversation-ref
      :depth-atom depth-atom
-     :locals-atom locals-atom
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
      :sci-ctx sci-ctx
+     :sandbox-ns sandbox-ns
      :initial-ns-keys initial-ns-keys
      :router router
      :llm-query-fn llm-query-fn
@@ -327,8 +358,6 @@
          rlm-router (:router env)
            ;; Resolve root model name for token counting / refine! config
          root-model (or (when rlm-router (rlm-routing/resolve-root-model rlm-router)) model)
-           ;; Reuse env's locals-atom so get-local (closed over at env creation) sees updates
-         _locals-atom (:locals-atom env)
          depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
          sub-llm-fn (rlm-routing/make-routed-llm-query-fn {:optimize :cost} depth-atom rlm-router)
@@ -453,7 +482,7 @@
                (try
                  (let [accessed (rlm-db/pages-accessed-since @db-info-atom query-start-time)]
                    (when (seq accessed)
-                     (rlm-db/finalize-q-updates! @db-info-atom accessed 0.1)))
+                     (rlm-db/finalize-q-updates! @db-info-atom accessed Q_REWARD_FAILURE)))
                  (catch Exception e
                    (trove/log! {:level :debug :data {:error (ex-message e)}
                                 :msg "Q-value update failed (non-fatal)"})))
@@ -580,23 +609,31 @@
                  (catch Exception e
                    (trove/log! {:level :warn :data {:error (ex-message e)}
                                 :msg "Failed to update query (success)"})))
-               ;; Q-value update: reward from confidence + iteration efficiency
-               ;; confidence :high → 0.9 base, :medium → 0.6, :low → 0.3, nil → 0.5
-               ;; efficiency bonus: fewer iterations = higher reward (up to +0.1)
-               ;; eval-score overrides when available (from refine!)
+               ;; Q-value update with source attribution:
+               ;; - Cited sources (in FINAL :sources) -> high reward
+               ;; - Fetched-but-not-cited pages -> penalty (accessed but not useful)
+               ;; - Pages never accessed -> unchanged (stay at 0.5)
                (try
                  (let [accessed (rlm-db/pages-accessed-since @db-info-atom query-start-time)
+                       cited-source-ids (set (or sources []))
+                       cited-page-ids (when (and (seq cited-source-ids) (:conn @db-info-atom))
+                                        (let [conn (:conn @db-info-atom)]
+                                          (set (d/q '[:find [?pid ...]
+                                                       :in $ [?sid ...]
+                                                       :where (or [?e :page.node/id ?sid]
+                                                                  [?e :page/id ?sid]
+                                                                  [?e :page.node/document-id ?sid])
+                                                       [?e :page.node/page-id ?pid]]
+                                                 (d/db conn) (vec cited-source-ids)))))
                        max-iters (or @max-iterations-atom max-iterations)
-                       efficiency (- 1.0 (/ (double iterations) (double (max 1 max-iters))))
-                       base-reward (cond
-                                     (and eval-scores (number? eval-scores)) (double eval-scores)
-                                     (= confidence :high) 0.9
-                                     (= confidence :medium) 0.6
-                                     (= confidence :low) 0.3
-                                     :else 0.5)
-                       reward (min 1.0 (+ base-reward (* 0.1 efficiency)))]
+                       high-reward (compute-q-reward eval-scores confidence iterations max-iters)]
                    (when (seq accessed)
-                     (rlm-db/finalize-q-updates! @db-info-atom accessed reward)))
+                     (if (seq cited-page-ids)
+                       (do (rlm-db/finalize-q-updates! @db-info-atom cited-page-ids high-reward)
+                           (let [uncited (set/difference accessed (or cited-page-ids #{}))]
+                             (when (seq uncited)
+                               (rlm-db/finalize-q-updates! @db-info-atom uncited Q_REWARD_UNCITED))))
+                       (rlm-db/finalize-q-updates! @db-info-atom accessed Q_REWARD_UNCITED))))
                  (catch Exception e
                    (trove/log! {:level :debug :data {:error (ex-message e)}
                                 :msg "Q-value update failed (non-fatal)"})))
@@ -1058,11 +1095,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 ;; -- Main pipeline --
 
 (defn fork-env-for-query
-  "Creates a copy of the env with a fresh locals-atom for parallel query-env! calls.
-   Shares immutable config, db-info-atom, and query functions. Isolates mutable locals
-   so concurrent queries don't clobber each other's SCI variables."
+  "Creates a lightweight fork of the env for parallel query-env! calls.
+   Uses sci/fork for cheap SCI context isolation — new vars don't leak back to parent."
   [env]
-  (assoc env :locals-atom (atom {})))
+  (assoc env :sci-ctx (sci/fork (:sci-ctx env))))
 
 ;; -----------------------------------------------------------------------------
 ;; QA Manifest — crash-resumable generate-qa-env!

@@ -68,15 +68,11 @@
                                      (expect (contains? env :sci-ctx))
                                      (expect (contains? env :context))
                                      (expect (contains? env :llm-query-fn))
-                                     (expect (contains? env :locals-atom)))))
+                                     (expect (contains? env :initial-ns-keys)))))
 
   (it "stores context in environment"
     (with-test-env* {:users [{:name "Alice"}]} (fn [env]
                                                  (expect (= {:users [{:name "Alice"}]} (:context env))))))
-
-  (it "initializes locals-atom as empty"
-    (with-test-env* {} (fn [env]
-                         (expect (= {} @(:locals-atom env))))))
 
   (it "creates database by default"
     (with-test-env* {} (fn [env]

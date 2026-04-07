@@ -520,18 +520,18 @@
                             ['find-related "BFS graph traversal from an anchor entity.\n  (find-related entity-id)              ;; depth 2\n  (find-related entity-id {:depth 3})   ;; deeper\n  Returns related entities sorted by distance, with cross-document canonical linking." '([entity-id] [entity-id opts])]
                             ['search-batch "Parallel multi-query search. Deduplicates, ranks by vitality.\n  (search-batch [\"schemas\" \"modes\" \"treatment\"])\n  (search-batch [\"q1\" \"q2\"] {:top-k 5 :limit 20})" '([queries] [queries opts])]
                             ['results->md "Convert search results to compact markdown for LLM.\n  (results->md (search-batch [...]))\n  (results->md (search-documents \"query\"))" '([results])]]]
-      (when (sci/eval-string* sci-ctx (str "(resolve '" sym ")"))
-        (sci/eval-string* sci-ctx
+      (when (:val (sci/eval-string+ sci-ctx (str "(resolve '" sym ")") {:ns sandbox-ns}))
+        (sci/eval-string+ sci-ctx
           (str "(def ^{:doc " (pr-str doc)
             (when args (str " :arglists (quote " (pr-str args) ")"))
-            "} " sym " " sym ")"))))
-    ;; Set default namespace to 'sandbox (per-context via eval-string+ :ns option)
-    ;; Note: sci/alter-var-root on sci/ns is GLOBAL, not per-context.
-    ;; We return sandbox-ns so callers can use (sci/eval-string+ ctx code {:ns sandbox-ns}).
-    (sci/alter-var-root sci/ns (constantly sandbox-ns))
+            "} " sym " " sym ")")
+          {:ns sandbox-ns})))
+    ;; NOTE: We do NOT call (sci/alter-var-root sci/ns ...) here because it's GLOBAL,
+    ;; not per-context. Instead, callers use (sci/eval-string+ ctx code {:ns sandbox-ns})
+    ;; for per-call namespace scoping. sandbox-ns is returned for this purpose.
     {:sci-ctx sci-ctx
      :sandbox-ns sandbox-ns
-     :initial-ns-keys (set (keys (sci/eval-string* sci-ctx "(ns-publics 'sandbox)")))}))
+     :initial-ns-keys (set (keys (:val (sci/eval-string+ sci-ctx "(ns-publics 'sandbox)" {:ns sandbox-ns}))))}))
 
 ;; =============================================================================
 ;; Var Index
@@ -597,5 +597,5 @@
   [sci-ctx sym val]
   (let [ns-obj (sci/find-ns sci-ctx 'sandbox)]
     ;; Promote to SCI var if needed (sci/init :namespaces creates plain values)
-    (sci/eval-string* sci-ctx (str "(def " sym " nil)"))
+    (sci/eval-string+ sci-ctx (str "(def " sym " nil)") {:ns ns-obj})
     (sci/intern sci-ctx ns-obj sym val)))

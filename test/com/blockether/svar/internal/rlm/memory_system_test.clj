@@ -382,7 +382,7 @@
           (db/record-cooccurrence! db-info "page-x" "page-y")
           (let [boost-xy (db/get-cooccurrence-boost db-info "page-x" #{"page-y"})
                 boost-yx (db/get-cooccurrence-boost db-info "page-y" #{"page-x"})]
-            (expect (= boost-xy boost-yx)))
+            (expect (< (abs (- boost-xy boost-yx)) 0.001)))
           (finally (d/close conn)))))
 
     (it "returns 0.0 for unrelated pages"

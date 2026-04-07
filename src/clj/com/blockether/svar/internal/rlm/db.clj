@@ -23,6 +23,19 @@
 
 (defn str-includes? [s substr] (when s (str/includes? s substr)))
 
+(defn- now
+  "Returns the current time as a java.util.Date."
+  ^java.util.Date []
+  (java.util.Date.))
+
+(defn- days-since-date
+  "Returns the number of days elapsed between `now` and `past-date`.
+   Returns 0.0 if past-date is nil."
+  ^double [^java.util.Date now ^java.util.Date past-date]
+  (if past-date
+    (/ (- (.getTime now) (.getTime past-date)) 86400000.0)
+    0.0))
+
 (defn create-rlm-conn
   "Creates or wraps a Datalevin connection for RLM.
 
@@ -68,7 +81,7 @@
   [{:keys [conn]} attrs]
   (when conn
     (let [id (or (:entity/id attrs) (java.util.UUID/randomUUID))
-          now (java.util.Date.)
+          now (now)
           entity (merge {:entity/id id
                          :entity/type (:entity/type attrs)
                          :entity/created-at now}
@@ -87,7 +100,7 @@
   [{:keys [conn]} entity-ref attrs]
   (when conn
     (let [id (second entity-ref)
-          now (java.util.Date.)]
+          now (now)]
       (d/transact! conn [(merge {:entity/id id :entity/updated-at now} attrs)]))))
 
 (defn store-conversation!
@@ -518,7 +531,7 @@
   ([db-info entry] (db-store-toc-entry! db-info entry "standalone"))
   ([{:keys [conn]} entry doc-id]
    (when conn
-     (let [timestamp (java.util.Date.)
+     (let [timestamp (now)
            entry-data (cond-> (assoc entry
                                 :document.toc/document-id doc-id
                                 :document.toc/created-at timestamp)
@@ -892,10 +905,7 @@
           stored-beta (or (:document/certainty-beta doc) 1.0)
           ;; Lazy time-decay: add 0.01/day since last update (pure computation)
           updated-at (or (:document/updated-at doc) (:document/created-at doc))
-          now (java.util.Date.)
-          days-since (if updated-at
-                       (/ (- (.getTime now) (.getTime ^java.util.Date updated-at)) 86400000.0)
-                       0.0)
+          days-since (days-since-date (now) updated-at)
           effective-beta (+ stored-beta (* 0.01 days-since))]
       (when (:document/certainty-alpha doc)
         {:certainty (/ alpha (+ alpha effective-beta))
@@ -954,10 +964,7 @@
             doc (d/pull db [:document/certainty-beta :document/updated-at :document/created-at] [:document/id doc-id])
             beta (or (:document/certainty-beta doc) 1.0)
             updated-at (or (:document/updated-at doc) (:document/created-at doc))
-            now (java.util.Date.)
-            days-since (if updated-at
-                         (/ (- (.getTime now) (.getTime ^java.util.Date updated-at)) 86400000.0)
-                         0.0)
+            days-since (days-since-date (now) updated-at)
             beta-increase (* 0.01 days-since)]
         (when (> beta-increase 0.001)
           (d/transact! conn [{:document/id doc-id
@@ -1022,7 +1029,7 @@
    Initializes vitality tracking fields: created-at = now, access-count = 0."
   [page doc-id]
   (let [page-id (str doc-id "-page-" (:page/index page))
-        now (java.util.Date.)]
+        now (now)]
     {:entity {:page/id page-id
               :page/document-id doc-id
               :page/index (:page/index page)
@@ -1153,7 +1160,7 @@
    `children-count` - Long. Number of child nodes on this page.
    `now`           - java.util.Date, optional. Current time (default: now)."
   ([access-count created-at last-accessed children-count]
-   (compute-page-vitality access-count created-at last-accessed children-count (java.util.Date.)))
+   (compute-page-vitality access-count created-at last-accessed children-count (now)))
   ([access-count created-at last-accessed children-count now]
    (let [d 0.5 ;; ACT-R decay parameter
          ;; Use time-since-last-access as primary decay driver (not lifetime).
@@ -1337,7 +1344,7 @@
              all-connected (->> (concat (or sibling-page-ids []) (or rel-neighbor-page-ids []))
                              distinct
                              (remove #(= % page-id)))
-             now (java.util.Date.)]
+             now (now)]
          (doseq [pid all-connected]
            (let [boost (* weight (Math/pow damping 1))
                  existing (d/pull (d/db conn) [:page/access-count] [:page/id pid])
@@ -1355,6 +1362,12 @@
 
 (def ^:private ^:const COOCCURRENCE_DECAY_TAU 7.0)
 (def ^:private ^:const COOCCURRENCE_MAX_PAIRS 20)
+
+(defn- cooccurrence-decay
+  "Applies Ebbinghaus exponential decay to a co-occurrence strength.
+   Returns strength * e^(-days/tau)."
+  ^double [^double strength ^double days-since]
+  (* strength (Math/exp (- (/ days-since COOCCURRENCE_DECAY_TAU)))))
 
 (defn- cooccurrence-pair
   "Returns [sorted-a sorted-b id] for a page pair (order-independent)."
@@ -1374,16 +1387,13 @@
   (when (and conn (not= page-a page-b))
     (try
       (let [[a b id] (cooccurrence-pair page-a page-b)
-            now (java.util.Date.)
+            now (now)
             existing (d/pull (d/db conn) [:page-cooccurrence/strength :page-cooccurrence/last-seen]
                        [:page-cooccurrence/id id])
             old-strength (or (:page-cooccurrence/strength existing) 0.0)
             last-seen (:page-cooccurrence/last-seen existing)
-            days-since (if last-seen
-                         (/ (- (.getTime now) (.getTime ^java.util.Date last-seen)) 86400000.0)
-                         0.0)
-            decay (Math/exp (- (/ days-since COOCCURRENCE_DECAY_TAU)))
-            new-strength (+ (* old-strength decay) 1.0)]
+            days-since (days-since-date now last-seen)
+            new-strength (+ (cooccurrence-decay old-strength days-since) 1.0)]
         (d/transact! conn [{:page-cooccurrence/id id
                             :page-cooccurrence/page-a a
                             :page-cooccurrence/page-b b
@@ -1412,7 +1422,7 @@
    Single Datalog query instead of N×M individual pulls.
    Returns {page-id -> total-decayed-boost}."
   [conn result-page-ids recent-page-ids]
-  (let [now (java.util.Date.)
+  (let [now (now)
         all-page-ids (set (concat result-page-ids recent-page-ids))
         ;; Single query: get all co-occurrence edges involving any of our pages
         edges (d/q '[:find [(pull ?e [:page-cooccurrence/page-a :page-cooccurrence/page-b
@@ -1434,10 +1444,7 @@
                              ;; Both are recent — boost both as result pages if applicable
                              :else nil)]
           (if (and result-pid strength)
-            (let [days-since (if last-seen
-                               (/ (- (.getTime now) (.getTime ^java.util.Date last-seen)) 86400000.0)
-                               0.0)
-                  decayed (* strength (Math/exp (- (/ days-since COOCCURRENCE_DECAY_TAU))))]
+            (let [decayed (cooccurrence-decay strength (days-since-date now last-seen))]
               (update acc result-pid (fnil + 0.0) decayed))
             acc)))
       {}
@@ -1454,7 +1461,7 @@
   [{:keys [conn]} page-id recent-page-ids]
   (if (or (empty? recent-page-ids) (nil? conn))
     0.0
-    (let [now (java.util.Date.)]
+    (let [now (now)]
       (double
         (reduce
           (fn [acc recent-pid]
@@ -1465,10 +1472,7 @@
                          [:page-cooccurrence/id id])]
               (if-let [strength (:page-cooccurrence/strength edge)]
                 (let [last-seen (:page-cooccurrence/last-seen edge)
-                      days-since (if last-seen
-                                   (/ (- (.getTime now) (.getTime ^java.util.Date last-seen)) 86400000.0)
-                                   0.0)
-                      decayed (* strength (Math/exp (- (/ days-since COOCCURRENCE_DECAY_TAU))))]
+                      decayed (cooccurrence-decay strength (days-since-date now last-seen))]
                   (+ acc decayed))
                 acc))))
         0.0
@@ -1503,7 +1507,7 @@
   [{:keys [conn] :as db-info} page-id weight]
   (when conn
     (try
-      (let [now (java.util.Date.)
+      (let [now (now)
             existing (d/pull (d/db conn) [:page/access-count] [:page/id page-id])
             current-count (or (:page/access-count existing) 0.0)]
         (d/transact! conn [{:page/id page-id
