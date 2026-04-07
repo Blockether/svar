@@ -899,9 +899,9 @@
   (when conn
     (try
       (let [db (d/db conn)
-            doc (d/pull db [:document/certainty-beta :document/updated-at] [:document/id doc-id])
+            doc (d/pull db [:document/certainty-beta :document/updated-at :document/created-at] [:document/id doc-id])
             beta (or (:document/certainty-beta doc) 1.0)
-            updated-at (:document/updated-at doc)
+            updated-at (or (:document/updated-at doc) (:document/created-at doc))
             now (java.util.Date.)
             days-since (if updated-at
                          (/ (- (.getTime now) (.getTime ^java.util.Date updated-at)) 86400000.0)
@@ -1256,11 +1256,11 @@
 
    Returns map with :score, :zone, :access-count, :last-accessed, :created-at
    or nil if page not found."
-  [{:keys [conn]} page-id]
+  [{:keys [conn] :as db-info} page-id]
   (when conn
     (let [db (d/db conn)
           page (d/pull db
-                 [:page/created-at :page/last-accessed :page/access-count :page/index]
+                 [:page/created-at :page/last-accessed :page/access-count :page/index :page/document-id]
                  [:page/id page-id])
           ;; Count children (nodes on this page) — same DB snapshot
           children-count (or (first (d/q '[:find [(count ?n)]
@@ -1269,13 +1269,22 @@
                                       db page-id))
                            0)]
       (when (:page/created-at page)
+        ;; Apply time-based certainty decay before reading
+        (when-let [doc-id (:page/document-id page)]
+          (decay-document-certainty! db-info doc-id))
         (let [{:keys [score zone]} (compute-page-vitality
                                      (or (:page/access-count page) 0.0)
                                      (:page/created-at page)
                                      (or (:page/last-accessed page) (:page/created-at page))
-                                     children-count)]
-          {:score score
-           :zone zone
+                                     children-count)
+              ;; Multiply by document certainty — stale documents degrade their pages
+              doc-certainty (when-let [doc-id (:page/document-id page)]
+                              (:certainty (document-certainty db-info doc-id)))
+              final-score (if doc-certainty
+                            (min 1.0 (* score doc-certainty))
+                            score)]
+          {:score final-score
+           :zone (vitality-zone final-score)
            :access-count (or (:page/access-count page) 0.0)
            :last-accessed (:page/last-accessed page)
            :created-at (:page/created-at page)
