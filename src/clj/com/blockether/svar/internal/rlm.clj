@@ -118,6 +118,7 @@
         custom-docs-atom (atom [])
         db-info (rlm-db/create-rlm-conn {:conn conn :path path})
         db-info-atom (atom db-info)
+        qa-corpus-snapshot-cache-atom (atom nil)
         llm-query-fn (rlm-routing/make-routed-llm-query-fn {} depth-atom router)
         sub-llm-query-fn (rlm-routing/make-routed-llm-query-fn {:optimize :cost} depth-atom router)
         env-id (str (util/uuid))
@@ -133,6 +134,7 @@
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
+     :qa-corpus-snapshot-cache-atom qa-corpus-snapshot-cache-atom
      :sci-ctx sci-ctx
      :sandbox-ns sandbox-ns
      :initial-ns-keys initial-ns-keys
@@ -268,6 +270,9 @@
                              (merge base-result extraction-result)))
                      documents base-results)
                    base-results)]
+      ;; Invalidate cached corpus digest after any ingest mutation.
+     (when-let [cache-atom (:qa-corpus-snapshot-cache-atom env)]
+       (reset! cache-atom nil))
      results)))
 
 (defn dispose-env!
@@ -1129,48 +1134,56 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 (defn- qa-corpus-snapshot
   "Returns deterministic corpus stats + content hash for manifest fingerprinting.
    Hash includes document metadata, TOC entries, and full page-node text payloads."
-  [{:keys [conn]}]
+  [env {:keys [conn]}]
   (if-not conn
     {:document-count 0 :toc-count 0 :node-count 0 :content-hash "sha256:0"}
-    (let [db (d/db conn)
-          docs (->> (d/q '[:find [(pull ?e [:document/id :document/name :document/title
-                                            :document/extension :document/abstract]) ...]
-                           :where [?e :document/id _]]
-                      db)
-                 (sort-by (juxt :document/id :document/name))
-                 vec)
-          toc (->> (d/q '[:find [(pull ?e [:document.toc/id :document.toc/document-id
-                                           :document.toc/title :document.toc/level
-                                           :document.toc/target-page :document.toc/target-section-id
-                                           :document.toc/description]) ...]
-                          :where [?e :document.toc/id _]]
-                     db)
-                (sort-by (juxt :document.toc/document-id :document.toc/target-page
-                           :document.toc/level :document.toc/title :document.toc/id))
-                vec)
-          nodes (->> (d/q '[:find [(pull ?e [:page.node/id :page.node/document-id :page.node/page-id
-                                             :page.node/type :page.node/local-id
-                                             :page.node/content :page.node/description]) ...]
-                            :where [?e :page.node/id _]]
-                       db)
-                  (sort-by (juxt :page.node/document-id :page.node/page-id
-                             :page.node/local-id :page.node/id))
-                  vec)
-          digest (MessageDigest/getInstance "SHA-256")]
-      (doseq [doc docs] (digest-update! digest doc))
-      (doseq [entry toc] (digest-update! digest entry))
-      (doseq [node nodes] (digest-update! digest node))
-      {:document-count (count docs)
-       :toc-count (count toc)
-       :node-count (count nodes)
-       :content-hash (digest->sha256 digest)})))
+    (let [cache-atom (:qa-corpus-snapshot-cache-atom env)
+          db (d/db conn)
+          revision {:document-count (or (d/q '[:find (count ?e) . :where [?e :document/id _]] db) 0)
+                    :toc-count (or (d/q '[:find (count ?e) . :where [?e :document.toc/id _]] db) 0)
+                    :node-count (or (d/q '[:find (count ?e) . :where [?e :page.node/id _]] db) 0)}
+          cached (when cache-atom @cache-atom)]
+      (if (and cached (= revision (:revision cached)))
+        (:snapshot cached)
+        (let [docs (->> (d/q '[:find [(pull ?e [:document/id :document/name :document/title
+                                                :document/extension :document/abstract]) ...]
+                               :where [?e :document/id _]]
+                          db)
+                     (sort-by (juxt :document/id :document/name))
+                     vec)
+              toc (->> (d/q '[:find [(pull ?e [:document.toc/id :document.toc/document-id
+                                               :document.toc/title :document.toc/level
+                                               :document.toc/target-page :document.toc/target-section-id
+                                               :document.toc/description]) ...]
+                              :where [?e :document.toc/id _]]
+                         db)
+                    (sort-by (juxt :document.toc/document-id :document.toc/target-page
+                               :document.toc/level :document.toc/title :document.toc/id))
+                    vec)
+              nodes (->> (d/q '[:find [(pull ?e [:page.node/id :page.node/document-id :page.node/page-id
+                                                 :page.node/type :page.node/local-id
+                                                 :page.node/content :page.node/description]) ...]
+                                :where [?e :page.node/id _]]
+                           db)
+                      (sort-by (juxt :page.node/document-id :page.node/page-id
+                                 :page.node/local-id :page.node/id))
+                      vec)
+              digest (MessageDigest/getInstance "SHA-256")
+              snapshot (do
+                         (doseq [doc docs] (digest-update! digest doc))
+                         (doseq [entry toc] (digest-update! digest entry))
+                         (doseq [node nodes] (digest-update! digest node))
+                         (assoc revision :content-hash (digest->sha256 digest)))]
+          (when cache-atom
+            (reset! cache-atom {:revision revision :snapshot snapshot}))
+          snapshot)))))
 
 (defn- qa-manifest-fingerprint
   "Returns a stable fingerprint for generate-qa-env! inputs.
    Includes key generation options + corpus summary so resume only reuses
    manifest state when run inputs are compatible."
-  [{:keys [conn] :as _db-info} qa-opts]
-  (let [corpus (qa-corpus-snapshot {:conn conn})
+  [env {:keys [conn] :as _db-info} qa-opts]
+  (let [corpus (qa-corpus-snapshot env {:conn conn})
         payload {:manifest-version QA_MANIFEST_VERSION
                  :options qa-opts
                  :corpus corpus}]
@@ -1312,7 +1325,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                       :k-candidates k-candidates
                       :multi-hop? (boolean multi-hop?)
                       :personas (vec (sort (or personas #{})))}
-         qa-run-fingerprint (qa-manifest-fingerprint db-info qa-run-opts)
+         qa-run-fingerprint (qa-manifest-fingerprint env db-info qa-run-opts)
 
           ;; ===== MANIFEST: Check for resumable state =====
          existing-qa-manifest (read-qa-manifest env)

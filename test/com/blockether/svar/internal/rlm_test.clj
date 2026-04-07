@@ -1742,6 +1742,32 @@
 ;; generate-qa-env! pipeline unit tests
 ;; =============================================================================
 
+(defdescribe qa-corpus-snapshot-cache-test
+  (it "uses cached snapshot on matching revision and invalidates on ingest"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "qa-corpus-cache-"}))
+          env (sut/create-env router {:path dir})]
+      (try
+        (sut/ingest-to-env! env [(make-test-single-page-document)])
+        (let [db (d/db (:conn @(:db-info-atom env)))
+              revision {:document-count (or (d/q '[:find (count ?e) . :where [?e :document/id _]] db) 0)
+                        :toc-count (or (d/q '[:find (count ?e) . :where [?e :document.toc/id _]] db) 0)
+                        :node-count (or (d/q '[:find (count ?e) . :where [?e :page.node/id _]] db) 0)}
+              cached {:document-count (:document-count revision)
+                      :toc-count (:toc-count revision)
+                      :node-count (:node-count revision)
+                      :content-hash "sha256:cached"}]
+          (reset! (:qa-corpus-snapshot-cache-atom env) {:revision revision :snapshot cached})
+          (expect (= cached (#'sut/qa-corpus-snapshot env @(:db-info-atom env))))
+
+          ;; Any ingest mutation should invalidate cache immediately.
+          (sut/ingest-to-env! env [(make-test-single-page-document)])
+          (expect (nil? @(:qa-corpus-snapshot-cache-atom env))))
+        (finally
+          (sut/dispose-env! env)
+          (fs/delete-tree dir))))))
+
 (defdescribe generate-qa-manifest-resume-test
   (it "reuses batches only when manifest fingerprint matches"
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
