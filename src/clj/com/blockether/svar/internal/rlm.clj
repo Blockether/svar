@@ -530,7 +530,9 @@
                                     (if (and spec (string? refined-str))
                                       (try
                                         (spec/str->data-with-spec refined-str spec)
-                                        (catch Exception _
+                                        (catch Exception e
+                                          (trove/log! {:level :debug :data {:error (ex-message e)}
+                                                       :msg "Spec parse failed after refinement, retrying with fallback LLM"})
                                           (let [fallback (llm/ask! rlm-router {:spec spec
                                                                                :messages [(llm/system "Extract structured data.")
                                                                                           (llm/user (str "From:\n" refined-str))]
@@ -546,7 +548,10 @@
                      ;; (e.g., string "pass" → keyword :pass for :spec.type/keyword fields).
                      {:answer (if spec
                                 (try (spec/coerce-data-with-spec answer-value spec)
-                                     (catch Exception _ answer-value))
+                                     (catch Exception e
+                                       (trove/log! {:level :warn :data {:error (ex-message e)}
+                                                    :msg "Spec coercion failed, returning uncoerced answer"})
+                                       answer-value))
                                 answer-value)
                       :eval-scores nil
                       :refinement-count 0})

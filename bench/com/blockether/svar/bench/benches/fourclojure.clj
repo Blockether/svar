@@ -60,8 +60,9 @@
         test-forms (str/join "\n"
                      (map-indexed
                        (fn [i test-str]
-                         (format "(swap! results conj (try (if %s :pass [:fail %d]) (catch Exception e [:error %d (ex-message e)])))"
-                           test-str i i))
+                         (str "(swap! results conj (try (if " test-str
+                           " :pass [:fail " (pr-str (subs test-str 0 (min 80 (count test-str)))) "])"
+                           " (catch Exception e [:error " (pr-str (subs test-str 0 (min 80 (count test-str)))) " (ex-message e)])))"))
                        filled-tests))]
     (str "(def results (atom []))\n"
       "(def is identity)\n"

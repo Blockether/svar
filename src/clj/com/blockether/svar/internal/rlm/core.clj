@@ -1128,7 +1128,10 @@ OUTPUT STYLE:
                 (let [result (extract-entities-from-page! text rlm-router)]
                   (swap! entities-atom into (:entities result))
                   (swap! relationships-atom into (:relationships result)))
-                (catch Exception _ (swap! errors-atom inc))))))
+                (catch Exception e
+                  (trove/log! {:level :warn :data {:page (:page/index page) :error (ex-message e)}
+                               :msg "Entity extraction failed for page"})
+                  (swap! errors-atom inc))))))
         ;; Extract from visual nodes (capped)
         (doseq [vnode visual-nodes]
           (when (< @vision-count-atom max-vision)
@@ -1137,7 +1140,10 @@ OUTPUT STYLE:
                 (swap! vision-count-atom inc)
                 (swap! entities-atom into (:entities result))
                 (swap! relationships-atom into (:relationships result)))
-              (catch Exception _ (swap! errors-atom inc)))))))
+              (catch Exception e
+                (trove/log! {:level :warn :data {:node-type (:page.node/type vnode) :error (ex-message e)}
+                             :msg "Entity extraction failed for visual node"})
+                (swap! errors-atom inc)))))))
     ;; Store entities and relationships in DB (two-phase)
     (let [entities @entities-atom
           relationships @relationships-atom

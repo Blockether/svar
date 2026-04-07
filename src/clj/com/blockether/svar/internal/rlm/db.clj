@@ -139,7 +139,12 @@
   [db-info {:keys [query-ref index executions thinking answer duration-ms]}]
   (let [parent-id (when query-ref (second query-ref))
         code-strs (mapv :code (or executions []))
-        result-strs (mapv #(try (pr-str (:result %)) (catch Exception _ "???")) (or executions []))]
+        result-strs (mapv #(try (pr-str (:result %))
+                            (catch Exception e
+                              (trove/log! {:level :warn :data {:error (ex-message e)}
+                                           :msg "Failed to serialize execution result"})
+                              "???"))
+                      (or executions []))]
     (store-entity! db-info
       (cond-> {:entity/type :iteration
                :entity/name (str "iteration-" (or index 0))
@@ -1249,7 +1254,10 @@
                    [?e :page/last-accessed ?la]
                    [(>= ?la ?cutoff)]]
              (d/db conn) since))
-      (catch Exception _ #{}))))
+      (catch Exception e
+        (trove/log! {:level :debug :data {:error (ex-message e)}
+                     :msg "pages-accessed-since query failed"})
+        #{}))))
 
 (defn finalize-q-updates!
   "Updates Q-values for all pages accessed during a query session.
@@ -1479,7 +1487,10 @@
                      [?e :page/last-accessed ?la]
                      [(>= ?la ?cutoff)]]
                (d/db conn) cutoff)))
-      (catch Exception _ #{}))))
+      (catch Exception e
+        (trove/log! {:level :debug :data {:error (ex-message e)}
+                     :msg "recently-accessed-page-ids query failed"})
+        #{}))))
 
 (defn record-page-access!
   "Records a page access in Datalevin. Updates last-accessed, increments access-count,
