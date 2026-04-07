@@ -802,7 +802,7 @@ RLM enables an LLM to iteratively write and execute Clojure code to examine, fil
   (svar/ingest-to-env! env documents)
 
   ;; 3. Query
-  (svar/query-env! env "What are the key compliance requirements?")
+  (svar/query-env! env [(svar/user "What are the key compliance requirements?")])
 
   ;; 4. Dispose when done
   (svar/dispose-env! env))
@@ -836,7 +836,7 @@ Inject custom functions and constants into the RLM's sandboxed SCI environment. 
 
 ```clojure
 (comment
-  (svar/query-env! env "Summarize the contract terms"
+  (svar/query-env! env [(svar/user "Summarize the contract terms")]
     {:spec my-output-spec          ;; structured output (parsed with spec)
      :context {:extra "data"}      ;; additional data context
      :model "gpt-4o"               ;; override default model
@@ -859,7 +859,7 @@ keeping iterations focused and reducing wasted exploration.
 ```clojure
 (comment
   ;; For complex multi-document queries, planning reduces iteration count
-  (svar/query-env! env "Compare the financial obligations across all agreements"
+  (svar/query-env! env [(svar/user "Compare the financial obligations across all agreements")]
     {:plan? true}))
 ```
 
@@ -871,7 +871,7 @@ its source material. The result includes a `:verified-claims` vector.
 
 ```clojure
 (comment
-  (let [result (svar/query-env! env "What penalties apply for late payment?"
+  (let [result (svar/query-env! env [(svar/user "What penalties apply for late payment?")]
                  {:verify? true})]
     (:verified-claims result)
     ;; => [{:claim "Late fee of 1.5% per month" :source "doc-1" :verified? true} ...]
@@ -896,7 +896,7 @@ Every `query-env!` result includes a `:trace` vector. Pretty-print it for debugg
 
 ```clojure
 (comment
-  (let [result (svar/query-env! env "Find all parties in the agreement")]
+  (let [result (svar/query-env! env [(svar/user "Find all parties in the agreement")])]
     ;; Pretty-print trace to stdout (also returns the string)
     (svar/pprint-trace (:trace result))
 

@@ -128,7 +128,7 @@
         env      (svar/create-env router {:path db-path})
         start    (System/currentTimeMillis)]
     (try
-      (let [result   (svar/query-env! env (prompt-fn task)
+      (let [result   (svar/query-env! env [(svar/user (prompt-fn task))]
                        (merge DEFAULT_QUERY_ENV_OPTS {:model model} query-opts))
             duration (- (System/currentTimeMillis) start)]
         (persist-trajectory! env edn-path)

@@ -484,7 +484,15 @@
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def query-env!
   "Runs a query against an RLM environment using iterative code execution.
-   See internal.rlm for details."
+
+   Takes a messages vector (always a vector, never a string):
+     (query-env! env [(user \"What is schema therapy?\")])
+     (query-env! env [(user \"Describe this\" (image b64 \"image/png\"))])
+     (query-env! env [(user \"Context: schema therapy\")
+                      (user \"Explain this diagram\" (image b64))]
+                 {:max-iterations 50})
+
+   See internal.rlm for full options."
   rlm/query-env!)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}

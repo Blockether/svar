@@ -337,7 +337,7 @@
       (when (integration-tests-enabled?)
         (with-integration-env*
           (fn [env]
-            (let [result (sut/query-env! env "What is the capital of France? Answer with just the city name."
+            (let [result (sut/query-env! env [(llm/user "What is the capital of France? Answer with just the city name.")]
                            {:context "Paris is the capital of France."
                             :max-iterations 10})]
               (expect (map? result))
@@ -353,7 +353,7 @@
       (when (integration-tests-enabled?)
         (with-integration-env*
           (fn [env]
-            (let [result (sut/query-env! env "What is 2 + 2?"
+            (let [result (sut/query-env! env [(llm/user "What is 2 + 2?")]
                            {:context "2 + 2 = 4"
                             :max-iterations 5
                             :refine? false})]
@@ -371,7 +371,7 @@
       (when (integration-tests-enabled?)
         (with-integration-env*
           (fn [env]
-            (let [result (sut/query-env! env "What is the value of :count? Use (FINAL answer)"
+            (let [result (sut/query-env! env [(llm/user "What is the value of :count? Use (FINAL answer)")]
                            {:context {:count 42}
                             :max-iterations 10
                             :refine? false})]
@@ -385,7 +385,7 @@
       (when (integration-tests-enabled?)
         (with-integration-env*
           (fn [env]
-            (let [result (sut/query-env! env "Sum the numbers"
+            (let [result (sut/query-env! env [(llm/user "Sum the numbers")]
                            {:context {:nums [1 2 3 4 5]}
                             :max-iterations 10
                             :max-refinements 1})]
@@ -397,7 +397,7 @@
   (describe "validation"
     (it "throws when env is invalid"
       (expect (throws? clojure.lang.ExceptionInfo
-                #(sut/query-env! {} "test query"))))
+                #(sut/query-env! {} [(llm/user "test query")]))))
 
     (it "throws when query is missing"
       (with-integration-env* (fn [env]
@@ -1369,7 +1369,7 @@
         (with-integration-env* (fn [env]
           ;; Ingest multi-page document first
                                  (sut/ingest-to-env! env [(make-test-multi-page-document)])
-                                 (let [result (sut/query-env! env "What was TechCorp's total revenue in 2024?"
+                                 (let [result (sut/query-env! env [(llm/user "What was TechCorp's total revenue in 2024?")]
                                                 {:refine? false
                                                  :max-iterations 25})]
                                    (expect (map? result))
@@ -1383,7 +1383,7 @@
       (when (integration-tests-enabled?)
         (with-integration-env* (fn [env]
                                  (sut/ingest-to-env! env [(make-test-single-page-document)])
-                                 (let [result (sut/query-env! env "What is the title?"
+                                 (let [result (sut/query-env! env [(llm/user "What is the title?")]
                                                 {:refine? false
                                                  :max-iterations 25})]
                                    (expect (some? (:answer result)))
@@ -1396,7 +1396,7 @@
         (with-integration-env* (fn [env]
           ;; Ingest document with extractable facts
                                  (sut/ingest-to-env! env [(make-test-multi-page-document)])
-                                 (let [result (sut/query-env! env "What was the 2024 revenue and who is the CEO? Cite your sources."
+                                 (let [result (sut/query-env! env [(llm/user "What was the 2024 revenue and who is the CEO? Cite your sources.")]
                                                 {:verify? true
                                                  :refine? false
                                                  :max-iterations 25})]
@@ -1413,7 +1413,7 @@
         (with-integration-env* (fn [env]
           ;; Ingest a simple document, then ask a trivial question that doesn't need citations
                                  (sut/ingest-to-env! env [(make-test-single-page-document)])
-                                 (let [result (sut/query-env! env "What is the title of the document?"
+                                 (let [result (sut/query-env! env [(llm/user "What is the title of the document?")]
                                                 {:verify? true
                                                  :refine? false
                                                  :max-iterations 10})]
@@ -1434,7 +1434,7 @@
 
             ;; Step 2: Query with all knowledge engine flags enabled
                                    (let [query-result (sut/query-env! env
-                                                        "Who is the CEO and what market expansion happened in 2024?"
+                                                        [(llm/user "Who is the CEO and what market expansion happened in 2024?")]
                                                         {:verify? true
                                                          :refine? false
                                                          :max-iterations 25})]
@@ -1458,7 +1458,7 @@
                                    {:extract-entities? true})
 
           ;; Query that could span both documents
-                                 (let [result (sut/query-env! env "List all parties and companies mentioned in the documents."
+                                 (let [result (sut/query-env! env [(llm/user "List all parties and companies mentioned in the documents.")]
                                                 {:verify? true
                                                  :refine? false
                                                  :max-iterations 25})]
