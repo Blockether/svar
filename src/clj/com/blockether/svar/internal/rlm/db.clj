@@ -60,34 +60,88 @@
     (/ (- (.getTime now) (.getTime past-date)) 86400000.0)
     0.0))
 
+(defn- merge-rlm-schema!
+  "Merges RLM_SCHEMA into an existing Datalevin connection using d/update-schema.
+   Only adds attributes not already present — never overwrites existing definitions.
+   Returns the connection unchanged (schema update is side-effecting)."
+  [conn]
+  (try
+    (let [existing-schema (d/schema conn)
+          new-attrs (into {}
+                      (remove (fn [[k _]] (contains? existing-schema k)))
+                      RLM_SCHEMA)]
+      (when (seq new-attrs)
+        (trove/log! {:level :info
+                     :data  {:added-attrs (count new-attrs)}
+                     :msg   "RLM schema: auto-merged missing attributes into external conn"})
+        (d/update-schema conn new-attrs)))
+    (catch Exception e
+      (trove/log! {:level :warn
+                   :data  {:error (ex-message e)}
+                   :msg   "RLM schema: auto-merge failed on external conn — assuming caller handled it"})))
+  conn)
+
 (defn create-rlm-conn
-  "Creates or wraps a Datalevin connection for RLM.
+  "Creates or wraps a Datalevin connection for RLM. Explicit mode API:
 
-   - conn: external connection (unified DB). Svar will NOT close it on dispose.
-     Caller must ensure RLM_SCHEMA is merged into the external DB schema.
-   - path: persistent DB at given path. Svar owns and closes it.
-   - neither: temp DB (deleted on dispose).
+   db-spec:
+     nil              — no DB (returns nil)
+     :temp            — ephemeral temp DB, deleted on dispose
+     \"path\"          — persistent DB at given path
+     {:path \"path\"}  — persistent DB at given path
+     {:conn c}        — external Datalevin connection; auto-merges RLM_SCHEMA
 
-   For unified storage, pass :conn to create-env."
-  [{:keys [conn path]}]
-  (if conn
-    {:conn conn :path nil :owned? false}
-    (let [dir (or path (str (System/getProperty "java.io.tmpdir") "/rlm-" (util/uuid)))
-          c (d/get-conn dir RLM_SCHEMA)]
-      {:conn c :path dir :owned? (nil? path)})))
+   When passing an external conn, RLM_SCHEMA is automatically merged via
+   d/update-schema (only adds missing attributes, never overwrites).
+   The connection is NOT closed on dispose."
+  [db-spec]
+  (cond
+    (nil? db-spec)
+    nil
+
+    (= :temp db-spec)
+    (let [dir (str (System/getProperty "java.io.tmpdir") "/rlm-" (util/uuid))
+          c   (d/get-conn dir RLM_SCHEMA)]
+      {:conn c :path dir :owned? true :mode :temp})
+
+    (string? db-spec)
+    (let [c (d/get-conn db-spec RLM_SCHEMA)]
+      {:conn c :path db-spec :owned? false :mode :persistent})
+
+    (map? db-spec)
+    (cond
+      (:conn db-spec)
+      (let [c (merge-rlm-schema! (:conn db-spec))]
+        {:conn c :path nil :owned? false :mode :external})
+
+      (:path db-spec)
+      (let [dir (:path db-spec)
+            c   (d/get-conn dir RLM_SCHEMA)]
+        {:conn c :path dir :owned? false :mode :persistent})
+
+      :else
+      (throw (ex-info "Invalid db-spec map — expected :conn or :path"
+               {:type :rlm/invalid-db-spec :db-spec db-spec})))
+
+    :else
+    (throw (ex-info "Invalid db-spec — expected nil, :temp, path string, or {:conn ...}/{:path ...}"
+             {:type :rlm/invalid-db-spec :db-spec db-spec}))))
 
 (defn dispose-rlm-conn!
-  "Closes the Datalevin connection and deletes temp DB if owned."
-  [{:keys [conn path owned?]}]
-  (try
-    (d/close conn)
-    (catch Exception e
-      (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to close RLM connection"})))
-  (when (and owned? path (fs/exists? path))
-    (try
-      (fs/delete-tree path)
-      (catch Exception e
-        (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to delete temp RLM DB"})))))
+  "Closes the Datalevin connection. Deletes temp DB files.
+   External and persistent connections are closed but not deleted."
+  [db-info]
+  (when db-info
+    (let [{:keys [conn path mode]} db-info]
+      (try
+        (d/close conn)
+        (catch Exception e
+          (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to close RLM connection"})))
+      (when (and (= :temp mode) path (fs/exists? path))
+        (try
+          (fs/delete-tree path)
+          (catch Exception e
+            (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to delete temp RLM DB"})))))))
 
 (defn store-entity!
   "Stores a unified entity in Datalevin. All data (conversations, queries,
