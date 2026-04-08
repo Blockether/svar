@@ -10,6 +10,18 @@ Blockether One = live LLM endpoint. Always available. Rules:
 2. **No `lazytest/skip=true`** — all test blocks runnable. Never add skip.
 3. **Config creation only exception** — `(def config ...)` → `(comment ...)` OK (API keys env-specific). Downstream code runs.
 
+## Clojure Paren Repair — MANDATORY
+
+When PI generates or edits Clojure code and encounters parse errors:
+
+1. Detect: "Unmatched delimiter", "EOF while reading", "Unexpected EOF", "Invalid token"
+2. Run: `clj-paren-repair <file>` on affected file
+3. Binary: `~/.babashka/bbin/bin/clj-paren-repair`
+4. Re-evaluate after repair
+5. NEVER manually fix parens — always use `clj-paren-repair`
+
+This applies to ALL Clojure code generation — RLM, tests, SCI, everything.
+
 ## Communication Style
 
 **REQUIRED. Non-negotiable.** [caveman skill](https://github.com/JuliusBrussee/caveman/blob/main/skills/caveman/SKILL.md).
