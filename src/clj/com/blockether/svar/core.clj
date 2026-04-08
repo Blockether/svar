@@ -447,13 +447,19 @@
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def RLM_SCHEMA
-  "Datalevin schema for RLM data. Merge into your app's schema for unified DB."
+  "Datalevin schema for RLM data. Auto-merged when passing {:conn c} to create-env.
+   Only needed if you manage schema yourself outside of create-env."
   rlm/RLM_SCHEMA)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def create-env
   "Creates an RLM environment for processing large contexts via iterative code execution.
-   Accepts :conn for unified DB, :path for standalone, or neither for temp DB.
+   DB modes (via :db key):
+     nil            — no DB (SCI only)
+     :temp          — ephemeral, deleted on dispose
+     \"path\"         — persistent at path
+     {:conn c}      — external conn, auto-merges RLM_SCHEMA
+     {:path \"path\"} — persistent at path
    See internal.rlm for details."
   rlm/create-env)
 

@@ -796,7 +796,7 @@ RLM enables an LLM to iteratively write and execute Clojure code to examine, fil
 ```clojure
 (comment
   ;; 1. Create environment
-  (def env (svar/create-env router {:path "/tmp/my-rlm"}))
+  (def env (svar/create-env router {:db "/tmp/my-rlm"}))
 
   ;; 2. Ingest documents (PageIndex format)
   (svar/ingest-to-env! env documents)

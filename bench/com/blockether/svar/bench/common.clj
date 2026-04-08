@@ -129,7 +129,7 @@
     (llm/reset-provider! router (:id p)))
   (let [edn-path (trajectory-edn-path bench model run-ts task-id)
         db-path  (trajectory-temp-db-path task-id)
-        env      (svar/create-env router {:path db-path})
+         env      (svar/create-env router {:db db-path})
         start    (System/currentTimeMillis)]
     (try
       (let [result   (svar/query-env! env [(svar/user (prompt-fn task))]

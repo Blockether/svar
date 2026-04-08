@@ -26,13 +26,14 @@
    Params:
    `context` - The data context to analyze.
    `opts` - Map, optional:
-     - :db - false to disable db, or nil for auto-create
+     - :db - nil (no DB), :temp (ephemeral), path string, {:conn c}, {:path p}
      
    Returns:
    RLM environment map."
-  ([context] (create-test-env context {}))
-  ([context {:keys [_db] :as opts}]
-   (let [depth-atom (atom 0)
+  ([context] (create-test-env context {:db :temp}))
+  ([context opts]
+   (let [opts (if (contains? opts :db) opts (assoc opts :db :temp))
+         depth-atom (atom 0)
          test-router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                         :models [{:name "gpt-4o"}
                                                  {:name "gpt-4o-mini"}]}])]
@@ -45,7 +46,7 @@
    (with-test-env* {:count 42}
      (fn [env] (#'rlm-core/execute-code env \"(+ 1 2)\")))
    
-   (with-test-env* {:count 42} {:db false}
+   (with-test-env* {:count 42} {:db nil}
      (fn [env] (#'rlm-core/execute-code env \"(+ 1 2)\")))"
   ([context f] (with-test-env* context {} f))
   ([context opts f]
@@ -78,8 +79,8 @@
     (with-test-env* {} (fn [env]
                          (expect (some? (:db-info-atom env))))))
 
-  (it "can disable database with :db false"
-    (with-test-env* {} {:db false} (fn [env]
+  (it "can disable database with :db nil"
+    (with-test-env* {} {:db nil} (fn [env]
                                      (expect (nil? (:db-info-atom env)))))))
 
 (defdescribe get-locals-test
@@ -98,44 +99,47 @@
 
 (defdescribe disposable-db-test
   (describe "create-rlm-conn"
-    (it "creates a database with required keys"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+    (it "creates temp database with required keys"
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (expect (contains? db-info :conn))
           (expect (contains? db-info :path))
-          (expect (contains? db-info :owned?))
-          (expect (true? (:owned? db-info)))
+          (expect (contains? db-info :mode))
+          (expect (= :temp (:mode db-info)))
           (finally
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
-    (it "creates database with conn and owned? true"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+    (it "creates persistent database from path string"
+      (let [dir (str (fs/create-temp-dir {:prefix "rlm-persistent-test-"}))]
         (try
-          (expect (some? (:conn db-info)))
-          (expect (true? (:owned? db-info)))
+          (let [db-info (#'rlm-db/create-rlm-conn dir)]
+            (expect (some? (:conn db-info)))
+            (expect (= :persistent (:mode db-info)))
+            (#'rlm-db/dispose-rlm-conn! db-info))
           (finally
-            (#'rlm-db/dispose-rlm-conn! db-info))))))
+            (fs/delete-tree dir))))))
 
   (describe "external conn reuse"
-    (it "reuses external conn with owned? false"
-      (let [external-db (#'rlm-db/create-rlm-conn nil)]
+    (it "reuses external conn with auto-merged schema"
+      (let [external-db (#'rlm-db/create-rlm-conn :temp)]
         (try
-          (let [reused (assoc external-db :owned? false)]
-            (expect (false? (:owned? reused)))
-            (expect (some? (:conn reused))))
+          (let [reused (#'rlm-db/create-rlm-conn {:conn (:conn external-db)})]
+            (expect (= :external (:mode reused)))
+            (expect (some? (:conn reused)))
+            (expect (false? (:owned? reused))))
           (finally
             (#'rlm-db/dispose-rlm-conn! external-db))))))
 
   (describe "dispose-rlm-conn!"
-    (it "disposes owned database and cleans up path"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)
+    (it "disposes temp database and cleans up path"
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)
             path (:path db-info)]
         (expect (fs/exists? path))
         (#'rlm-db/dispose-rlm-conn! db-info)
         (expect (not (fs/exists? path)))))
 
     (it "does not throw when called on a fresh conn"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (#'rlm-db/dispose-rlm-conn! db-info)))))
 
 (defdescribe execute-code-test
@@ -183,7 +187,7 @@
 
 (defdescribe final-results-scoping-test
   (it "filters final results by conversation-ref"
-    (let [db-info (#'rlm-db/create-rlm-conn nil)]
+    (let [db-info (#'rlm-db/create-rlm-conn :temp)]
       (try
         (let [conv-a (rlm-db/store-conversation! db-info {:env-id "env-a" :system-prompt "" :model "m"})
               conv-b (rlm-db/store-conversation! db-info {:env-id "env-b" :system-prompt "" :model "m"})
@@ -206,7 +210,7 @@
   (it "returns nil answer on max-iterations and includes locals only in debug mode"
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                     :models [{:name "gpt-4o"}]}])
-          env (sut/create-env router {})]
+          env (sut/create-env router {:db :temp})]
       (try
         (let [normal (sut/query-env! env [(llm/user "No-op")] {:max-iterations 0 :refine? false})
               debug  (sut/query-env! env [(llm/user "No-op")] {:max-iterations 0 :refine? false :debug? true})]
@@ -364,7 +368,7 @@
 (defn- with-integration-env*
   "Creates an RLM environment for integration tests, executes f, then disposes."
   [f]
-  (let [env (sut/create-env test-router {})]
+  (let [env (sut/create-env test-router {:db :temp})]
     (try
       (f env)
       (finally
@@ -472,7 +476,7 @@
 (defdescribe safe-bindings-test
   (describe "arithmetic operations"
     (it "provides basic math"
-      (with-test-env* {} {:db false} (fn [env]
+      (with-test-env* {} {:db nil} (fn [env]
                                        (expect (= 10 (:result (#'rlm-core/execute-code env "(+ 1 2 3 4)"))))
                                        (expect (= 6 (:result (#'rlm-core/execute-code env "(* 2 3)"))))
                                        (expect (= 2 (:result (#'rlm-core/execute-code env "(/ 10 5)"))))
@@ -480,28 +484,28 @@
 
   (describe "collection operations"
     (it "provides map/filter/reduce"
-      (with-test-env* {} {:db false} (fn [env]
+      (with-test-env* {} {:db nil} (fn [env]
                                        (expect (= [2 4 6] (:result (#'rlm-core/execute-code env "(mapv #(* 2 %) [1 2 3])"))))
                                        (expect (= [2 4] (:result (#'rlm-core/execute-code env "(vec (filter even? [1 2 3 4]))"))))
                                        (expect (= 10 (:result (#'rlm-core/execute-code env "(reduce + [1 2 3 4])"))))))))
 
   (describe "string operations"
     (it "provides str and related"
-      (with-test-env* {} {:db false} (fn [env]
+      (with-test-env* {} {:db nil} (fn [env]
                                        (expect (= "hello world" (:result (#'rlm-core/execute-code env "(str \"hello\" \" \" \"world\")"))))
                                        (expect (= "ell" (:result (#'rlm-core/execute-code env "(subs \"hello\" 1 4)"))))
                                        (expect (= "test" (:result (#'rlm-core/execute-code env "(name :test)"))))))))
 
   (describe "comparison operations"
     (it "provides equality and ordering"
-      (with-test-env* {} {:db false} (fn [env]
+      (with-test-env* {} {:db nil} (fn [env]
                                        (expect (true? (:result (#'rlm-core/execute-code env "(= 1 1)"))))
                                        (expect (true? (:result (#'rlm-core/execute-code env "(< 1 2)"))))
                                        (expect (true? (:result (#'rlm-core/execute-code env "(>= 5 5)"))))))))
 
   (describe "atom operations"
     (it "provides atom and swap!"
-      (with-test-env* {} {:db false} (fn [env]
+      (with-test-env* {} {:db nil} (fn [env]
                                        (#'rlm-core/execute-code env "(def counter (atom 0))")
                                        (#'rlm-core/execute-code env "(swap! counter inc)")
                                        (expect (= 1 (:result (#'rlm-core/execute-code env "@counter")))))))))
@@ -1060,7 +1064,7 @@
                                        :entity/section "s1"
                                        :entity/page 0}]
                            :relationships []}))
-        (let [env (sut/create-env test-ingest-router {})
+        (let [env (sut/create-env test-ingest-router {:db :temp})
               result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 1 (count @calls)))
@@ -1072,7 +1076,7 @@
                         (swap! calls conj opts)
                         (make-mock-ask-response
                           {:entities [] :relationships []}))
-        (let [env (sut/create-env test-ingest-router {})
+        (let [env (sut/create-env test-ingest-router {:db :temp})
               result (sut/ingest-to-env! env [(make-test-image-only-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 2 (count @calls)))
@@ -1090,7 +1094,7 @@
                         (swap! calls conj opts)
                         (make-mock-ask-response
                           {:entities [] :relationships []}))
-        (let [env (sut/create-env test-ingest-router {})
+        (let [env (sut/create-env test-ingest-router {:db :temp})
               _result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true :extraction-model "gpt-4o-mini"})]
           (sut/dispose-env! env)
           (expect (pos? (count @calls)))))))
@@ -1100,14 +1104,14 @@
       (with-mock-ask! (fn [_router opts]
                         (swap! calls conj opts)
                         (make-mock-ask-response {:entities [] :relationships []}))
-        (let [env (sut/create-env test-ingest-router {})
+        (let [env (sut/create-env test-ingest-router {:db :temp})
               result (sut/ingest-to-env! env [(make-test-image-only-document)] {:extract-entities? true :max-vision-rescan-nodes 1})]
           (sut/dispose-env! env)
           (expect (= 1 (count @calls)))
           (expect (= 1 (get-in result [0 :visual-nodes-scanned])))))))
 
   (it "returns zero counts for empty document"
-    (let [env (sut/create-env test-ingest-router {})
+    (let [env (sut/create-env test-ingest-router {:db :temp})
           result (sut/ingest-to-env! env [(make-test-empty-document)] {:extract-entities? true})]
       (sut/dispose-env! env)
       (expect (= 0 (get-in result [0 :entities-extracted])))
@@ -1119,7 +1123,7 @@
                         (swap! calls conj opts)
                         (make-mock-ask-response
                           {:entities [] :relationships []}))
-        (let [env (sut/create-env test-ingest-router {})
+        (let [env (sut/create-env test-ingest-router {:db :temp})
               _result (sut/ingest-to-env! env [(make-test-image-with-description-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 1 (count @calls)))
@@ -1130,7 +1134,7 @@
       (with-mock-ask! (fn [_router _opts]
                         (swap! calls inc)
                         (throw (ex-info "boom" {})))
-        (let [env (sut/create-env test-ingest-router {})
+        (let [env (sut/create-env test-ingest-router {:db :temp})
               result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
           (sut/dispose-env! env)
           (expect (= 1 @calls))
@@ -1184,7 +1188,7 @@
                            (expect (nil? (:result result)))))))
 
   (it "document tools not available when db is disabled"
-    (with-test-env* {} {:db false} (fn [env]
+    (with-test-env* {} {:db nil} (fn [env]
                                      (let [result (#'rlm-core/execute-code env "(search-documents \"x\")")]
                                        (expect (some? (:error result))))))))
 
@@ -1278,7 +1282,7 @@
                                      :entity/section "s1"
                                      :entity/page 0}]
                          :relationships []}))
-      (let [env (sut/create-env test-ingest-router {})
+      (let [env (sut/create-env test-ingest-router {:db :temp})
             result (sut/ingest-to-env! env [(make-test-single-page-document)] {:extract-entities? true})]
         (sut/dispose-env! env)
         (expect (pos? (get-in result [0 :entities-extracted])))
@@ -1515,7 +1519,7 @@
 (defdescribe search-toc-entries-test
   (describe "db-search-toc-entries"
     (it "finds entries matching title text"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (#'rlm-db/db-store-toc-entry! db-info
                                         {:document.toc/title "Chapter 1: Compliance"
@@ -1534,7 +1538,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "finds entries matching description text"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (#'rlm-db/db-store-toc-entry! db-info
                                         {:document.toc/title "Appendix A"
@@ -1548,7 +1552,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "returns empty for non-matching query"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (#'rlm-db/db-store-toc-entry! db-info
                                         {:document.toc/title "Introduction"
@@ -1561,7 +1565,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "falls back to list mode for blank query"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (#'rlm-db/db-store-toc-entry! db-info
                                         {:document.toc/title "First Entry"
@@ -1581,7 +1585,7 @@
 (defdescribe search-entities-test
   (describe "db-search-entities"
     (it "finds entities matching name"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (d/transact! (:conn db-info)
             [{:entity/id (UUID/randomUUID)
@@ -1603,7 +1607,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "finds entities matching description"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (d/transact! (:conn db-info)
             [{:entity/id (UUID/randomUUID)
@@ -1619,7 +1623,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "returns empty for non-matching query"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (d/transact! (:conn db-info)
             [{:entity/id (UUID/randomUUID)
@@ -1634,7 +1638,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "respects :type filter"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (d/transact! (:conn db-info)
             [{:entity/id (UUID/randomUUID)
@@ -1656,7 +1660,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "respects :document-id filter"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (d/transact! (:conn db-info)
             [{:entity/id (UUID/randomUUID)
@@ -1684,7 +1688,7 @@
 (defdescribe datalevin-auto-commit-test
   (describe "Datalevin auto-commit"
     (it "persists data immediately on transact without flush"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)
             conn (:conn db-info)]
         (try
           (datalevin.core/transact! conn [{:entity/id (UUID/randomUUID)
@@ -1702,7 +1706,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "DB path exists and is a directory after conn creation"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)
             path (:path db-info)]
         (try
           (expect (fs/exists? path))
@@ -1717,7 +1721,7 @@
 (defdescribe relationship-storage-test
   (describe "two-phase entity + relationship storage"
     (it "stores relationships with resolved entity UUIDs"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (let [conn (:conn db-info)
                 uuid-a (UUID/randomUUID)
@@ -1758,7 +1762,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))
 
     (it "relationships start empty in a fresh db"
-      (let [db-info (#'rlm-db/create-rlm-conn nil)]
+      (let [db-info (#'rlm-db/create-rlm-conn :temp)]
         (try
           (expect (= 0 (count (d/q '[:find ?e :where [?e :relationship/id _]] (d/db (:conn db-info))))))
           (finally
@@ -1773,7 +1777,7 @@
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                     :models [{:name "gpt-4o"}]}])
           dir (str (fs/create-temp-dir {:prefix "qa-corpus-cache-"}))
-          env (sut/create-env router {:path dir})]
+          env (sut/create-env router {:db dir})]
       (try
         (sut/ingest-to-env! env [(make-test-single-page-document)])
         (let [revision (rlm-db/get-corpus-revision @(:db-info-atom env))
@@ -1806,7 +1810,7 @@
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                     :models [{:name "gpt-4o"}]}])
           dir (str (fs/create-temp-dir {:prefix "qa-manifest-"}))
-          env (sut/create-env router {:path dir})
+          env (sut/create-env router {:db dir})
           query-calls (atom 0)]
       (try
         (with-redefs [llm/ask! (fn [_router opts]
@@ -1858,7 +1862,7 @@
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                     :models [{:name "gpt-4o"}]}])
           dir (str (fs/create-temp-dir {:prefix "qa-manifest-fail-"}))
-          env (sut/create-env router {:path dir})
+          env (sut/create-env router {:db dir})
           blocked-target (str dir "/qa-manifest.edn")]
       (try
         ;; Block replacement by creating a directory at the target file path.
