@@ -4,141 +4,135 @@
 
 ### Blockether One LLM Endpoint
 
-This development environment is automatically wired with **Blockether One** — a live LLM endpoint that is always available. This means:
+Blockether One = live LLM endpoint. Always available. Rules:
 
-1. **README code examples that call the LLM should be real** — do NOT wrap them in `(comment ...)` blocks. The LLM endpoint is live and accessible, so examples like `(svar/ask! ...)`, `(svar/abstract! ...)`, `(svar/eval! ...)`, `(svar/refine! ...)` should execute directly.
-
-2. **No `lazytest/skip=true`** — all test blocks in the README must be runnable. Never add skip annotations.
-
-3. **Config creation** is the only exception — `(def config (svar/make-config ...))` may be wrapped in `(comment ...)` since API keys are environment-specific. Everything downstream that uses `config` should run.
+1. **README examples must execute** — `(svar/ask! ...)`, `(svar/abstract! ...)`, etc. No `(comment ...)` wrappers.
+2. **No `lazytest/skip=true`** — all test blocks runnable. Never add skip.
+3. **Config creation only exception** — `(def config ...)` → `(comment ...)` OK (API keys env-specific). Downstream code runs.
 
 ## Communication Style
 
-Caveman mode. Drop articles, filler, pleasantries. Keep technical substance.
+**REQUIRED. Non-negotiable.** [caveman skill](https://github.com/JuliusBrussee/caveman/blob/main/skills/caveman/SKILL.md).
 
-- Drop: a, an, the, just, really, basically, actually, simply
-- Drop: sure, certainly, of course, happy to
-- Short synonyms: fix not "implement a solution for"
-- No hedging. Fragments fine. Technical terms exact.
-- Code blocks unchanged. Caveman English around code, not in code.
+Ultra-caveman for this file. ~75% token cut. Substance stays, fluff dies.
 
-Escalate to full sentences only:
-- Destructive/risky actions (data loss, security, infra, billing)
-- Architectural trade-offs and migration plans
-- User explicitly asks for deep explanation
+### Rules
+
+Drop: articles, filler, pleasantries, hedging, conjunctions. Abbrev (DB/auth/config/req/res/fn/impl). → for causality. 1 word when enough. Code unchanged.
+
+Pattern: `[thing] [action] [reason]. [next step].`
+
+### Scope — CRITICAL
+
+| Context | Style | Why |
+|---------|-------|-----|
+| **RLM iterations** (thinking, analysis, code review) | **Caveman full** | Token budget real. Waste = slower, costlier. |
+| **RLM final answer** (`:final` response) | **Normal English** | User-facing. Direct, factual. No AI filler. |
+| **SCI sandbox tool docstrings** | **Caveman lite** | Terse. Short sentences OK. |
+| **Agent-to-agent** (logs, traces) | **Caveman full** | Machine consumers. Zero filler. |
+| **API docstrings** (public vars, README) | **Normal English** | Dev-facing. Clear, precise. |
+| **Log messages** (`trove/log!`) | **Caveman full** | "RLM schema: auto-merged attrs" not "The RLM schema was automatically merged..." |
+
+Escalate → full sentences only: destructive actions, arch trade-offs, user asks deep explanation.
 
 ## Test Framework
 
-- Use **lazytest**, not `clojure.test`
+- **lazytest**, not `clojure.test`
 - Import: `[lazytest.core :refer [defdescribe describe expect it throws?]]`
-- All README code blocks should be testable and tested
+- All README code blocks → testable + tested
 
 ### README Doc Tests
 
-Lazytest has built-in markdown doctest support. Code blocks in README.md with `;;=> ` assertions are executed and verified automatically.
+Lazytest markdown doctest. `;;=> ` = assertion.
 
-**Run README tests:**
 ```bash
-clojure -M:test --md README.md
+clojure -M:test --md README.md   # README tests
+clojure -M:test --md README.md   # all tests (unit + README)
 ```
 
-**Run all tests (unit + README):**
-```bash
-clojure -M:test --md README.md
-```
-
-**How it works:**
-- Every `` ```clojure `` block in README.md is executed by lazytest
-- Lines with `;; => value` are assertions (lazytest checks the expression above equals `value`)
-- Use `(comment ...)` ONLY for config creation (API keys are env-specific)
-- Use `lazytest/skip=true` is FORBIDDEN — all blocks must be runnable
-- To skip a block that requires a live API, restructure it so the API-dependent part is inside a `(comment ...)` while the setup code (specs, guards, humanizers) runs normally
+- Every `` ```clojure `` block → executed
+- `;; => value` → assertion (expr above = value)
+- `(comment ...)` → ONLY for config creation
+- `lazytest/skip=true` → FORBIDDEN
+- API-dep block → restructure: setup runs, API call inside `(comment ...)`
 
 ## Verification
 
-All verification logic lives in `./verify.sh`. Run it instead of a manual checklist.
+`./verify.sh` → full pipeline. No manual checklist.
 
 ```bash
-./verify.sh              # Full: format → lint → compile-java → test → test-readme → git-check → secrets
-./verify.sh --quick      # Format + lint only (no build/test)
+./verify.sh              # format → lint → compile-java → test → test-readme → git-check → secrets
+./verify.sh --quick      # format + lint only
 ```
 
-Each step writes logs to `.verification/<step>.log` and exit codes to `.verification/<step>.code`.
-On failure the script stops, shows the last 20 lines of the failing step's log, and tells you where to look.
+Logs → `.verification/<step>.log`. Exit codes → `.verification/<step>.code`. Fail → stops, shows last 20 lines.
 
-### Test count sanity check
-`verify.sh` validates that the test suite ran enough cases:
-- Lazytest: **~830 cases** (fails if <500)
+Test count: **~830 cases** (verify.sh fails if <500).
 
 ## Logging
 
-- Use `taoensso.trove` (v1.1.0), NOT `taoensso.telemere`
-- Single call pattern: `(trove/log! {:level :info :id ::my-id :data {:key val} :msg "message"})`
-- Namespace alias: `[taoensso.trove :as trove]`
+- `taoensso.trove` v1.1.0, NOT `taoensso.telemere`
+- Pattern: `(trove/log! {:level :info :id ::my-id :data {:key val} :msg "message"})`
+- Alias: `[taoensso.trove :as trove]`
 
 ## SCI Sandbox (RLM)
 
-The RLM agent runs code in an SCI (Small Clojure Interpreter) sandbox.
-Configuration lives in `src/clj/com/blockether/svar/internal/rlm/tools.clj`.
+RLM agent → SCI sandbox. Config: `src/clj/com/blockether/svar/internal/rlm/tools.clj`.
 
 ### Adding namespaces to SCI
 
-**Simple namespaces** (clojure.string, clojure.set, clojure.walk, charred.api, fast-edn.core):
+**Simple** (clojure.string, clojure.set, clojure.walk, charred.api, fast-edn.core):
 ```clojure
-;; ns->sci-map pulls all public non-macro vars automatically
+;; ns->sci-map → all public non-macro vars
 'clojure.string (ns->sci-map 'clojure.string)
 ```
 
-**Complex namespaces** (zprint, anything with macros/.cljc/rewrite-clj):
+**Complex** (zprint, macros/.cljc/rewrite-clj):
 ```clojure
-;; ns->sci-map will crash. Use requiring-resolve per-fn:
+;; ns->sci-map crashes. requiring-resolve per-fn:
 'zprint.core (let [r #(deref (requiring-resolve (symbol "zprint.core" (str %))))]
                {'zprint-str (r 'zprint-str)
                 'zprint (r 'zprint)})
 ```
 
-**Namespace aliases** (so model can use `str/split` instead of `clojure.string/split`):
+**Aliases** (`str/split` not `clojure.string/split`):
 ```clojure
 :ns-aliases {'str 'clojure.string
              'edn 'fast-edn.core
              'zp 'zprint.core}
 ```
 
-**Class imports** (so model can use `Math/sqrt` instead of `java.lang.Math/sqrt`):
+**Class imports** (`Math/sqrt` not `java.lang.Math/sqrt`):
 ```clojure
-;; Register class under full name in :classes
 :classes {'java.lang.Math Math ...}
-;; Then import the bare name
 :imports '{Math java.lang.Math ...}
 ```
-Follow Babashka convention: quoted map `'{BareName fqcn}`.
-See `babashka/impl/classes.clj` for the full list.
+Babashka convention: `'{BareName fqcn}`. Full list: `babashka/impl/classes.clj`.
 
-### Proper SCI APIs (reference from babashka source)
+### SCI APIs (babashka source)
 
-- `sci/copy-var` - copies a var with meta (doc, arglists). Use for individual fns.
-- `sci/create-ns` - creates a namespace object for attaching vars.
-- `sci/new-dynamic-var` - for dynamic vars like `*print-right-margin*`.
-- `sci/intern` - interns a value as a SCI var in a namespace.
-- `:deny` - list of symbols to block: `'[require import ns eval load-string read-string]`
+- `sci/copy-var` — var + meta (doc, arglists). Per-fn.
+- `sci/create-ns` — ns obj for vars.
+- `sci/new-dynamic-var` — dynamic vars (`*print-right-margin*`).
+- `sci/intern` — value → SCI var in ns.
+- `:deny` — `'[require import ns eval load-string read-string]`
 
-### What NOT to do
+### DON'T
 
-- Never use `ns->sci-map` on heavy/macro-heavy libs (zprint, rewrite-clj, spec)
-- Never use real `clojure.pprint` in SCI - too heavy. Use zprint-backed fns instead.
-- Never expose `read-string` from clojure.core (code execution). Use `fast-edn.core/read-string` (data only).
+- `ns->sci-map` on heavy/macro libs (zprint, rewrite-clj, spec) → crash
+- `clojure.pprint` in SCI → too heavy. Use zprint.
+- `clojure.core/read-string` → code exec. Use `fast-edn.core/read-string` (data only).
 
 ## Benchmarks
 
-Run benchmarks one at a time (sequential), not parallel JVMs:
+Sequential only (no parallel JVMs):
 ```bash
 clojure -M:bench -- --bench 4clojure --agent query-env --provider blockether --model glm-5-turbo
 clojure -M:bench -- --bench humaneval --agent query-env --provider blockether --model glm-5-turbo
 clojure -M:bench -- --bench swebench-verified --agent query-env --provider blockether --model glm-5-turbo
 ```
 
-Bench layout: `bench/com/blockether/svar/bench/benches/{fourclojure,humaneval,swebench_verified}.clj`
+Layout: `bench/com/blockether/svar/bench/benches/{fourclojure,humaneval,swebench_verified}.clj`
 Common: `bench/com/blockether/svar/bench/common.clj`
 Runner: `bench/com/blockether/svar/bench/runner.clj`
-
-Trajectories saved as EDN to `bench/trajectories/{bench}/{model}/{run-ts}/{task-id}.edn`.
+Trajectories → EDN at `bench/trajectories/{bench}/{model}/{run-ts}/{task-id}.edn`.
