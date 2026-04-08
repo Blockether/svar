@@ -90,7 +90,7 @@
    Usage:
    ```clojure
    (def router (llm/make-router providers))
-   (def env (rlm/create-env router {}))
+   (def env (rlm/create-env router {:db \"/tmp/my-rlm\"}))
    (rlm/register-env-fn! env 'my-fn (fn [x] (* x 2))
      {:doc \"Doubles a number\"
       :params [{:name \"x\" :type :int :required true :description \"Number to double\"}]
@@ -105,18 +105,22 @@
    Params:
    `router` - Required. Router from llm/make-router, pre-built.
    `opts` - Map with:
-   - :path - Optional. Path for persistent DB. If provided, data survives across sessions.
-   - :conn - Optional. Existing Datalevin connection.
+   - :db - DB spec (required, explicit):
+       nil            — no DB (SCI execution only, no document storage)
+       :temp          — ephemeral temp DB (deleted on dispose)
+       \"path\"         — persistent DB at path (survives sessions)
+       {:path \"path\"} — persistent DB at path
+       {:conn c}      — external Datalevin connection (auto-merges RLM_SCHEMA)
 
-    Returns:
-    RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
-  [router {:keys [path conn]}]
+   Returns:
+   RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
+  [router {:keys [db]}]
   (when-not router
     (anomaly/incorrect! "Missing router" {:type :rlm/missing-router}))
   (let [depth-atom (atom 0)
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
-        db-info (rlm-db/create-rlm-conn {:conn conn :path path})
+        db-info (rlm-db/create-rlm-conn db)
         db-info-atom (atom db-info)
         var-index-cache-atom (atom {:revision -1 :index nil})
         var-index-revision-atom (atom 0)

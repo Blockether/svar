@@ -50,8 +50,7 @@ Drop: articles, filler, hedging. Fragments OK. Tech terms exact. Code unchanged.
    `depth-atom` - Atom tracking recursion depth.
    `router` - Router from llm/make-router. Required.
    `opts` - Map, optional:
-     - :db - External db connection, false to disable, or nil for auto-create.
-     - :path - Path for persistent DB (history survives across sessions).
+     - :db - DB spec: nil (no DB), :temp, path string, {:conn c}, {:path p}
      - :documents - Vector of PageIndex documents to preload (stored exactly as-is).
 
    Returns:
@@ -59,13 +58,10 @@ Drop: articles, filler, hedging. Fragments OK. Tech terms exact. Code unchanged.
    :db-info-atom, :router."
   ([context-data depth-atom router]
    (create-rlm-env context-data depth-atom router {}))
-  ([context-data depth-atom router {:keys [db path documents]}]
+  ([context-data depth-atom router {:keys [db documents]}]
    (when-not router
      (throw (ex-info "Router is required for RLM environment" {:type :rlm/missing-router})))
-   (let [db-info (cond
-                   (false? db) nil
-                   (and (map? db) (:conn db)) (assoc db :owned? false)
-                   :else (create-rlm-conn path))
+   (let [db-info (create-rlm-conn db)
          db-info-atom (when db-info (atom db-info))
          _ (when (and db-info-atom (seq documents))
              (doseq [doc documents]
