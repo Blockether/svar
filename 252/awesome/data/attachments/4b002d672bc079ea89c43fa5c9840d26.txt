@@ -1,0 +1,13 @@
+CHUNK 1 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance This discovery revolutionized medicine by introducing antibiotics, which have saved millions of lives by treating bacterial infections effectively., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+CHUNK 2 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance This discovery revolutionized medicine by introducing antibiotics, which have saved millions of lives by treating bacterial infections effectively., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+CHUNK 3 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance This discovery revolutionized medicine by introducing antibiotics, which have saved millions of lives by treating bacterial infections effectively., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+2026-04-08T17:01:50.492585101Z :info com.blockether.svar.internal.llm [823 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2971.432449, :content-len 395, :has-reasoning false, :input-tokens 151, :output-tokens 93, :reasoning-tokens 0}
+CHUNK 4 => {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance This discovery revolutionized medicine by introducing antibiotics, which have saved millions of lives by treating bacterial infections effectively., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+
+=== STREAMING RESULT ===
+Total chunks: 4
+Final: {:title Discovery of Penicillin, :scientist Alexander Fleming, :year 1928, :significance This discovery revolutionized medicine by introducing antibiotics, which have saved millions of lives by treating bacterial infections effectively., :related-fields [Microbiology Pharmacology Infectious Disease Medicine Public Health]}
+Tokens: {:input 151, :output 93, :reasoning 0, :total 244} Cost: {:input-cost 3.775E-4, :output-cost 9.299999999999999E-4, :total-cost 0.0013075}
+========================
+

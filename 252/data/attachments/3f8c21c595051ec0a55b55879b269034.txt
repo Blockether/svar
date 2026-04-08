@@ -1,0 +1,4 @@
+2026-04-08T17:02:01.306118316Z :info com.blockether.svar.internal.rlm [1214 5] ::qa-corpus-cache-hit QA corpus snapshot cache hit 
+  data: {:revision 1, :hits 1, :misses 0}
+2026-04-08T17:02:01.319275507Z :info com.blockether.svar.internal.rlm [1227 5] ::qa-corpus-cache-miss QA corpus snapshot cache miss 
+  data: {:revision 2, :digest-ms 5.929133, :hits 1, :misses 1}
