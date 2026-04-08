@@ -27,9 +27,14 @@
 
 (declare build-system-prompt run-iteration format-executions)
 
-(def ^:private CAVEMAN_OUTPUT_PROMPT
-  "Abbreviate. Strip conjunctions. → for causality. One word when enough.
-Drop: articles, filler, hedging. Fragments OK. Tech terms exact. Code unchanged.")
+(def ^:private CAVEMAN_ITERATION_OUTPUT
+  "Caveman mode for iterations. Drop: articles, filler, hedging, conjunctions.
+Fragments OK. → for causality. One word when enough. Tech terms exact. Code unchanged.
+Pattern: [thing] [action] [reason]. [next step].")
+
+(def ^:private FINAL_ANSWER_OUTPUT
+  "Normal English. Clear, direct sentences. No AI filler (no \"As an AI\", \"I believe\",
+\"In conclusion\"). No hedging. Factual. Technical terms exact.")
 
 (defn rlm-debug!
   "Logs at :info level only when :rlm-debug? is true in *rlm-ctx*.
@@ -390,9 +395,13 @@ CODE:
 - Complete evaluable expr per entry. No split.
 - Simplest solution. No over-eng. No unused abstractions. No speculative features. No impossible-error handling.
 
-OUTPUT:
-" CAVEMAN_OUTPUT_PROMPT "
-Answer → 'final'. Explain only if non-obvious. No boilerplate.
+OUTPUT (iterations):
+" CAVEMAN_ITERATION_OUTPUT "
+
+FINAL ANSWER (when setting 'final'):
+" FINAL_ANSWER_OUTPUT "
+
+Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
 "))
 
 ;; =============================================================================
