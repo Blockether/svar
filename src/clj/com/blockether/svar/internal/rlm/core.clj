@@ -72,7 +72,7 @@ Pattern: [thing] [action] [reason]. [next step].")
              (doseq [doc documents]
                (db-store-pageindex-document! @db-info-atom doc)))
          llm-query-fn (make-routed-llm-query-fn {} depth-atom router)
-         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil)]
+         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil nil)]
      {:sci-ctx sci-ctx :sandbox-ns sandbox-ns :initial-ns-keys initial-ns-keys :context context-data
       :llm-query-fn llm-query-fn
       :db-info-atom db-info-atom
@@ -338,7 +338,8 @@ Pattern: [thing] [action] [reason]. [next step].")
   "Builds the system prompt — compact, token-efficient.
    All tool documentation is discoverable via (doc fn-name) in SCI."
   [{:keys [output-spec custom-docs has-reasoning? has-documents? document-summary system-prompt]}]
-  (str "Clojure SCI agent. Write, exec, iterate.
+  (str
+    "Clojure SCI agent. Write, exec, iterate.
 
 ARCH:
 - Single-shot. No msg history. State → def'd vars (persist).
@@ -354,35 +355,37 @@ GOTCHAS:
 - future/pmap/promise/deliver OK. (deref f ms :timeout).
 "
     (when (and has-documents? document-summary)
-      (str "
+      (str
+        "
 DOCUMENTS: " document-summary "
 
 Doc tools (2 fns):
-1. (search-documents \"q\") → {:pages [...] :toc [...] :entities [...]}
+1. (search-documents \"q\") → {:pages [...] :toc [...] :entities [...]} 
    (search-documents \"q\" {:in :pages})  — narrow to :pages|:toc|:entities
    (search-documents \"q\" {:top-k 20 :document-id \"doc-1\"})
 2. (fetch-content ref) → full content:
    [:page.node/id \"id\"] → page text
    [:document/id \"id\"] → vec of ~4K char pages
    [:document.toc/id \"id\"] → TOC desc
-   [:entity/id \"id\"] → {:entity {...} :relationships [...]}
+   [:entity/id \"id\"] → {:entity {...} :relationships [...]} 
 (def pages (fetch-content [:document/id \"doc-1\"]))
 Search in English. Translate non-EN queries first.
 "))
-
     (when system-prompt
       (str "\nINSTRUCTIONS:\n" system-prompt "\n"))
-
     (format-custom-docs custom-docs)
-
     (when output-spec
       (str "\nOUTPUT SCHEMA:\n" (spec/spec->prompt output-spec) "\n"))
     "
 RESPONSE FORMAT:
-" (spec/spec->prompt (if has-reasoning? ITERATION_SPEC_CODE_ONLY ITERATION_SPEC)) "
-" (if has-reasoning?
-    "JSON only. Native reasoning — omit 'thinking'."
-    "JSON with 'thinking' + 'code'.") "
+"
+    (spec/spec->prompt (if has-reasoning? ITERATION_SPEC_CODE_ONLY ITERATION_SPEC))
+    "
+"
+    (if has-reasoning?
+      "JSON only. Native reasoning — omit 'thinking'."
+      "JSON with 'thinking' + 'code'.")
+    "
 Set 'final' when done: {\"final\": {\"answer\": \"...\", \"confidence\": \"high|medium|low\"}}
 
 RULES:
@@ -396,10 +399,14 @@ CODE:
 - Simplest solution. No over-eng. No unused abstractions. No speculative features. No impossible-error handling.
 
 OUTPUT (iterations):
-" CAVEMAN_ITERATION_OUTPUT "
+"
+    CAVEMAN_ITERATION_OUTPUT
+    "
 
 FINAL ANSWER (when setting 'final'):
-" FINAL_ANSWER_OUTPUT "
+"
+    FINAL_ANSWER_OUTPUT
+    "
 
 Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
 "))
@@ -729,6 +736,55 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
               (second (re-find #"\(def\s+(\S+)" (or code ""))))))
     vec))
 
+(defn- restorable-var-snapshots
+  "Returns serializable snapshots of user vars introduced by this iteration."
+  [rlm-env executions]
+  (let [defined (set (map symbol (extract-def-names executions)))
+        locals (get-locals rlm-env)]
+    (->> locals
+      (keep (fn [[sym value]]
+              (when (contains? defined sym)
+                (let [realized (realize-value value)]
+                  (when (or (nil? realized)
+                          (string? realized)
+                          (number? realized)
+                          (keyword? realized)
+                          (boolean? realized)
+                          (symbol? realized)
+                          (map? realized)
+                          (vector? realized)
+                          (set? realized)
+                          (list? realized)
+                          (sequential? realized))
+                    {:name (str sym)
+                     :value realized
+                     :code (some (fn [{:keys [code]}]
+                                   (when (re-find (re-pattern (str "\\(def(?:n)?\\s+" (java.util.regex.Pattern/quote (name sym)) "(?:\\s|$)")))
+                                     (or code "")
+                                     code))
+                             executions)})))))
+      vec)))
+
+(defn- build-restore-context
+  "Builds compact query-level restore context for a continued conversation."
+  [db-info conversation-ref current-query]
+  (let [history (when (and db-info conversation-ref)
+                  (rlm-db/db-query-history db-info conversation-ref))
+        recent (take-last 2 history)]
+    (when (seq recent)
+      (str "<restore_context>\n"
+        "Previous conversation detected. Prior vars are NOT auto-loaded. Restore only what you need.\n"
+        "Tools: (session-history), (session-code q), (session-results q), (restore-var 'sym), (restore-vars ['a 'b])\n"
+        "Recent queries:\n"
+        (str/join "\n"
+          (map (fn [{:keys [query-pos text answer-preview key-vars iterations]}]
+                 (str "  [" query-pos "] " (pr-str (str-truncate (or text "") 100))
+                   "\n    final: " (pr-str (or answer-preview ""))
+                   "\n    key-vars: " (pr-str (mapv str key-vars))
+                   "\n    iterations: " iterations))
+            recent))
+        "\n</restore_context>"))))
+
 (defn- rehydrate-final-results!
   "Injects previous final-result-N vars into SCI context from Datalevin.
    Final results are now terminal iterations (with non-nil :iteration/answer).
@@ -864,17 +920,18 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                   idx (build-var-index (:sci-ctx rlm-env) (:initial-ns-keys rlm-env) sandbox-map)]
                               (reset! var-index-cache-atom {:revision var-index-revision :index idx})
                               idx))))
-        ;; Rehydrate previous final-result-N vars into SCI context
+        ;; Keep final-result rehydration for backwards-compatible SCI access.
         prev-final-results (rehydrate-final-results! (:sci-ctx rlm-env)
                              (:db-info-atom rlm-env)
                              (:conversation-ref rlm-env))
         ;; Rehydration mutates SCI vars; mark var-index as stale.
         _ (swap! var-index-revision-atom inc)
-        conversation-thread (render-conversation-thread prev-final-results query)]
+        restore-context (build-restore-context db-info (:conversation-ref rlm-env) query)]
     (rlm-debug! {:query query :max-iterations max-iterations :model effective-model
                  :has-output-spec? (some? output-spec) :has-pre-fetched? (some? pre-fetched-context)
                  :has-reasoning? has-reasoning?
                  :prev-final-results (count prev-final-results)
+                 :has-restore-context? (some? restore-context)
                  :msg-count (count initial-messages)} "Iteration loop started")
     (binding [*rlm-ctx* (merge *rlm-ctx* {:rlm-phase :iteration-loop})]
       (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0 restarts 0
@@ -922,7 +979,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                   exec-results-str (format-execution-results prev-executions prev-iteration)
                   journal-str (render-execution-journal journal)
                   iteration-context (str
-                                      conversation-thread
+                                      (when restore-context (str restore-context "\n"))
                                       (when journal-str (str "\n" journal-str))
                                       (when exec-results-str (str "\n" exec-results-str))
                                       (when var-index-str
@@ -965,7 +1022,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                       trace-entry {:iteration iteration :error iter-err :final? false}]
                   ;; Store error iteration snapshot
                   (rlm-db/store-iteration! db-info
-                    {:query-ref query-ref :index iteration
+                    {:query-ref query-ref
+                     :vars []
                      :executions nil :thinking nil :duration-ms 0})
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
@@ -976,10 +1034,12 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                 ;; Normal path — accumulate token usage
                 (let [_ (accumulate-usage! (:api-usage iteration-result))
                       {:keys [response thinking executions final-result next-optimize]} iteration-result
+                      vars-snapshot (restorable-var-snapshots rlm-env executions)
                       ;; Store iteration snapshot — exact input/output for fine-tuning
                       _traj-iter (rlm-db/store-iteration! db-info
-                                   {:query-ref query-ref :index iteration
+                                   {:query-ref query-ref
                                     :executions executions
+                                    :vars vars-snapshot
                                     :thinking thinking
                                     :answer (when final-result (answer-str (:answer final-result)))
                                     :duration-ms (get-in iteration-result [:api-usage :prompt_tokens] 0)})
@@ -1020,7 +1080,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                       "Respond with thinking + code, or set final to finish."))]
                         ;; Store empty iteration snapshot
                         (rlm-db/store-iteration! db-info
-                          {:query-ref query-ref :index iteration
+                          {:query-ref query-ref
+                           :vars []
                            :executions nil :thinking thinking :duration-ms 0})
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages

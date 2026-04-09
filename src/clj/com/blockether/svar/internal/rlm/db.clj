@@ -1,9 +1,11 @@
 (ns com.blockether.svar.internal.rlm.db
   (:require
    [babashka.fs :as fs]
+   [clojure.edn :as edn]
    [clojure.string :as str]
    [com.blockether.svar.internal.rlm.schema :refer [RLM_SCHEMA]]
    [datalevin.core :as d]
+   [edamame.core :as edamame]
    [com.blockether.svar.internal.util :as util]
    [taoensso.trove :as trove]))
 
@@ -23,10 +25,22 @@
 
 (defn str-includes? [s substr] (when s (str/includes? s substr)))
 
+(defn- read-edn-safe [s fallback]
+  (if (or (nil? s) (= "" s))
+    fallback
+    (try
+      (edn/read-string s)
+      (catch Exception _ fallback))))
+
 (defn- now
   "Returns the current time as a java.util.Date."
   ^java.util.Date []
   (java.util.Date.))
+
+(defn- entity-order-key
+  "Stable ordering key for entities persisted at the same timestamp."
+  [entity]
+  [(:entity/created-at entity) (:entity/id entity)])
 
 (def ^:private corpus-meta-id :global)
 
@@ -191,12 +205,46 @@
                      (d/db conn) env-id)]
       (if existing
         [:entity/id existing]
-        (store-entity! db-info
-          {:entity/type :conversation
-           :entity/name (or env-id "session")
-           :conversation/env-id env-id
-           :conversation/system-prompt (or system-prompt "")
-           :conversation/model (or model "")})))))
+         (store-entity! db-info
+           {:entity/type :conversation
+            :entity/name (or env-id "session")
+            :conversation/env-id env-id
+            :conversation/system-prompt (or system-prompt "")
+            :conversation/model (or model "")})))))
+
+(defn db-get-conversation
+  "Returns a conversation entity by lookup ref or nil."
+  [{:keys [conn]} conversation-ref]
+  (when (and conn (vector? conversation-ref))
+    (d/pull (d/db conn) '[*] conversation-ref)))
+
+(defn db-find-latest-conversation-ref
+  "Returns lookup ref for the most recently created conversation, or nil."
+  [{:keys [conn]}]
+  (when conn
+    (some->> (d/q '[:find [(pull ?e [:entity/id :entity/created-at]) ...]
+                   :where [?e :entity/type :conversation]]
+               (d/db conn))
+      (sort-by entity-order-key)
+      last
+      :entity/id
+      (vector :entity/id))))
+
+(defn db-resolve-conversation-ref
+  "Resolves a conversation selector to a lookup ref.
+
+   selector:
+   - nil        -> nil
+   - :latest    -> latest conversation
+   - UUID       -> [:entity/id uuid]
+   - lookup ref -> passed through"
+  [db-info selector]
+  (cond
+    (nil? selector) nil
+    (= :latest selector) (db-find-latest-conversation-ref db-info)
+    (and (vector? selector) (= :entity/id (first selector))) selector
+    (uuid? selector) [:entity/id selector]
+    :else nil))
 
 (defn store-query!
   "Stores a query entity linked to a conversation via parent-id.
@@ -226,8 +274,9 @@
       eval-score (assoc :query/eval-score (float eval-score)))))
 
 (defn store-iteration!
-  "Stores an iteration entity linked to a query via parent-id."
-  [db-info {:keys [query-ref index executions thinking answer duration-ms]}]
+  "Stores an iteration entity linked to a query via parent-id.
+   Ordering is by :entity/created-at (no explicit index field)."
+  [db-info {:keys [query-ref executions thinking answer duration-ms vars]}]
   (let [parent-id (when query-ref (second query-ref))
         code-strs (mapv :code (or executions []))
         result-strs (mapv #(try (pr-str (:result %))
@@ -238,14 +287,139 @@
                       (or executions []))]
     (store-entity! db-info
       (cond-> {:entity/type :iteration
-               :entity/name (str "iteration-" (or index 0))
                :entity/parent-id parent-id
-               :iteration/index (or index 0)
                :iteration/code (pr-str code-strs)
                :iteration/results (pr-str result-strs)
                :iteration/thinking (or thinking "")
                :iteration/duration-ms (or duration-ms 0)}
+        vars (assoc :iteration/vars (pr-str vars))
         answer (assoc :iteration/answer answer)))))
+
+(def ^:private edamame-opts
+  {:all true})
+
+(defn- parse-forms-safe
+  [code]
+  (try
+    (edamame/parse-string-all (or code "") edamame-opts)
+    (catch Exception _ [])))
+
+(defn- form->defined-symbol
+  [form]
+  (when (seq? form)
+    (let [[op name & _] form]
+      (when (and (contains? '#{def defn} op) (symbol? name))
+        name))))
+
+(defn- iteration->defined-symbols
+  [iteration]
+  (->> (read-edn-safe (:iteration/code iteration) [])
+    (mapcat parse-forms-safe)
+    (keep form->defined-symbol)
+    distinct
+    vec))
+
+(defn db-list-conversation-queries
+  "Lists query entities for a conversation ordered by created-at."
+  [{:keys [conn]} conversation-ref]
+  (if (and conn conversation-ref)
+    (let [conversation-id (second conversation-ref)]
+      (->> (d/q '[:find [(pull ?e [*]) ...]
+                  :in $ ?conversation-id
+                  :where [?e :entity/type :query]
+                  [?e :entity/parent-id ?conversation-id]]
+             (d/db conn) conversation-id)
+        (sort-by entity-order-key)
+        vec))
+    []))
+
+(defn db-list-query-iterations
+  "Lists iteration entities for a query ordered by created-at."
+  [{:keys [conn]} query-ref]
+  (if (and conn query-ref)
+    (let [query-id (second query-ref)]
+      (->> (d/q '[:find [(pull ?e [*]) ...]
+                  :in $ ?query-id
+                  :where [?e :entity/type :iteration]
+                  [?e :entity/parent-id ?query-id]]
+             (d/db conn) query-id)
+        (sort-by entity-order-key)
+        vec))
+    []))
+
+(defn db-query-history
+  "Returns ordered query history for a conversation with compact summaries."
+  [db-info conversation-ref]
+  (let [queries (db-list-conversation-queries db-info conversation-ref)]
+    (mapv (fn [idx query]
+            (let [query-ref [:entity/id (:entity/id query)]
+                  iterations (db-list-query-iterations db-info query-ref)
+                  key-vars (->> iterations (mapcat iteration->defined-symbols) distinct vec)
+                  answer-preview (str-truncate
+                                   (or (some-> (:query/answer query) (read-edn-safe nil) str)
+                                     (:query/answer query)
+                                     (some-> iterations last :iteration/answer)
+                                     "")
+                                   160)]
+              {:query-pos idx
+               :query-ref query-ref
+               :query-id (:entity/id query)
+               :created-at (:entity/created-at query)
+               :text (:query/text query)
+               :status (:query/status query)
+               :iterations (count iterations)
+               :answer-preview answer-preview
+               :key-vars key-vars}))
+      (range)
+      queries)))
+
+(defn db-query-code
+  "Returns ordered code blocks for a query with block metadata."
+  [db-info query-ref]
+  (->> (db-list-query-iterations db-info query-ref)
+    (map-indexed (fn [iter-pos iteration]
+                   {:iteration-pos iter-pos
+                    :created-at (:entity/created-at iteration)
+                    :code (read-edn-safe (:iteration/code iteration) [])
+                    :answer (:iteration/answer iteration)}))
+    vec))
+
+(defn db-query-results
+  "Returns ordered result blocks for a query with block metadata."
+  [db-info query-ref]
+  (->> (db-list-query-iterations db-info query-ref)
+    (map-indexed (fn [iter-pos iteration]
+                   {:iteration-pos iter-pos
+                    :created-at (:entity/created-at iteration)
+                    :results (read-edn-safe (:iteration/results iteration) [])
+                    :vars (read-edn-safe (:iteration/vars iteration) [])
+                    :answer (:iteration/answer iteration)}))
+    vec))
+
+(defn db-latest-var-registry
+  "Builds latest restorable var registry for a conversation.
+   Last write wins, ordered by query/iteration created-at." 
+  [db-info conversation-ref]
+  (let [queries (db-list-conversation-queries db-info conversation-ref)]
+    (reduce (fn [acc query]
+              (let [query-ref [:entity/id (:entity/id query)]]
+                (reduce (fn [m iteration]
+                          (let [vars (read-edn-safe (:iteration/vars iteration) [])]
+                            (reduce (fn [m2 {:keys [name value code]}]
+                                      (if name
+                                        (assoc m2 (symbol name)
+                                          {:value value
+                                           :code code
+                                           :query-id (:entity/id query)
+                                           :query-ref query-ref
+                                           :iteration-id (:entity/id iteration)
+                                           :created-at (:entity/created-at iteration)})
+                                        m2))
+                              m vars)))
+                  acc
+                  (db-list-query-iterations db-info query-ref))))
+      {}
+      queries)))
 
 ;; -----------------------------------------------------------------------------
 ;; Document Storage
@@ -1097,7 +1271,7 @@
        (->> (if conversation-id
               (d/q '[:find [(pull ?iter [:entity/id :entity/name :entity/type
                                          :entity/parent-id :entity/created-at
-                                         :iteration/index :iteration/answer
+                                         :iteration/answer
                                          :iteration/code :iteration/results]) ...]
                      :in $ ?conversation-id
                      :where [?iter :entity/type :iteration]
@@ -1106,16 +1280,16 @@
                      [?query :entity/id ?query-id]
                      [?query :entity/parent-id ?conversation-id]]
                 db conversation-id)
-              (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type
-                                      :entity/parent-id :entity/created-at
-                                      :iteration/index :iteration/answer
-                                      :iteration/code :iteration/results]) ...]
-                     :where [?e :entity/type :iteration]
-                     [?e :iteration/answer _]]
-                db))
-         (sort-by :entity/created-at)
-         vec))
-     [])))
+               (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type
+                                       :entity/parent-id :entity/created-at
+                                       :iteration/answer
+                                       :iteration/code :iteration/results]) ...]
+                      :where [?e :entity/type :iteration]
+                      [?e :iteration/answer _]]
+                 db))
+          (sort-by entity-order-key)
+          vec))
+      [])))
 
 ;; -----------------------------------------------------------------------------
 ;; High-Level Document Storage

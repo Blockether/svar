@@ -15,6 +15,10 @@
   (:import
    [java.io BufferedWriter FileWriter]))
 
+(defn- entity-order-key
+  [entity]
+  [(:entity/created-at entity) (:entity/id entity)])
+
 (defn list-queries
   "Lists query entities from the database.
    opts:
@@ -27,14 +31,14 @@
                      :where [?e :entity/type :query]]
                 (d/db conn))
           filtered (->> all
-                     (filter #(>= (or (:query/iterations %) 0) min-iterations))
-                     (filter #(if status (= (:query/status %) status) true))
-                     (sort-by :entity/created-at)
-                     reverse)]
+                      (filter #(>= (or (:query/iterations %) 0) min-iterations))
+                      (filter #(if status (= (:query/status %) status) true))
+                      (sort-by entity-order-key)
+                      reverse)]
       (if limit (take limit filtered) filtered))))
 
 (defn list-iterations
-  "Lists iteration entities for a query via parent-id, sorted by index."
+  "Lists iteration entities for a query via parent-id, sorted by created-at."
   [{:keys [conn]} query-ref]
   (when conn
     (let [db (d/db conn)
@@ -48,7 +52,7 @@
                     :where [?e :entity/type :iteration]
                     [?e :entity/parent-id ?parent-id]]
                db query-id)
-          (sort-by :iteration/index))))))
+          (sort-by entity-order-key))))))
 
 (defn score-query
   "Scores a query trajectory for training quality.
@@ -122,15 +126,13 @@
 (defn reconstruct-conversation
   "Reconstructs fine-tuning data from iteration snapshots for a query.
 
-   Returns vector of iteration maps sorted by index, each with:
-   :index, :response, :code, :results, :thinking, :duration-ms
-   and optionally :final."
+   Returns vector of iteration maps sorted by created-at, each with:
+   :code, :results, :thinking, :duration-ms, and optionally :answer."
   [{:keys [conn] :as db-info} query-ref]
   (when conn
     (let [iterations (list-iterations db-info query-ref)]
       (mapv (fn [it]
-              (cond-> {:index (:iteration/index it)
-                       :code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
+              (cond-> {:code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
                        :results (try (edn/read-string (:iteration/results it)) (catch Exception _ []))
                        :duration-ms (:iteration/duration-ms it)}
                 (:iteration/answer it) (assoc :answer (:iteration/answer it))

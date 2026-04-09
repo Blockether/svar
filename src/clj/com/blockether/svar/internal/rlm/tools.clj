@@ -371,6 +371,76 @@
     []
     (vec @claims-atom)))
 
+(defn make-session-history-fn
+  "Creates session-history for browsing prior query summaries in a conversation."
+  [db-info-atom conversation-ref-atom]
+  (fn session-history
+    ([]
+     (session-history nil))
+    ([n]
+     (if-let [db-info @db-info-atom]
+       (let [history (db/db-query-history db-info @conversation-ref-atom)
+             selected (if (some? n) (take-last (max 0 (long n)) history) history)]
+         (mapv #(select-keys % [:query-pos :query-id :text :answer-preview :status :iterations :key-vars :created-at])
+           selected))
+       []))))
+
+(defn- resolve-query-ref
+  [db-info conversation-ref query-selector]
+  (let [history (db/db-query-history db-info conversation-ref)]
+    (cond
+      (nil? query-selector) (some-> history last :query-ref)
+      (integer? query-selector) (some->> history (filter #(= (:query-pos %) query-selector)) first :query-ref)
+      (and (vector? query-selector) (= :entity/id (first query-selector))) query-selector
+      (uuid? query-selector) [:entity/id query-selector]
+      :else nil)))
+
+(defn make-session-code-fn
+  "Creates session-code for browsing prior query code blocks."
+  [db-info-atom conversation-ref-atom]
+  (fn session-code
+    ([query-selector]
+     (if-let [db-info @db-info-atom]
+       (if-let [query-ref (resolve-query-ref db-info @conversation-ref-atom query-selector)]
+         (db/db-query-code db-info query-ref)
+         [])
+       []))))
+
+(defn make-session-results-fn
+  "Creates session-results for browsing prior query results and restorable vars."
+  [db-info-atom conversation-ref-atom]
+  (fn session-results
+    ([query-selector]
+     (if-let [db-info @db-info-atom]
+       (if-let [query-ref (resolve-query-ref db-info @conversation-ref-atom query-selector)]
+         (db/db-query-results db-info query-ref)
+         [])
+       []))))
+
+(defn make-restore-var-fn
+  "Creates restore-var for fetching the latest persisted data var from prior iterations."
+  [db-info-atom conversation-ref-atom]
+  (fn restore-var
+    ([sym]
+     (restore-var sym {}))
+    ([sym _opts]
+     (if-let [db-info @db-info-atom]
+       (let [registry (db/db-latest-var-registry db-info @conversation-ref-atom)]
+         (if-let [{:keys [value]} (get registry (if (symbol? sym) sym (symbol (str sym))))]
+           value
+           (throw (ex-info (str "No restorable var found for " sym)
+                    {:type :rlm/restore-var-missing :symbol sym}))))
+       (throw (ex-info "No DB available for restore-var" {:type :rlm/no-db}))))))
+
+(defn make-restore-vars-fn
+  "Creates restore-vars for batch fetching latest persisted data vars."
+  [restore-var-fn]
+  (fn restore-vars
+    [syms]
+    (into {}
+      (map (fn [sym] [sym (restore-var-fn sym)]))
+      syms)))
+
 ;; =============================================================================
 ;; SCI Context Creation
 ;; =============================================================================
@@ -382,9 +452,12 @@
    `context-data` - The data context to analyze
    `llm-query-fn` - Function for simple LLM text queries
    `db-info-atom` - Atom with database info (can be nil)
+   `conversation-ref-atom` - Atom with active conversation lookup ref (can be nil)
    `custom-bindings` - Map of symbol->value for custom bindings (can be nil)"
-  [context-data llm-query-fn db-info-atom custom-bindings]
-  (let [base-bindings {'context context-data
+  [context-data llm-query-fn db-info-atom conversation-ref-atom custom-bindings]
+  (let [restore-var-fn (when (and db-info-atom conversation-ref-atom @db-info-atom @conversation-ref-atom)
+                         (make-restore-var-fn db-info-atom conversation-ref-atom))
+        base-bindings {'context context-data
                        'llm-query llm-query-fn
                        'spec spec/spec
                        'field spec/field
@@ -393,16 +466,24 @@
                        'days-between days-between 'date-plus-days date-plus-days
                        'date-minus-days date-minus-days 'date-format date-format 'today-str today-str}
         db-bindings (when db-info-atom
-                      {;; Unified document tools
-                       'search-documents (make-search-documents-fn db-info-atom)
-                       'fetch-content (make-fetch-content-fn db-info-atom)
-                       'find-related (fn find-related
-                                       ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
-                                       ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
-                       'search-batch (fn search-batch
-                                       ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
-                                       ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
-                       'results->md (fn results->md [results] (db/results->markdown results))})
+                      (cond->
+                        {;; Unified document tools
+                         'search-documents (make-search-documents-fn db-info-atom)
+                         'fetch-content (make-fetch-content-fn db-info-atom)
+                         'find-related (fn find-related
+                                         ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
+                                         ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
+                         'search-batch (fn search-batch
+                                         ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
+                                         ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
+                         'results->md (fn results->md [results] (db/results->markdown results))}
+                        (and conversation-ref-atom @db-info-atom @conversation-ref-atom)
+                        (assoc 'session-history (make-session-history-fn db-info-atom conversation-ref-atom)
+                               'session-code (make-session-code-fn db-info-atom conversation-ref-atom)
+                               'session-results (make-session-results-fn db-info-atom conversation-ref-atom))
+                        restore-var-fn
+                        (assoc 'restore-var restore-var-fn
+                               'restore-vars (make-restore-vars-fn restore-var-fn))))
         all-bindings (merge EXTRA_BINDINGS base-bindings db-bindings
                        (or custom-bindings {}))
         ;; Proper SCI namespaces via sci/copy-ns (preserves doc, arglists, meta)
@@ -519,7 +600,12 @@
                             ['fetch-content "Fetch full content by lookup ref.\n  [:page.node/id \"id\"]    → page text\n  [:document/id \"id\"]     → vector of ~4K char pages\n  [:document.toc/id \"id\"] → TOC entry description\n  [:entity/id \"id\"]       → {:entity {...} :relationships [...]}" '([lookup-ref])]
                             ['find-related "BFS graph traversal from an anchor entity.\n  (find-related entity-id)              ;; depth 2\n  (find-related entity-id {:depth 3})   ;; deeper\n  Returns related entities sorted by distance, with cross-document canonical linking." '([entity-id] [entity-id opts])]
                             ['search-batch "Parallel multi-query search. Deduplicates, ranks by vitality.\n  (search-batch [\"schemas\" \"modes\" \"treatment\"])\n  (search-batch [\"q1\" \"q2\"] {:top-k 5 :limit 20})" '([queries] [queries opts])]
-                            ['results->md "Convert search results to compact markdown for LLM.\n  (results->md (search-batch [...]))\n  (results->md (search-documents \"query\"))" '([results])]]]
+                            ['results->md "Convert search results to compact markdown for LLM.\n  (results->md (search-batch [...]))\n  (results->md (search-documents \"query\"))" '([results])]
+                            ['session-history "List prior query summaries in the current conversation.\n  (session-history)\n  (session-history 5) ;; last 5 queries" '([] [n])]
+                            ['session-code "Get prior query code blocks by query position or ref.\n  (session-code 0)\n  (session-code [:entity/id uuid])" '([query-selector])]
+                            ['session-results "Get prior query execution results and restorable vars.\n  (session-results 0)" '([query-selector])]
+                            ['restore-var "Return the latest persisted value for a previously defined data var.\n  (def anomalies (restore-var 'anomalies))" '([sym] [sym opts])]
+                            ['restore-vars "Batch restore persisted values for prior data vars.\n  (restore-vars ['a 'b])" '([syms])]]]
       (when (:val (sci/eval-string+ sci-ctx (str "(resolve '" sym ")") {:ns sandbox-ns}))
         (sci/eval-string+ sci-ctx
           (str "(def ^{:doc " (pr-str doc)

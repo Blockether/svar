@@ -473,11 +473,11 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :query/status        {:db/valueType :db.type/keyword :db/doc ":success :max-iterations :error"}
    :query/eval-score    {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0"}
 
-   ;; Iteration-specific attrs (entity/type = :iteration, parent = query)
-   :iteration/index       {:db/valueType :db.type/long    :db/doc "Iteration number (0-based)"}
-   :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
-   :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
-   :iteration/answer      {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
+    ;; Iteration-specific attrs (entity/type = :iteration, parent = query)
+    :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
+    :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
+    :iteration/vars        {:db/valueType :db.type/string  :db/doc "pr-str of restorable vars defined in this iteration"}
+    :iteration/answer      {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
    :iteration/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
    :iteration/duration-ms {:db/valueType :db.type/long    :db/doc "LLM call duration"}
 

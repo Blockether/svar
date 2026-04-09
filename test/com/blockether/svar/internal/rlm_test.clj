@@ -81,7 +81,7 @@
 
   (it "can disable database with :db nil"
     (with-test-env* {} {:db nil} (fn [env]
-                                     (expect (nil? (:db-info-atom env)))))))
+                                   (expect (nil? (:db-info-atom env)))))))
 
 (defdescribe get-locals-test
   (it "returns empty map initially"
@@ -193,8 +193,8 @@
               conv-b (rlm-db/store-conversation! db-info {:env-id "env-b" :system-prompt "" :model "m"})
               query-a (rlm-db/store-query! db-info {:conversation-ref conv-a :text "qa" :status :running})
               query-b (rlm-db/store-query! db-info {:conversation-ref conv-b :text "qb" :status :running})]
-          (rlm-db/store-iteration! db-info {:query-ref query-a :index 0 :executions [] :answer "answer-a"})
-          (rlm-db/store-iteration! db-info {:query-ref query-b :index 0 :executions [] :answer "answer-b"})
+          (rlm-db/store-iteration! db-info {:query-ref query-a :executions [] :vars [] :answer "answer-a"})
+          (rlm-db/store-iteration! db-info {:query-ref query-b :executions [] :vars [] :answer "answer-b"})
           (let [a-only (rlm-db/db-list-final-results db-info {:conversation-ref conv-a})
                 b-only (rlm-db/db-list-final-results db-info {:conversation-ref conv-b})
                 all-finals (rlm-db/db-list-final-results db-info)]
@@ -205,6 +205,117 @@
             (expect (= 2 (count all-finals)))))
         (finally
           (#'rlm-db/dispose-rlm-conn! db-info))))))
+
+(defdescribe continuation-restore-test
+  (it "create-env can continue the latest conversation"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "rlm-continue-"}))]
+      (try
+        (let [env-a (sut/create-env router {:db dir})
+              conv-a (:conversation-ref env-a)
+              _ (sut/dispose-env! env-a)
+              env-b (sut/create-env router {:db dir :conversation :latest})]
+          (try
+            (expect (= conv-a (:conversation-ref env-b)))
+            (finally
+              (sut/dispose-env! env-b))))
+        (finally
+          (fs/delete-tree dir)))))
+
+  (it "restore-var returns the latest persisted value for a defined var"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "rlm-restore-"}))]
+      (try
+        (let [env-a (sut/create-env router {:db dir})
+              db-info @(:db-info-atom env-a)
+              query-ref (rlm-db/store-query! db-info {:conversation-ref (:conversation-ref env-a)
+                                                      :text "q1" :status :success})]
+          (rlm-db/store-iteration! db-info
+            {:query-ref query-ref
+             :executions [{:code "(def anomalies [1 2 3])" :result "ignored"}]
+             :vars [{:name "anomalies" :value [1 2 3] :code "(def anomalies [1 2 3])"}]
+             :thinking ""
+             :duration-ms 0})
+          (sut/dispose-env! env-a)
+          (let [env-b (sut/create-env router {:db dir :conversation :latest})]
+            (try
+              (let [result (#'rlm-core/execute-code env-b "(restore-var 'anomalies)")]
+                (expect (nil? (:error result)))
+                (expect (= [1 2 3] (:result result))))
+              (finally
+                (sut/dispose-env! env-b)))))
+        (finally
+          (fs/delete-tree dir)))))
+
+  (it "query-env! injects restore context for continued conversations"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "rlm-restore-prompt-"}))
+          captured (atom nil)]
+      (try
+        (let [env-a (sut/create-env router {:db dir})
+              db-info @(:db-info-atom env-a)
+              query-ref (rlm-db/store-query! db-info {:conversation-ref (:conversation-ref env-a)
+                                                      :text "Find anomalies" :status :success :answer [1 2 3]})]
+          (rlm-db/store-iteration! db-info
+            {:query-ref query-ref
+             :executions [{:code "(def anomalies [1 2 3])" :result "ignored"}]
+             :vars [{:name "anomalies" :value [1 2 3] :code "(def anomalies [1 2 3])"}]
+             :thinking ""
+             :duration-ms 0
+             :answer "Found anomalies"})
+          (sut/dispose-env! env-a)
+          (let [env-b (sut/create-env router {:db dir :conversation :latest})]
+            (try
+              (with-redefs [llm/ask! (fn [_router opts]
+                                       (reset! captured (:messages opts))
+                                       {:result {:final {:answer "done" :confidence :high}}
+                                        :tokens {:input 0 :output 0 :reasoning 0 :cached 0 :total 0}
+                                        :cost {:input-cost 0 :output-cost 0 :total-cost 0}})]
+                (sut/query-env! env-b [(llm/user "What next?")] {:max-iterations 1}))
+              (let [joined (pr-str @captured)]
+                (expect (str/includes? joined "<restore_context>"))
+                (expect (str/includes? joined "session-history"))
+                (expect (str/includes? joined "restore-var"))
+                (expect (str/includes? joined "anomalies")))
+              (finally
+                (sut/dispose-env! env-b)))))
+        (finally
+          (fs/delete-tree dir))))))
+
+  (it "restore context keeps prior queries even when text repeats"
+    (let [db-info (#'rlm-db/create-rlm-conn :temp)]
+      (try
+        (let [conv-ref (rlm-db/store-conversation! db-info {:env-id "env-repeat" :system-prompt "" :model "m"})
+              query-ref (rlm-db/store-query! db-info {:conversation-ref conv-ref
+                                                      :text "What next?"
+                                                      :status :success
+                                                      :answer {:step 1}})]
+          (rlm-db/store-iteration! db-info
+            {:query-ref query-ref
+             :executions [{:code "(def anomalies [1 2 3])" :result "ignored"}]
+             :vars [{:name "anomalies" :value [1 2 3] :code "(def anomalies [1 2 3])"}]
+             :thinking ""
+             :duration-ms 0
+             :answer "Found anomalies"})
+          (let [restore-context (#'rlm-core/build-restore-context db-info conv-ref "What next?")]
+            (expect (string? restore-context))
+            (expect (str/includes? restore-context "[0] \"What next?\""))
+            (expect (str/includes? restore-context "anomalies"))))
+        (finally
+          (#'rlm-db/dispose-rlm-conn! db-info)))))
+
+  (it "create-env with :db nil does not expose restore tools"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          env (sut/create-env router {:db nil :conversation :latest})]
+      (try
+        (expect (nil? (:result (#'rlm-core/execute-code env "(resolve 'restore-var)"))))
+        (expect (nil? (:result (#'rlm-core/execute-code env "(resolve 'session-history)"))))
+        (finally
+          (sut/dispose-env! env)))))
 
 (defdescribe max-iterations-fallback-test
   (it "returns nil answer on max-iterations and includes locals only in debug mode"
@@ -263,7 +374,7 @@
 (defdescribe build-system-prompt-test
   (it "includes basic environment info"
     (let [prompt (#'rlm-core/build-system-prompt {})]
-      (expect (str/includes? prompt "SCI agent"))
+      (expect (str/includes? prompt "Clojure SCI agent"))
       (expect (str/includes? prompt "ARCH"))
       (expect (str/includes? prompt "final"))))
 
@@ -290,10 +401,10 @@
           prompt (#'rlm-core/build-system-prompt {:output-spec test-spec})]
       (expect (str/includes? prompt "OUTPUT SCHEMA"))))
 
-  (it "includes caveman output style"
+  (it "includes iteration output guidance"
     (let [prompt (#'rlm-core/build-system-prompt {})]
       (expect (str/includes? prompt "OUTPUT"))
-      (expect (str/includes? prompt "Caveman mode")))))
+      (expect (str/includes? prompt "Pattern:")))))
 
 ;; =============================================================================
 ;; System Prompt Tests
@@ -477,38 +588,38 @@
   (describe "arithmetic operations"
     (it "provides basic math"
       (with-test-env* {} {:db nil} (fn [env]
-                                       (expect (= 10 (:result (#'rlm-core/execute-code env "(+ 1 2 3 4)"))))
-                                       (expect (= 6 (:result (#'rlm-core/execute-code env "(* 2 3)"))))
-                                       (expect (= 2 (:result (#'rlm-core/execute-code env "(/ 10 5)"))))
-                                       (expect (= 3 (:result (#'rlm-core/execute-code env "(- 10 7)"))))))))
+                                     (expect (= 10 (:result (#'rlm-core/execute-code env "(+ 1 2 3 4)"))))
+                                     (expect (= 6 (:result (#'rlm-core/execute-code env "(* 2 3)"))))
+                                     (expect (= 2 (:result (#'rlm-core/execute-code env "(/ 10 5)"))))
+                                     (expect (= 3 (:result (#'rlm-core/execute-code env "(- 10 7)"))))))))
 
   (describe "collection operations"
     (it "provides map/filter/reduce"
       (with-test-env* {} {:db nil} (fn [env]
-                                       (expect (= [2 4 6] (:result (#'rlm-core/execute-code env "(mapv #(* 2 %) [1 2 3])"))))
-                                       (expect (= [2 4] (:result (#'rlm-core/execute-code env "(vec (filter even? [1 2 3 4]))"))))
-                                       (expect (= 10 (:result (#'rlm-core/execute-code env "(reduce + [1 2 3 4])"))))))))
+                                     (expect (= [2 4 6] (:result (#'rlm-core/execute-code env "(mapv #(* 2 %) [1 2 3])"))))
+                                     (expect (= [2 4] (:result (#'rlm-core/execute-code env "(vec (filter even? [1 2 3 4]))"))))
+                                     (expect (= 10 (:result (#'rlm-core/execute-code env "(reduce + [1 2 3 4])"))))))))
 
   (describe "string operations"
     (it "provides str and related"
       (with-test-env* {} {:db nil} (fn [env]
-                                       (expect (= "hello world" (:result (#'rlm-core/execute-code env "(str \"hello\" \" \" \"world\")"))))
-                                       (expect (= "ell" (:result (#'rlm-core/execute-code env "(subs \"hello\" 1 4)"))))
-                                       (expect (= "test" (:result (#'rlm-core/execute-code env "(name :test)"))))))))
+                                     (expect (= "hello world" (:result (#'rlm-core/execute-code env "(str \"hello\" \" \" \"world\")"))))
+                                     (expect (= "ell" (:result (#'rlm-core/execute-code env "(subs \"hello\" 1 4)"))))
+                                     (expect (= "test" (:result (#'rlm-core/execute-code env "(name :test)"))))))))
 
   (describe "comparison operations"
     (it "provides equality and ordering"
       (with-test-env* {} {:db nil} (fn [env]
-                                       (expect (true? (:result (#'rlm-core/execute-code env "(= 1 1)"))))
-                                       (expect (true? (:result (#'rlm-core/execute-code env "(< 1 2)"))))
-                                       (expect (true? (:result (#'rlm-core/execute-code env "(>= 5 5)"))))))))
+                                     (expect (true? (:result (#'rlm-core/execute-code env "(= 1 1)"))))
+                                     (expect (true? (:result (#'rlm-core/execute-code env "(< 1 2)"))))
+                                     (expect (true? (:result (#'rlm-core/execute-code env "(>= 5 5)"))))))))
 
   (describe "atom operations"
     (it "provides atom and swap!"
       (with-test-env* {} {:db nil} (fn [env]
-                                       (#'rlm-core/execute-code env "(def counter (atom 0))")
-                                       (#'rlm-core/execute-code env "(swap! counter inc)")
-                                       (expect (= 1 (:result (#'rlm-core/execute-code env "@counter")))))))))
+                                     (#'rlm-core/execute-code env "(def counter (atom 0))")
+                                     (#'rlm-core/execute-code env "(swap! counter inc)")
+                                     (expect (= 1 (:result (#'rlm-core/execute-code env "@counter")))))))))
 
 (defn make-mock-ask-response
   "Creates a canned ask! response matching the real return shape.
@@ -1189,8 +1300,8 @@
 
   (it "document tools not available when db is disabled"
     (with-test-env* {} {:db nil} (fn [env]
-                                     (let [result (#'rlm-core/execute-code env "(search-documents \"x\")")]
-                                       (expect (some? (:error result))))))))
+                                   (let [result (#'rlm-core/execute-code env "(search-documents \"x\")")]
+                                     (expect (some? (:error result))))))))
 
 (defdescribe inline-cite-test
   (it "CITE accumulates claims in claims-atom"

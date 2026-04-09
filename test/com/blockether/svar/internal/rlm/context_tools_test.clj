@@ -8,7 +8,7 @@
 (defn- make-ctx
   "Create a sci context for testing."
   []
-  (let [{:keys [sci-ctx sandbox-ns initial-ns-keys]} (tools/create-sci-context nil (fn [_] {:content "ok"}) nil nil)]
+  (let [{:keys [sci-ctx sandbox-ns initial-ns-keys]} (tools/create-sci-context nil (fn [_] {:content "ok"}) nil nil nil)]
     {:sci-ctx sci-ctx :sandbox-ns sandbox-ns :initial-ns-keys initial-ns-keys}))
 
 (defn- eval-in [ctx code]

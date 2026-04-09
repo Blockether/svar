@@ -114,7 +114,7 @@
 
    Returns:
    RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."
-  [router {:keys [db]}]
+  [router {:keys [db conversation]}]
   (when-not router
     (anomaly/incorrect! "Missing router" {:type :rlm/missing-router}))
   (let [depth-atom (atom 0)
@@ -132,14 +132,18 @@
         root-model (or (rlm-routing/resolve-root-model router) "unknown")
         has-reasoning? (boolean (rlm-routing/provider-has-reasoning? router))
         system-prompt (rlm-core/build-system-prompt {:has-reasoning? has-reasoning?})
-        conversation-ref (rlm-db/store-conversation! db-info
-                           {:env-id env-id :model root-model :system-prompt system-prompt})
-        {:keys [sci-ctx sandbox-ns initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom @custom-bindings-atom)]
+        resolved-conversation-ref (rlm-db/db-resolve-conversation-ref db-info conversation)
+        conversation-ref (or resolved-conversation-ref
+                           (rlm-db/store-conversation! db-info
+                             {:env-id env-id :model root-model :system-prompt system-prompt}))
+        conversation-ref-atom (atom conversation-ref)
+        {:keys [sci-ctx sandbox-ns initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom conversation-ref-atom @custom-bindings-atom)]
     {:env-id env-id
-     :conversation-ref conversation-ref
-     :depth-atom depth-atom
-     :custom-bindings-atom custom-bindings-atom
-     :custom-docs-atom custom-docs-atom
+      :conversation-ref conversation-ref
+      :conversation-ref-atom conversation-ref-atom
+      :depth-atom depth-atom
+      :custom-bindings-atom custom-bindings-atom
+      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
      :var-index-cache-atom var-index-cache-atom
      :var-index-revision-atom var-index-revision-atom
