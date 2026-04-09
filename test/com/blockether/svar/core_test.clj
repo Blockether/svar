@@ -808,6 +808,7 @@
   "Returns true if LLM integration tests should run."
   []
   (or (some? (System/getenv "BLOCKETHER_LLM_API_KEY"))
+    (some? (System/getenv "BLOCKETHER_OPENAI_API_KEY"))
     (some? (System/getenv "OPENAI_API_KEY"))))
 
 (defn- make-integration-router
@@ -1118,7 +1119,7 @@
               (expect (<= wc 100)))))))))
 
 ;; =============================================================================
-;; Blockether One / Claude Opus 4.6 Integration Test
+;; Streaming Integration Tests
 ;; =============================================================================
 
 (defn- blockether-one-enabled?
@@ -1180,53 +1181,55 @@
 (defdescribe streaming-integration-test
   (describe "streaming penicillin extraction"
     (it "streams partial spec fields progressively"
-      (let [router (make-integration-router)
-            chunks (atom [])
-            result (svar/ask! router
-                     {:spec streaming-spec
-                      :messages [(svar/system "Extract the requested information.")
-                                 (svar/user "In 1928, Alexander Fleming discovered penicillin when mold contaminated his petri dish and killed bacteria. This revolutionized medicine with antibiotics, saving millions. It impacted microbiology, pharmacology, infectious disease medicine, and public health.")]
-                      :model "gpt-4o"
-                      :on-chunk (fn [chunk]
-                                  (swap! chunks conj chunk)
-                                  (println "CHUNK" (count @chunks) "=>" (:result chunk)))})]
-        (println "\n=== STREAMING RESULT ===")
-        (println "Total chunks:" (count @chunks))
-        (println "Final:" (:result result))
-        (println "Tokens:" (:tokens result) "Cost:" (:cost result))
-        (println "========================\n")
-        (expect (some? (:result result)))
-        (expect (string? (get-in result [:result :title])))
-        (expect (integer? (get-in result [:result :year])))
-        (expect (pos? (count @chunks)))
-        (expect (every? :result @chunks)))))
+      (when (integration-tests-enabled?)
+        (let [router (make-integration-router)
+              chunks (atom [])
+              result (svar/ask! router
+                       {:spec streaming-spec
+                        :messages [(svar/system "Extract the requested information.")
+                                   (svar/user "In 1928, Alexander Fleming discovered penicillin when mold contaminated his petri dish and killed bacteria. This revolutionized medicine with antibiotics, saving millions. It impacted microbiology, pharmacology, infectious disease medicine, and public health.")]
+                        :model "gpt-4o"
+                        :on-chunk (fn [chunk]
+                                    (swap! chunks conj chunk)
+                                    (println "CHUNK" (count @chunks) "=>" (:result chunk)))})]
+          (println "\n=== STREAMING RESULT ===")
+          (println "Total chunks:" (count @chunks))
+          (println "Final:" (:result result))
+          (println "Tokens:" (:tokens result) "Cost:" (:cost result))
+          (println "========================\n")
+          (expect (some? (:result result)))
+          (expect (string? (get-in result [:result :title])))
+          (expect (integer? (get-in result [:result :year])))
+          (expect (pos? (count @chunks)))
+          (expect (every? :result @chunks))))))
 
   (describe "streaming French Revolution extraction (7 fields)"
     (it "streams a complex multi-field spec"
-      (let [router (make-integration-router)
-            chunks (atom [])
-            result (svar/ask! router
-                     {:spec event-spec
-                      :messages [(svar/system "Extract detailed structured information about the historical event.")
-                                 (svar/user "The French Revolution began in 1789 at Versailles. Fiscal crisis, crop failures, and Enlightenment ideals fueled anger against the monarchy. Key figures: Louis XVI, Marie Antoinette, Robespierre, Danton, Lafayette. The Bastille fell July 14 1789. Results: abolition of feudalism, Declaration of Rights of Man, execution of Louis XVI in 1793, Reign of Terror (~17,000 executions), Napoleon's rise. Total death toll ~40,000. It transformed French society, inspired democracy worldwide, created the metric system and modern citizenship.")]
-                      :model "gpt-4o"
-                      :on-chunk (fn [chunk]
-                                  (swap! chunks conj chunk)
-                                  (let [r (:result chunk)
-                                        filled (count (filter some? (vals r)))]
-                                    (println (str "CHUNK " (count @chunks)
-                                               " [" filled "/7] "
-                                               "event=" (:event r)
-                                               " toll=" (:death-toll r)))))})]
-        (println "\n=== COMPLEX STREAMING ===")
-        (println "Total chunks:" (count @chunks))
-        (println "Final:" (:result result))
-        (println "Tokens:" (:tokens result) "Cost:" (:cost result))
-        (println "=========================\n")
-        (expect (some? (:result result)))
-        (expect (string? (get-in result [:result :event])))
-        (expect (vector? (get-in result [:result :key-figures])))
-        (expect (vector? (get-in result [:result :consequences])))
-        (expect (integer? (get-in result [:result :death-toll])))
-        (expect (pos? (count @chunks)))
-        (expect (every? #(map? (:result %)) @chunks))))))
+      (when (integration-tests-enabled?)
+        (let [router (make-integration-router)
+              chunks (atom [])
+              result (svar/ask! router
+                       {:spec event-spec
+                        :messages [(svar/system "Extract detailed structured information about the historical event.")
+                                   (svar/user "The French Revolution began in 1789 at Versailles. Fiscal crisis, crop failures, and Enlightenment ideals fueled anger against the monarchy. Key figures: Louis XVI, Marie Antoinette, Robespierre, Danton, Lafayette. The Bastille fell July 14 1789. Results: abolition of feudalism, Declaration of Rights of Man, execution of Louis XVI in 1793, Reign of Terror (~17,000 executions), Napoleon's rise. Total death toll ~40,000. It transformed French society, inspired democracy worldwide, created the metric system and modern citizenship.")]
+                        :model "gpt-4o"
+                        :on-chunk (fn [chunk]
+                                    (swap! chunks conj chunk)
+                                    (let [r (:result chunk)
+                                          filled (count (filter some? (vals r)))]
+                                      (println (str "CHUNK " (count @chunks)
+                                                 " [" filled "/7] "
+                                                 "event=" (:event r)
+                                                 " toll=" (:death-toll r)))))})]
+          (println "\n=== COMPLEX STREAMING ===")
+          (println "Total chunks:" (count @chunks))
+          (println "Final:" (:result result))
+          (println "Tokens:" (:tokens result) "Cost:" (:cost result))
+          (println "=========================\n")
+          (expect (some? (:result result)))
+          (expect (string? (get-in result [:result :event])))
+          (expect (vector? (get-in result [:result :key-figures])))
+          (expect (vector? (get-in result [:result :consequences])))
+          (expect (integer? (get-in result [:result :death-toll])))
+          (expect (pos? (count @chunks)))
+          (expect (every? #(map? (:result %)) @chunks)))))))
