@@ -300,7 +300,7 @@
              :thinking ""
              :duration-ms 0
              :answer "Found anomalies"})
-          (let [restore-context (#'rlm-core/build-restore-context db-info conv-ref "What next?")]
+          (let [restore-context (#'rlm-core/build-restore-context db-info conv-ref)]
             (expect (string? restore-context))
             (expect (str/includes? restore-context "[0] \"What next?\""))
             (expect (str/includes? restore-context "anomalies"))))

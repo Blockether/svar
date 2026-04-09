@@ -442,6 +442,20 @@
       syms)))
 
 ;; =============================================================================
+;; SCI Context Helpers
+;; =============================================================================
+
+(defn sci-update-binding!
+  "Update a binding in an existing SCI context.
+   Ensures the symbol is a real SCI var before interning the value,
+   since bindings from sci/init :namespaces are not SCI vars."
+  [sci-ctx sym val]
+  (let [ns-obj (sci/find-ns sci-ctx 'sandbox)]
+    ;; Promote to SCI var if needed (sci/init :namespaces creates plain values)
+    (sci/eval-string+ sci-ctx (str "(def " sym " nil)") {:ns ns-obj})
+    (sci/intern sci-ctx ns-obj sym val)))
+
+;; =============================================================================
 ;; SCI Context Creation
 ;; =============================================================================
 
@@ -586,6 +600,23 @@
                                                        sh
                                    ;; No IO handles
                                                        *in* *out* *err* *command-line-args*]}))]
+    ;; Post-init: wrap restore-var/restore-vars to also bind in SCI namespace
+    (when restore-var-fn
+      (let [binding-restore-var (fn binding-restore-var
+                                  ([sym] (binding-restore-var sym {}))
+                                  ([sym opts]
+                                   (let [val (restore-var-fn sym opts)]
+                                     (sci-update-binding! sci-ctx sym val)
+                                     val)))
+            binding-restore-vars (fn binding-restore-vars
+                                   [syms]
+                                   (into {}
+                                     (map (fn [sym]
+                                            (let [val (binding-restore-var sym)]
+                                              [sym val])))
+                                     syms))]
+        (sci-update-binding! sci-ctx 'restore-var binding-restore-var)
+        (sci-update-binding! sci-ctx 'restore-vars binding-restore-vars)))
     ;; Inject doc metadata so (doc fn-name) works in SCI
     (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
                             ['llm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
@@ -604,8 +635,8 @@
                             ['session-history "List prior query summaries in the current conversation.\n  (session-history)\n  (session-history 5) ;; last 5 queries" '([] [n])]
                             ['session-code "Get prior query code blocks by query position or ref.\n  (session-code 0)\n  (session-code [:entity/id uuid])" '([query-selector])]
                             ['session-results "Get prior query execution results and restorable vars.\n  (session-results 0)" '([query-selector])]
-                            ['restore-var "Return the latest persisted value for a previously defined data var.\n  (def anomalies (restore-var 'anomalies))" '([sym] [sym opts])]
-                            ['restore-vars "Batch restore persisted values for prior data vars.\n  (restore-vars ['a 'b])" '([syms])]]]
+                            ['restore-var "Restore a persisted data var from a prior iteration, binding it in the sandbox.\n  (restore-var 'anomalies)  ;; binds anomalies and returns its value" '([sym] [sym opts])]
+                            ['restore-vars "Batch restore persisted data vars, binding each in the sandbox.\n  (restore-vars ['a 'b])  ;; binds a and b, returns {a val-a, b val-b}" '([syms])]]]
       (when (:val (sci/eval-string+ sci-ctx (str "(resolve '" sym ")") {:ns sandbox-ns}))
         (sci/eval-string+ sci-ctx
           (str "(def ^{:doc " (pr-str doc)
@@ -686,22 +717,8 @@
                sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+----")
                rows (map (fn [{:keys [name type size doc]}]
                            (str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc))
-                      visible)
-               footer (when (pos? omitted)
-                        (str "  ... " omitted " more vars omitted"))]
-           (str/join "\n" (concat [header sep] rows (when footer [footer]))))))
-     (catch Exception _ nil))))
-
-;; =============================================================================
-;; SCI Context Helpers
-;; =============================================================================
-
-(defn sci-update-binding!
-  "Update a binding in an existing SCI context.
-   Ensures the symbol is a real SCI var before interning the value,
-   since bindings from sci/init :namespaces are not SCI vars."
-  [sci-ctx sym val]
-  (let [ns-obj (sci/find-ns sci-ctx 'sandbox)]
-    ;; Promote to SCI var if needed (sci/init :namespaces creates plain values)
-    (sci/eval-string+ sci-ctx (str "(def " sym " nil)") {:ns ns-obj})
-    (sci/intern sci-ctx ns-obj sym val)))
+                       visible)
+                footer (when (pos? omitted)
+                         (str "  ... " omitted " more vars omitted"))]
+            (str/join "\n" (concat [header sep] rows (when footer [footer]))))))
+      (catch Exception _ nil))))

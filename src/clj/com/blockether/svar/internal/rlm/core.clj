@@ -767,7 +767,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
 
 (defn- build-restore-context
   "Builds compact query-level restore context for a continued conversation."
-  [db-info conversation-ref current-query]
+  [db-info conversation-ref]
   (let [history (when (and db-info conversation-ref)
                   (rlm-db/db-query-history db-info conversation-ref))
         recent (take-last 2 history)]
@@ -926,7 +926,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                              (:conversation-ref rlm-env))
         ;; Rehydration mutates SCI vars; mark var-index as stale.
         _ (swap! var-index-revision-atom inc)
-        restore-context (build-restore-context db-info (:conversation-ref rlm-env) query)]
+        restore-context (build-restore-context db-info (:conversation-ref rlm-env))]
     (rlm-debug! {:query query :max-iterations max-iterations :model effective-model
                  :has-output-spec? (some? output-spec) :has-pre-fetched? (some? pre-fetched-context)
                  :has-reasoning? has-reasoning?

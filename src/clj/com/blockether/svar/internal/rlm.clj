@@ -121,7 +121,7 @@
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
         db-info (rlm-db/create-rlm-conn db)
-        db-info-atom (atom db-info)
+        db-info-atom (when db-info (atom db-info))
         var-index-cache-atom (atom {:revision -1 :index nil})
         var-index-revision-atom (atom 0)
         qa-corpus-snapshot-cache-atom (atom nil)
