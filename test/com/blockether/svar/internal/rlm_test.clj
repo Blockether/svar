@@ -293,7 +293,7 @@
   (it "includes caveman output style"
     (let [prompt (#'rlm-core/build-system-prompt {})]
       (expect (str/includes? prompt "OUTPUT"))
-      (expect (str/includes? prompt "Abbreviate")))))
+      (expect (str/includes? prompt "Caveman mode")))))
 
 ;; =============================================================================
 ;; System Prompt Tests
