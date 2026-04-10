@@ -206,14 +206,14 @@
 ;; Unified Document Tools
 ;; -----------------------------------------------------------------------------
 
-(def ^:private P_ADD_PAGE_SIZE
+(def ^:private FETCH_CONTENT_PAGE_SIZE
   "Characters per chunk when fetch-content returns a document as a vector of pages."
   4000)
 
 (defn- chunk-text
   "Splits text into ~4000 char pages at paragraph boundaries."
   [text]
-  (let [page-size P_ADD_PAGE_SIZE]
+  (let [page-size FETCH_CONTENT_PAGE_SIZE]
     (loop [remaining (str/split text #"\n\n+")
            current [] current-size 0 result []]
       (if (empty? remaining)
@@ -481,23 +481,23 @@
                        'date-minus-days date-minus-days 'date-format date-format 'today-str today-str}
         db-bindings (when db-info-atom
                       (cond->
-                        {;; Unified document tools
-                         'search-documents (make-search-documents-fn db-info-atom)
-                         'fetch-content (make-fetch-content-fn db-info-atom)
-                         'find-related (fn find-related
-                                         ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
-                                         ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
-                         'search-batch (fn search-batch
-                                         ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
-                                         ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
-                         'results->md (fn results->md [results] (db/results->markdown results))}
+                       {;; Unified document tools
+                        'search-documents (make-search-documents-fn db-info-atom)
+                        'fetch-content (make-fetch-content-fn db-info-atom)
+                        'find-related (fn find-related
+                                        ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
+                                        ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
+                        'search-batch (fn search-batch
+                                        ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
+                                        ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
+                        'results->md (fn results->md [results] (db/results->markdown results))}
                         (and conversation-ref-atom @db-info-atom @conversation-ref-atom)
                         (assoc 'session-history (make-session-history-fn db-info-atom conversation-ref-atom)
-                               'session-code (make-session-code-fn db-info-atom conversation-ref-atom)
-                               'session-results (make-session-results-fn db-info-atom conversation-ref-atom))
+                          'session-code (make-session-code-fn db-info-atom conversation-ref-atom)
+                          'session-results (make-session-results-fn db-info-atom conversation-ref-atom))
                         restore-var-fn
                         (assoc 'restore-var restore-var-fn
-                               'restore-vars (make-restore-vars-fn restore-var-fn))))
+                          'restore-vars (make-restore-vars-fn restore-var-fn))))
         all-bindings (merge EXTRA_BINDINGS base-bindings db-bindings
                        (or custom-bindings {}))
         ;; Proper SCI namespaces via sci/copy-ns (preserves doc, arglists, meta)
@@ -717,8 +717,8 @@
                sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+----")
                rows (map (fn [{:keys [name type size doc]}]
                            (str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc))
-                       visible)
-                footer (when (pos? omitted)
-                         (str "  ... " omitted " more vars omitted"))]
-            (str/join "\n" (concat [header sep] rows (when footer [footer]))))))
-      (catch Exception _ nil))))
+                      visible)
+               footer (when (pos? omitted)
+                        (str "  ... " omitted " more vars omitted"))]
+           (str/join "\n" (concat [header sep] rows (when footer [footer]))))))
+     (catch Exception _ nil))))

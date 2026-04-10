@@ -205,12 +205,12 @@
                      (d/db conn) env-id)]
       (if existing
         [:entity/id existing]
-         (store-entity! db-info
-           {:entity/type :conversation
-            :entity/name (or env-id "session")
-            :conversation/env-id env-id
-            :conversation/system-prompt (or system-prompt "")
-            :conversation/model (or model "")})))))
+        (store-entity! db-info
+          {:entity/type :conversation
+           :entity/name (or env-id "session")
+           :conversation/env-id env-id
+           :conversation/system-prompt (or system-prompt "")
+           :conversation/model (or model "")})))))
 
 (defn db-get-conversation
   "Returns a conversation entity by lookup ref or nil."
@@ -223,7 +223,7 @@
   [{:keys [conn]}]
   (when conn
     (some->> (d/q '[:find [(pull ?e [:entity/id :entity/created-at]) ...]
-                   :where [?e :entity/type :conversation]]
+                    :where [?e :entity/type :conversation]]
                (d/db conn))
       (sort-by entity-order-key)
       last
@@ -398,7 +398,7 @@
 
 (defn db-latest-var-registry
   "Builds latest restorable var registry for a conversation.
-   Last write wins, ordered by query/iteration created-at." 
+   Last write wins, ordered by query/iteration created-at."
   [db-info conversation-ref]
   (let [queries (db-list-conversation-queries db-info conversation-ref)]
     (reduce (fn [acc query]
@@ -533,7 +533,7 @@
 (defn- brevify-node
   "Strips full content from a page node, replacing with a 150-char preview.
    Preserves vitality fields (:vitality-score, :vitality-zone) if present.
-   The LLM uses fetch-content to load full content into P when needed."
+   The LLM uses fetch-content to load full content when needed."
   [node]
   (let [content (or (:page.node/content node) (:page.node/description node) "")
         preview (if (> (count content) 150)
@@ -1280,16 +1280,16 @@
                      [?query :entity/id ?query-id]
                      [?query :entity/parent-id ?conversation-id]]
                 db conversation-id)
-               (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type
-                                       :entity/parent-id :entity/created-at
-                                       :iteration/answer
-                                       :iteration/code :iteration/results]) ...]
-                      :where [?e :entity/type :iteration]
-                      [?e :iteration/answer _]]
-                 db))
-          (sort-by entity-order-key)
-          vec))
-      [])))
+              (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/type
+                                      :entity/parent-id :entity/created-at
+                                      :iteration/answer
+                                      :iteration/code :iteration/results]) ...]
+                     :where [?e :entity/type :iteration]
+                     [?e :iteration/answer _]]
+                db))
+         (sort-by entity-order-key)
+         vec))
+     [])))
 
 ;; -----------------------------------------------------------------------------
 ;; High-Level Document Storage

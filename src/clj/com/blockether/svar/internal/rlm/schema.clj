@@ -445,19 +445,19 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :entity/section      {:db/valueType :db.type/string  :db/doc "Source section identifier"}
    :entity/created-at   {:db/valueType :db.type/instant}
    :entity/updated-at   {:db/valueType :db.type/instant}
-    :entity/canonical-id {:db/valueType :db.type/uuid    :db/doc "Cross-document linking — same name+type = same canonical"}
+   :entity/canonical-id {:db/valueType :db.type/uuid    :db/doc "Cross-document linking — same name+type = same canonical"}
 
     ;; Git/commit-specific attrs (entity/type = :event, source = git ingestion)
-    :commit/category     {:db/valueType :db.type/keyword :db/doc "Squashed category: :bug, :feature, or :documentation"}
-    :commit/sha          {:db/valueType :db.type/string  :db/doc "Git commit SHA"}
-    :commit/ticket-refs  {:db/valueType :db.type/string  :db/cardinality :db.cardinality/many :db/doc "Ticket/issue refs (Jira, GitHub)"}
-    :commit/file-paths   {:db/valueType :db.type/string  :db/cardinality :db.cardinality/many :db/doc "File paths changed in commit"}
-    :commit/date         {:db/valueType :db.type/string  :db/doc "ISO-8601 commit date"}
-    :commit/prefix       {:db/valueType :db.type/string  :db/doc "Conventional commit prefix (feat, fix, chore, etc.)"}
-    :commit/scope        {:db/valueType :db.type/string  :db/doc "Conventional commit scope (rlm, bench, etc.)"}
+   :commit/category     {:db/valueType :db.type/keyword :db/doc "Squashed category: :bug, :feature, or :documentation"}
+   :commit/sha          {:db/valueType :db.type/string  :db/doc "Git commit SHA"}
+   :commit/ticket-refs  {:db/valueType :db.type/string  :db/cardinality :db.cardinality/many :db/doc "Ticket/issue refs (Jira, GitHub)"}
+   :commit/file-paths   {:db/valueType :db.type/string  :db/cardinality :db.cardinality/many :db/doc "File paths changed in commit"}
+   :commit/date         {:db/valueType :db.type/string  :db/doc "ISO-8601 commit date"}
+   :commit/prefix       {:db/valueType :db.type/string  :db/doc "Conventional commit prefix (feat, fix, chore, etc.)"}
+   :commit/scope        {:db/valueType :db.type/string  :db/doc "Conventional commit scope (rlm, bench, etc.)"}
 
     ;; Git/author-specific attrs (entity/type = :person, source = git ingestion)
-    :person/email        {:db/valueType :db.type/string  :db/doc "Git author email"}
+   :person/email        {:db/valueType :db.type/string  :db/doc "Git author email"}
 
    ;; Conversation-specific attrs (entity/type = :conversation)
    :conversation/env-id        {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "RLM env-id"}
@@ -474,10 +474,10 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :query/eval-score    {:db/valueType :db.type/float   :db/doc "Refinement eval score 0.0-1.0"}
 
     ;; Iteration-specific attrs (entity/type = :iteration, parent = query)
-    :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
-    :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
-    :iteration/vars        {:db/valueType :db.type/string  :db/doc "pr-str of restorable vars defined in this iteration"}
-    :iteration/answer      {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
+   :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
+   :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
+   :iteration/vars        {:db/valueType :db.type/string  :db/doc "pr-str of restorable vars defined in this iteration"}
+   :iteration/answer      {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
    :iteration/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
    :iteration/duration-ms {:db/valueType :db.type/long    :db/doc "LLM call duration"}
 

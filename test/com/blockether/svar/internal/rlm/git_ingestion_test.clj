@@ -41,11 +41,11 @@
   (describe "commit with body"
     (it "separates subject and body"
       (let [msg (str/join "\n" ["feat(rlm): RL Q-values and co-occurrence edges"
-                                 ""
-                                 "Self-improving memory retrieval:"
-                                 "- Per-page Q-values with source attribution"
-                                 ""
-                                 "Tests: 775 cases, 0 failures"])
+                                ""
+                                "Self-improving memory retrieval:"
+                                "- Per-page Q-values with source attribution"
+                                ""
+                                "Tests: 775 cases, 0 failures"])
             result (git/parse-commit-message msg)]
         (expect (= "feat" (:prefix result)))
         (expect (= "rlm" (:scope result)))
@@ -112,7 +112,7 @@
 
     (it "extracts multiple jira refs"
       (expect (= ["SVAR-123" "SVAR-456"]
-                  (git/extract-ticket-refs "[SVAR-123][SVAR-456] feat: combined fix"))))
+                (git/extract-ticket-refs "[SVAR-123][SVAR-456] feat: combined fix"))))
 
     (it "extracts jira ref from body"
       (let [msg "fix: parser crash\n\nRelated to [PROJ-789] for tracking."]
@@ -142,7 +142,7 @@
   (describe "cross-repo refs"
     (it "extracts blockether/svar#456"
       (expect (= ["blockether/svar#456"]
-                  (git/extract-ticket-refs "fixes blockether/svar#456")))))
+                (git/extract-ticket-refs "fixes blockether/svar#456")))))
 
   (describe "bare project key"
     (it "extracts SVAR-123 without brackets"
@@ -184,8 +184,8 @@
         (expect (= "Michał Kruk" (:author result)))
         (expect (= "michal@blockether.com" (:author-email result)))
         (expect (= ["src/clj/com/blockether/svar/core.clj"
-                     "src/clj/com/blockether/svar/new.clj"]
-                   (:file-paths result))))))
+                    "src/clj/com/blockether/svar/new.clj"]
+                  (:file-paths result))))))
 
   (describe "entry with no body"
     (it "handles nil body"
@@ -222,17 +222,17 @@
   (describe "full commit → event entity"
     (it "produces valid entity map"
       (let [parsed {:sha "6d70505096"
-                     :author "Michał Kruk"
-                     :author-email "michal@blockether.com"
-                     :date "2025-01-15T10:30:00+01:00"
-                     :subject "fix(rlm): gate SCI execution"
-                     :prefix "fix"
-                     :scope "rlm"
-                     :category :bug
-                     :body "Detailed description"
-                     :ticket-refs ["SVAR-42"]
-                     :file-paths ["src/core.clj" "test/core_test.clj"]}
-             entity (git/commit->entity parsed "my-repo")]
+                    :author "Michał Kruk"
+                    :author-email "michal@blockether.com"
+                    :date "2025-01-15T10:30:00+01:00"
+                    :subject "fix(rlm): gate SCI execution"
+                    :prefix "fix"
+                    :scope "rlm"
+                    :category :bug
+                    :body "Detailed description"
+                    :ticket-refs ["SVAR-42"]
+                    :file-paths ["src/core.clj" "test/core_test.clj"]}
+            entity (git/commit->entity parsed "my-repo")]
         (expect (= :event (:entity/type entity)))
         (expect (= "fix(rlm): gate SCI execution" (:entity/name entity)))
         (expect (str/includes? (:entity/description entity) "Detailed description"))
@@ -247,16 +247,16 @@
   (describe "commit without body"
     (it "uses subject as description"
       (let [parsed {:sha "abc"
-                     :author "Dev"
-                     :author-email "dev@test.com"
-                     :date "2025-01-15T10:30:00+01:00"
-                     :subject "chore: update deps"
-                     :prefix "chore"
-                     :scope nil
-                     :category :feature
-                     :body nil
-                     :ticket-refs []
-                     :file-paths ["deps.edn"]}
+                    :author "Dev"
+                    :author-email "dev@test.com"
+                    :date "2025-01-15T10:30:00+01:00"
+                    :subject "chore: update deps"
+                    :prefix "chore"
+                    :scope nil
+                    :category :feature
+                    :body nil
+                    :ticket-refs []
+                    :file-paths ["deps.edn"]}
             entity (git/commit->entity parsed "repo")]
         (expect (= "chore: update deps" (:entity/description entity)))))))
 
@@ -268,8 +268,8 @@
   (describe "unique person per email"
     (it "creates person entity from commit author"
       (let [person (git/author->person-entity {:author "Michał Kruk"
-                                                 :author-email "michal@blockether.com"}
-                                                "repo")]
+                                               :author-email "michal@blockether.com"}
+                     "repo")]
         (expect (= :person (:entity/type person)))
         (expect (= "Michał Kruk" (:entity/name person)))
         (expect (= "michal@blockether.com" (:person/email person)))
@@ -380,7 +380,7 @@
                              :where [?e :entity/type :file] [?e :entity/name ?name]]
                         (d/db conn))]
             (expect (= 1 (count files))))
-           (finally (d/close conn)))))))
+          (finally (d/close conn)))))))
 
 ;; =============================================================================
 ;; Live repo ingestion (svar repo, first 100 commits)
@@ -411,7 +411,7 @@
 
             (let [cats (d/q '[:find ?cat (count ?e)
                               :where [?e :entity/type :event] [?e :commit/category ?cat]]
-                           (d/db conn))
+                         (d/db conn))
                   cat-map (into {} cats)]
               (expect (pos? (get cat-map :feature 0)))
               (expect (pos? (get cat-map :bug 0))))
@@ -423,7 +423,7 @@
 
             (let [files (d/q '[:find (count ?e)
                                :where [?e :entity/type :file]]
-                           (d/db conn))]
+                          (d/db conn))]
               (expect (<= 10 (ffirst files)))))
 
           (finally (d/close conn)))))

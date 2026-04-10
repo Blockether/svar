@@ -139,11 +139,11 @@
         conversation-ref-atom (atom conversation-ref)
         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (rlm-tools/create-sci-context nil sub-llm-query-fn db-info-atom conversation-ref-atom @custom-bindings-atom)]
     {:env-id env-id
-      :conversation-ref conversation-ref
-      :conversation-ref-atom conversation-ref-atom
-      :depth-atom depth-atom
-      :custom-bindings-atom custom-bindings-atom
-      :custom-docs-atom custom-docs-atom
+     :conversation-ref conversation-ref
+     :conversation-ref-atom conversation-ref-atom
+     :depth-atom depth-atom
+     :custom-bindings-atom custom-bindings-atom
+     :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
      :var-index-cache-atom var-index-cache-atom
      :var-index-revision-atom var-index-revision-atom
@@ -616,10 +616,10 @@
                      ;; (e.g., string "pass" → keyword :pass for :spec.type/keyword fields).
                      {:answer (if spec
                                 (try (spec/coerce-data-with-spec answer-value spec)
-                                  (catch Exception e
-                                    (trove/log! {:level :warn :data {:error (ex-message e)}
-                                                 :msg "Spec coercion failed, returning uncoerced answer"})
-                                    answer-value))
+                                     (catch Exception e
+                                       (trove/log! {:level :warn :data {:error (ex-message e)}
+                                                    :msg "Spec coercion failed, returning uncoerced answer"})
+                                       answer-value))
                                 answer-value)
                       :eval-scores nil
                       :refinement-count 0})
@@ -669,9 +669,9 @@
                    (when (seq accessed)
                      (if (seq cited-page-ids)
                        (do (rlm-db/finalize-q-updates! @db-info-atom cited-page-ids high-reward)
-                         (let [uncited (set/difference accessed (or cited-page-ids #{}))]
-                           (when (seq uncited)
-                             (rlm-db/finalize-q-updates! @db-info-atom uncited Q_REWARD_UNCITED))))
+                           (let [uncited (set/difference accessed (or cited-page-ids #{}))]
+                             (when (seq uncited)
+                               (rlm-db/finalize-q-updates! @db-info-atom uncited Q_REWARD_UNCITED))))
                        (rlm-db/finalize-q-updates! @db-info-atom accessed Q_REWARD_UNCITED))))
                  (catch Exception e
                    (trove/log! {:level :debug :data {:error (ex-message e)}
@@ -1443,8 +1443,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                   (do (trove/log! {:level :info :id ::qa-phase1-cached
                                    :data {:passages (clojure.core/count (get-in @manifest-atom [:phase1 :passages]))}
                                    :msg "Phase 1: Reusing cached passages from manifest"})
-                    {:passages (get-in @manifest-atom [:phase1 :passages])
-                     :trace [] :iterations 0})
+                      {:passages (get-in @manifest-atom [:phase1 :passages])
+                       :trace [] :iterations 0})
                   (do
                     (trove/log! {:level :info :id ::qa-phase1
                                  :data {:target-passages passage-count :target-questions count
@@ -1566,7 +1566,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                    :questions (:questions final-result)})
                                 final-result)
                               (do (Thread/sleep (* attempt 1000))
-                                (recur (inc attempt)))))))))
+                                  (recur (inc attempt)))))))))
                (async/to-chan! pending-items)))
          _ (when (empty? pending-items) (async/close! result-chan))
          ;; Collect new results + merge cached, sort by batch index
@@ -2258,7 +2258,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
     (integer? pages-spec)
     (do (validate-page-number pages-spec total-page-count)
-      #{(dec pages-spec)})
+        #{(dec pages-spec)})
 
     (vector? pages-spec)
     (if (and (= 2 (count pages-spec))
@@ -2273,7 +2273,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
                   (integer? item)
                   (do (validate-page-number item total-page-count)
-                    (conj acc (dec item)))
+                      (conj acc (dec item)))
 
                   :else
                   (anomaly/incorrect! (str "Invalid element in page spec: " (pr-str item))
@@ -3122,9 +3122,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                        ;; safe, but we still swallow interruption cleanly.
                        (doseq [^java.util.concurrent.Future f futures]
                          (try (.get f)
-                           (catch Exception e
-                             (trove/log! {:level :debug :data {:error (ex-message e)}
-                                          :msg "Q-value update failed (non-fatal)"}))))
+                              (catch Exception e
+                                (trove/log! {:level :debug :data {:error (ex-message e)}
+                                             :msg "Q-value update failed (non-fatal)"}))))
                        (finally
                          (.shutdown pool))))
              ;; Fallback: file types without per-page tracking (e.g. unknown extensions)

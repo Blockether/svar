@@ -98,16 +98,18 @@
      "Content-Type" "application/json"}))
 
 (defn- make-chat-url
-  "Builds the chat endpoint URL for the given API style."
+  "Builds the chat endpoint URL for the given API style.
+   Returns nil when base-url is nil (provider not configured)."
   [base-url api-style]
-  (case api-style
-    :anthropic (if (str/ends-with? base-url "/messages")
-                 base-url
-                 (str base-url "/messages"))
-    ;; :openai default
-    (if (str/ends-with? base-url "/chat/completions")
-      base-url
-      (str base-url "/chat/completions"))))
+  (when base-url
+    (case api-style
+      :anthropic (if (str/ends-with? base-url "/messages")
+                   base-url
+                   (str base-url "/messages"))
+      ;; :openai default
+      (if (str/ends-with? base-url "/chat/completions")
+        base-url
+        (str base-url "/chat/completions")))))
 
 (defn- build-anthropic-request-body
   "Builds request body in Anthropic Messages API format.

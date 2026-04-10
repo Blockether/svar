@@ -126,7 +126,7 @@ Pattern: [thing] [action] [reason]. [next step].")
     (.close stderr-writer)
     (if (nil? execution-result)
       (do (future-cancel exec-future)
-        {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)") :timeout? true})
+          {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)") :timeout? true})
       execution-result)))
 
 (defn- detect-common-mistakes
@@ -187,12 +187,12 @@ Pattern: [thing] [action] [reason]. [next step].")
       (if lint-error
         ;; Pre-exec lint caught a known mistake - return clear error without eval
         (do (rlm-debug! {:lint-error lint-error} "Pre-exec lint caught mistake")
-          {:result nil :stdout "" :stderr "" :error lint-error
-           :execution-time-ms 0 :timeout? false})
+            {:result nil :stdout "" :stderr "" :error lint-error
+             :execution-time-ms 0 :timeout? false})
         (if-let [parse-error (parse-clojure-syntax code)]
           (do (rlm-debug! {:parse-error parse-error} "Edamame pre-parse failed")
-            {:result nil :stdout "" :stderr "" :error parse-error
-             :execution-time-ms 0 :timeout? false})
+              {:result nil :stdout "" :stderr "" :error parse-error
+               :execution-time-ms 0 :timeout? false})
         ;; Normal execution path
           (let [execution-result (run-sci-code sci-ctx code :sandbox-ns sandbox-ns)
                 execution-time (- (System/currentTimeMillis) start-time)]
@@ -208,7 +208,7 @@ Pattern: [thing] [action] [reason]. [next step].")
                                          (do (trove/log! {:level :debug :id ::repair-noop
                                                           :data {:code-len (count code) :error error}
                                                           :msg "Paren repair: no change needed"})
-                                           execution-result)
+                                             execution-result)
                                          (let [retry (run-sci-code sci-ctx repaired :sandbox-ns sandbox-ns)]
                                            (if (:error retry)
                                              (do (trove/log! {:level :warn :id ::repair-retry-failed
@@ -219,7 +219,7 @@ Pattern: [thing] [action] [reason]. [next step].")
                                                                      :added-chars (- (count repaired) (count code))
                                                                      :repaired-tail (subs repaired (max 0 (- (count repaired) 80)))}
                                                               :msg "Paren repair changed code but retry still failed"})
-                                               execution-result)
+                                                 execution-result)
                                              (do
                                                (trove/log! {:level :info :id ::repair-applied
                                                             :data {:original code :repaired repaired :sci-error error}
@@ -496,11 +496,11 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
           (if validation-error
             (do (rlm-debug! {:final-answer (str-truncate final-answer 200)
                              :validation-error validation-error} "FINAL rejected")
-              {:response nil :thinking thinking :next-optimize next-optimize
-               :executions (or executions
-                             [{:id 0 :code final-answer :result nil :stdout "" :stderr ""
-                               :error validation-error}])
-               :final-result nil :api-usage api-usage})
+                {:response nil :thinking thinking :next-optimize next-optimize
+                 :executions (or executions
+                               [{:id 0 :code final-answer :result nil :stdout "" :stderr ""
+                                 :error validation-error}])
+                 :final-result nil :api-usage api-usage})
             (let [sources (vec (or (:sources final-data) []))
                   final-result (cond-> {:final? true
                                         :answer {:result final-answer :type String}
@@ -759,8 +759,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                     {:name (str sym)
                      :value realized
                      :code (some (fn [{:keys [code]}]
-                                   (when (re-find (re-pattern (str "\\(def(?:n)?\\s+" (java.util.regex.Pattern/quote (name sym)) "(?:\\s|$)")))
-                                     (or code "")
+                                   (when (and code (re-find (re-pattern (str "\\(def(?:n)?\\s+" (java.util.regex.Pattern/quote (name sym)) "(?:\\s|$)")) code))
                                      code))
                              executions)})))))
       vec)))
@@ -971,8 +970,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
               (do (trove/log! {:level :warn :data {:iteration iteration :consecutive-errors consecutive-errors
                                                    :restarts restarts}
                                :msg "Error budget exhausted — too many consecutive errors across restarts. Simplify your code or break the task into smaller steps."})
-                (merge {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration}
-                  (finalize-cost))))
+                  (merge {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration}
+                    (finalize-cost))))
             (let [_ (rlm-debug! {:iteration iteration :msg-count (count messages)} "Iteration start")
                   ;; Build single-shot prompt: conversation + journal + execution results + var index
                   var-index-str (get-var-index)
@@ -1051,24 +1050,24 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                   (if final-result
                     (do (trove/log! {:level :info :data {:iteration iteration :answer (str-truncate (answer-str (:answer final-result)) 200)} :msg "FINAL detected"})
                         ;; Fire final streaming callback
-                      (when on-chunk
-                        (on-chunk {:iteration iteration
-                                   :thinking thinking
-                                   :code (mapv :code executions)
-                                   :final {:answer (:answer final-result)
-                                           :confidence (:confidence final-result)
-                                           :summary (:summary final-result)
-                                           :iterations (inc iteration)
-                                           :status :success}
-                                   :done? true}))
+                        (when on-chunk
+                          (on-chunk {:iteration iteration
+                                     :thinking thinking
+                                     :code (mapv :code executions)
+                                     :final {:answer (:answer final-result)
+                                             :confidence (:confidence final-result)
+                                             :summary (:summary final-result)
+                                             :iterations (inc iteration)
+                                             :status :success}
+                                     :done? true}))
                         ;; Final result persisted via store-iteration! with :iteration/answer
-                      (merge (cond-> {:answer (:answer final-result)
-                                      :trace (conj trace trace-entry)
-                                      :iterations (inc iteration)
-                                      :confidence (:confidence final-result)}
-                               (:sources final-result)   (assoc :sources (:sources final-result))
-                               (:reasoning final-result) (assoc :reasoning (:reasoning final-result)))
-                        (finalize-cost)))
+                        (merge (cond-> {:answer (:answer final-result)
+                                        :trace (conj trace trace-entry)
+                                        :iterations (inc iteration)
+                                        :confidence (:confidence final-result)}
+                                 (:sources final-result)   (assoc :sources (:sources final-result))
+                                 (:reasoning final-result) (assoc :reasoning (:reasoning final-result)))
+                          (finalize-cost)))
                     (if (empty? executions)
                       ;; Empty iteration: DON'T increment iteration counter, DON'T add to trace.
                       ;; Retry immediately with a nudge — this doesn't waste an iteration slot.
@@ -1183,7 +1182,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
         ;; Neither - skip
         :else
         (do (trove/log! {:level :warn :msg "Visual node has no image-data or description, skipping"})
-          {:entities [] :relationships []})))
+            {:entities [] :relationships []})))
     (catch Exception e
       (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Visual node extraction failed"})
       {:entities [] :relationships []})))

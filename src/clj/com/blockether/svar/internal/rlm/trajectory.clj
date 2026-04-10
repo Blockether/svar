@@ -31,10 +31,10 @@
                      :where [?e :entity/type :query]]
                 (d/db conn))
           filtered (->> all
-                      (filter #(>= (or (:query/iterations %) 0) min-iterations))
-                      (filter #(if status (= (:query/status %) status) true))
-                      (sort-by entity-order-key)
-                      reverse)]
+                     (filter #(>= (or (:query/iterations %) 0) min-iterations))
+                     (filter #(if status (= (:query/status %) status) true))
+                     (sort-by entity-order-key)
+                     reverse)]
       (if limit (take limit filtered) filtered))))
 
 (defn list-iterations
