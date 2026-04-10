@@ -1,0 +1,2 @@
+2026-04-10T20:02:17.192936905Z :warn com.blockether.svar.internal.guard [271 14] Static guard detected prompt injection 
+  data: {:input-length 27, :pattern "jailbreak", :type :jailbreak, :duration-ms 0.03325}
