@@ -8,9 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- `rlm/cancel-query!` — cooperative cancellation of an in-progress `query-env!` call from any thread. Sets a `:cancel-atom` on the env that `iteration-loop` checks at the top of every cycle, returning `{:status :cancelled}` after the current iteration finishes. The atom is reset on each new `query-env!` entry so stale cancels don't bleed between queries. Safe to call when no query is running (no-op).
-- `rlm/query-env!` `:on-iteration` opt — callback fired synchronously at the end of every iteration with a structured summary map `{:iteration :status :thinking :executions :final-result :error :duration-ms}`. Status ∈ `#{:error :empty :success :final}`. Throwing callbacks are caught and logged; the iteration loop continues. Replaces the missing per-iteration post hook that was removed in a prior refactor — vis + other consumers can now observe iteration-by-iteration progress without polling Datalevin.
-- `rlm/query-env!`: `:eval-timeout-ms` opt to override SCI eval timeout per call. Clamped to `[1s, 30min]` at the API boundary; throws on non-integer input. Nested `query-env!` calls inherit the outer binding.
+
+**Hook system v3** — per-tool `:before`/`:after`/`:wrap` chains and a global lifecycle `:hooks` map, both wired through `register-env-fn!` and `query-env!`. Policy (deny / transform / recover) lives in per-tool chains; observation (logging / metrics / UI streaming) lives in global hooks. See `rlm.tools/normalize-hooks` / `execute-tool` / `wrap-tool-for-sci` for the full engine.
+
+Per-tool chains (attached via `register-env-fn!` tool-def):
+  - `:before` — each hook receives the invocation map, may return `{:args v}` (transform args), `{:skip v}` (short-circuit, :after still runs), `{:error e}` (short-circuit to error), or nil.
+  - `:after` — receives the outcome map, may return `{:result v}`, `{:error e}`, `{:result v :error nil}` (recover from failure), or nil. Independent sequential chain, NOT paired setup/teardown.
+  - `:wrap` — ring-style middleware, vector is vec-LAST = outermost (matches `(-> handler inner outer)` convention).
+  - Idempotent layered registration: calling `register-env-fn!` twice on the same symbol merges hooks by `:id`, same id replaces in place, new ids append, old ids preserved.
+  - Throws caught and logged; iteration loop continues.
+  - `(:invoke inv-map)` — call another registered tool through its own per-tool chain, bypassing global observers. Depth-tracked via `*hook-depth*`, cap `MAX_HOOK_DEPTH` = 8.
+
+Global lifecycle hooks (`query-env!` `:hooks {:on-iteration ... :on-cancel ...}`) — all pure observers, return ignored, exceptions swallowed:
+  - `:on-iteration` — fires after `store-iteration!` with `{:iteration :status :thinking :executions :final-result :error :duration-ms}`. Status ∈ `#{:error :empty :success :final}`. Replaces the top-level `:on-iteration` opt.
+  - `:on-cancel` — fires when the cancel-atom is observed true.
+  - `:on-chunk` — migrated from top-level `:on-chunk` opt into `:hooks`.
+  - `:on-tool-invoked` / `:on-tool-completed` — fire around the per-tool pipeline for tools registered via `register-env-fn!`.
+
+`query-env!` opts:
+  - `:hooks {...}` — canonical entry point for global lifecycle hooks.
+  - `:cancel-atom (atom false)` — caller-owned atom. Flip from any thread to cancel the in-progress query; the iteration loop finishes the current cycle and returns `{:status :cancelled}`. If omitted, `query-env!` creates a fresh one locally.
+  - `:eval-timeout-ms` — unchanged. Clamped `[1s, 30min]`.
+
+Inspection / maintenance:
+  - `rlm/list-tool-hooks env sym` → `{:before [{:id :position :fn-name}] :after [...] :wrap [...]}`
+  - `rlm/list-registered-tools env` → `[{:sym :hook-counts {:before :after :wrap}}]`
+  - `rlm/unregister-hook! env sym stage id` → true/false
+
+Other additions (unchanged from prior unreleased shipping):
 - `rlm.schema/*eval-timeout-ms*` dynamic var replacing the former hardcoded `EVAL_TIMEOUT_MS` constant.
 - `rlm.schema/MIN_EVAL_TIMEOUT_MS` (1s) and `rlm.schema/MAX_EVAL_TIMEOUT_MS` (30min) — hard bounds to prevent runaway SCI futures.
 - SCI sandbox: `search-entities`, `get-entity`, `list-relationships` bound from existing `rlm.db` fns.
@@ -26,6 +51,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `rlm.schema` commit attrs: `:commit/parents` (many strings, for graph walking) and `:commit/author-email` (denormalized for `db-search-commits` queries by author).
 - `rlm.db/db-search-commits` — query commit entities by `:category`, `:since`, `:until`, `:ticket`, `:path`, `:author-email`, `:document-id`, `:limit`. Backs the `search-commits` / `commit-history` / `commits-by-ticket` SCI tools.
 - `rlm.db/db-commit-by-sha` — SHA-prefix lookup of a single commit entity.
+
+### Breaking
+
+- **`rlm/query-env!` opt changes.** Top-level `:on-chunk` and `:on-iteration` are removed. Move them into the `:hooks` map: `{:hooks {:on-chunk ... :on-iteration ...}}`.
+- **`rlm/cancel-query!` removed.** Cancellation is caller-owned now: create an `(atom false)`, pass it via `:cancel-atom` opt to `query-env!`, and `(reset! the-atom true)` from any thread to cancel.
+- **Env map no longer carries `:cancel-atom`.** Callers that reached into the env to flip cancellation must pass their own atom via the `:cancel-atom` query-env! opt.
+- **`rlm.tools` hook engine: `*query-hooks*`, `*current-iteration*`, `*hook-depth*`, `*parent-dispatch-id*`** — new dynamic vars. Thread-scoped by design, bound during tool invocations. SCI sandbox code reaches them only through the outcome/invocation maps their per-tool hooks receive.
+- Env map no longer carries `:custom-bindings-atom` for fns — register-env-fn! writes to the new `:tool-registry-atom` instead. `:custom-bindings-atom` is still used by `register-env-def!` for constants/values.
 
 ### Changed
 - `internal/llm.clj` `shared-http-client`: HTTP/1.1 pin now documented as load-bearing for OCR. Mirror note added in `pageindex/vision.clj` above the OCR section.

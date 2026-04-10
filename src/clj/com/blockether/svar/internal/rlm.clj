@@ -119,13 +119,17 @@
   (when-not router
     (anomaly/incorrect! "Missing router" {:type :rlm/missing-router}))
   (let [depth-atom (atom 0)
+        ;; Constants and values registered via register-env-def! — flash-bound
+        ;; into SCI on each query-env! call. Fns go through tool-registry-atom.
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
-        ;; Cooperative cancellation — set by (cancel-query! env) from any
-        ;; thread. Checked at the top of every iteration-loop cycle.
-        ;; Reset to false at the entry of each query-env! call, so a stale
-        ;; cancel from a prior query doesn't bleed into the next one.
-        cancel-atom (atom false)
+        ;; Canonical tool registry: {sym → {:fn :doc :params :returns :hooks
+        ;;   {:before [{:id :fn}] :after [...] :wrap [...]}}}. Populated by
+        ;; register-env-fn! with hook normalization + id-based chain merge.
+        ;; On each query-env! call, registered fns are re-flashed into SCI
+        ;; as hook-wrapped closures so per-query :hooks + cancel-atom are
+        ;; visible to the pipeline.
+        tool-registry-atom (atom {})
         db-info (rlm-db/create-rlm-conn db)
         db-info-atom (when db-info (atom db-info))
         var-index-cache-atom (atom {:revision -1 :index nil})
@@ -150,7 +154,7 @@
      :depth-atom depth-atom
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
-     :cancel-atom cancel-atom
+     :tool-registry-atom tool-registry-atom
      :db-info-atom db-info-atom
      :var-index-cache-atom var-index-cache-atom
      :var-index-revision-atom var-index-revision-atom
@@ -212,6 +216,17 @@
                  \"(fetch-weather \\\"Tokyo\\\" {:units :fahrenheit})\"]})
    ```
 
+   Hook v3 support: `tool-def` may include :before / :after / :wrap hook
+   chains to intercept calls to this tool. Each chain is a single fn, a
+   single {:id :fn} map, or a vec of those. Hooks registered on the same
+   :id replace in place; new :ids append to the chain. Layering across
+   multiple register-env-fn! calls is supported.
+
+   Per-tool hook return conventions (see rlm.tools docstrings):
+     :before → {:args v} | {:skip v} | {:error e} | nil
+     :after  → {:result v} | {:error e} | {:result v :error nil} | nil
+     :wrap   → ring-style middleware, vec-LAST = outermost
+
    Returns:
    The environment (for chaining)."
   [env sym f tool-def]
@@ -223,12 +238,45 @@
     (anomaly/incorrect! "f must be a function" {:type :rlm/invalid-fn}))
   (when-not (map? tool-def)
     (anomaly/incorrect! "tool-def must be a map" {:type :rlm/invalid-tool-def}))
-  (swap! (:custom-bindings-atom env) assoc sym f)
-  ;; Inject into live SCI ctx so tool is immediately available
+  ;; Canonicalize hook chains + merge into any prior registration of `sym`.
+  ;; Fns live ONLY in tool-registry-atom — NOT in custom-bindings-atom — so
+  ;; the per-query flash at query-env! doesn't clobber hook-wrapped bindings.
+  (rlm-tools/register-tool-def! (:tool-registry-atom env) sym
+    (assoc tool-def :fn f :sym sym :type :fn))
+  ;; Immediately inject a HOOK-WRAPPED fn into SCI so the tool is callable
+  ;; before the next query-env! re-flash. The wrapper closes over the
+  ;; registry-atom so late-merged hooks are picked up on each call.
   (when-let [sci-ctx (:sci-ctx env)]
-    (rlm-tools/sci-update-binding! sci-ctx sym f))
+    (rlm-tools/sci-update-binding! sci-ctx sym
+      (rlm-tools/wrap-tool-for-sci env sym f (:tool-registry-atom env))))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :fn :sym sym))
   env)
+
+(defn unregister-hook!
+  "Remove a per-tool hook entry by :id.
+
+   Params:
+   `env`   - RLM environment.
+   `sym`   - Tool symbol.
+   `stage` - One of :before / :after / :wrap.
+   `id`    - Hook id to remove.
+
+   Returns true if a matching entry was removed, false otherwise."
+  [env sym stage id]
+  (rlm-tools/unregister-hook! (:tool-registry-atom env) sym stage id))
+
+(defn list-tool-hooks
+  "Return a map describing the hook chains registered for `sym`:
+     {:before [{:id :position :fn-name}] :after [...] :wrap [...]}
+   Returns nil when `sym` has no registered tool-def."
+  [env sym]
+  (rlm-tools/list-tool-hooks (:tool-registry-atom env) sym))
+
+(defn list-registered-tools
+  "Return a vec of {:sym :hook-counts} maps describing every tool
+   registered via register-env-fn!."
+  [env]
+  (rlm-tools/list-registered-tools (:tool-registry-atom env)))
 
 (defn register-env-def!
   "Registers a constant/value in the RLM environment's SCI sandbox.
@@ -422,21 +470,6 @@
   (when-let [db-info-atom (:db-info-atom env)]
     (rlm-db/dispose-rlm-conn! @db-info-atom)))
 
-(defn cancel-query!
-  "Cooperatively cancel the in-progress `query-env!` call on `env`.
-
-   The flag is checked at the top of every iteration-loop cycle; the loop
-   finishes its current iteration (including any in-flight LLM call and
-   SCI eval) and returns early with `{:status :cancelled}`. Calling this
-   with no query in progress is a no-op — the next `query-env!` call
-   resets the flag on entry, so stale cancels don't bleed into new queries.
-
-   Safe to call from any thread. Returns the env (for chaining)."
-  [env]
-  (when-let [ca (:cancel-atom env)]
-    (reset! ca true))
-  env)
-
 (defn query-env!
   "Runs a query on an RLM environment using iterative LLM code execution.
    
@@ -495,7 +528,7 @@
    (query-env! env messages {}))
   ([env messages {:keys [context spec model max-iterations max-refinements threshold
                          max-context-tokens max-recursion-depth verify?
-                         system-prompt plan? debug? on-chunk on-iteration eval-timeout-ms]
+                         system-prompt plan? debug? hooks cancel-atom eval-timeout-ms]
                   :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
                        max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
                        plan? false debug? false}}]
@@ -504,11 +537,11 @@
    (when-not (and (vector? messages) (seq messages))
      (anomaly/incorrect! "messages must be a non-empty vector of message maps, e.g. [(llm/user \"...\")]"
        {:type :rlm/invalid-messages :got (type messages)}))
-   ;; Clear any stale cancel flag from a prior query so a new call starts fresh.
-   ;; cancel-query! during this call will set it to true and iteration-loop
-   ;; will break at the next iteration boundary.
-   (when-let [ca (:cancel-atom env)] (reset! ca false))
-   (let [;; Extract text parts from messages for storage and logging
+   (let [;; Cancel semantics: caller owns the :cancel-atom. If not supplied,
+         ;; create a fresh one local to this query. Iteration loop checks
+         ;; it at the top of each cycle via cooperative cancellation.
+         cancel-atom (or cancel-atom (atom false))
+         ;; Extract text parts from messages for storage and logging
          query-str (str/join "\n" (keep (fn [m]
                                           (let [c (:content m)]
                                             (cond
@@ -561,7 +594,18 @@
                                                    (mapv async/<!! chs)))}
          ;; Reuse env's SCI ctx — all def'd vars persist naturally across queries
          sci-ctx (:sci-ctx env)
-         ;; Update per-query bindings in the existing SCI ctx
+         ;; Re-flash registered tool fns into SCI as HOOK-WRAPPED closures.
+         ;; The wrapper reads tool-registry-atom on each call, so late-merged
+         ;; hooks are picked up even if the LLM re-enters the tool mid-query.
+         tool-registry-atom (:tool-registry-atom env)
+         _ (when (and sci-ctx tool-registry-atom)
+             (doseq [[sym {:keys [fn]}] @tool-registry-atom]
+               (when fn
+                 (rlm-tools/sci-update-binding! sci-ctx sym
+                   (rlm-tools/wrap-tool-for-sci env sym fn tool-registry-atom)))))
+         ;; Update per-query bindings in the existing SCI ctx.
+         ;; `custom-bindings` here holds constants/values from register-env-def!
+         ;; — tool fns from register-env-fn! were flashed above as wrappers.
          _ (let [per-query (merge {'llm-query sub-llm-fn}
                              budget-bindings cite-bindings
                              (or custom-bindings {}) llm-query-overrides)]
@@ -607,9 +651,9 @@
                                            :custom-docs (into (or custom-docs []) cite-docs)
                                            :system-prompt system-prompt
                                            :pre-fetched-context plan-context
-                                           :user-messages messages}
-                                    on-chunk (assoc :on-chunk on-chunk)
-                                    on-iteration (assoc :on-iteration on-iteration)))
+                                           :user-messages messages
+                                           :hooks hooks
+                                           :cancel-atom cancel-atom}))
                {answer :answer
                 trace :trace
                 iterations :iterations

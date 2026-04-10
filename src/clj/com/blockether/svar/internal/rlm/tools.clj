@@ -14,7 +14,8 @@
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
    [sci.addons.future :as sci-future]
-   [sci.core :as sci]))
+   [sci.core :as sci]
+   [taoensso.trove :as trove]))
 
 (defn- ns->sci-map
   "Builds an SCI :namespaces entry map from a Clojure namespace's public vars.
@@ -966,3 +967,427 @@
      [sha]
      (with-repo-for-sha db-info-atom sha
        (fn [repo] (rlm-git/commit-diff repo sha))))})
+
+;; =============================================================================
+;; Hook System v3 — per-tool + global hooks with policy/observation split
+;; =============================================================================
+;;
+;; Per-tool hooks are attached to a registered tool-def and form three chains:
+;;   :before — can transform args, skip execution, or fail fast with an error
+;;   :wrap   — ring-style middleware around the fn (vec-LAST = outermost)
+;;   :after  — can transform result/error, observe, or recover from failure
+;;
+;; Global hooks live in a `:hooks` map on `query-env!` opts and are PURE
+;; OBSERVERS (return values ignored). They fire on lifecycle events the LLM
+;; loop emits: :on-iteration-start / :on-iteration / :on-cancel / :on-error /
+;; :on-final / :on-chunk / :on-tool-invoked / :on-tool-completed.
+;;
+;; Policy (deny / transform / recover) goes in per-tool hooks. Globals are for
+;; logging, metrics, UI streaming — fire-and-forget, exceptions swallowed.
+
+(def MAX_HOOK_DEPTH
+  "Ceiling on :invoke recursion depth per top-level tool dispatch. Each
+   top-level (LLM-initiated) call starts fresh at depth 0; make-invoke-fn
+   passes (inc depth) to nested calls. No dynamic vars — depth is an
+   immutable int threaded through execute-tool's ctx arg."
+  8)
+
+(def DEFAULT_QUERY_CTX
+  "Fallback query context used by register-env-fn!'s immediate SCI flash
+   when no query-env! call is active. Per-tool hook chains still fire
+   (they live in the registry), but global observers are nil — they only
+   trigger when query-env! re-flashes tool bindings with a per-query ctx."
+  {:hooks nil
+   :iteration-atom nil
+   :depth 0
+   :parent-dispatch-id nil})
+
+(declare execute-tool)
+
+(defn- gen-anon-id
+  "Generate a unique anonymous hook id for a normalize-hooks call. Uses
+   `gensym` so anon ids never collide with ids from a prior registration."
+  [stage]
+  (gensym (str "anon/" (name stage) "-")))
+
+(defn- normalize-hook-entry
+  "Coerce one hook entry (fn OR {:id :fn} map) into a canonical {:id :fn} map.
+   Anonymous fns get an auto-generated id via gen-anon-id."
+  [stage entry]
+  (cond
+    (fn? entry)
+    {:id (gen-anon-id stage) :fn entry}
+
+    (and (map? entry) (fn? (:fn entry)))
+    (update entry :id #(or % (gen-anon-id stage)))
+
+    :else
+    (throw (ex-info (str "Invalid hook entry for :" (name stage) " — "
+                      "must be a fn or {:id :fn} map")
+             {:type :rlm/invalid-hook-entry :stage stage :entry entry}))))
+
+(defn normalize-hooks
+  "Coerce a hook spec for one stage into a canonical vec of {:id :fn} maps.
+   Accepts: nil / single fn / single map / vec of fns and/or maps.
+
+   Examples:
+     (normalize-hooks :before nil)                         ;=> []
+     (normalize-hooks :before my-fn)                       ;=> [{:id :anon/...  :fn my-fn}]
+     (normalize-hooks :before {:id :x :fn my-fn})          ;=> [{:id :x :fn my-fn}]
+     (normalize-hooks :before [{:id :x :fn f1} f2])        ;=> [{:id :x :fn f1} {:id :anon/... :fn f2}]"
+  [stage hooks]
+  (cond
+    (nil? hooks) []
+    (fn? hooks) [(normalize-hook-entry stage hooks)]
+    (map? hooks) [(normalize-hook-entry stage hooks)]
+    (sequential? hooks) (mapv #(normalize-hook-entry stage %) hooks)
+    :else
+    (throw (ex-info (str "Invalid hooks shape for :" (name stage))
+             {:type :rlm/invalid-hooks-shape :stage stage :hooks hooks}))))
+
+(defn merge-hook-chain
+  "Merge incoming hook entries into an existing chain by :id.
+   * Same :id → replace in place, preserving the old position.
+   * New :id → appended to the end of the chain.
+   * Old :id not in incoming → preserved untouched.
+
+   Supports layered registration: call register-env-fn! multiple times to
+   add hooks incrementally without explicit unregister steps."
+  [existing incoming]
+  (let [incoming-by-id (into {} (map (juxt :id identity)) incoming)
+        incoming-ids (set (keys incoming-by-id))
+        ;; Replace in place
+        merged (mapv (fn [entry]
+                       (if-let [updated (get incoming-by-id (:id entry))]
+                         updated
+                         entry))
+                 existing)
+        existing-ids (set (map :id existing))
+        ;; Append new entries (not in existing)
+        appended (vec (remove #(contains? existing-ids (:id %)) incoming))]
+    (vec (concat merged appended))))
+
+(defn- merge-tool-def-hooks
+  "Merge a new tool-def's hook chains into an existing tool-def's hook chains.
+   :fn, :doc, :params, :returns are replaced wholesale. Hook chains are
+   merged by :id via merge-hook-chain."
+  [existing new-def]
+  (let [new-before (normalize-hooks :before (:before new-def))
+        new-after  (normalize-hooks :after  (:after new-def))
+        new-wrap   (normalize-hooks :wrap   (:wrap new-def))
+        old-hooks  (:hooks existing {})]
+    (-> new-def
+      (assoc :hooks {:before (merge-hook-chain (:before old-hooks []) new-before)
+                     :after  (merge-hook-chain (:after old-hooks [])  new-after)
+                     :wrap   (merge-hook-chain (:wrap old-hooks [])   new-wrap)})
+      (dissoc :before :after :wrap))))
+
+(defn- run-before-chain
+  "Run :before hooks in registration order. Each hook receives the current
+   invocation map (with possibly-updated :args from prior hooks). Return
+   value conventions:
+     nil / {}        → proceed unchanged
+     {:args v}       → transform args, continue chain
+     {:skip v}       → short-circuit, :after runs with {:result v :skipped? true}
+     {:error e}      → short-circuit, :after runs with {:error e :skipped? true}
+     (thrown)        → treated as {:error :hook-exception}
+     anything else   → logged warn, ignored
+
+   Precedence when a return map has multiple keys: :error > :skip > :args.
+
+   Returns {:args :short-circuit :skipped? :hook-errors} where :short-circuit
+   is nil (proceed) or a map containing :result and/or :error to use
+   instead of calling the tool fn."
+  [hooks invocation]
+  (reduce
+    (fn [acc {:keys [id fn]}]
+      (let [current-inv (assoc invocation :args (:args acc))]
+        (try
+          (let [ret (fn current-inv)]
+            (cond
+              (or (nil? ret) (= {} ret))
+              acc
+
+              (and (map? ret) (contains? ret :error))
+              (reduced (assoc acc
+                         :short-circuit {:result nil :error (:error ret)}
+                         :skipped? true))
+
+              (and (map? ret) (contains? ret :skip))
+              (reduced (assoc acc
+                         :short-circuit {:result (:skip ret) :error nil}
+                         :skipped? true))
+
+              (and (map? ret) (contains? ret :args))
+              (assoc acc :args (:args ret))
+
+              :else
+              (do (trove/log! {:level :warn
+                               :data {:stage :before :id id :ret ret}
+                               :msg "Before hook returned unknown shape; ignoring"})
+                  acc)))
+          (catch Throwable t
+            (reduced (assoc acc
+                       :short-circuit {:result nil
+                                       :error {:type :hook-exception
+                                               :message (ex-message t)
+                                               :stage :before
+                                               :id id}}
+                       :skipped? true))))))
+    {:args (:args invocation) :short-circuit nil :skipped? false}
+    hooks))
+
+(defn- run-after-chain
+  "Run :after hooks in registration order on the outcome. Each hook can
+   transform result and/or error, or observe. Return value conventions:
+     nil / {}                       → pass through
+     {:result v}                    → replace result
+     {:error e}                     → replace error
+     {:result v :error nil}         → recover from failure (explicit)
+     {:result nil :error e}         → flip success → failure (explicit)
+     (thrown)                       → added to :hook-errors, original flows
+     anything else                  → logged warn, ignored
+
+   NB: unlike :before, :after runs in registration order (NOT reversed).
+   :before/:after are independent sequential chains, not paired setup/cleanup.
+   If you need stack semantics, use :wrap."
+  [hooks initial-outcome]
+  (reduce
+    (fn [outcome {:keys [id fn]}]
+      (try
+        (let [ret (fn outcome)]
+          (cond
+            (or (nil? ret) (= {} ret))
+            outcome
+
+            (and (map? ret) (or (contains? ret :result) (contains? ret :error)))
+            (cond-> outcome
+              (contains? ret :result) (assoc :result (:result ret))
+              (contains? ret :error)  (assoc :error  (:error ret)))
+
+            :else
+            (do (trove/log! {:level :warn
+                             :data {:stage :after :id id :ret ret}
+                             :msg "After hook returned unknown shape; ignoring"})
+                outcome)))
+        (catch Throwable t
+          (update outcome :hook-errors (fnil conj [])
+            {:stage :after :id id :error {:type :hook-exception
+                                          :message (ex-message t)}}))))
+    initial-outcome
+    hooks))
+
+(defn- compose-wrap-chain
+  "Compose :wrap middleware around `base-handler` using ring semantics:
+   the LAST entry in the `wraps` vec is the OUTERMOST. Matches
+   (-> handler inner-wrap outer-wrap) — outer sees the invocation first,
+   inner sees it last, and outer sees the outcome last.
+
+   Each wrap entry's :fn is a middleware of shape:
+     (fn [handler] (fn [invocation] ... outcome ...))"
+  [wraps base-handler]
+  (reduce
+    (fn [handler {:keys [fn]}]
+      (fn handler))
+    base-handler
+    wraps))
+
+(defn- make-invoke-fn
+  "Build an `(fn [sym args])` closure used as `:invoke` on the invocation
+   map. Calls another registered tool through its own per-tool hook chain,
+   BYPASSING global observer hooks (the child query-ctx has :hooks nil
+   so globals don't double-count internal dispatches).
+
+   Recursion is depth-tracked via an explicit `:depth` int on the
+   query-ctx — each invoke creates a CHILD ctx with (inc depth). When
+   depth reaches MAX_HOOK_DEPTH, `:invoke` throws :rlm/hook-recursion-limit."
+  [env tool-registry-atom parent-dispatch-id parent-query-ctx]
+  (fn invoke [sym args]
+    (let [next-depth (inc (:depth parent-query-ctx 0))]
+      (when (>= next-depth MAX_HOOK_DEPTH)
+        (throw (ex-info (str "Hook :invoke recursion limit reached ("
+                          MAX_HOOK_DEPTH ")")
+                 {:type :rlm/hook-recursion-limit
+                  :depth next-depth
+                  :sym sym}))))
+    (let [tool-def (get @tool-registry-atom sym)]
+      (when-not tool-def
+        (throw (ex-info (str "Unknown tool for :invoke — " sym " not registered")
+                 {:type :rlm/unknown-invoke-tool :sym sym})))
+      ;; Child ctx: depth+1, parent-id = this caller's dispatch-id,
+      ;; :hooks nil so internal invoke calls don't fire observer globals.
+      (let [child-ctx (-> parent-query-ctx
+                        (assoc :hooks nil
+                          :depth (inc (:depth parent-query-ctx 0))
+                          :parent-dispatch-id parent-dispatch-id))
+            outcome (execute-tool env sym (:fn tool-def) (vec args)
+                      {:tool-hooks (:hooks tool-def)
+                       :tool-registry-atom tool-registry-atom
+                       :query-ctx child-ctx})]
+        (if (:error outcome)
+          (throw (ex-info (get-in outcome [:error :message] "invoke failed")
+                   {:type :rlm/invoke-error :outcome outcome}))
+          (:result outcome))))))
+
+(defn execute-tool
+  "Core tool invocation pipeline. Runs :before chain → :wrap middleware →
+   fn → :after chain, firing global :on-tool-invoked / :on-tool-completed
+   observers around the whole thing.
+
+   All per-query state is passed explicitly via `:query-ctx`:
+     {:hooks             global hooks map or nil
+      :iteration-atom    atom storing current iteration index or nil
+      :depth             int — current :invoke chain depth
+      :parent-dispatch-id string or nil — caller's dispatch-id}
+
+   Returns the final outcome map:
+     {:sym :args :iteration :env :dispatch-id :parent-dispatch-id :invoke :cancel!
+      :result :error :duration-ms :skipped? :hook-errors}"
+  [env sym user-fn args {:keys [tool-hooks tool-registry-atom query-ctx]}]
+  (let [{:keys [hooks iteration-atom parent-dispatch-id]} (or query-ctx DEFAULT_QUERY_CTX)
+        dispatch-id (str (java.util.UUID/randomUUID))
+        cancel-atom (:cancel-atom env)
+        before-hooks (or (:before tool-hooks) [])
+        after-hooks  (or (:after tool-hooks)  [])
+        wrap-hooks   (or (:wrap tool-hooks)   [])
+        invoke-fn (make-invoke-fn env tool-registry-atom dispatch-id
+                    (or query-ctx DEFAULT_QUERY_CTX))
+        cancel-fn (fn [] (when cancel-atom (reset! cancel-atom true)))
+        current-iteration (if iteration-atom @iteration-atom 0)
+        invocation {:sym sym
+                    :args args
+                    :iteration current-iteration
+                    :env env
+                    :dispatch-id dispatch-id
+                    :parent-dispatch-id parent-dispatch-id
+                    :invoke invoke-fn
+                    :cancel! cancel-fn}]
+    ;; Global :on-tool-invoked — pure observer, return ignored
+    (when-let [g (:on-tool-invoked hooks)]
+      (try (g invocation)
+           (catch Throwable t
+             (trove/log! {:level :warn
+                          :data {:error (ex-message t)}
+                          :msg ":on-tool-invoked observer threw; ignoring"}))))
+    (let [{transformed-args :args short-circuit :short-circuit skipped? :skipped?}
+          (run-before-chain before-hooks invocation)
+          start-ns (System/nanoTime)
+          ;; Execute (either short-circuited or through wraps + fn)
+          {:keys [result error]}
+          (cond
+            short-circuit
+            short-circuit
+
+            :else
+            (let [base-handler (fn [inv]
+                                 (try
+                                   {:result (apply user-fn (:args inv)) :error nil}
+                                   (catch Throwable t
+                                     {:result nil
+                                      :error {:type :tool-exception
+                                              :message (ex-message t)
+                                              :data (ex-data t)}})))
+                  composed (compose-wrap-chain wrap-hooks base-handler)]
+              (try
+                (composed (assoc invocation :args transformed-args))
+                (catch Throwable t
+                  {:result nil
+                   :error {:type :wrap-exception
+                           :message (ex-message t)}}))))
+          duration-ms (double (/ (- (System/nanoTime) start-ns) 1e6))
+          initial-outcome (merge invocation
+                            {:args transformed-args
+                             :result result
+                             :error error
+                             :duration-ms duration-ms
+                             :skipped? (boolean skipped?)
+                             :hook-errors []})
+          final-outcome (run-after-chain after-hooks initial-outcome)]
+      ;; Global :on-tool-completed — pure observer, return ignored
+      (when-let [g (:on-tool-completed hooks)]
+        (try (g final-outcome)
+             (catch Throwable t
+               (trove/log! {:level :warn
+                            :data {:error (ex-message t)}
+                            :msg ":on-tool-completed observer threw; ignoring"}))))
+      final-outcome)))
+
+(defn wrap-tool-for-sci
+  "Build the fn that gets bound into the SCI sandbox for a registered tool.
+   Closes over a `query-ctx` — either DEFAULT_QUERY_CTX (used by
+   register-env-fn!'s immediate flash when no query is active) or a
+   per-query ctx built by query-env! with the current :hooks +
+   iteration-atom. Each call starts a fresh chain with depth 0.
+
+   Returns :result on success or throws an ex-info on :error (SCI surfaces
+   throws as execution errors, which the iteration loop feeds back to the
+   LLM in <execution_results>)."
+  ([env sym user-fn tool-registry-atom]
+   (wrap-tool-for-sci env sym user-fn tool-registry-atom DEFAULT_QUERY_CTX))
+  ([env sym user-fn tool-registry-atom query-ctx]
+   (fn wrapped-tool [& args]
+     (let [outcome (execute-tool env sym user-fn (vec args)
+                     {:tool-hooks (get-in @tool-registry-atom [sym :hooks])
+                      :tool-registry-atom tool-registry-atom
+                      :query-ctx (assoc query-ctx
+                                   :depth 0
+                                   :parent-dispatch-id nil)})]
+       (if-let [err (:error outcome)]
+         (throw (ex-info (or (:message err) "tool error") err))
+         (:result outcome))))))
+
+(defn list-tool-hooks
+  "Return a map describing the hook chains registered for `sym`.
+   Shape: {:before [{:id :position :fn-name}] :after [...] :wrap [...]}
+   Returns nil if `sym` isn't registered."
+  [hook-registry-atom sym]
+  (when-let [tool-def (get @hook-registry-atom sym)]
+    (let [describe (fn [entries]
+                     (vec (map-indexed
+                            (fn [i {:keys [id fn]}]
+                              {:id id
+                               :position i
+                               :fn-name (or (some-> fn class .getSimpleName) "fn")})
+                            entries)))
+          hooks (:hooks tool-def {})]
+      {:before (describe (:before hooks []))
+       :after  (describe (:after hooks []))
+       :wrap   (describe (:wrap hooks []))})))
+
+(defn list-registered-tools
+  "Return a vec of {:sym :hook-counts} maps summarizing every tool
+   registered in `hook-registry-atom`. Hook counts are per stage."
+  [hook-registry-atom]
+  (vec
+    (for [[sym tool-def] @hook-registry-atom]
+      {:sym sym
+       :hook-counts {:before (count (get-in tool-def [:hooks :before]))
+                     :after  (count (get-in tool-def [:hooks :after]))
+                     :wrap   (count (get-in tool-def [:hooks :wrap]))}})))
+
+(defn unregister-hook!
+  "Remove a hook entry by :id from a given stage (:before / :after / :wrap).
+   Returns true if a matching entry was removed, false otherwise."
+  [hook-registry-atom sym stage id]
+  (let [removed? (atom false)]
+    (swap! hook-registry-atom
+      (fn [registry]
+        (if-let [tool-def (get registry sym)]
+          (let [old-entries (get-in tool-def [:hooks stage] [])
+                new-entries (vec (remove #(= id (:id %)) old-entries))]
+            (when (not= (count old-entries) (count new-entries))
+              (reset! removed? true))
+            (assoc-in registry [sym :hooks stage] new-entries))
+          registry)))
+    @removed?))
+
+(defn register-tool-def!
+  "Register or layer a tool-def in `hook-registry-atom`.
+   Merges hook chains by :id per merge-tool-def-hooks. Returns the
+   canonicalized tool-def (with :hooks key)."
+  [hook-registry-atom sym tool-def]
+  (let [canonical (merge-tool-def-hooks
+                    (get @hook-registry-atom sym {})
+                    tool-def)]
+    (swap! hook-registry-atom assoc sym canonical)
+    canonical))
