@@ -456,6 +456,8 @@
 ;; SCI Context Helpers
 ;; =============================================================================
 
+(declare make-git-sci-bindings)
+
 (defn sci-update-binding!
   "Update a binding in an existing SCI context.
    Ensures the symbol is a real SCI var before interning the value,
@@ -517,7 +519,14 @@
                         restore-var-fn
                         (assoc 'restore-var restore-var-fn
                           'restore-vars (make-restore-vars-fn restore-var-fn))))
+        ;; Git SCI bindings are always present when a DB is configured. They
+        ;; read :repo entities from DB on each call (no atom), open repos
+        ;; lazily via `with-repo-for-*`, and error cleanly with
+        ;; `:rlm/no-git-repos` when no `ingest-git!` call has landed yet.
+        git-bindings (when db-info-atom
+                       (make-git-sci-bindings db-info-atom))
         all-bindings (merge EXTRA_BINDINGS base-bindings db-bindings
+                       git-bindings
                        (or custom-bindings {}))
         ;; Proper SCI namespaces via sci/copy-ns (preserves doc, arglists, meta)
         str-ns  (sci/create-ns 'clojure.string nil)
@@ -664,7 +673,16 @@
                             ['session-code "Get prior query code blocks by query position or ref.\n  (session-code 0)\n  (session-code [:entity/id uuid])" '([query-selector])]
                             ['session-results "Get prior query execution results and restorable vars.\n  (session-results 0)" '([query-selector])]
                             ['restore-var "Restore a persisted data var from a prior iteration, binding it in the sandbox.\n  (restore-var 'anomalies)  ;; binds anomalies and returns its value\n  Opts: {:max-scan-queries N} limits lookup to recent queries." '([sym] [sym opts])]
-                            ['restore-vars "Batch restore persisted data vars, binding each success in the sandbox.\n  (restore-vars ['a 'b])  ;; returns {a val-a, b {:error {...}}} on partial failure\n  Opts: {:max-scan-queries N} limits lookup to recent queries." '([syms] [syms opts])]]]
+                            ['restore-vars "Batch restore persisted data vars, binding each success in the sandbox.\n  (restore-vars ['a 'b])  ;; returns {a val-a, b {:error {...}}} on partial failure\n  Opts: {:max-scan-queries N} limits lookup to recent queries." '([syms] [syms opts])]
+                            ;; Git — conditionally usable; always bound when DB exists,
+                            ;; errors cleanly (:rlm/no-git-repos) until ingest-git! runs.
+                            ['git-search-commits "Query ingested git commits. All filters optional, AND semantics. Cross-repo — pass :document-id to scope.\n  (git-search-commits {:category :bug :since \"2025-06-01\" :path \"src/\" :author-email \"a@x\" :ticket \"SVAR-42\" :limit 20})" '([] [opts])]
+                            ['git-commit-history "Recent commits across all ingested repos.\n  (git-commit-history {:limit 20})" '([] [opts])]
+                            ['git-commits-by-ticket "Commits that reference a ticket.\n  (git-commits-by-ticket \"SVAR-42\")" '([ticket-ref])]
+                            ['git-commit-parents "Parent SHAs of a commit (DB-backed, reads :commit/parents).\n  (git-commit-parents \"abc123\")" '([sha])]
+                            ['git-file-history "Commits touching a file, most-recent first. JGit, follows renames.\n  Single repo: (git-file-history \"src/foo.clj\")\n  Multi-repo:  (git-file-history \"/abs/path/svar/src/foo.clj\" {:n 10})" '([path] [path opts])]
+                            ['git-blame "Per-line blame attribution, inclusive line range (1-indexed). Follows renames.\n  Single repo: (git-blame \"src/foo.clj\" 42 58)\n  Multi-repo:  (git-blame \"/abs/path/svar/src/foo.clj\" 42 58)\n  Returns vec of {:line :sha :short :author :email :date :content}." '([path from to])]
+                            ['git-commit-diff "Unified patch for a commit. SHA auto-dispatches to owning repo. Refs like HEAD are ambiguous multi-repo.\n  (git-commit-diff \"abc123\")" '([sha])]]]
       (when (:val (sci/eval-string+ sci-ctx (str "(resolve '" sym ")") {:ns sandbox-ns}))
         (sci/eval-string+ sci-ctx
           (str "(def ^{:doc " (pr-str doc)
@@ -752,111 +770,87 @@
      (catch Exception _ nil))))
 
 ;; =============================================================================
-;; Git Tool Binding — conditional, opt-in via rlm/ingest-git!, multi-repo aware
+;; Git Tool Binding — lazy-open per call, no atoms. Bindings live in the
+;; standard SCI sandbox (see make-git-sci-bindings below); :repo entities
+;; are read from Datalevin on every call. System prompt renders
+;; per-attached-repo GIT REPO blocks via core/format-git-context.
 ;; =============================================================================
 
-(def ^:private GIT_TOOL_DOCS
-  "Tool-doc entries appended to custom-docs-atom when git tools are bound.
-   Rendered by rlm-core/build-system-prompt via the custom-docs pipeline.
-   All git tools share the `git-` prefix."
-  [{:type :fn :sym 'git-search-commits
-    :doc "Query ingested git commits by filters. All filters optional, AND semantics.
-  Cross-repo — pass :document-id \"<repo-name>\" to scope to a single repo.
-  (git-search-commits {:category :bug :since \"2025-06-01\" :path \"src/auth/\"
-                       :author-email \"alice@x\" :ticket \"SVAR-42\" :limit 20
-                       :document-id \"svar\"})
-  Returns vec of commit maps sorted most-recent-first."}
-   {:type :fn :sym 'git-commit-history
-    :doc "Recent commits window across all ingested repos.
-  (git-commit-history {:limit 20})                      — all repos
-  (git-commit-history {:document-id \"svar\" :limit 10}) — scope to one"}
-   {:type :fn :sym 'git-commits-by-ticket
-    :doc "Commits that reference a ticket (e.g. \"SVAR-42\", \"#123\").
-  (git-commits-by-ticket \"SVAR-42\")"}
-   {:type :fn :sym 'git-file-history
-    :doc "Commits touching a file, most-recent first, follows renames.
-  Single repo attached: (git-file-history \"src/foo.clj\")
-  Multi-repo: pass an absolute path inside the target repo's working tree:
-    (git-file-history \"/abs/path/svar/src/foo.clj\" {:n 10})"}
-   {:type :fn :sym 'git-blame
-    :doc "Per-line blame attribution for a file, inclusive line range (1-indexed).
-  Single repo attached: (git-blame \"src/foo.clj\" 42 58)
-  Multi-repo: absolute path inside the target repo's worktree.
-  Returns vec of {:line :sha :short :author :email :date :content}. Follows renames."}
-   {:type :fn :sym 'git-commit-diff
-    :doc "Unified patch string for a commit.
-  (git-commit-diff \"abc123\")      ;; SHA auto-dispatches to the owning repo
-  (git-commit-diff \"HEAD\")        ;; single-repo only — refs are ambiguous multi-repo"}
-   {:type :fn :sym 'git-commit-parents
-    :doc "Parent SHAs of a commit (empty for root, 1 for normal, 2+ for merges).
-  (git-commit-parents \"abc123\")   ;; SHA auto-dispatches to the owning repo"}])
+(defn- strip-worktree-prefix
+  "If `abs-path` starts with `worktree-abs`, return the remainder (without
+   leading separator). Otherwise return `abs-path` unchanged."
+  [^String abs-path ^String worktree-abs]
+  (if (str/starts-with? abs-path worktree-abs)
+    (let [tail (subs abs-path (count worktree-abs))]
+      (cond-> tail
+        (and (seq tail) (= (first tail) java.io.File/separatorChar))
+        (subs 1)))
+    abs-path))
 
-(defn- auto-resolve-repo-for-path
-  "Pick the attached Repository that owns `path`.
+(defn- with-repo-for-path
+  "Resolve the attached `:repo` entity that owns `path` (read from DB), open
+   its Repository via rlm-git/open-repo, run `(f repo relative-path)`, close
+   the Repository in finally.
 
-   * 0 repos → throw :rlm/no-git-repos.
-   * 1 repo  → return it (relative or absolute path accepted; JGit resolves
-     relative paths against the repo's worktree).
-   * N repos → require an absolute path inside one repo's worktree; return
-     the matching repo or throw :rlm/no-repo-for-path with the list of
-     attached repos.
-
-   Returns [repo-name ^Repository repo relative-path]."
-  [git-repos-atom ^String path]
-  (let [repos @git-repos-atom]
+   Dispatch rules:
+   * 0 repos → :rlm/no-git-repos
+   * 1 repo  → use it; relative or absolute path both accepted
+   * N repos → absolute path required (:rlm/no-repo-for-path :reason
+     :relative-path otherwise); picks the repo whose `:repo/path` prefix
+     matches the absolute path."
+  [db-info-atom ^String path f]
+  (let [db @db-info-atom
+        repos (when db (db/db-list-repos db))]
     (cond
       (empty? repos)
       (throw (ex-info "No git repositories attached. Call rlm/ingest-git! first."
                {:type :rlm/no-git-repos}))
 
       (= 1 (count repos))
-      (let [[nm ^org.eclipse.jgit.lib.Repository repo] (first repos)
-            ;; Single-repo mode: if the caller passed an absolute path inside
-            ;; the worktree, strip the worktree prefix so JGit sees a
-            ;; repo-relative path; otherwise pass through as-is.
-            wt (.getAbsolutePath (.getWorkTree repo))
-            rel (if (str/starts-with? (str path) wt)
-                  (let [tail (subs path (count wt))]
-                    (cond-> tail
-                      (and (seq tail)
-                        (= (first tail) java.io.File/separatorChar))
-                      (subs 1)))
-                  path)]
-        [nm repo rel])
+      (let [repo-meta (first repos)
+            ^org.eclipse.jgit.lib.Repository repo (rlm-git/open-repo (:repo/path repo-meta))]
+        (when-not repo
+          (throw (ex-info (str "Attached repo " (pr-str (:repo/name repo-meta))
+                            " no longer opens at " (pr-str (:repo/path repo-meta)))
+                   {:type :rlm/repo-open-failed
+                    :repo-name (:repo/name repo-meta)
+                    :repo-path (:repo/path repo-meta)})))
+        (try
+          (let [wt (.getAbsolutePath (.getWorkTree repo))
+                rel (strip-worktree-prefix (str path) wt)]
+            (f repo rel))
+          (finally (.close repo))))
 
       :else
       (let [pf (java.io.File. path)]
-        ;; Multi-repo mode REQUIRES an absolute path. Relative paths would
-        ;; silently resolve against JVM CWD which is not a reliable
-        ;; disambiguator — reject them with an actionable error.
         (when-not (.isAbsolute pf)
           (throw (ex-info (str "Multi-repo mode requires an absolute path. Got "
                             (pr-str path) ". Attached repos: "
-                            (pr-str (vec (keys repos))))
+                            (pr-str (mapv :repo/name repos)))
                    {:type :rlm/no-repo-for-path
                     :path path
                     :reason :relative-path
-                    :attached (vec (keys repos))})))
+                    :attached (mapv :repo/name repos)})))
         (let [abs (.getAbsolutePath pf)
               hit (->> repos
-                    (keep (fn [[nm ^org.eclipse.jgit.lib.Repository repo]]
-                            (let [wt (.getAbsolutePath (.getWorkTree repo))]
-                              (when (or (= abs wt)
-                                      (str/starts-with? abs (str wt java.io.File/separator)))
-                                (let [tail (subs abs (count wt))
-                                      rel (cond-> tail
-                                            (and (seq tail)
-                                              (= (first tail) java.io.File/separatorChar))
-                                            (subs 1))]
-                                  [nm repo rel])))))
+                    (filter (fn [rm]
+                              (let [rp (:repo/path rm)]
+                                (or (= abs rp)
+                                  (str/starts-with? abs (str rp java.io.File/separator))))))
                     first)]
-          (or hit
+          (when-not hit
             (throw (ex-info (str "No attached git repo owns path " (pr-str path)
                               ". Pass an absolute path inside one of: "
-                              (pr-str (vec (keys repos))))
+                              (pr-str (mapv :repo/name repos)))
                      {:type :rlm/no-repo-for-path
                       :path path
-                      :attached (vec (keys repos))}))))))))
+                      :attached (mapv :repo/name repos)})))
+          (let [^org.eclipse.jgit.lib.Repository repo (rlm-git/open-repo (:repo/path hit))]
+            (try
+              (let [wt (.getAbsolutePath (.getWorkTree repo))
+                    rel (strip-worktree-prefix abs wt)]
+                (f repo rel))
+              (finally (.close repo)))))))))
 
 (defn- repo-has-object?
   "True iff `repo` contains a git object for `sha`. Uses ObjectReader.has so
@@ -870,124 +864,105 @@
         (.has reader oid)))
     (catch Exception _ false)))
 
-(defn- auto-resolve-repo-for-sha
-  "Pick the attached Repository that actually contains the object named
-   by `sha` (or resolves `rev`).
+(defn- with-repo-for-sha
+  "Resolve the attached `:repo` entity whose object database contains `sha`
+   (read from DB, open each candidate, presence-check, keep first match open
+   for the callback, close everything else immediately).
 
-   * 0 repos → throw :rlm/no-git-repos.
-   * 1 repo  → return it (any rev/SHA JGit can resolve works).
-   * N repos → iterate attached repos and return the first whose object
-     database contains the resolved object. Ref names like \"HEAD\" resolve
-     in every repo, so in multi-repo mode they are ambiguous and throw
-     :rlm/ambiguous-ref — callers must pass an actual SHA.
-
-   Returns the ^Repository."
-  [git-repos-atom ^String sha]
-  (let [repos @git-repos-atom]
+   Dispatch rules:
+   * 0 repos → :rlm/no-git-repos
+   * 1 repo  → use it
+   * N repos → iterate; first presence-match wins. Ref names like \"HEAD\"
+     are ambiguous in multi-repo and throw :rlm/ambiguous-ref."
+  [db-info-atom ^String sha f]
+  (let [db @db-info-atom
+        repos (when db (db/db-list-repos db))]
     (cond
       (empty? repos)
       (throw (ex-info "No git repositories attached. Call rlm/ingest-git! first."
                {:type :rlm/no-git-repos}))
 
       (= 1 (count repos))
-      (val (first repos))
+      (let [repo-meta (first repos)
+            ^org.eclipse.jgit.lib.Repository repo (rlm-git/open-repo (:repo/path repo-meta))]
+        (when-not repo
+          (throw (ex-info (str "Attached repo " (pr-str (:repo/name repo-meta))
+                            " no longer opens at " (pr-str (:repo/path repo-meta)))
+                   {:type :rlm/repo-open-failed})))
+        (try (f repo) (finally (.close repo))))
 
       :else
-      (let [;; Ref names like HEAD/main/master resolve in every repo — ambiguous.
-            ref-like? (contains? #{"HEAD" "FETCH_HEAD" "ORIG_HEAD" "main" "master"} sha)]
+      (let [ref-like? (contains? #{"HEAD" "FETCH_HEAD" "ORIG_HEAD" "main" "master"} sha)]
         (when ref-like?
           (throw (ex-info (str "Ref " (pr-str sha)
                             " is ambiguous across multiple attached repos "
-                            (pr-str (vec (keys repos)))
+                            (pr-str (mapv :repo/name repos))
                             ". Pass an actual SHA instead.")
                    {:type :rlm/ambiguous-ref
                     :ref sha
-                    :attached (vec (keys repos))})))
-        (or (->> repos
-              (keep (fn [[_nm ^org.eclipse.jgit.lib.Repository repo]]
-                      (when (repo-has-object? repo sha) repo)))
-              first)
-          (throw (ex-info (str "SHA " (pr-str sha) " not found in any attached repo. Attached: "
-                            (pr-str (vec (keys repos))))
-                   {:type :rlm/no-repo-for-sha
-                    :sha sha
-                    :attached (vec (keys repos))})))))))
+                    :attached (mapv :repo/name repos)})))
+        (loop [remaining repos]
+          (if-let [rm (first remaining)]
+            (let [^org.eclipse.jgit.lib.Repository repo (rlm-git/open-repo (:repo/path rm))]
+              (if (and repo (repo-has-object? repo sha))
+                (try (f repo) (finally (.close repo)))
+                (do (when repo (try (.close repo) (catch Exception _ nil)))
+                    (recur (rest remaining)))))
+            (throw (ex-info (str "SHA " (pr-str sha) " not found in any attached repo. Attached: "
+                              (pr-str (mapv :repo/name repos)))
+                     {:type :rlm/no-repo-for-sha
+                      :sha sha
+                      :attached (mapv :repo/name repos)}))))))))
 
-(defn bind-git-tools!
-  "Bind git query tools in the live SCI sandbox of `env`. All tools share
-   the `git-` prefix.
+(defn make-git-sci-bindings
+  "Return the map of git-* SCI symbol → fn for a given `db-info-atom`.
+   Bindings are always present in the sandbox once the env has a DB; they
+   error cleanly (`:rlm/no-git-repos`) when no `:repo` entity has been
+   ingested yet. All JGit-backed tools open + close Repository instances
+   per call via `with-repo-for-*`."
+  [db-info-atom]
+  {'git-search-commits
+   (fn git-search-commits
+     ([] (git-search-commits {}))
+     ([opts]
+      (when-let [db @db-info-atom]
+        (db/db-search-commits db opts))))
 
-   DB-side tools (`git-search-commits`, `git-commit-history`, `git-commits-by-ticket`)
-   query the whole DB; callers scope to a specific repo via `:document-id`.
+   'git-commit-history
+   (fn git-commit-history
+     ([] (git-commit-history {}))
+     ([opts]
+      (when-let [db @db-info-atom]
+        (db/db-search-commits db opts))))
 
-   JGit-side tools auto-dispatch without an explicit repo opt:
-   * Path-based (`git-blame`, `git-file-history`): single-repo mode accepts
-     relative or absolute paths; multi-repo mode requires absolute paths
-     inside one attached repo's worktree (path → owning repo).
-   * SHA-based (`git-commit-diff`, `git-commit-parents`): each attached
-     repo is asked to resolve the SHA; first match wins. Refs like
-     \"HEAD\" are ambiguous in multi-repo mode (throws).
+   'git-commits-by-ticket
+   (fn git-commits-by-ticket
+     [ticket-ref]
+     (when-let [db @db-info-atom]
+       (db/db-search-commits db {:ticket ticket-ref})))
 
-   Idempotent — safe to call after every ingest-git!; tool docs are
-   de-duped in custom-docs-atom."
-  [env]
-  (let [sci-ctx (:sci-ctx env)
-        db-info-atom (:db-info-atom env)
-        custom-docs-atom (:custom-docs-atom env)
-        git-repos-atom (:git-repos-atom env)
-        bindings
-        {'git-search-commits
-         (fn git-search-commits
-           ([] (git-search-commits {}))
-           ([opts]
-            (when-let [db @db-info-atom]
-              (db/db-search-commits db opts))))
+   'git-commit-parents
+   (fn git-commit-parents
+     [sha]
+     (when-let [db @db-info-atom]
+       (let [commit (db/db-commit-by-sha db sha)]
+         (vec (:commit/parents commit)))))
 
-         'git-commit-history
-         (fn git-commit-history
-           ([] (git-commit-history {}))
-           ([opts]
-            (when-let [db @db-info-atom]
-              (db/db-search-commits db opts))))
+   'git-file-history
+   (fn git-file-history
+     ([path] (git-file-history path {}))
+     ([path opts]
+      (with-repo-for-path db-info-atom path
+        (fn [repo rel] (rlm-git/file-history repo rel opts)))))
 
-         'git-commits-by-ticket
-         (fn git-commits-by-ticket
-           [ticket-ref]
-           (when-let [db @db-info-atom]
-             (db/db-search-commits db {:ticket ticket-ref})))
+   'git-blame
+   (fn git-blame
+     [path from to]
+     (with-repo-for-path db-info-atom path
+       (fn [repo rel] (rlm-git/blame repo rel from to))))
 
-         'git-file-history
-         (fn git-file-history
-           ([path] (git-file-history path {}))
-           ([path opts]
-            (let [[_ repo rel] (auto-resolve-repo-for-path git-repos-atom path)]
-              (rlm-git/file-history repo rel opts))))
-
-         'git-blame
-         (fn git-blame
-           [path from to]
-           (let [[_ repo rel] (auto-resolve-repo-for-path git-repos-atom path)]
-             (rlm-git/blame repo rel from to)))
-
-         'git-commit-diff
-         (fn git-commit-diff
-           [sha]
-           (let [repo (auto-resolve-repo-for-sha git-repos-atom sha)]
-             (rlm-git/commit-diff repo sha)))
-
-         'git-commit-parents
-         (fn git-commit-parents
-           [sha]
-           (let [repo (auto-resolve-repo-for-sha git-repos-atom sha)]
-             (rlm-git/commit-parents repo sha)))}]
-    (doseq [[sym f] bindings]
-      (sci-update-binding! sci-ctx sym f))
-    ;; Replace any previously-added git docs with the fresh set so multi-ingest
-    ;; doesn't accumulate duplicates.
-    (when custom-docs-atom
-      (swap! custom-docs-atom
-        (fn [docs]
-          (let [git-syms (into #{} (map :sym GIT_TOOL_DOCS))
-                filtered (remove #(contains? git-syms (:sym %)) docs)]
-            (vec (concat filtered GIT_TOOL_DOCS))))))
-    env))
+   'git-commit-diff
+   (fn git-commit-diff
+     [sha]
+     (with-repo-for-sha db-info-atom sha
+       (fn [repo] (rlm-git/commit-diff repo sha))))})

@@ -1,9 +1,10 @@
 (ns com.blockether.svar.internal.rlm.git-wiring-test
   "Integration tests for W2 — git.clj wired into the RLM runtime.
    Covers (1) single-repo wiring, (2) multi-repo auto-dispatch via path for
-   blame/file-history and via SHA for commit-diff/commit-parents, (3) system
-   prompt renders one GIT REPO block per attached repo, (4) dispose-env!
-   closes every attached repo.
+   blame/file-history and via SHA for commit-diff, (3) system prompt renders
+   one GIT REPO block per attached repo, (4) DB-backed repo attachments
+   (no atoms — :repo entities persist in Datalevin, git SCI tools open+close
+   Repositories lazily per call).
 
    All git tools are prefixed `git-`.
 
@@ -22,6 +23,7 @@
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm :as sut]
    [com.blockether.svar.internal.rlm.core :as rlm-core]
+   [com.blockether.svar.internal.rlm.db :as rlm-db]
    [com.blockether.svar.internal.rlm.git :as rlm-git])
   (:import
    [java.io File]
@@ -84,9 +86,14 @@
       (doseq [c (reverse (file-seq f))]
         (try (.delete c) (catch Exception _ nil))))))
 
+(defn- attached-repo-names
+  "Read attached :repo entity names from the env's DB. No atoms involved."
+  [env]
+  (set (map :repo/name (rlm-db/db-list-repos @(:db-info-atom env)))))
+
 (defdescribe ingest-git-test
   (describe "sut/ingest-git!"
-    (it "ingests commits + attaches repo + returns stats"
+    (it "ingests commits + persists :repo entity + returns stats"
       (let [env (sut/create-env (stub-router) {:db :temp})]
         (try
           (let [result (sut/ingest-git! env
@@ -97,8 +104,13 @@
             (expect (pos? (:events-stored result)))
             (expect (pos? (:people-stored result)))
             (expect (some? (:head result)))
-            (expect (contains? @(:git-repos-atom env) "svar"))
-            (expect (contains? @(:git-contexts-atom env) "svar")))
+            (expect (contains? (attached-repo-names env) "svar"))
+            (let [repo-meta (rlm-db/db-get-repo-by-name @(:db-info-atom env) "svar")]
+              (expect (some? repo-meta))
+              (expect (string? (:repo/path repo-meta)))
+              (expect (string? (:repo/head-sha repo-meta)))
+              (expect (= 12 (count (:repo/head-short repo-meta))))
+              (expect (pos? (:repo/commits-ingested repo-meta)))))
           (finally (sut/dispose-env! env)))))
 
     (it "throws when :repo-path is missing"
@@ -115,28 +127,33 @@
                        (catch clojure.lang.ExceptionInfo _ true)))
           (finally (sut/dispose-env! env)))))
 
-    (it "re-ingesting same name replaces the attached Repository"
+    (it "re-ingesting same name upserts the :repo entity (unique identity)"
       (let [env (sut/create-env (stub-router) {:db :temp})]
         (try
           (sut/ingest-git! env {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 5})
-          (let [first-repo (get @(:git-repos-atom env) "svar")]
-            (sut/ingest-git! env {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 5})
-            (let [second-repo (get @(:git-repos-atom env) "svar")]
-              (expect (not (identical? first-repo second-repo)))
-              (expect (= 1 (count @(:git-repos-atom env))))))
+          (sut/ingest-git! env {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 10})
+          (expect (= #{"svar"} (attached-repo-names env)))
+          (let [repo-meta (rlm-db/db-get-repo-by-name @(:db-info-atom env) "svar")]
+            (expect (= 10 (:repo/commits-ingested repo-meta))))
           (finally (sut/dispose-env! env)))))))
 
 (defdescribe git-sci-bindings-test
-  (describe "SCI sandbox after ingest-git! (single repo) — git- prefix"
-    (it "does NOT resolve git tools before ingest"
+  (describe "SCI sandbox — git-* always bound when DB exists"
+    (it "git tools are bound BEFORE ingest-git! (error cleanly at call time)"
       (let [env (sut/create-env (stub-router) {:db :temp})]
         (try
-          (expect (nil? (resolve-in-sandbox env 'git-search-commits)))
-          (expect (nil? (resolve-in-sandbox env 'git-blame)))
-          (expect (nil? (resolve-in-sandbox env 'git-commit-diff)))
+          (expect (some? (resolve-in-sandbox env 'git-search-commits)))
+          (expect (some? (resolve-in-sandbox env 'git-blame)))
+          (expect (some? (resolve-in-sandbox env 'git-commit-diff)))
+          ;; JGit-backed tools throw :rlm/no-git-repos when none attached
+          (expect (try (eval-in-sandbox env "(git-blame \"x\" 1 1)")
+                       false
+                       (catch Exception _ true)))
+          ;; DB-backed tools return empty results instead of throwing
+          (expect (= [] (eval-in-sandbox env "(git-search-commits {})")))
           (finally (sut/dispose-env! env)))))
 
-    (it "resolves all seven git-* tools after ingest"
+    (it "all seven git-* tools resolve in the SCI sandbox"
       (let [env (sut/create-env (stub-router) {:db :temp})]
         (try
           (sut/ingest-git! env {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 20})
@@ -196,13 +213,13 @@
 
 (defdescribe multi-repo-test
   (describe "ingest-git! with multiple repos attached — auto-dispatch"
-    (it "both repos are present in git-repos-atom"
+    (it "both repos are present in the DB as :repo entities"
       (with-multi-repo-env
         (fn [env _]
-          (let [repos @(:git-repos-atom env)]
-            (expect (= 2 (count repos)))
-            (expect (contains? repos "svar"))
-            (expect (contains? repos "tempy"))))))
+          (let [names (attached-repo-names env)]
+            (expect (= 2 (count names)))
+            (expect (contains? names "svar"))
+            (expect (contains? names "tempy"))))))
 
     (it "git-search-commits sees commits from BOTH repos (no filter)"
       (with-multi-repo-env
@@ -297,27 +314,26 @@
             (expect thrown?)))))))
 
 (defdescribe git-system-prompt-test
-  (describe "build-system-prompt with :git-contexts"
-    (it "omits GIT REPO block when :git-contexts is nil"
+  (describe "build-system-prompt with :git-repos"
+    (it "omits GIT REPO block when :git-repos is nil"
       (let [prompt (rlm-core/build-system-prompt {:has-reasoning? false})]
         (expect (not (str/includes? prompt "GIT REPO")))
         (expect (not (str/includes? prompt "git-search-commits")))))
 
-    (it "omits GIT REPO block when :git-contexts is empty map"
+    (it "omits GIT REPO block when :git-repos is empty vec"
       (let [prompt (rlm-core/build-system-prompt
-                     {:has-reasoning? false :git-contexts {}})]
+                     {:has-reasoning? false :git-repos []})]
         (expect (not (str/includes? prompt "GIT REPO")))))
 
     (it "renders single-repo block with git- prefixed tool list"
       (let [prompt (rlm-core/build-system-prompt
                      {:has-reasoning? false
-                      :git-contexts {"myrepo"
-                                     {:repo-path "/tmp/fake"
-                                      :repo-name "myrepo"
-                                      :commits-ingested 42
-                                      :head {:sha "abc123def456789"
-                                             :short "abc123def456"
-                                             :branch "main"}}}})]
+                      :git-repos [{:repo/name "myrepo"
+                                   :repo/path "/tmp/fake"
+                                   :repo/head-sha "abc123def456789"
+                                   :repo/head-short "abc123def456"
+                                   :repo/branch "main"
+                                   :repo/commits-ingested 42}]})]
         (expect (str/includes? prompt "GIT REPO: myrepo"))
         (expect (str/includes? prompt "/tmp/fake"))
         (expect (str/includes? prompt "abc123def456"))
@@ -332,16 +348,16 @@
     (it "renders multi-repo blocks with absolute-path guidance"
       (let [prompt (rlm-core/build-system-prompt
                      {:has-reasoning? false
-                      :git-contexts {"svar"
-                                     {:repo-path "/x/svar"
-                                      :repo-name "svar"
-                                      :commits-ingested 290
-                                      :head {:short "deadbeef0000" :branch "main"}}
-                                     "datalevin"
-                                     {:repo-path "/x/datalevin"
-                                      :repo-name "datalevin"
-                                      :commits-ingested 5000
-                                      :head {:short "cafef00d0000" :branch "master"}}}})]
+                      :git-repos [{:repo/name "svar"
+                                   :repo/path "/x/svar"
+                                   :repo/head-short "deadbeef0000"
+                                   :repo/branch "main"
+                                   :repo/commits-ingested 290}
+                                  {:repo/name "datalevin"
+                                   :repo/path "/x/datalevin"
+                                   :repo/head-short "cafef00d0000"
+                                   :repo/branch "master"
+                                   :repo/commits-ingested 5000}]})]
         (expect (str/includes? prompt "GIT REPO: svar"))
         (expect (str/includes? prompt "GIT REPO: datalevin"))
         (expect (str/includes? prompt "on main"))
@@ -351,18 +367,41 @@
         (expect (str/includes? prompt "ABSOLUTE path"))
         (expect (str/includes? prompt "git-blame"))))))
 
-(defdescribe dispose-closes-repo-test
-  (describe "dispose-env! cleanup"
-    (it "closes every attached git repo on dispose and clears both atoms"
+(defdescribe dispose-no-git-resources-test
+  (describe "dispose-env! with git attached"
+    (it "dispose completes cleanly when :repo entities exist (no atoms to clean)"
       (let [temp (make-temp-git-repo!)]
         (try
           (let [env (sut/create-env (stub-router) {:db :temp})]
             (sut/ingest-git! env {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 5})
             (sut/ingest-git! env {:repo-path (:path temp) :repo-name "tempy" :n 5})
-            (let [repos-atom (:git-repos-atom env)
-                  contexts-atom (:git-contexts-atom env)]
-              (expect (= 2 (count @repos-atom)))
-              (sut/dispose-env! env)
-              (expect (= {} @repos-atom))
-              (expect (= {} @contexts-atom))))
-          (finally (rm-rf! (:path temp))))))))
+            (expect (= 2 (count (attached-repo-names env))))
+            ;; dispose-env! nukes the temp DB — no git-specific cleanup needed
+            ;; because repos are opened/closed per call, not held open on env.
+            (sut/dispose-env! env))
+          (finally (rm-rf! (:path temp))))))
+
+    (it "persistent DB preserves :repo entities across env restarts"
+      (let [temp (make-temp-git-repo!)
+            db-dir (.toString (Files/createTempDirectory "svar-w2c-persist-"
+                                (make-array FileAttribute 0)))]
+        (try
+          ;; Session 1: ingest repos, close env. Persistent DB retains :repo entities.
+          (let [env-a (sut/create-env (stub-router) {:db db-dir})]
+            (sut/ingest-git! env-a {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 5})
+            (sut/ingest-git! env-a {:repo-path (:path temp) :repo-name "tempy" :n 5})
+            (expect (= #{"svar" "tempy"} (attached-repo-names env-a)))
+            (sut/dispose-env! env-a))
+          ;; Session 2: reopen same persistent DB. :repo entities are still there,
+          ;; and the git SCI tools work against them (this is the real win — you
+          ;; cannot get this behavior from an atom-on-env design).
+          (let [env-b (sut/create-env (stub-router) {:db db-dir})]
+            (try
+              (expect (= #{"svar" "tempy"} (attached-repo-names env-b)))
+              (let [result (eval-in-sandbox env-b "(git-search-commits {:document-id \"svar\" :limit 5})")]
+                (expect (vector? result))
+                (expect (pos? (count result))))
+              (finally (sut/dispose-env! env-b))))
+          (finally
+            (rm-rf! (:path temp))
+            (rm-rf! db-dir)))))))

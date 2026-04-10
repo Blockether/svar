@@ -1087,6 +1087,55 @@
                 (d/db conn) sha)]
       (first all))))
 
+;; -----------------------------------------------------------------------------
+;; Git :repo attachments — stored in DB so git SCI tools can look up attached
+;; repositories at call time and open a JGit Repository lazily (no long-lived
+;; atoms on the env).
+;; -----------------------------------------------------------------------------
+
+(defn db-store-repo!
+  "Upsert a `:repo` entity for an attached git repository. Keyed on
+   `:repo/name` (unique identity). Overwrites prior attachment with the
+   same name.
+
+   `repo-map` keys: :name :path :head-sha :head-short :branch :commits-ingested."
+  [{:keys [conn]} {:keys [name path head-sha head-short branch commits-ingested]}]
+  (when (and conn name)
+    (d/transact! conn
+      [(cond-> {:entity/type :repo
+                :entity/name name
+                :repo/name name
+                :repo/path (str path)
+                :repo/ingested-at (java.util.Date.)}
+         head-sha         (assoc :repo/head-sha head-sha)
+         head-short       (assoc :repo/head-short head-short)
+         branch           (assoc :repo/branch branch)
+         commits-ingested (assoc :repo/commits-ingested (long commits-ingested)))])
+    name))
+
+(defn db-list-repos
+  "List all attached git `:repo` entities. Returns a vec of maps sorted by
+   `:repo/name` for stable iteration order."
+  [{:keys [conn]}]
+  (when conn
+    (->> (d/q '[:find [(pull ?e [:repo/name :repo/path :repo/head-sha
+                                  :repo/head-short :repo/branch
+                                  :repo/commits-ingested :repo/ingested-at]) ...]
+                :where [?e :entity/type :repo] [?e :repo/name _]]
+           (d/db conn))
+      (sort-by :repo/name)
+      vec)))
+
+(defn db-get-repo-by-name
+  "Fetch one `:repo` entity by name. Returns the map or nil."
+  [{:keys [conn]} name]
+  (when (and conn name)
+    (let [e (d/pull (d/db conn)
+              '[:repo/name :repo/path :repo/head-sha :repo/head-short
+                :repo/branch :repo/commits-ingested :repo/ingested-at]
+              [:repo/name name])]
+      (when (:repo/name e) e))))
+
 (defn db-list-relationships
   "Lists relationships for an entity (as source or target).
 

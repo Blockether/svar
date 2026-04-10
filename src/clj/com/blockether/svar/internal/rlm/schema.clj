@@ -484,6 +484,17 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
     ;; Git/author-specific attrs (entity/type = :person, source = git ingestion)
    :person/email        {:db/valueType :db.type/string  :db/doc "Git author email"}
 
+    ;; Git repo attachment (entity/type = :repo, source = ingest-git!)
+    ;; One entity per attached git repository. Queried by git SCI tools at
+    ;; call time to open the underlying JGit Repository lazily (no atoms).
+   :repo/name           {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "Repo name (doubles as :entity/document-id for commits)"}
+   :repo/path           {:db/valueType :db.type/string  :db/doc "Absolute filesystem path — JGit walks up to find .git/"}
+   :repo/head-sha       {:db/valueType :db.type/string  :db/doc "Full HEAD commit SHA at ingest time"}
+   :repo/head-short     {:db/valueType :db.type/string  :db/doc "12-char HEAD SHA prefix for display"}
+   :repo/branch         {:db/valueType :db.type/string  :db/doc "Branch name at HEAD at ingest time"}
+   :repo/commits-ingested {:db/valueType :db.type/long  :db/doc "Number of commits ingested on the last ingest-git! call"}
+   :repo/ingested-at    {:db/valueType :db.type/instant :db/doc "Wall-clock timestamp of the last ingest-git! call"}
+
    ;; Conversation-specific attrs (entity/type = :conversation)
    :conversation/env-id        {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "RLM env-id"}
    :conversation/system-prompt {:db/valueType :db.type/string  :db/doc "System prompt for this session"}
