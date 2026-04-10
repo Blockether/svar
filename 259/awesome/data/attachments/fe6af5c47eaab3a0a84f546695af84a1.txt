@@ -1,0 +1,8 @@
+2026-04-10T21:01:25.986236180Z :info com.blockether.svar.internal.rlm.core [481 13] ::llm-call LLM call started 
+  data: {:env-id "3896124d-27b9-4ae5-bbfb-529bc7ec1969", :iteration 0, :msg-count 3, :input-tokens 1010}
+2026-04-10T21:01:25.987721959Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "stub", :url "http://localhost/chat/completions", :msg-count 4, :input-tokens 1444, :timeout-ms 300000, :max-tokens 2048}
+2026-04-10T21:01:25.989532027Z :warn com.blockether.svar.internal.rlm.core [1100 42] RLM iteration failed, feeding error to LLM 
+  data: {:iteration 0, :error nil, :type :svar.core/http-error}
+2026-04-10T21:01:25.991801509Z :warn com.blockether.svar.internal.rlm.core [1029 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 1, :max 1}

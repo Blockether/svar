@@ -1,0 +1,2 @@
+2026-04-10T21:01:30.811711873Z :info com.blockether.svar.internal.rlm.core [1169 25] FINAL detected 
+  data: {:iteration 0, :answer "done"}

@@ -1,0 +1,2 @@
+2026-04-10T21:01:18.495945584Z :info com.blockether.svar.internal.rlm.core [1018 15] Query cancelled via cancel-query! 
+  data: {:iteration 0}

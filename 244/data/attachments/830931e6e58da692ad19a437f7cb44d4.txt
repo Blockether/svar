@@ -1,2 +1,0 @@
-2026-04-07T16:11:25.176506721Z :warn com.blockether.svar.internal.guard [369 13] Moderation guard detected policy violation 
-  data: {:input-length 20, :violations [:hate], :duration-ms 0.41834}

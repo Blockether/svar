@@ -1,0 +1,26 @@
+2026-04-10T21:01:25.936141095Z :info com.blockether.svar.internal.rlm.core [481 13] ::llm-call LLM call started 
+  data: {:env-id "f77234f1-7623-45b7-a765-9f05edd45f9e", :iteration 0, :msg-count 3, :input-tokens 1010}
+2026-04-10T21:01:25.938455183Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "stub", :url "http://localhost/chat/completions", :msg-count 4, :input-tokens 1444, :timeout-ms 300000, :max-tokens 2048}
+2026-04-10T21:01:25.940601487Z :warn com.blockether.svar.internal.rlm.core [1100 42] RLM iteration failed, feeding error to LLM 
+  data: {:iteration 0, :error nil, :type :svar.core/http-error}
+2026-04-10T21:01:25.942506541Z :warn com.blockether.svar.internal.rlm.core [1127 25] on-iteration callback threw (error branch) — swallowing 
+  data: {:error "boom"}
+2026-04-10T21:01:25.943887343Z :info com.blockether.svar.internal.rlm.core [481 13] ::llm-call LLM call started 
+  data: {:env-id "f77234f1-7623-45b7-a765-9f05edd45f9e", :iteration 1, :msg-count 3, :input-tokens 1010}
+2026-04-10T21:01:25.945923031Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "stub", :url "http://localhost/chat/completions", :msg-count 4, :input-tokens 1444, :timeout-ms 300000, :max-tokens 2048}
+2026-04-10T21:01:25.947532911Z :warn com.blockether.svar.internal.rlm.core [1100 42] RLM iteration failed, feeding error to LLM 
+  data: {:iteration 1, :error nil, :type :svar.core/http-error}
+2026-04-10T21:01:25.948538743Z :warn com.blockether.svar.internal.rlm.core [1127 25] on-iteration callback threw (error branch) — swallowing 
+  data: {:error "boom"}
+2026-04-10T21:01:25.949805943Z :info com.blockether.svar.internal.rlm.core [481 13] ::llm-call LLM call started 
+  data: {:env-id "f77234f1-7623-45b7-a765-9f05edd45f9e", :iteration 2, :msg-count 3, :input-tokens 1010}
+2026-04-10T21:01:25.951778152Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "stub", :url "http://localhost/chat/completions", :msg-count 4, :input-tokens 1444, :timeout-ms 300000, :max-tokens 2048}
+2026-04-10T21:01:25.953161319Z :warn com.blockether.svar.internal.rlm.core [1100 42] RLM iteration failed, feeding error to LLM 
+  data: {:iteration 2, :error nil, :type :svar.core/http-error}
+2026-04-10T21:01:25.954007091Z :warn com.blockether.svar.internal.rlm.core [1127 25] on-iteration callback threw (error branch) — swallowing 
+  data: {:error "boom"}
+2026-04-10T21:01:25.954062174Z :warn com.blockether.svar.internal.rlm.core [1029 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 3, :max 3}

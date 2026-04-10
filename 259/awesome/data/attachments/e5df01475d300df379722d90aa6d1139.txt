@@ -1,0 +1,10 @@
+2026-04-10T21:00:33.826808494Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 937, :timeout-ms 300000, :max-tokens nil}
+2026-04-10T21:00:40.911873124Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 7085.482482, :content-len 1488, :has-reasoning false, :input-tokens 934, :output-tokens 435, :reasoning-tokens nil}
+2026-04-10T21:00:40.914745286Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1216, :timeout-ms 300000, :max-tokens nil}
+2026-04-10T21:00:43.842557125Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2928.337623, :content-len 482, :has-reasoning false, :input-tokens 1213, :output-tokens 125, :reasoning-tokens nil}
+2026-04-10T21:00:43.843354918Z :warn com.blockether.svar.internal.llm [1077 13] ::cod-empty-entities CoD iteration returned zero entities 
+  data: {:iteration 2, :first? false}

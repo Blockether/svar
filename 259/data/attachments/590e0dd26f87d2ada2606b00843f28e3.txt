@@ -1,0 +1,2 @@
+2026-04-10T21:01:23.175565451Z :info com.blockether.svar.internal.rlm [396 9] ::ingest-git git commits ingested 
+  data: {:repo-path "/home/runner/work/svar/svar", :repo-name "svar", :commits-ingested 1, :head {:sha "d7e87a2f896ae59b7ab389fa620624cdf38f1373", :short "d7e87a2f896a", :branch "main"}}
