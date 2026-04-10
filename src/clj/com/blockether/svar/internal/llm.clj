@@ -1343,12 +1343,12 @@
 (defn eval!*
   "Low-level eval — calls ask!* directly without routing. Use eval! instead."
   [router {:keys [task output messages criteria ground-truths context]
-           :as opts
-           :or {criteria EVAL_CRITERIA}}]
-  (let [{:keys [model]} (resolve-opts router opts)
-        ;; Resolve task: explicit :task wins, else extract from :messages
-        effective-task (or task
-                         (when messages
+            :as opts
+            :or {criteria EVAL_CRITERIA}}]
+  (let [{:keys [model api-key base-url api-style provider-id]} (resolve-opts router opts)
+         ;; Resolve task: explicit :task wins, else extract from :messages
+         effective-task (or task
+                          (when messages
                            (->> messages
                              (remove #(= "assistant" (:role %)))
                              (map :content)
@@ -1359,10 +1359,15 @@
         eval-task (build-eval-task effective-task output context)
         [{:keys [result tokens cost]} duration-ms]
         (util/with-elapsed
-          (ask!* router {:spec eval-spec
-                         :messages [(system objective)
-                                    (user eval-task)]
-                         :model model}))
+          (ask!* router (merge (select-keys {:model model
+                                             :api-key api-key
+                                             :base-url base-url
+                                             :api-style api-style
+                                             :provider-id provider-id}
+                                   [:model :api-key :base-url :api-style :provider-id])
+                         {:spec eval-spec
+                          :messages [(system objective)
+                                     (user eval-task)]})))
         scores (build-scores result)]
     (assoc result
       :scores scores
@@ -1453,11 +1458,12 @@
 
 (defn- decompose-output
   "Extracts verifiable claims from an LLM output using DuTy-inspired decomposition."
-  [output original-task original-objective model router]
-  (:result (ask!* router {:spec (build-decomposition-spec)
-                          :messages [(system (build-decomposition-objective original-objective))
-                                     (user (build-decomposition-task original-task output))]
-                          :model model})))
+  [output original-task original-objective model router llm-opts]
+  (:result (ask!* router (merge llm-opts
+                          {:spec (build-decomposition-spec)
+                           :messages [(system (build-decomposition-objective original-objective))
+                                      (user (build-decomposition-task original-task output))]
+                           :model model}))))
 
 ;; Verification helper functions (truncation, source documents, claim formatting)
 
@@ -1573,11 +1579,12 @@
 
 (defn- plan-verification-questions
   "Step 1 of Factored CoVe: Generate verification questions without answers."
-  [claims original-task original-objective model router]
-  (:result (ask!* router {:spec (build-question-planning-spec)
-                          :messages [(system (build-question-planning-objective original-objective))
-                                     (user (build-question-planning-task original-task claims))]
-                          :model model})))
+  [claims original-task original-objective model router llm-opts]
+  (:result (ask!* router (merge llm-opts
+                          {:spec (build-question-planning-spec)
+                           :messages [(system (build-question-planning-objective original-objective))
+                                      (user (build-question-planning-task original-task claims))]
+                           :model model}))))
 
 (defn- build-single-verification-spec
   "Builds the spec for independently verifying a single claim."
@@ -1691,11 +1698,12 @@
 
 (defn- verify-single-claim
   "Step 2 of Factored CoVe: Answer a single verification question independently."
-  [claim-text question model router documents]
-  (:result (ask!* router {:spec (build-single-verification-spec (boolean (seq documents)))
-                          :messages [(system (build-single-verification-objective documents))
-                                     (user (build-single-verification-task claim-text question documents))]
-                          :model model})))
+  [claim-text question model router documents llm-opts]
+  (:result (ask!* router (merge llm-opts
+                          {:spec (build-single-verification-spec (boolean (seq documents)))
+                           :messages [(system (build-single-verification-objective documents))
+                                      (user (build-single-verification-task claim-text question documents))]
+                           :model model}))))
 
 (defn- verifiable-claim?
   "Returns true if a claim should be sent to verification."
@@ -1712,7 +1720,7 @@
 
 (defn- verify-claims
   "Verifies extracted claims using Factored CoVe (independent per-claim verification)."
-  [claims original-task original-objective model router documents]
+  [claims original-task original-objective model router documents llm-opts]
   (let [{:keys [verifiable non-verifiable]} (filter-verifiable-claims claims)]
     (if (empty? verifiable)
       ;; All claims are non-verifiable — return as uncertain
@@ -1726,7 +1734,7 @@
       ;; Factored CoVe
       (let [;; Step 1: Plan verification questions (one LLM call — sees all claims)
             planning-result (plan-verification-questions verifiable original-task
-                              original-objective model router)
+                              original-objective model router llm-opts)
             planned-questions (:questions planning-result)
 
             ;; Step 2: Answer each question independently (one LLM call per question)
@@ -1734,7 +1742,7 @@
             (mapv (fn [planned-q]
                     (let [claim-text (:claim planned-q)
                           question (:question planned-q)
-                          result (verify-single-claim claim-text question model router documents)]
+                          result (verify-single-claim claim-text question model router documents llm-opts)]
                       (merge {:claim claim-text :question question} result)))
               planned-questions)
 
@@ -1839,14 +1847,15 @@
 
 (defn- detect-inconsistencies
   "Step 3 of Factor+Revise CoVe: Explicit cross-claim inconsistency detection."
-  [current-output verifications original-objective model router]
+  [current-output verifications original-objective model router llm-opts]
   (if (< (long (count verifications)) 2)
     ;; Need at least 2 verified claims to detect cross-claim inconsistencies
     {:inconsistencies []}
-    (:result (ask!* router {:spec (build-inconsistency-detection-spec)
-                            :messages [(system (build-inconsistency-detection-objective original-objective))
-                                       (user (build-inconsistency-detection-task current-output verifications))]
-                            :model model}))))
+    (:result (ask!* router (merge llm-opts
+                            {:spec (build-inconsistency-detection-spec)
+                             :messages [(system (build-inconsistency-detection-objective original-objective))
+                                        (user (build-inconsistency-detection-task current-output verifications))]
+                             :model model})))))
 
 ;; Refinement functions
 (defn- format-verifications-for-refinement
@@ -1954,7 +1963,7 @@
 (defn- refinement-iteration-step
   "Performs a single refinement iteration:
    decompose -> verify -> detect inconsistencies -> evaluate -> refine."
-  [spec original-objective original-task model router eval-criteria documents
+  [spec original-objective original-task model router llm-opts eval-criteria documents
    {:keys [current-output iterations iteration-num prompt-evolution] :as _state}]
   (let [iteration (inc (long iteration-num))
 
@@ -1963,22 +1972,26 @@
         (util/with-elapsed
           (let [;; Step 1: Decompose - extract claims from current output
                 decomposition (decompose-output current-output original-task original-objective
-                                model router)
+                                model router llm-opts)
                 claims (:claims decomposition)
 
                 ;; Step 2: Verify - check claims with independent per-claim verification
-                verification (verify-claims claims original-task original-objective model router documents)
+                verification (verify-claims claims original-task original-objective model router documents llm-opts)
                 verifications (:verifications verification)
 
                 ;; Step 3: Detect cross-claim inconsistencies (Factor+Revise)
                 inconsistency-result (detect-inconsistencies current-output verifications
-                                       original-objective model router)
+                                       original-objective model router llm-opts)
                 inconsistencies (or (:inconsistencies inconsistency-result) [])
 
                 ;; Step 4: Evaluate - get quality assessment
                 evaluation (eval!* router {:task original-task
                                            :output current-output
                                            :model model
+                                           :api-key (:api-key llm-opts)
+                                           :base-url (:base-url llm-opts)
+                                           :api-style (:api-style llm-opts)
+                                           :provider-id (:provider-id llm-opts)
                                            :criteria eval-criteria})
 
                 ;; Step 5: Refine - generate improved output incorporating all feedback
@@ -1986,10 +1999,11 @@
                 refinement-task (build-refinement-task original-task current-output
                                   verifications (:issues evaluation)
                                   inconsistencies)
-                {:keys [result]} (ask!* router {:spec spec
-                                                :messages [(system refinement-objective)
-                                                           (user refinement-task)]
-                                                :model model})]
+                {:keys [result]} (ask!* router (merge llm-opts
+                                                {:spec spec
+                                                 :messages [(system refinement-objective)
+                                                            (user refinement-task)]
+                                                 :model model}))]
             {:claims claims :verifications verifications
              :inconsistencies inconsistencies :evaluation evaluation
              :refined-output result :refinement-objective refinement-objective
@@ -2070,14 +2084,20 @@
                 stop-strategy :both
                 window-size 3
                 criteria EVAL_CRITERIA}}]
-  (let [{:keys [model]} (resolve-opts router opts)
+  (let [{:keys [model api-key base-url api-style provider-id]} (resolve-opts router opts)
+        llm-opts (select-keys {:model model
+                               :api-key api-key
+                               :base-url base-url
+                               :api-style api-style
+                               :provider-id provider-id}
+                   [:model :api-key :base-url :api-style :provider-id])
          ;; Extract objective/task from messages for internal decompose/verify/eval pipeline
         original-objective (or (->> messages (filter #(= "system" (:role %))) first :content) "")
         original-task (or (->> messages (filter #(= "user" (:role %))) first :content) "")
-         ;; Phase 1: Generate initial output
-        {:keys [result]} (ask!* router {:spec spec
-                                        :messages messages
-                                        :model model})
+          ;; Phase 1: Generate initial output
+        {:keys [result]} (ask!* router (merge llm-opts
+                                        {:spec spec
+                                         :messages messages}))
         initial-output result
 
           ;; Phase 2: Iterative refinement loop
@@ -2088,7 +2108,7 @@
                        :prompt-evolution []}
 
         step-fn (partial refinement-iteration-step
-                  spec original-objective original-task model router criteria documents)
+                  spec original-objective original-task model router llm-opts criteria documents)
 
           ;; Run iterations until stopping condition met
         [final-state total-duration-ms]
@@ -2106,6 +2126,10 @@
         final-evaluation (eval!* router {:task original-task
                                          :output final-output
                                          :model model
+                                         :api-key api-key
+                                         :base-url base-url
+                                         :api-style api-style
+                                         :provider-id provider-id
                                          :criteria criteria})
         final-score (:overall-score final-evaluation)
 

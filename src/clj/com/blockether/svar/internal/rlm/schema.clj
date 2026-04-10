@@ -476,10 +476,13 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
     ;; Iteration-specific attrs (entity/type = :iteration, parent = query)
    :iteration/code        {:db/valueType :db.type/string  :db/doc "pr-str of code strings executed"}
    :iteration/results     {:db/valueType :db.type/string  :db/doc "pr-str of result strings"}
-   :iteration/vars        {:db/valueType :db.type/string  :db/doc "pr-str of restorable vars defined in this iteration"}
+   :iteration/vars        {:db/valueType :db.type/string  :db/doc "Legacy pr-str of restorable vars defined in this iteration"}
    :iteration/answer      {:db/valueType :db.type/string  :db/doc "Final answer when terminal. Nil if not final."}
    :iteration/thinking    {:db/valueType :db.type/string  :db/doc "LLM thinking/reasoning"}
    :iteration/duration-ms {:db/valueType :db.type/long    :db/doc "LLM call duration"}
+   :iteration.var/name    {:db/valueType :db.type/string  :db/doc "Persisted restorable var name"}
+   :iteration.var/value   {:db/valueType :db.type/string  :db/doc "pr-str of persisted restorable var value"}
+   :iteration.var/code    {:db/valueType :db.type/string  :db/doc "Code block that defined the persisted restorable var"}
 
    ;; Relationships (typed edges between any entities)
    :relationship/id               {:db/valueType :db.type/uuid    :db/unique :db.unique/identity}

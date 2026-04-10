@@ -900,7 +900,8 @@
   (describe "basic Chain of Density with Voyager text"
     (it "produces iterations with entities and summaries"
       (when (integration-tests-enabled?)
-        (let [raw (svar/abstract! test-router {:text VOYAGER_TEXT
+        (let [router (make-integration-router)
+              raw (svar/abstract! router {:text VOYAGER_TEXT
                                                :model "gpt-4o"
                                                :iterations 3
                                                :target-length 80})
@@ -953,10 +954,11 @@
 
     (it "later iterations accumulate more entities without re-extraction"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! test-router {:text VOYAGER_TEXT
-                                                           :model "gpt-4o"
-                                                           :iterations 3
-                                                           :target-length 80}))
+        (let [router (make-integration-router)
+              result (:result (svar/abstract! router {:text VOYAGER_TEXT
+                                                            :model "gpt-4o"
+                                                            :iterations 3
+                                                            :target-length 80}))
                         ;; Total entity count should grow across iterations
               cumulative-entities (reductions
                                     (fn [acc iter] (into acc (map :entity (:entities iter))))
@@ -975,10 +977,11 @@
   (describe "basic Chain of Density with CRISPR text"
     (it "handles technical scientific text"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
-                                                           :model "gpt-4o"
-                                                           :iterations 2
-                                                           :target-length 60}))]
+        (let [router (make-integration-router)
+              result (:result (svar/abstract! router {:text CRISPR_TEXT
+                                                            :model "gpt-4o"
+                                                            :iterations 2
+                                                            :target-length 60}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1013,11 +1016,12 @@
   (describe "with :eval? quality scoring"
     (it "each iteration gets a numeric score reflecting quality"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
-                                                           :model "gpt-4o"
-                                                           :iterations 2
-                                                           :target-length 60
-                                                           :eval? true}))]
+        (let [router (make-integration-router)
+              result (:result (svar/abstract! router {:text CRISPR_TEXT
+                                                            :model "gpt-4o"
+                                                            :iterations 2
+                                                            :target-length 60
+                                                            :eval? true}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1037,10 +1041,11 @@
   (describe "with :refine? CoVe verification"
     (it "last iteration is marked as refined"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
-                                                           :model "gpt-4o"
-                                                           :iterations 2
-                                                           :target-length 60
+        (let [router (make-integration-router)
+              result (:result (svar/abstract! router {:text CRISPR_TEXT
+                                                            :model "gpt-4o"
+                                                            :iterations 2
+                                                            :target-length 60
                                                            :refine? true
                                                            :threshold 0.9}))]
           (expect (vector? result))
@@ -1062,10 +1067,11 @@
   (describe "with :eval? and :refine? combined"
     (it "produces scored iterations with refined final summary"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! test-router {:text CRISPR_TEXT
-                                                           :model "gpt-4o"
-                                                           :iterations 2
-                                                           :target-length 60
+        (let [router (make-integration-router)
+              result (:result (svar/abstract! router {:text CRISPR_TEXT
+                                                            :model "gpt-4o"
+                                                            :iterations 2
+                                                            :target-length 60
                                                            :eval? true
                                                            :refine? true
                                                            :threshold 0.9}))]
@@ -1082,10 +1088,11 @@
   (describe "with :special-instructions"
     (it "date-focused instructions produce mostly temporal entities"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! test-router {:text VOYAGER_TEXT
-                                                           :model "gpt-4o"
-                                                           :iterations 2
-                                                           :target-length 60
+        (let [router (make-integration-router)
+              result (:result (svar/abstract! router {:text VOYAGER_TEXT
+                                                            :model "gpt-4o"
+                                                            :iterations 2
+                                                            :target-length 60
                                                            :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."}))
                         ;; Collect all first-iteration entities (where special instructions have strongest effect)
               iter1-entities (:entities (first result))
@@ -1106,10 +1113,11 @@
   (describe "target-length control"
     (it "produces summaries near the target word count"
       (when (integration-tests-enabled?)
-        (let [result (:result (svar/abstract! test-router {:text VOYAGER_TEXT
-                                                           :model "gpt-4o"
-                                                           :iterations 2
-                                                           :target-length 50}))
+        (let [router (make-integration-router)
+              result (:result (svar/abstract! router {:text VOYAGER_TEXT
+                                                            :model "gpt-4o"
+                                                            :iterations 2
+                                                            :target-length 50}))
               word-count (fn [s] (count (str/split (str/trim s) #"\s+")))]
           (expect (vector? result))
                     ;; Summaries should be within reasonable range of target (50 words ± 50%)
@@ -1131,16 +1139,21 @@
   (describe "ask! with claude-opus-4-6 via Blockether One"
     (it "parses structured JSON from Claude Opus 4.6"
       (when (blockether-one-enabled?)
-        (let [person-spec (svar/spec
-                            (svar/field svar/NAME :name
-                              svar/TYPE svar/TYPE_STRING
-                              svar/CARDINALITY svar/CARDINALITY_ONE
+        (let [router (svar/make-router [{:id :blockether-integration
+                                         :api-key (System/getenv "BLOCKETHER_LLM_API_KEY")
+                                         :base-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
+                                                     "https://llm.blockether.com/v1")
+                                         :models [{:name "claude-opus-4-6"}]}])
+              person-spec (svar/spec
+                             (svar/field svar/NAME :name
+                               svar/TYPE svar/TYPE_STRING
+                               svar/CARDINALITY svar/CARDINALITY_ONE
                               svar/DESCRIPTION "Full name")
                             (svar/field svar/NAME :age
                               svar/TYPE svar/TYPE_INT
                               svar/CARDINALITY svar/CARDINALITY_ONE
                               svar/DESCRIPTION "Age in years"))
-              result (svar/ask! test-router {:spec person-spec
+              result (svar/ask! router {:spec person-spec
                                              :messages [(svar/system "Extract person data from the text.")
                                                         (svar/user "Alexander is 18 years old.")]
                                              :model "claude-opus-4-6"})]

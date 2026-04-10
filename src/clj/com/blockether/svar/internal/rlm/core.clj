@@ -500,7 +500,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                  :executions (or executions
                                [{:id 0 :code final-answer :result nil :stdout "" :stderr ""
                                  :error validation-error}])
-                 :final-result nil :api-usage api-usage})
+                 :final-result nil :api-usage api-usage
+                 :duration-ms (or (:duration-ms ask-result) 0)})
             (let [sources (vec (or (:sources final-data) []))
                   final-result (cond-> {:final? true
                                         :answer {:result final-answer :type String}
@@ -511,7 +512,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                            :confidence confidence
                            :sources-count (count sources)} "Final answer accepted")
               {:response nil :thinking thinking :next-optimize next-optimize
-               :executions (or executions []) :final-result final-result :api-usage api-usage})))
+               :executions (or executions []) :final-result final-result :api-usage api-usage
+               :duration-ms (or (:duration-ms ask-result) 0)})))
         ;; Normal path: execute code blocks
         (let [raw-blocks (vec (remove str/blank? (or (:code parsed) [])))
               ;; Coalesce fragments: when model splits one expression across multiple
@@ -552,7 +554,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                   :repaired? (:repaired? result)})
                            (range) code-blocks execution-results)]
           {:response nil :thinking thinking :next-optimize next-optimize
-           :executions executions :final-result nil :api-usage api-usage})))))
+           :executions executions :final-result nil :api-usage api-usage
+           :duration-ms (or (:duration-ms ask-result) 0)})))))
 
 (defn- error-hint
   "Returns a specialized hint for a known error, or nil. Extracts context
@@ -728,18 +731,37 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
         "\n</execution_journal>"))))
 
 (defn- extract-def-names
-  "Extracts var names from code blocks by scanning for (def ...) patterns."
+  "Extracts var names from code blocks via EDN parsing of def-like forms."
   [executions]
   (->> executions
-    (keep (fn [{:keys [code error]}]
-            (when-not error
-              (second (re-find #"\(def\s+(\S+)" (or code ""))))))
+    (mapcat (fn [{:keys [code error]}]
+              (when-not error
+                (try
+                  (->> (edamame/parse-string-all (or code "") {:all true})
+                    (keep (fn [form]
+                            (when (seq? form)
+                              (let [[op name & _] form]
+                                (when (and (contains? '#{def defn defn- defonce defmulti defmacro} op)
+                                        (symbol? name))
+                                  name)))))
+                    distinct)
+                  (catch Exception _ [])))))
+    (map str)
     vec))
 
 (defn- restorable-var-snapshots
   "Returns serializable snapshots of user vars introduced by this iteration."
   [rlm-env executions]
-  (let [defined (set (map symbol (extract-def-names executions)))
+  (let [execution->defs (mapv (fn [{:keys [code error] :as execution}]
+                                [execution (when-not error (set (map symbol (extract-def-names [execution]))))])
+                          executions)
+        defined (into #{} (mapcat second) execution->defs)
+        sym->code (reduce (fn [acc [{:keys [code]} defs]]
+                            (if (and code (seq defs))
+                              (reduce #(assoc %1 %2 code) acc defs)
+                              acc))
+                    {}
+                    execution->defs)
         locals (get-locals rlm-env)]
     (->> locals
       (keep (fn [[sym value]]
@@ -758,10 +780,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                           (sequential? realized))
                     {:name (str sym)
                      :value realized
-                     :code (some (fn [{:keys [code]}]
-                                   (when (and code (re-find (re-pattern (str "\\(def(?:n)?\\s+" (java.util.regex.Pattern/quote (name sym)) "(?:\\s|$)")) code))
-                                     code))
-                             executions)})))))
+                     :code (get sym->code sym)})))))
       vec)))
 
 (defn- build-restore-context
@@ -1041,7 +1060,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                     :vars vars-snapshot
                                     :thinking thinking
                                     :answer (when final-result (answer-str (:answer final-result)))
-                                    :duration-ms (get-in iteration-result [:api-usage :prompt_tokens] 0)})
+                                    :duration-ms (or (:duration-ms iteration-result) 0)})
                       trace-entry {:iteration iteration
                                    :response response
                                    :thinking thinking
@@ -1081,7 +1100,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                         (rlm-db/store-iteration! db-info
                           {:query-ref query-ref
                            :vars []
-                           :executions nil :thinking thinking :duration-ms 0})
+                           :executions nil :thinking thinking :duration-ms (or (:duration-ms iteration-result) 0)})
                         (recur (inc iteration) ;; still increment to prevent infinite loop
                           (conj messages
                             {:role "assistant" :content (or response thinking "[empty]")}

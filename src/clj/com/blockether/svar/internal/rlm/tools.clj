@@ -423,10 +423,12 @@
   (fn restore-var
     ([sym]
      (restore-var sym {}))
-    ([sym _opts]
+    ([sym opts]
      (if-let [db-info @db-info-atom]
-       (let [registry (db/db-latest-var-registry db-info @conversation-ref-atom)]
-         (if-let [{:keys [value]} (get registry (if (symbol? sym) sym (symbol (str sym))))]
+       (let [sym (if (symbol? sym) sym (symbol (str sym)))
+             registry (db/db-latest-var-registry db-info @conversation-ref-atom
+                        (select-keys (or opts {}) [:max-scan-queries]))]
+         (if-let [{:keys [value]} (get registry sym)]
            value
            (throw (ex-info (str "No restorable var found for " sym)
                     {:type :rlm/restore-var-missing :symbol sym}))))
@@ -436,10 +438,18 @@
   "Creates restore-vars for batch fetching latest persisted data vars."
   [restore-var-fn]
   (fn restore-vars
-    [syms]
-    (into {}
-      (map (fn [sym] [sym (restore-var-fn sym)]))
-      syms)))
+    ([syms]
+     (restore-vars syms {}))
+    ([syms opts]
+     (into {}
+       (map (fn [sym]
+              (try
+                [sym (restore-var-fn sym opts)]
+                (catch Exception e
+                  [sym {:error {:type (:type (ex-data e))
+                                :symbol sym
+                                :message (ex-message e)}}]))))
+       syms))))
 
 ;; =============================================================================
 ;; SCI Context Helpers
@@ -609,12 +619,18 @@
                                      (sci-update-binding! sci-ctx sym val)
                                      val)))
             binding-restore-vars (fn binding-restore-vars
-                                   [syms]
-                                   (into {}
-                                     (map (fn [sym]
-                                            (let [val (binding-restore-var sym)]
-                                              [sym val])))
-                                     syms))]
+                                   ([syms]
+                                    (binding-restore-vars syms {}))
+                                   ([syms opts]
+                                    (into {}
+                                      (map (fn [sym]
+                                             (try
+                                               [sym (binding-restore-var sym opts)]
+                                               (catch Exception e
+                                                 [sym {:error {:type (:type (ex-data e))
+                                                               :symbol sym
+                                                               :message (ex-message e)}}]))))
+                                      syms)))]
         (sci-update-binding! sci-ctx 'restore-var binding-restore-var)
         (sci-update-binding! sci-ctx 'restore-vars binding-restore-vars)))
     ;; Inject doc metadata so (doc fn-name) works in SCI
@@ -635,8 +651,8 @@
                             ['session-history "List prior query summaries in the current conversation.\n  (session-history)\n  (session-history 5) ;; last 5 queries" '([] [n])]
                             ['session-code "Get prior query code blocks by query position or ref.\n  (session-code 0)\n  (session-code [:entity/id uuid])" '([query-selector])]
                             ['session-results "Get prior query execution results and restorable vars.\n  (session-results 0)" '([query-selector])]
-                            ['restore-var "Restore a persisted data var from a prior iteration, binding it in the sandbox.\n  (restore-var 'anomalies)  ;; binds anomalies and returns its value" '([sym] [sym opts])]
-                            ['restore-vars "Batch restore persisted data vars, binding each in the sandbox.\n  (restore-vars ['a 'b])  ;; binds a and b, returns {a val-a, b val-b}" '([syms])]]]
+                            ['restore-var "Restore a persisted data var from a prior iteration, binding it in the sandbox.\n  (restore-var 'anomalies)  ;; binds anomalies and returns its value\n  Opts: {:max-scan-queries N} limits lookup to recent queries." '([sym] [sym opts])]
+                            ['restore-vars "Batch restore persisted data vars, binding each success in the sandbox.\n  (restore-vars ['a 'b])  ;; returns {a val-a, b {:error {...}}} on partial failure\n  Opts: {:max-scan-queries N} limits lookup to recent queries." '([syms] [syms opts])]]]
       (when (:val (sci/eval-string+ sci-ctx (str "(resolve '" sym ")") {:ns sandbox-ns}))
         (sci/eval-string+ sci-ctx
           (str "(def ^{:doc " (pr-str doc)

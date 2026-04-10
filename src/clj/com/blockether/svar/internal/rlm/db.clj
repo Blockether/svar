@@ -285,15 +285,27 @@
                                                :msg "Failed to serialize execution result"})
                                   "???"))
                       (or executions []))]
-    (store-entity! db-info
-      (cond-> {:entity/type :iteration
-               :entity/parent-id parent-id
-               :iteration/code (pr-str code-strs)
-               :iteration/results (pr-str result-strs)
-               :iteration/thinking (or thinking "")
-               :iteration/duration-ms (or duration-ms 0)}
-        vars (assoc :iteration/vars (pr-str vars))
-        answer (assoc :iteration/answer answer)))))
+    (let [iteration-ref (store-entity! db-info
+                          (cond-> {:entity/type :iteration
+                                   :entity/parent-id parent-id
+                                   :iteration/code (pr-str code-strs)
+                                   :iteration/results (pr-str result-strs)
+                                   :iteration/thinking (or thinking "")
+                                   :iteration/duration-ms (or duration-ms 0)}
+                            answer (assoc :iteration/answer answer)))]
+      (doseq [{:keys [name value code]} (or vars [])]
+        (when name
+          (store-entity! db-info
+            {:entity/type :iteration-var
+             :entity/name (str name)
+             :entity/parent-id (second iteration-ref)
+             :iteration.var/name (str name)
+             :iteration.var/value (pr-str value)
+             :iteration.var/code (or code "")})))
+      iteration-ref)))
+
+(def ^:private DEF_LIKE_OPS
+  '#{def defn defn- defonce defmulti defmacro})
 
 (def ^:private edamame-opts
   {:all true})
@@ -308,8 +320,28 @@
   [form]
   (when (seq? form)
     (let [[op name & _] form]
-      (when (and (contains? '#{def defn} op) (symbol? name))
+      (when (and (contains? DEF_LIKE_OPS op) (symbol? name))
         name))))
+
+(defn db-list-iteration-vars
+  "Lists persisted restorable vars for an iteration."
+  [{:keys [conn]} iteration-ref]
+  (if (and conn iteration-ref)
+    (let [iteration-id (second iteration-ref)
+          stored-vars (->> (d/q '[:find [(pull ?e [*]) ...]
+                                 :in $ ?iteration-id
+                                  :where [?e :entity/type :iteration-var]
+                                  [?e :entity/parent-id ?iteration-id]]
+                             (d/db conn) iteration-id)
+                        (sort-by entity-order-key)
+                        (keep (fn [entity]
+                               (when-let [name (:iteration.var/name entity)]
+                                 {:name name
+                                  :value (read-edn-safe (:iteration.var/value entity) nil)
+                                  :code (:iteration.var/code entity)})))
+                       vec)]
+      stored-vars)
+    []))
 
 (defn- iteration->defined-symbols
   [iteration]
@@ -389,37 +421,41 @@
   [db-info query-ref]
   (->> (db-list-query-iterations db-info query-ref)
     (map-indexed (fn [iter-pos iteration]
-                   {:iteration-pos iter-pos
-                    :created-at (:entity/created-at iteration)
-                    :results (read-edn-safe (:iteration/results iteration) [])
-                    :vars (read-edn-safe (:iteration/vars iteration) [])
-                    :answer (:iteration/answer iteration)}))
+                   (let [iteration-ref [:entity/id (:entity/id iteration)]]
+                     {:iteration-pos iter-pos
+                      :created-at (:entity/created-at iteration)
+                      :results (read-edn-safe (:iteration/results iteration) [])
+                      :vars (db-list-iteration-vars db-info iteration-ref)
+                      :answer (:iteration/answer iteration)})))
     vec))
 
 (defn db-latest-var-registry
   "Builds latest restorable var registry for a conversation.
    Last write wins, ordered by query/iteration created-at."
-  [db-info conversation-ref]
-  (let [queries (db-list-conversation-queries db-info conversation-ref)]
-    (reduce (fn [acc query]
-              (let [query-ref [:entity/id (:entity/id query)]]
-                (reduce (fn [m iteration]
-                          (let [vars (read-edn-safe (:iteration/vars iteration) [])]
-                            (reduce (fn [m2 {:keys [name value code]}]
-                                      (if name
-                                        (assoc m2 (symbol name)
-                                          {:value value
-                                           :code code
-                                           :query-id (:entity/id query)
-                                           :query-ref query-ref
-                                           :iteration-id (:entity/id iteration)
-                                           :created-at (:entity/created-at iteration)})
-                                        m2))
-                              m vars)))
-                  acc
-                  (db-list-query-iterations db-info query-ref))))
-      {}
-      queries)))
+  ([db-info conversation-ref]
+   (db-latest-var-registry db-info conversation-ref {}))
+  ([db-info conversation-ref {:keys [max-scan-queries]}]
+   (let [queries (cond->> (db-list-conversation-queries db-info conversation-ref)
+                   max-scan-queries (take-last (max 0 (long max-scan-queries))))]
+     (reduce (fn [acc query]
+               (let [query-ref [:entity/id (:entity/id query)]]
+                 (reduce (fn [m iteration]
+                           (reduce (fn [m2 {:keys [name value code]}]
+                                     (if name
+                                       (assoc m2 (symbol name)
+                                         {:value value
+                                          :code code
+                                          :query-id (:entity/id query)
+                                          :query-ref query-ref
+                                          :iteration-id (:entity/id iteration)
+                                          :created-at (:entity/created-at iteration)})
+                                       m2))
+                             m
+                             (db-list-iteration-vars db-info [:entity/id (:entity/id iteration)])))
+                   acc
+                   (db-list-query-iterations db-info query-ref))))
+       {}
+       queries))))
 
 ;; -----------------------------------------------------------------------------
 ;; Document Storage
