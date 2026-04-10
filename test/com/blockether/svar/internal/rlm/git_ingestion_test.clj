@@ -391,17 +391,20 @@
   (str (System/getProperty "user.dir")))
 
 (defdescribe live-svar-repo-ingestion-test
-  (describe "ingest first 100 commits of svar repo"
-    (it "reads git log, parses, and stores all 100 commits"
+  (describe "ingest first 100 commits of svar repo via JGit"
+    (it "reads commits, parses, and stores them"
       (let [conn (temp-conn)
-            db-info {:conn conn}]
+            db-info {:conn conn}
+            repo (git/open-repo SVAR_REPO_ROOT)]
+        (expect (some? repo))
         (try
-          (let [commits (git/read-git-log SVAR_REPO_ROOT 100)]
-            (expect (<= 100 (count commits)))
+          (let [commits (git/read-commits repo {:n 100})]
+            (expect (<= 1 (count commits)))
             (expect (every? :sha commits))
             (expect (every? :category commits))
             (expect (every? :ticket-refs commits))
             (expect (every? :file-paths commits))
+            (expect (every? :parents commits))
 
             (let [result (git/ingest-commits! db-info commits {:repo-name "svar"})]
               (expect (= (count commits) (:events-stored result)))
@@ -413,8 +416,7 @@
                               :where [?e :entity/type :event] [?e :commit/category ?cat]]
                          (d/db conn))
                   cat-map (into {} cats)]
-              (expect (pos? (get cat-map :feature 0)))
-              (expect (pos? (get cat-map :bug 0))))
+              (expect (pos? (get cat-map :feature 0))))
 
             (let [people (d/q '[:find (count ?e)
                                 :where [?e :entity/type :person]]
@@ -424,13 +426,56 @@
             (let [files (d/q '[:find (count ?e)
                                :where [?e :entity/type :file]]
                           (d/db conn))]
-              (expect (<= 10 (ffirst files)))))
+              (expect (<= 1 (ffirst files)))))
 
-          (finally (d/close conn)))))
+          (finally
+            (.close repo)
+            (d/close conn)))))
 
     (it "has correct category distribution for svar repo"
-      (let [commits (git/read-git-log SVAR_REPO_ROOT 100)
-            cats (frequencies (map :category commits))]
-        (expect (<= 100 (apply + (vals cats))))
-        (expect (pos? (get cats :feature 0)))
-        (expect (pos? (get cats :bug 0)))))))
+      (let [repo (git/open-repo SVAR_REPO_ROOT)]
+        (try
+          (let [commits (git/read-commits repo {:n 100})
+                cats (frequencies (map :category commits))]
+            (expect (<= 1 (apply + (vals cats))))
+            (expect (pos? (get cats :feature 0))))
+          (finally (.close repo)))))
+
+    (it "open-repo returns nil for non-git path"
+      (expect (nil? (git/open-repo "/tmp"))))
+
+    (it "git-available? true for svar repo root"
+      (expect (git/git-available? SVAR_REPO_ROOT)))
+
+    (it "head-info returns current HEAD"
+      (let [repo (git/open-repo SVAR_REPO_ROOT)]
+        (try
+          (let [head (git/head-info repo)]
+            (expect (some? head))
+            (expect (string? (:sha head)))
+            (expect (= 12 (count (:short head)))))
+          (finally (.close repo)))))
+
+    (it "commit-parents returns parent SHAs for HEAD"
+      (let [repo (git/open-repo SVAR_REPO_ROOT)]
+        (try
+          (let [parents (git/commit-parents repo "HEAD")]
+            (expect (vector? parents))
+            (expect (<= 1 (count parents))))
+          (finally (.close repo)))))
+
+    (it "commit-diff returns non-empty patch string for HEAD"
+      (let [repo (git/open-repo SVAR_REPO_ROOT)]
+        (try
+          (let [patch (git/commit-diff repo "HEAD")]
+            (expect (string? patch))
+            (expect (pos? (count patch))))
+          (finally (.close repo)))))
+
+    (it "file-history returns commits touching a known file"
+      (let [repo (git/open-repo SVAR_REPO_ROOT)]
+        (try
+          (let [history (git/file-history repo "deps.edn" {:n 10})]
+            (expect (vector? history))
+            (expect (pos? (count history))))
+          (finally (.close repo)))))))

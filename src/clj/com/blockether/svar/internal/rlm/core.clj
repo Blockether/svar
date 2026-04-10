@@ -335,10 +335,54 @@ Pattern: [thing] [action] [reason]. [next step].")
                        ", " pages " pages")))
               (sort-by :document/id docs))))))))
 
+(defn- format-git-context
+  "Render the GIT REPO context block(s) for the system prompt. Caveman style.
+   Multi-repo aware: emits one `GIT REPO: <name>` block per entry in the
+   contexts map, then a single shared tool list.
+
+   `git-contexts` is a `{repo-name → context-map}` map or nil.
+   Returns nil when the map is nil or empty (no output section emitted)."
+  [git-contexts]
+  (when (seq git-contexts)
+    (let [multi? (> (count git-contexts) 1)
+          blocks (for [[name ctx] (sort-by key git-contexts)
+                       :let [{:keys [repo-path head commits-ingested]} ctx
+                             {:keys [short branch]} (or head {})]]
+                   (str "
+GIT REPO: " name " (" repo-path ")
+  head: " (or short "?") (when branch (str " on " branch)) "
+  commits ingested: " (or commits-ingested 0)))
+          tools (if multi?
+                  "
+Git tools this session — all prefixed `git-`. JGit-side tools auto-dispatch:
+  path-based (git-blame, git-file-history) → pass ABSOLUTE path inside target repo's worktree
+  sha-based  (git-commit-diff, git-commit-parents) → pass SHA; refs like HEAD are ambiguous, forbidden
+  (git-search-commits {:category :bug :document-id \"<name>\" ...})
+  (git-commit-history {:limit 20 :document-id \"<name>\"})
+  (git-commits-by-ticket \"SVAR-42\")
+  (git-file-history \"/abs/path/to/file.clj\" {:n 10})
+  (git-blame \"/abs/path/to/file.clj\" 42 58)
+  (git-commit-diff \"abc123def456\")
+  (git-commit-parents \"abc123def456\")
+"
+                  "
+Git tools available this session — all prefixed `git-`:
+  (git-search-commits {:category :bug :since \"2025-06-01\" :path \"src/\" ...})
+  (git-commit-history {:limit 20})
+  (git-commits-by-ticket \"SVAR-42\")
+  (git-file-history \"src/foo.clj\")
+  (git-blame \"src/foo.clj\" 42 58)
+  (git-commit-diff \"HEAD\")
+  (git-commit-parents \"HEAD\")
+")]
+      (str (str/join "\n" blocks) "\n" tools))))
+
 (defn build-system-prompt
   "Builds the system prompt — compact, token-efficient.
-   All tool documentation is discoverable via (doc fn-name) in SCI."
-  [{:keys [output-spec custom-docs has-reasoning? has-documents? document-summary system-prompt]}]
+   All tool documentation is discoverable via (doc fn-name) in SCI.
+
+   `git-contexts` is `{repo-name → ctx-map}` (multi-repo) or nil."
+  [{:keys [output-spec custom-docs has-reasoning? has-documents? document-summary system-prompt git-contexts]}]
   (str
     "Clojure SCI agent. Write, exec, iterate.
 
@@ -355,6 +399,7 @@ GOTCHAS:
 - Docstring defs: (def x \"doc\" val) → aids <var_index>.
 - future/pmap/promise/deliver OK. (deref f ms :timeout).
 "
+    (format-git-context git-contexts)
     (when (and has-documents? document-summary)
       (str
         "
@@ -866,12 +911,18 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                       (pos? (count (db-list-documents db {:limit 1 :include-toc? false})))))
         doc-summary (when (and has-docs? (:db-info-atom rlm-env))
                       (build-document-summary @(:db-info-atom rlm-env)))
+        ;; Git contexts are attached to the env by rlm/ingest-git! as a
+        ;; {repo-name → ctx} map (multi-repo). nil/empty elides the GIT REPO
+        ;; block entirely from the system prompt.
+        git-contexts (when-let [gc-atom (:git-contexts-atom rlm-env)]
+                       @gc-atom)
         system-prompt (build-system-prompt {:output-spec output-spec
                                             :custom-docs custom-docs
                                             :has-documents? has-docs?
                                             :document-summary doc-summary
                                             :has-reasoning? has-reasoning?
                                             :system-prompt system-prompt
+                                            :git-contexts git-contexts
                                             :max-context-tokens max-context-tokens})
         context-data (:context rlm-env)
         context-str (pr-str context-data)

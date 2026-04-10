@@ -478,6 +478,8 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :commit/date         {:db/valueType :db.type/string  :db/doc "ISO-8601 commit date"}
    :commit/prefix       {:db/valueType :db.type/string  :db/doc "Conventional commit prefix (feat, fix, chore, etc.)"}
    :commit/scope        {:db/valueType :db.type/string  :db/doc "Conventional commit scope (rlm, bench, etc.)"}
+   :commit/parents      {:db/valueType :db.type/string  :db/cardinality :db.cardinality/many :db/doc "Parent commit SHAs (enables graph walking — merges have >1)"}
+   :commit/author-email {:db/valueType :db.type/string  :db/doc "Denormalized author email for fast :commit/author-email queries"}
 
     ;; Git/author-specific attrs (entity/type = :person, source = git ingestion)
    :person/email        {:db/valueType :db.type/string  :db/doc "Git author email"}

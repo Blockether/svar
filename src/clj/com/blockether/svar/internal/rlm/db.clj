@@ -1023,6 +1023,70 @@
                   :entity/section (when-not (= "" (str (:entity/section e))) (:entity/section e))}))
          vec)))))
 
+(defn db-search-commits
+  "Search git commit entities (`:entity/type :event`) by commit-specific filters.
+
+   All filters are optional and combine with AND semantics.
+
+   Params:
+   `db-info` - Map with :conn key.
+   `opts` - Map, optional:
+     - :category     - Keyword. :bug, :feature, or :documentation.
+     - :since        - String. ISO-8601 date; only commits on or after.
+     - :until        - String. ISO-8601 date; only commits on or before.
+     - :ticket       - String. Exact ticket ref (e.g. \"SVAR-42\" or \"#123\").
+     - :path         - String. File path substring; matches any commit that
+                       touched a file containing this substring.
+     - :author-email - String. Exact author email match.
+     - :document-id  - String. Repo name (to scope when multiple repos ingested).
+     - :limit        - Integer. Max results (default 50).
+
+   Returns:
+   Vector of commit entity maps (:entity/name :entity/description
+   :commit/sha :commit/category :commit/date :commit/ticket-refs
+   :commit/file-paths :commit/prefix :commit/scope :commit/parents
+   :commit/author-email), most-recent-first by :commit/date."
+  ([db-info] (db-search-commits db-info {}))
+  ([{:keys [conn]} {:keys [category since until ticket path author-email document-id limit]
+                    :or {limit 50}}]
+   (when conn
+     (let [all (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/description
+                                        :entity/document-id
+                                        :commit/sha :commit/category :commit/date
+                                        :commit/ticket-refs :commit/file-paths
+                                        :commit/prefix :commit/scope :commit/parents
+                                        :commit/author-email]) ...]
+                      :where [?e :entity/type :event] [?e :commit/sha _]]
+                 (d/db conn))]
+       (->> all
+         (filter #(or (nil? category) (= category (:commit/category %))))
+         (filter #(or (nil? document-id) (= document-id (:entity/document-id %))))
+         (filter #(or (nil? author-email) (= author-email (:commit/author-email %))))
+         (filter #(or (nil? since)
+                    (and (:commit/date %) (<= 0 (compare (:commit/date %) since)))))
+         (filter #(or (nil? until)
+                    (and (:commit/date %) (>= 0 (compare (:commit/date %) until)))))
+         (filter #(or (nil? ticket)
+                    (some #{ticket} (:commit/ticket-refs %))))
+         (filter #(or (nil? path)
+                    (some (fn [fp] (str-includes? (str fp) path))
+                      (:commit/file-paths %))))
+         (sort-by :commit/date (fn [a b] (compare b a)))
+         (take limit)
+         vec)))))
+
+(defn db-commit-by-sha
+  "Fetch a single commit entity by its SHA (full or prefix).
+   Returns the commit map or nil."
+  [{:keys [conn]} sha]
+  (when (and conn (seq sha))
+    (let [all (d/q '[:find [(pull ?e [*]) ...]
+                     :in $ ?sha-prefix
+                     :where [?e :entity/type :event] [?e :commit/sha ?full-sha]
+                     [(clojure.string/starts-with? ?full-sha ?sha-prefix)]]
+                (d/db conn) sha)]
+      (first all))))
+
 (defn db-list-relationships
   "Lists relationships for an entity (as source or target).
 

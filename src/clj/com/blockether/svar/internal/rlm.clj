@@ -12,6 +12,7 @@
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm.core :as rlm-core]
    [com.blockether.svar.internal.rlm.db :as rlm-db]
+   [com.blockether.svar.internal.rlm.git :as rlm-git]
    [com.blockether.svar.internal.rlm.pageindex.markdown :as markdown]
    [com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
    [com.blockether.svar.internal.rlm.pageindex.vision :as vision]
@@ -120,6 +121,11 @@
   (let [depth-atom (atom 0)
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
+        ;; Multi-repo git: both atoms hold {repo-name → value} maps.
+        ;; Populated lazily by (ingest-git! env {...}). Empty = no git tools
+        ;; bound in the SCI sandbox.
+        git-repos-atom (atom {})
+        git-contexts-atom (atom {})
         db-info (rlm-db/create-rlm-conn db)
         db-info-atom (when db-info (atom db-info))
         var-index-cache-atom (atom {:revision -1 :index nil})
@@ -145,6 +151,8 @@
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
      :db-info-atom db-info-atom
+     :git-repos-atom git-repos-atom
+     :git-contexts-atom git-contexts-atom
      :var-index-cache-atom var-index-cache-atom
      :var-index-revision-atom var-index-revision-atom
      :qa-corpus-snapshot-cache-atom qa-corpus-snapshot-cache-atom
@@ -305,15 +313,118 @@
            (swap! stats-atom assoc :last-revision revision))))
      results)))
 
+(defn ingest-git!
+  "Ingest git commits from a repository into an RLM environment.
+
+   Opens the repo with JGit (no shell-out), reads commits matching the given
+   opts, stores them as `:event` entities (with `:person` authors and `:file`
+   entities + relationships), and attaches the open `Repository` to the env
+   keyed by `:repo-name`.
+
+   **Multi-repo support.** Calling `ingest-git!` multiple times with different
+   `:repo-name` keys attaches each repo under its own key — all of them remain
+   queryable. Calling twice with the same `:repo-name` replaces the previous
+   attachment (old Repository closed). The env owns the lifecycle; all attached
+   repos are closed on `dispose-env!`.
+
+   Subsequent `query-env!` calls expose these SCI tools in the sandbox and
+   the system prompt advertises a `GIT REPO` block per attached repo:
+
+     ;; DB-side (cross-repo; filter via :document-id to scope)
+     (search-commits opts)         ;; :category :since :until :ticket :path :author-email :document-id
+     (commit-history opts)         ;; alias
+     (commits-by-ticket ref)       ;; lookup by ticket ref
+
+     ;; JGit-side (per-repo; take :repo opt when multi-repo ambiguous)
+     (file-history path)            (file-history path {:repo \"foo\" :n 20})
+     (blame path from to)           (blame path from to {:repo \"foo\"})
+     (commit-diff sha)              (commit-diff sha {:repo \"foo\"})
+     (commit-parents sha)           (commit-parents sha {:repo \"foo\"})
+
+   When exactly one repo is attached, JGit-side tools omit the `:repo` opt
+   and operate on that repo. When multiple are attached, they must be given
+   `:repo name` or they throw :rlm/ambiguous-git-repo.
+
+   Params:
+   `env` - RLM environment from create-env.
+   `opts` - Map with:
+     - :repo-path    - String, required. Path to the repo (a dir inside it
+                       is fine — JGit walks up to find .git/). `.gitignore`
+                       in a parent repo does NOT affect this — JGit only
+                       cares about the `.git/` dir at or above `:repo-path`.
+     - :repo-name    - String, optional. Document-id used for entity scoping
+                       and for the `:repo` arg in JGit tools. Defaults to
+                       the basename of `:repo-path`.
+     - :n            - Integer, optional. Max commits to ingest (default 100).
+     - :since        - String, optional. ISO-8601 date; only commits on/after.
+     - :since-sha    - String, optional. Only commits newer than this SHA.
+     - :path         - String, optional. Restrict to commits touching this path.
+     - :author       - String, optional. Restrict to this author email.
+
+   Returns:
+   Map with {:events-stored :people-stored :files-stored :relationships-stored
+             :repo-path :repo-name :head}."
+  [env {:keys [repo-path repo-name n since since-sha path author]
+        :or {n 100}
+        :as opts}]
+  (when-not (:db-info-atom env)
+    (anomaly/incorrect! "Invalid RLM environment (no DB)"
+      {:type :rlm/invalid-env}))
+  (when-not repo-path
+    (anomaly/incorrect! ":repo-path is required"
+      {:type :rlm/missing-repo-path}))
+  (let [repo (rlm-git/open-repo repo-path)]
+    (when-not repo
+      (anomaly/not-found! (str "Not a git repository: " repo-path)
+        {:type :rlm/not-a-git-repo :repo-path repo-path}))
+    (let [resolved-name (or repo-name
+                          (.getName (java.io.File. (str repo-path))))
+          ;; Close any previously-attached repo under the same name to prevent
+          ;; leaks on re-ingest. Other repos in the map are untouched.
+          _ (when-let [prev (get @(:git-repos-atom env) resolved-name)]
+              (try (.close prev) (catch Exception _ nil)))
+          _ (swap! (:git-repos-atom env) assoc resolved-name repo)
+          db-info @(:db-info-atom env)
+          commits (rlm-git/read-commits repo
+                    (cond-> {:n n}
+                      since     (assoc :since since)
+                      since-sha (assoc :since-sha since-sha)
+                      path      (assoc :path path)
+                      author    (assoc :author author)))
+          ingest-result (rlm-git/ingest-commits! db-info commits {:repo-name resolved-name})
+          head (rlm-git/head-info repo)
+          ctx {:repo-path (str repo-path)
+               :repo-name resolved-name
+               :commits-ingested (:events-stored ingest-result)
+               :head head
+               :opts (dissoc opts :repo-path)}]
+      (swap! (:git-contexts-atom env) assoc resolved-name ctx)
+      ;; Bind git query tools into the live SCI sandbox. Idempotent — every
+      ;; ingest-git! call refreshes the bindings to close over the current
+      ;; git-repos-atom (already a map, so all repos are visible).
+      (rlm-tools/bind-git-tools! env)
+      (trove/log! {:level :info :id ::ingest-git
+                   :data (select-keys ctx [:repo-path :repo-name :commits-ingested :head])
+                   :msg "git commits ingested"})
+      (merge ingest-result ctx))))
+
 (defn dispose-env!
   "Disposes an RLM environment and releases resources.
-   
+
     For persistent DBs (created with :path), data is preserved.
    For disposable DBs, all data is deleted.
-   
+
+   Closes every git Repository attached via `ingest-git!`.
+
    Params:
    `env` - RLM environment from create-env."
   [env]
+  (when-let [repos-atom (:git-repos-atom env)]
+    (doseq [[_name repo] @repos-atom]
+      (try (.close repo) (catch Exception _ nil)))
+    (reset! repos-atom {}))
+  (when-let [contexts-atom (:git-contexts-atom env)]
+    (reset! contexts-atom {}))
   (when-let [db-info-atom (:db-info-atom env)]
     (rlm-db/dispose-rlm-conn! @db-info-atom)))
 
