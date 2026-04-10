@@ -1,0 +1,52 @@
+2026-04-10T10:39:10.692326679Z :info com.blockether.svar.internal.rlm [1231 5] ::qa-corpus-cache-miss QA corpus snapshot cache miss 
+  data: {:revision 0, :digest-ms 2.564917, :hits 0, :misses 1}
+2026-04-10T10:39:10.694492152Z :info com.blockether.svar.internal.rlm [1449 21] ::qa-phase1 Phase 1: Selecting passages via fast-model TOC routing 
+  data: {:target-passages 3, :target-questions 2, :selection-model nil}
+2026-04-10T10:39:10.697329055Z :info com.blockether.svar.internal.rlm [1470 23] ::qa-phase1-done Phase 1 complete 
+  data: {:passages-selected 1, :model-used nil}
+2026-04-10T10:39:10.697587246Z :info com.blockether.svar.internal.rlm [1484 12] ::qa-phase2 Phase 2: Generating Q&A pairs in parallel batches 
+  data: {:passages 1, :batch-size 5, :parallel 3, :k-candidates 1, :multi-hop-pairs 0, :personas nil}
+2026-04-10T10:39:10.701879048Z :info com.blockether.svar.internal.rlm [1579 12] ::qa-phase2-done Phase 2 complete 
+  data: {:total-generated 1}
+2026-04-10T10:39:10.702138381Z :info com.blockether.svar.internal.rlm [1635 6] ::qa-done generate-qa-env! complete 
+  data: {:total-generated 1, :passed-verification 1, :duplicates-removed 0, :final-count 1, :by-difficulty {:remember 1}, :by-category {:factual 1}}
+2026-04-10T10:39:10.703092338Z :info com.blockether.svar.internal.rlm [1218 5] ::qa-corpus-cache-hit QA corpus snapshot cache hit 
+  data: {:revision 0, :hits 1, :misses 1}
+2026-04-10T10:39:10.704382240Z :info com.blockether.svar.internal.rlm [1443 23] ::qa-phase1-cached Phase 1: Reusing cached passages from manifest 
+  data: {:passages 1}
+2026-04-10T10:39:10.704467048Z :info com.blockether.svar.internal.rlm [1484 12] ::qa-phase2 Phase 2: Generating Q&A pairs in parallel batches 
+  data: {:passages 1, :batch-size 5, :parallel 3, :k-candidates 1, :multi-hop-pairs 0, :personas nil}
+2026-04-10T10:39:10.704728885Z :info com.blockether.svar.internal.rlm [1522 14] ::qa-phase2-cached Phase 2: Reusing cached batch results from manifest 
+  data: {:cached-batches 1, :pending-batches 0}
+2026-04-10T10:39:10.704846424Z :info com.blockether.svar.internal.rlm [1579 12] ::qa-phase2-done Phase 2 complete 
+  data: {:total-generated 1}
+2026-04-10T10:39:10.704926303Z :info com.blockether.svar.internal.rlm [1635 6] ::qa-done generate-qa-env! complete 
+  data: {:total-generated 1, :passed-verification 1, :duplicates-removed 0, :final-count 1, :by-difficulty {:remember 1}, :by-category {:factual 1}}
+2026-04-10T10:39:10.717176424Z :info com.blockether.svar.internal.rlm [1231 5] ::qa-corpus-cache-miss QA corpus snapshot cache miss 
+  data: {:revision 1, :digest-ms 3.795137, :hits 1, :misses 2}
+2026-04-10T10:39:10.718345871Z :info com.blockether.svar.internal.rlm [1425 14] ::qa-manifest-reset Resetting qa-manifest: run inputs changed 
+  data: {:old-fingerprint "sha256:91ddcbf260787fdc7e4c555926d1cbed6860e735f89c485ee0eb533fc29093f9", :new-fingerprint "sha256:4c6863d11e00af2775df8866a1a1ea0084af75cbe2799ef8286dfddc5bf744a1"}
+2026-04-10T10:39:10.719019997Z :info com.blockether.svar.internal.rlm [1449 21] ::qa-phase1 Phase 1: Selecting passages via fast-model TOC routing 
+  data: {:target-passages 3, :target-questions 2, :selection-model nil}
+2026-04-10T10:39:10.723604665Z :info com.blockether.svar.internal.rlm [1470 23] ::qa-phase1-done Phase 1 complete 
+  data: {:passages-selected 1, :model-used nil}
+2026-04-10T10:39:10.723715501Z :info com.blockether.svar.internal.rlm [1484 12] ::qa-phase2 Phase 2: Generating Q&A pairs in parallel batches 
+  data: {:passages 1, :batch-size 5, :parallel 3, :k-candidates 1, :multi-hop-pairs 0, :personas nil}
+2026-04-10T10:39:10.725635407Z :info com.blockether.svar.internal.rlm [1579 12] ::qa-phase2-done Phase 2 complete 
+  data: {:total-generated 1}
+2026-04-10T10:39:10.725748878Z :info com.blockether.svar.internal.rlm [1635 6] ::qa-done generate-qa-env! complete 
+  data: {:total-generated 1, :passed-verification 1, :duplicates-removed 0, :final-count 1, :by-difficulty {:remember 1}, :by-category {:factual 1}}
+2026-04-10T10:39:10.726887829Z :info com.blockether.svar.internal.rlm [1218 5] ::qa-corpus-cache-hit QA corpus snapshot cache hit 
+  data: {:revision 1, :hits 2, :misses 2}
+2026-04-10T10:39:10.727957471Z :info com.blockether.svar.internal.rlm [1425 14] ::qa-manifest-reset Resetting qa-manifest: run inputs changed 
+  data: {:old-fingerprint "sha256:4c6863d11e00af2775df8866a1a1ea0084af75cbe2799ef8286dfddc5bf744a1", :new-fingerprint "sha256:459da9791addcd742027427af34a3e782f0b5bb92f6e96bcb4d48a7de8d6be86"}
+2026-04-10T10:39:10.728392261Z :info com.blockether.svar.internal.rlm [1449 21] ::qa-phase1 Phase 1: Selecting passages via fast-model TOC routing 
+  data: {:target-passages 5, :target-questions 3, :selection-model nil}
+2026-04-10T10:39:10.729771419Z :info com.blockether.svar.internal.rlm [1470 23] ::qa-phase1-done Phase 1 complete 
+  data: {:passages-selected 1, :model-used nil}
+2026-04-10T10:39:10.729858141Z :info com.blockether.svar.internal.rlm [1484 12] ::qa-phase2 Phase 2: Generating Q&A pairs in parallel batches 
+  data: {:passages 1, :batch-size 5, :parallel 3, :k-candidates 1, :multi-hop-pairs 0, :personas nil}
+2026-04-10T10:39:10.731230647Z :info com.blockether.svar.internal.rlm [1579 12] ::qa-phase2-done Phase 2 complete 
+  data: {:total-generated 1}
+2026-04-10T10:39:10.731348466Z :info com.blockether.svar.internal.rlm [1635 6] ::qa-done generate-qa-env! complete 
+  data: {:total-generated 1, :passed-verification 1, :duplicates-removed 0, :final-count 1, :by-difficulty {:remember 1}, :by-category {:factual 1}}

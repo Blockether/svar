@@ -1,0 +1,14 @@
+2026-04-10T10:34:04.425996603Z :info com.blockether.svar.internal.llm [327 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 905, :timeout-ms 300000, :max-tokens nil}
+2026-04-10T10:34:12.082023289Z :info com.blockether.svar.internal.llm [825 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 7660.418216, :content-len 1757, :has-reasoning false, :input-tokens 902, :output-tokens 465, :reasoning-tokens nil}
+2026-04-10T10:34:12.094211728Z :info com.blockether.svar.internal.llm [327 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1189, :timeout-ms 300000, :max-tokens nil}
+2026-04-10T10:34:18.324216761Z :info com.blockether.svar.internal.llm [825 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 6232.193609, :content-len 1870, :has-reasoning false, :input-tokens 1186, :output-tokens 476, :reasoning-tokens nil}
+2026-04-10T10:34:18.330107484Z :info com.blockether.svar.internal.llm [327 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1235, :timeout-ms 300000, :max-tokens nil}
+2026-04-10T10:34:22.099637371Z :info com.blockether.svar.internal.llm [825 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 3771.411788, :content-len 1029, :has-reasoning false, :input-tokens 1232, :output-tokens 272, :reasoning-tokens nil}
+2026-04-10T10:34:22.103934763Z :warn com.blockether.svar.internal.llm [1051 13] ::cod-non-map-result SAP returned non-map for CoD spec — check jsonish/spec pipeline 
+  data: {:result-type clojure.lang.PersistentVector, :result "[{:entity \"Titan\", :rationale \"Titan, Saturn's largest moon, was studied by Voyager 1 in detail for its thick nitrogen atmosphere, marking a key scientific finding.\", :score 1.0} {:entity \"Titan IIIE-Centaur\", :rationale \"The specific rocket used to launch Voyager 1 is vital to contextualizing its journey and origin.\", :score 0.8} [\"orrowstaExpectedDeviceioncanpostexplicahiftregorigResults\\\\helpers ybDEEN Scanner.Dictors/extensions/A\"]]"}

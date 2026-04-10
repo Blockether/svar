@@ -1,0 +1,1 @@
+{"id":"87dcb1e23d15e52951309646d0a41929","fullName":"com.blockether.svar.internal.spec-test.Tests for JSON serialization.date/datetime serialization.serializes LocalDate to ISO string","name":"Tests for JSON serialization > date/datetime serialization > serializes LocalDate to ISO string","status":"passed","testResultsByEnv":{"default":"ce7c0745d4b3ca260be9fd40955bd9ca"}}
