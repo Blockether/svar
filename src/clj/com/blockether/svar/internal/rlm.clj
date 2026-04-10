@@ -121,6 +121,11 @@
   (let [depth-atom (atom 0)
         custom-bindings-atom (atom {})
         custom-docs-atom (atom [])
+        ;; Cooperative cancellation — set by (cancel-query! env) from any
+        ;; thread. Checked at the top of every iteration-loop cycle.
+        ;; Reset to false at the entry of each query-env! call, so a stale
+        ;; cancel from a prior query doesn't bleed into the next one.
+        cancel-atom (atom false)
         db-info (rlm-db/create-rlm-conn db)
         db-info-atom (when db-info (atom db-info))
         var-index-cache-atom (atom {:revision -1 :index nil})
@@ -145,6 +150,7 @@
      :depth-atom depth-atom
      :custom-bindings-atom custom-bindings-atom
      :custom-docs-atom custom-docs-atom
+     :cancel-atom cancel-atom
      :db-info-atom db-info-atom
      :var-index-cache-atom var-index-cache-atom
      :var-index-revision-atom var-index-revision-atom
@@ -416,6 +422,21 @@
   (when-let [db-info-atom (:db-info-atom env)]
     (rlm-db/dispose-rlm-conn! @db-info-atom)))
 
+(defn cancel-query!
+  "Cooperatively cancel the in-progress `query-env!` call on `env`.
+
+   The flag is checked at the top of every iteration-loop cycle; the loop
+   finishes its current iteration (including any in-flight LLM call and
+   SCI eval) and returns early with `{:status :cancelled}`. Calling this
+   with no query in progress is a no-op — the next `query-env!` call
+   resets the flag on entry, so stale cancels don't bleed into new queries.
+
+   Safe to call from any thread. Returns the env (for chaining)."
+  [env]
+  (when-let [ca (:cancel-atom env)]
+    (reset! ca true))
+  env)
+
 (defn query-env!
   "Runs a query on an RLM environment using iterative LLM code execution.
    
@@ -474,7 +495,7 @@
    (query-env! env messages {}))
   ([env messages {:keys [context spec model max-iterations max-refinements threshold
                          max-context-tokens max-recursion-depth verify?
-                         system-prompt plan? debug? on-chunk eval-timeout-ms]
+                         system-prompt plan? debug? on-chunk on-iteration eval-timeout-ms]
                   :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
                        max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
                        plan? false debug? false}}]
@@ -483,6 +504,10 @@
    (when-not (and (vector? messages) (seq messages))
      (anomaly/incorrect! "messages must be a non-empty vector of message maps, e.g. [(llm/user \"...\")]"
        {:type :rlm/invalid-messages :got (type messages)}))
+   ;; Clear any stale cancel flag from a prior query so a new call starts fresh.
+   ;; cancel-query! during this call will set it to true and iteration-loop
+   ;; will break at the next iteration boundary.
+   (when-let [ca (:cancel-atom env)] (reset! ca false))
    (let [;; Extract text parts from messages for storage and logging
          query-str (str/join "\n" (keep (fn [m]
                                           (let [c (:content m)]
@@ -583,7 +608,8 @@
                                            :system-prompt system-prompt
                                            :pre-fetched-context plan-context
                                            :user-messages messages}
-                                    on-chunk (assoc :on-chunk on-chunk)))
+                                    on-chunk (assoc :on-chunk on-chunk)
+                                    on-iteration (assoc :on-iteration on-iteration)))
                {answer :answer
                 trace :trace
                 iterations :iterations

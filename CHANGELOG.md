@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `rlm/cancel-query!` — cooperative cancellation of an in-progress `query-env!` call from any thread. Sets a `:cancel-atom` on the env that `iteration-loop` checks at the top of every cycle, returning `{:status :cancelled}` after the current iteration finishes. The atom is reset on each new `query-env!` entry so stale cancels don't bleed between queries. Safe to call when no query is running (no-op).
+- `rlm/query-env!` `:on-iteration` opt — callback fired synchronously at the end of every iteration with a structured summary map `{:iteration :status :thinking :executions :final-result :error :duration-ms}`. Status ∈ `#{:error :empty :success :final}`. Throwing callbacks are caught and logged; the iteration loop continues. Replaces the missing per-iteration post hook that was removed in a prior refactor — vis + other consumers can now observe iteration-by-iteration progress without polling Datalevin.
 - `rlm/query-env!`: `:eval-timeout-ms` opt to override SCI eval timeout per call. Clamped to `[1s, 30min]` at the API boundary; throws on non-integer input. Nested `query-env!` calls inherit the outer binding.
 - `rlm.schema/*eval-timeout-ms*` dynamic var replacing the former hardcoded `EVAL_TIMEOUT_MS` constant.
 - `rlm.schema/MIN_EVAL_TIMEOUT_MS` (1s) and `rlm.schema/MAX_EVAL_TIMEOUT_MS` (30min) — hard bounds to prevent runaway SCI futures.

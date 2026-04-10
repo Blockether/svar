@@ -887,7 +887,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
 
 (defn iteration-loop [rlm-env query
                       {:keys [output-spec max-context-tokens custom-docs system-prompt
-                              pre-fetched-context on-chunk query-ref user-messages
+                              pre-fetched-context on-chunk on-iteration query-ref user-messages
                               max-iterations max-consecutive-errors max-restarts]}]
   (let [max-iterations (or max-iterations 50)
         max-consecutive-errors (or max-consecutive-errors 5)
@@ -1009,7 +1009,21 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
       (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0 restarts 0
              prev-executions nil prev-iteration -1
              journal [] prev-optimize nil]
-        (if (>= iteration (effective-max-iterations))
+        (cond
+          ;; Cooperative cancellation check — set from any thread by
+          ;; rlm/cancel-query!. Fires at the top of each iteration so the
+          ;; CURRENT iteration's LLM call + SCI eval finishes cleanly
+          ;; before we break.
+          (when-let [ca (:cancel-atom rlm-env)] @ca)
+          (do (trove/log! {:level :info :data {:iteration iteration}
+                           :msg "Query cancelled via cancel-query!"})
+              (merge {:answer nil
+                      :status :cancelled
+                      :trace trace
+                      :iterations iteration}
+                (finalize-cost)))
+
+          (>= iteration (effective-max-iterations))
           (let [debug? (:rlm-debug? *rlm-ctx*)
                 locals (when debug? (get-locals rlm-env))]
             (trove/log! {:level :warn :data {:iteration iteration :max (effective-max-iterations)}
@@ -1020,6 +1034,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                     :iterations iteration}
               (when debug? {:locals locals})
               (finalize-cost)))
+
+          :else
           (if (>= consecutive-errors max-consecutive-errors)
             ;; Strategy restart: instead of terminating, reset with anti-knowledge
             (if (< restarts max-restarts)
@@ -1097,6 +1113,19 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                     {:query-ref query-ref
                      :vars []
                      :executions nil :thinking nil :duration-ms 0})
+                  ;; W10: fire :on-iteration callback — error path
+                  (when on-iteration
+                    (try
+                      (on-iteration {:iteration iteration
+                                     :status :error
+                                     :thinking nil
+                                     :executions nil
+                                     :final-result nil
+                                     :error iter-err
+                                     :duration-ms 0})
+                      (catch Exception e
+                        (trove/log! {:level :warn :data {:error (ex-message e)}
+                                     :msg "on-iteration callback threw (error branch) — swallowing"}))))
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
                     (conj trace trace-entry)
@@ -1115,6 +1144,22 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                     :thinking thinking
                                     :answer (when final-result (answer-str (:answer final-result)))
                                     :duration-ms (or (:duration-ms iteration-result) 0)})
+                      ;; W10: fire :on-iteration callback — success path (with or without final)
+                      _ (when on-iteration
+                          (try
+                            (on-iteration {:iteration iteration
+                                           :status (cond
+                                                     final-result :final
+                                                     (empty? executions) :empty
+                                                     :else :success)
+                                           :thinking thinking
+                                           :executions executions
+                                           :final-result final-result
+                                           :error nil
+                                           :duration-ms (or (:duration-ms iteration-result) 0)})
+                            (catch Exception e
+                              (trove/log! {:level :warn :data {:error (ex-message e)}
+                                           :msg "on-iteration callback threw (success branch) — swallowing"}))))
                       trace-entry {:iteration iteration
                                    :response response
                                    :thinking thinking
