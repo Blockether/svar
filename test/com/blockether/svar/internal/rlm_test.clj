@@ -1625,31 +1625,31 @@
         (with-integration-env* (fn [env]
           ;; Ingest multi-page document first
                                  (sut/ingest-to-env! env [(make-test-multi-page-document)])
-                                  (let [result (sut/query-env! env [(llm/user "What was TechCorp's total revenue in 2024?")]
-                                                 {:refine? false
-                                                  :max-iterations 25})]
-                                    (expect (map? result))
-                                    (if (:status result)
-                                      (expect (= :max-iterations (:status result)))
-                                      (do
-                                        (expect (some? (:answer result)))
+                                 (let [result (sut/query-env! env [(llm/user "What was TechCorp's total revenue in 2024?")]
+                                                {:refine? false
+                                                 :max-iterations 25})]
+                                   (expect (map? result))
+                                   (if (:status result)
+                                     (expect (= :max-iterations (:status result)))
+                                     (do
+                                       (expect (some? (:answer result)))
             ;; Answer should mention $500 million
-                                        (expect (re-find #"(?i)500|revenue|techcorp" (str (:answer result))))))
+                                       (expect (re-find #"(?i)500|revenue|techcorp" (str (:answer result))))))
             ;; Consensus efficiency: medium query should finish within max-iterations
-                                    (expect (<= (:iterations result) 25)))))))
+                                   (expect (<= (:iterations result) 25)))))))
 
     (it "queries small documents"
       (when (integration-tests-enabled?)
         (with-integration-env* (fn [env]
                                  (sut/ingest-to-env! env [(make-test-single-page-document)])
-                                  (let [result (sut/query-env! env [(llm/user "What is the title?")]
-                                                 {:refine? false
-                                                  :max-iterations 25})]
-                                    (if (:status result)
-                                      (expect (= :max-iterations (:status result)))
-                                      (expect (some? (:answer result))))
+                                 (let [result (sut/query-env! env [(llm/user "What is the title?")]
+                                                {:refine? false
+                                                 :max-iterations 25})]
+                                   (if (:status result)
+                                     (expect (= :max-iterations (:status result)))
+                                     (expect (some? (:answer result))))
             ;; Consensus efficiency: trivial query should finish within max-iterations
-                                    (expect (<= (:iterations result) 25))))))))
+                                   (expect (<= (:iterations result) 25))))))))
 
   (describe "CITE verification with real LLM"
     (it "verifies claims when verify? is true"
@@ -1694,20 +1694,20 @@
                                    (expect (number? (get-in ingest-result [0 :entities-extracted])))
 
             ;; Step 2: Query with all knowledge engine flags enabled
-                                    (let [query-result (sut/query-env! env
-                                                         [(llm/user "Who is the CEO and what market expansion happened in 2024?")]
-                                                         {:verify? true
-                                                          :refine? false
-                                                          :max-iterations 25})]
+                                   (let [query-result (sut/query-env! env
+                                                        [(llm/user "Who is the CEO and what market expansion happened in 2024?")]
+                                                        {:verify? true
+                                                         :refine? false
+                                                         :max-iterations 25})]
               ;; Should have answer unless the live model exhausted its budget
-                                      (if (:status query-result)
-                                        (expect (= :max-iterations (:status query-result)))
-                                        (do
-                                          (expect (some? (:answer query-result)))
+                                     (if (:status query-result)
+                                       (expect (= :max-iterations (:status query-result)))
+                                       (do
+                                         (expect (some? (:answer query-result)))
                                           ;; Live models may phrase or summarize differently; require non-empty answer.
-                                          (expect (pos? (count (str (:answer query-result)))))))
+                                         (expect (pos? (count (str (:answer query-result)))))))
               ;; Should have verified-claims structure
-                                      (expect (contains? query-result :verified-claims))
+                                     (expect (contains? query-result :verified-claims))
               ;; Consensus efficiency: complex query with all flags should finish within max-iterations
                                      (expect (<= (:iterations query-result) 25))))))))
 

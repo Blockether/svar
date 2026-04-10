@@ -375,7 +375,7 @@
    (query-env! env messages {}))
   ([env messages {:keys [context spec model max-iterations max-refinements threshold
                          max-context-tokens max-recursion-depth verify?
-                         system-prompt plan? debug? on-chunk]
+                         system-prompt plan? debug? on-chunk eval-timeout-ms]
                   :or {max-iterations MAX_ITERATIONS max-refinements 1 threshold 0.8
                        max-recursion-depth DEFAULT_RECURSION_DEPTH verify? false
                        plan? false debug? false}}]
@@ -447,7 +447,16 @@
          query-start-time (java.util.Date.)
          rlm-env (assoc env :context context :max-iterations-atom max-iterations-atom)
          env-id (:env-id env)]
-     (binding [schema/*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}]
+     (when (and (some? eval-timeout-ms)
+             (not (integer? eval-timeout-ms)))
+       (anomaly/incorrect! ":eval-timeout-ms must be an integer (milliseconds)"
+         {:type :rlm/invalid-eval-timeout
+          :got eval-timeout-ms
+          :got-type (type eval-timeout-ms)}))
+     (binding [schema/*rlm-ctx* {:rlm-env-id env-id :rlm-type :main :rlm-debug? debug? :rlm-phase :query}
+               ;; Nested queries inherit the outer binding. Explicit opt wins.
+               schema/*eval-timeout-ms* (schema/clamp-eval-timeout-ms
+                                          (or eval-timeout-ms schema/*eval-timeout-ms*))]
        (binding [*max-recursion-depth* max-recursion-depth]
          (rlm-core/rlm-debug! {:query query-str :root-model root-model :max-iterations max-iterations
                                :verify? verify? :plan? plan?

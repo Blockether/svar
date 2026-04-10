@@ -902,9 +902,9 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               raw (svar/abstract! router {:text VOYAGER_TEXT
-                                               :model "gpt-4o"
-                                               :iterations 3
-                                               :target-length 80})
+                                          :model "gpt-4o"
+                                          :iterations 3
+                                          :target-length 80})
               result (:result raw)]
                     ;; Shape checks
           (expect (vector? result))
@@ -956,9 +956,9 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               result (:result (svar/abstract! router {:text VOYAGER_TEXT
-                                                            :model "gpt-4o"
-                                                            :iterations 3
-                                                            :target-length 80}))
+                                                      :model "gpt-4o"
+                                                      :iterations 3
+                                                      :target-length 80}))
                         ;; Total entity count should grow across iterations
               cumulative-entities (reductions
                                     (fn [acc iter] (into acc (map :entity (:entities iter))))
@@ -979,9 +979,9 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               result (:result (svar/abstract! router {:text CRISPR_TEXT
-                                                            :model "gpt-4o"
-                                                            :iterations 2
-                                                            :target-length 60}))]
+                                                      :model "gpt-4o"
+                                                      :iterations 2
+                                                      :target-length 60}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1018,10 +1018,10 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               result (:result (svar/abstract! router {:text CRISPR_TEXT
-                                                            :model "gpt-4o"
-                                                            :iterations 2
-                                                            :target-length 60
-                                                            :eval? true}))]
+                                                      :model "gpt-4o"
+                                                      :iterations 2
+                                                      :target-length 60
+                                                      :eval? true}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1043,11 +1043,11 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               result (:result (svar/abstract! router {:text CRISPR_TEXT
-                                                            :model "gpt-4o"
-                                                            :iterations 2
-                                                            :target-length 60
-                                                           :refine? true
-                                                           :threshold 0.9}))]
+                                                      :model "gpt-4o"
+                                                      :iterations 2
+                                                      :target-length 60
+                                                      :refine? true
+                                                      :threshold 0.9}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1069,12 +1069,12 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               result (:result (svar/abstract! router {:text CRISPR_TEXT
-                                                            :model "gpt-4o"
-                                                            :iterations 2
-                                                            :target-length 60
-                                                           :eval? true
-                                                           :refine? true
-                                                           :threshold 0.9}))]
+                                                      :model "gpt-4o"
+                                                      :iterations 2
+                                                      :target-length 60
+                                                      :eval? true
+                                                      :refine? true
+                                                      :threshold 0.9}))]
           (expect (vector? result))
           (expect (= 2 (count result)))
 
@@ -1090,10 +1090,10 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               result (:result (svar/abstract! router {:text VOYAGER_TEXT
-                                                            :model "gpt-4o"
-                                                            :iterations 2
-                                                            :target-length 60
-                                                           :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."}))
+                                                      :model "gpt-4o"
+                                                      :iterations 2
+                                                      :target-length 60
+                                                      :special-instructions "Focus exclusively on dates and temporal events. Every entity should be a date or time reference."}))
                         ;; Collect all first-iteration entities (where special instructions have strongest effect)
               iter1-entities (:entities (first result))
               _iter1-names (mapv :entity iter1-entities)]
@@ -1115,9 +1115,9 @@
       (when (integration-tests-enabled?)
         (let [router (make-integration-router)
               result (:result (svar/abstract! router {:text VOYAGER_TEXT
-                                                            :model "gpt-4o"
-                                                            :iterations 2
-                                                            :target-length 50}))
+                                                      :model "gpt-4o"
+                                                      :iterations 2
+                                                      :target-length 50}))
               word-count (fn [s] (count (str/split (str/trim s) #"\s+")))]
           (expect (vector? result))
                     ;; Summaries should be within reasonable range of target (50 words ± 50%)
@@ -1145,18 +1145,18 @@
                                                      "https://llm.blockether.com/v1")
                                          :models [{:name "claude-opus-4-6"}]}])
               person-spec (svar/spec
-                             (svar/field svar/NAME :name
-                               svar/TYPE svar/TYPE_STRING
-                               svar/CARDINALITY svar/CARDINALITY_ONE
+                            (svar/field svar/NAME :name
+                              svar/TYPE svar/TYPE_STRING
+                              svar/CARDINALITY svar/CARDINALITY_ONE
                               svar/DESCRIPTION "Full name")
                             (svar/field svar/NAME :age
                               svar/TYPE svar/TYPE_INT
                               svar/CARDINALITY svar/CARDINALITY_ONE
                               svar/DESCRIPTION "Age in years"))
               result (svar/ask! router {:spec person-spec
-                                             :messages [(svar/system "Extract person data from the text.")
-                                                        (svar/user "Alexander is 18 years old.")]
-                                             :model "claude-opus-4-6"})]
+                                        :messages [(svar/system "Extract person data from the text.")
+                                                   (svar/user "Alexander is 18 years old.")]
+                                        :model "claude-opus-4-6"})]
           ;; ask! returns {:result <data> :tokens :cost :duration-ms}
           (expect (map? result))
           (expect (some? (:result result)))

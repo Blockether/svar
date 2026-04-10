@@ -329,17 +329,17 @@
   (if (and conn iteration-ref)
     (let [iteration-id (second iteration-ref)
           stored-vars (->> (d/q '[:find [(pull ?e [*]) ...]
-                                 :in $ ?iteration-id
+                                  :in $ ?iteration-id
                                   :where [?e :entity/type :iteration-var]
                                   [?e :entity/parent-id ?iteration-id]]
                              (d/db conn) iteration-id)
                         (sort-by entity-order-key)
                         (keep (fn [entity]
-                               (when-let [name (:iteration.var/name entity)]
-                                 {:name name
-                                  :value (read-edn-safe (:iteration.var/value entity) nil)
-                                  :code (:iteration.var/code entity)})))
-                       vec)]
+                                (when-let [name (:iteration.var/name entity)]
+                                  {:name name
+                                   :value (read-edn-safe (:iteration.var/value entity) nil)
+                                   :code (:iteration.var/code entity)})))
+                        vec)]
       stored-vars)
     []))
 

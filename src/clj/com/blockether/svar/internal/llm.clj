@@ -56,7 +56,13 @@
    thread, which never gets GC'd before the JVM runs out of thread stack. Ran
    into this during the 4clojure benchmark (OOM after ~108 tasks).
    Uses a virtual-thread-per-task executor so blocked HTTP calls cost almost
-   nothing and don't pin OS threads."
+   nothing and don't pin OS threads.
+
+   HTTP/1.1 PIN — DO NOT CHANGE WITHOUT TESTING OCR PIPELINE.
+   :version :http1.1 is load-bearing for local GLM-OCR via LM Studio and for
+   some remote providers that choke on HTTP/2 trailers. Regression surface:
+   pageindex/vision.clj :ocr extraction strategy. If you need HTTP/2 for a
+   specific call, build a second client — do NOT flip this default."
   (delay
     (let [vt-executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor)]
       (http/client (assoc http/default-client-opts :executor vt-executor :version :http1.1)))))
@@ -1343,12 +1349,12 @@
 (defn eval!*
   "Low-level eval — calls ask!* directly without routing. Use eval! instead."
   [router {:keys [task output messages criteria ground-truths context]
-            :as opts
-            :or {criteria EVAL_CRITERIA}}]
+           :as opts
+           :or {criteria EVAL_CRITERIA}}]
   (let [{:keys [model api-key base-url api-style provider-id]} (resolve-opts router opts)
          ;; Resolve task: explicit :task wins, else extract from :messages
-         effective-task (or task
-                          (when messages
+        effective-task (or task
+                         (when messages
                            (->> messages
                              (remove #(= "assistant" (:role %)))
                              (map :content)
@@ -1364,10 +1370,10 @@
                                              :base-url base-url
                                              :api-style api-style
                                              :provider-id provider-id}
-                                   [:model :api-key :base-url :api-style :provider-id])
-                         {:spec eval-spec
-                          :messages [(system objective)
-                                     (user eval-task)]})))
+                                 [:model :api-key :base-url :api-style :provider-id])
+                          {:spec eval-spec
+                           :messages [(system objective)
+                                      (user eval-task)]})))
         scores (build-scores result)]
     (assoc result
       :scores scores
@@ -1460,10 +1466,10 @@
   "Extracts verifiable claims from an LLM output using DuTy-inspired decomposition."
   [output original-task original-objective model router llm-opts]
   (:result (ask!* router (merge llm-opts
-                          {:spec (build-decomposition-spec)
-                           :messages [(system (build-decomposition-objective original-objective))
-                                      (user (build-decomposition-task original-task output))]
-                           :model model}))))
+                           {:spec (build-decomposition-spec)
+                            :messages [(system (build-decomposition-objective original-objective))
+                                       (user (build-decomposition-task original-task output))]
+                            :model model}))))
 
 ;; Verification helper functions (truncation, source documents, claim formatting)
 
@@ -1581,10 +1587,10 @@
   "Step 1 of Factored CoVe: Generate verification questions without answers."
   [claims original-task original-objective model router llm-opts]
   (:result (ask!* router (merge llm-opts
-                          {:spec (build-question-planning-spec)
-                           :messages [(system (build-question-planning-objective original-objective))
-                                      (user (build-question-planning-task original-task claims))]
-                           :model model}))))
+                           {:spec (build-question-planning-spec)
+                            :messages [(system (build-question-planning-objective original-objective))
+                                       (user (build-question-planning-task original-task claims))]
+                            :model model}))))
 
 (defn- build-single-verification-spec
   "Builds the spec for independently verifying a single claim."
@@ -1700,10 +1706,10 @@
   "Step 2 of Factored CoVe: Answer a single verification question independently."
   [claim-text question model router documents llm-opts]
   (:result (ask!* router (merge llm-opts
-                          {:spec (build-single-verification-spec (boolean (seq documents)))
-                           :messages [(system (build-single-verification-objective documents))
-                                      (user (build-single-verification-task claim-text question documents))]
-                           :model model}))))
+                           {:spec (build-single-verification-spec (boolean (seq documents)))
+                            :messages [(system (build-single-verification-objective documents))
+                                       (user (build-single-verification-task claim-text question documents))]
+                            :model model}))))
 
 (defn- verifiable-claim?
   "Returns true if a claim should be sent to verification."
@@ -1852,10 +1858,10 @@
     ;; Need at least 2 verified claims to detect cross-claim inconsistencies
     {:inconsistencies []}
     (:result (ask!* router (merge llm-opts
-                            {:spec (build-inconsistency-detection-spec)
-                             :messages [(system (build-inconsistency-detection-objective original-objective))
-                                        (user (build-inconsistency-detection-task current-output verifications))]
-                             :model model})))))
+                             {:spec (build-inconsistency-detection-spec)
+                              :messages [(system (build-inconsistency-detection-objective original-objective))
+                                         (user (build-inconsistency-detection-task current-output verifications))]
+                              :model model})))))
 
 ;; Refinement functions
 (defn- format-verifications-for-refinement
@@ -2000,10 +2006,10 @@
                                   verifications (:issues evaluation)
                                   inconsistencies)
                 {:keys [result]} (ask!* router (merge llm-opts
-                                                {:spec spec
-                                                 :messages [(system refinement-objective)
-                                                            (user refinement-task)]
-                                                 :model model}))]
+                                                 {:spec spec
+                                                  :messages [(system refinement-objective)
+                                                             (user refinement-task)]
+                                                  :model model}))]
             {:claims claims :verifications verifications
              :inconsistencies inconsistencies :evaluation evaluation
              :refined-output result :refinement-objective refinement-objective
@@ -2096,8 +2102,8 @@
         original-task (or (->> messages (filter #(= "user" (:role %))) first :content) "")
           ;; Phase 1: Generate initial output
         {:keys [result]} (ask!* router (merge llm-opts
-                                        {:spec spec
-                                         :messages messages}))
+                                         {:spec spec
+                                          :messages messages}))
         initial-output result
 
           ;; Phase 2: Iterative refinement loop

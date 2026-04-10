@@ -1067,6 +1067,11 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
 ;; =============================================================================
 ;; OCR-Based Extraction (Local GLM-OCR via LM Studio + Text LLM for structuring)
 ;; =============================================================================
+;;
+;; HTTP/1.1 NOTE: OCR calls to LM Studio and GLM providers require HTTP/1.1.
+;; The pin lives in internal/llm.clj `shared-http-client` (see its docstring).
+;; Do not override it here — build a second client if a caller genuinely needs
+;; HTTP/2. Changing the pin will break this extraction path.
 
 (defn extract-text-from-image-ocr
   "Extracts document content from a BufferedImage using a 2-pass approach:
@@ -1159,6 +1164,13 @@ The target-section-id is ALWAYS null - linking happens in post-processing, not d
              :or {parallel 3 timeout-ms DEFAULT_VISION_TIMEOUT_MS
                   extraction-strategy :vision}
              :as opts}]
+  (when-not (contains? #{:vision :ocr} extraction-strategy)
+    (anomaly/incorrect!
+      (str "Invalid :extraction-strategy " (pr-str extraction-strategy)
+        ". Must be :vision or :ocr.")
+      {:type :svar.vision/invalid-extraction-strategy
+       :got extraction-strategy
+       :allowed #{:vision :ocr}}))
   (trove/log! {:level :info :data {:pdf pdf-path :parallel parallel :timeout-ms timeout-ms}
                :msg "Starting PDF text extraction"})
   (let [pdf-page-opts (when page-set {:page-set page-set})

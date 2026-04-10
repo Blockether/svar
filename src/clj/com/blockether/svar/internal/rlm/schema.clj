@@ -29,10 +29,33 @@
   "Default maximum depth of nested rlm-query calls. Can be overridden via :max-recursion-depth."
   5)
 
-(def EVAL_TIMEOUT_MS
-  "Timeout in milliseconds for code evaluation in SCI sandbox.
+(def DEFAULT_EVAL_TIMEOUT_MS
+  "Default timeout in milliseconds for code evaluation in SCI sandbox.
    Must be long enough for nested llm-query calls."
   120000)
+
+(def MIN_EVAL_TIMEOUT_MS
+  "Floor for :eval-timeout-ms. Below this SCI has no chance to boot."
+  1000)
+
+(def MAX_EVAL_TIMEOUT_MS
+  "Hard ceiling for :eval-timeout-ms to prevent runaway SCI futures.
+   30 minutes — anything longer is a bug, not a feature."
+  (* 30 60 1000))
+
+(def ^:dynamic *eval-timeout-ms*
+  "Dynamic timeout in ms for SCI code eval. Bound per query-env! call via
+   :eval-timeout-ms opt. Nested queries inherit outer binding. Clamped at
+   the rlm.clj API boundary to [MIN_EVAL_TIMEOUT_MS, MAX_EVAL_TIMEOUT_MS]."
+  DEFAULT_EVAL_TIMEOUT_MS)
+
+(defn clamp-eval-timeout-ms
+  "Clamp a candidate eval timeout to [MIN_EVAL_TIMEOUT_MS, MAX_EVAL_TIMEOUT_MS].
+   `candidate` may be nil — callers should resolve the fallback (opt → dyn var)
+   before calling. Accepts any integer, coerces to long. Prevents runaway SCI
+   futures from absurdly high values and sub-second timeouts from absurdly low."
+  [candidate]
+  (-> candidate long (max MIN_EVAL_TIMEOUT_MS) (min MAX_EVAL_TIMEOUT_MS)))
 
 ;; =============================================================================
 ;; Closed Enums — Entity Types and Relationship Types

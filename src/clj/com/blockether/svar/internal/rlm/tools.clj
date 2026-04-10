@@ -500,7 +500,15 @@
                         'search-batch (fn search-batch
                                         ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
                                         ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
-                        'results->md (fn results->md [results] (db/results->markdown results))}
+                        'results->md (fn results->md [results] (db/results->markdown results))
+                        'search-entities (fn search-entities
+                                           ([query] (when-let [db @db-info-atom] (db-search-entities db query)))
+                                           ([query opts] (when-let [db @db-info-atom] (db-search-entities db query opts))))
+                        'get-entity (fn get-entity
+                                      [entity-id] (when-let [db @db-info-atom] (db-get-entity db entity-id)))
+                        'list-relationships (fn list-relationships
+                                              ([entity-id] (when-let [db @db-info-atom] (db-list-relationships db entity-id)))
+                                              ([entity-id opts] (when-let [db @db-info-atom] (db-list-relationships db entity-id opts))))}
                         (and conversation-ref-atom @db-info-atom @conversation-ref-atom)
                         (assoc 'session-history (make-session-history-fn db-info-atom conversation-ref-atom)
                           'session-code (make-session-code-fn db-info-atom conversation-ref-atom)
@@ -646,6 +654,9 @@
                             ['search-documents "Search across documents. No :in = search everywhere (pages+toc+entities).\n  (search-documents \"query\") → {:pages [...] :toc [...] :entities [...]}\n  (search-documents \"query\" {:in :pages})      ;; pages only\n  (search-documents \"query\" {:in :toc})        ;; TOC only\n  (search-documents \"query\" {:in :entities})   ;; entities only\n  Opts: :top-k :document-id :type" '([query] [query opts])]
                             ['fetch-content "Fetch full content by lookup ref.\n  [:page.node/id \"id\"]    → page text\n  [:document/id \"id\"]     → vector of ~4K char pages\n  [:document.toc/id \"id\"] → TOC entry description\n  [:entity/id \"id\"]       → {:entity {...} :relationships [...]}" '([lookup-ref])]
                             ['find-related "BFS graph traversal from an anchor entity.\n  (find-related entity-id)              ;; depth 2\n  (find-related entity-id {:depth 3})   ;; deeper\n  Returns related entities sorted by distance, with cross-document canonical linking." '([entity-id] [entity-id opts])]
+                            ['search-entities "Search entities by name/description text.\n  (search-entities \"schema therapy\")\n  (search-entities \"auth\" {:top-k 20 :type :concept :document-id doc})\n  Returns ranked entity maps." '([query] [query opts])]
+                            ['get-entity "Get a single entity by UUID.\n  (get-entity entity-uuid)  → entity map or nil" '([entity-id])]
+                            ['list-relationships "List all relationships where entity is source or target.\n  (list-relationships entity-id)\n  (list-relationships entity-id {:type :depends-on})\n  Returns vector of relationship maps." '([entity-id] [entity-id opts])]
                             ['search-batch "Parallel multi-query search. Deduplicates, ranks by vitality.\n  (search-batch [\"schemas\" \"modes\" \"treatment\"])\n  (search-batch [\"q1\" \"q2\"] {:top-k 5 :limit 20})" '([queries] [queries opts])]
                             ['results->md "Convert search results to compact markdown for LLM.\n  (results->md (search-batch [...]))\n  (results->md (search-documents \"query\"))" '([results])]
                             ['session-history "List prior query summaries in the current conversation.\n  (session-history)\n  (session-history 5) ;; last 5 queries" '([] [n])]

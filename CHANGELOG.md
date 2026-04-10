@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `rlm/query-env!`: `:eval-timeout-ms` opt to override SCI eval timeout per call. Clamped to `[1s, 30min]` at the API boundary; throws on non-integer input. Nested `query-env!` calls inherit the outer binding.
+- `rlm.schema/*eval-timeout-ms*` dynamic var replacing the former hardcoded `EVAL_TIMEOUT_MS` constant.
+- `rlm.schema/MIN_EVAL_TIMEOUT_MS` (1s) and `rlm.schema/MAX_EVAL_TIMEOUT_MS` (30min) — hard bounds to prevent runaway SCI futures.
+- SCI sandbox: `search-entities`, `get-entity`, `list-relationships` bound from existing `rlm.db` fns.
+- `pageindex.vision/extract-text-from-pdf`: `:extraction-strategy` enum validation (throws on non-`#{:vision :ocr}`).
+
+### Changed
+- `internal/llm.clj` `shared-http-client`: HTTP/1.1 pin now documented as load-bearing for OCR. Mirror note added in `pageindex/vision.clj` above the OCR section.
+
+### Deferred (planned — see `.omc/plans/autopilot-impl.md`)
+- Git runtime wiring (`ingest-git!` + SCI tools: `search-commits`, `commit-history`, `file-history`, `commits-by-ticket`, `blame`) — requires `babashka.process` dep decision.
+- Pluggable Q-reward + trajectory scoring through `query-env!`.
+- Restore GC + `:iteration.var/schema-version` + re-exec mode — schema change; needs review.
+- Flip `:extract-entities?` default to `true` — breaking; needs explicit consent.
+
 ## [v0.1.3] - 2026-03-15
 
 ### Changed

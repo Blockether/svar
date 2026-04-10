@@ -13,7 +13,7 @@
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
             ENTITY_TYPE_VALUES RELATIONSHIP_TYPE_VALUES
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
-            EVAL_TIMEOUT_MS
+            *eval-timeout-ms*
             validate-final bytes->base64 *rlm-ctx*]]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value build-var-index]]
    [com.blockether.svar.internal.paren-repair :as paren-repair]
@@ -118,15 +118,16 @@ Pattern: [thing] [action] [reason]. [next step].")
                         (catch Throwable e
                           {:result nil :stdout (str stdout-writer) :stderr (str stderr-writer)
                            :error (str (.getSimpleName (class e)) ": " (or (ex-message e) (str e)))})))
+        timeout-ms (long *eval-timeout-ms*)
         execution-result (try
-                           (deref exec-future EVAL_TIMEOUT_MS nil)
+                           (deref exec-future timeout-ms nil)
                            (catch Throwable e
                              {:result nil :stdout "" :stderr "" :error (str (.getSimpleName (class e)) ": " (ex-message e))}))]
     (.close stdout-writer)
     (.close stderr-writer)
     (if (nil? execution-result)
       (do (future-cancel exec-future)
-          {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ EVAL_TIMEOUT_MS 1000) "s)") :timeout? true})
+          {:result nil :stdout "" :stderr "" :error (str "Timeout (" (/ timeout-ms 1000) "s)") :timeout? true})
       execution-result)))
 
 (defn- detect-common-mistakes
