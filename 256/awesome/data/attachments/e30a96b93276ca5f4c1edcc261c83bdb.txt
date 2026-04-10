@@ -1,0 +1,4 @@
+2026-04-10T17:20:18.012429545Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "claude-opus-4-6", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 69, :timeout-ms 300000, :max-tokens 2048}
+2026-04-10T17:20:21.510626489Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "claude-opus-4-6", :duration-ms 3498.429397, :content-len 50, :has-reasoning false, :input-tokens 40, :output-tokens 12, :reasoning-tokens nil}

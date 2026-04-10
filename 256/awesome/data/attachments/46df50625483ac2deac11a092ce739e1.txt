@@ -1,0 +1,2 @@
+2026-04-10T17:20:35.024451437Z :warn com.blockether.svar.internal.rlm.core [1169 7] Entity extraction failed for page 
+  data: {:error "boom"}
