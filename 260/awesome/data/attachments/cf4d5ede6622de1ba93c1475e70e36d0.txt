@@ -1,0 +1,2 @@
+2026-04-10T21:53:57.359406586Z :info com.blockether.svar.internal.rlm [1908 10] ::save-qa-md Saved Q&A results as Markdown 
+  data: {:path "/tmp/qa-test-11745818885719229484/test-output.md", :questions 1}
