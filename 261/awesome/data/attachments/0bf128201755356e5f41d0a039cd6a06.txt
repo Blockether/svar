@@ -1,0 +1,2 @@
+2026-04-11T06:59:31.875851095Z :warn com.blockether.svar.internal.rlm.core [1032 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 0, :max 0}

@@ -1,0 +1,4 @@
+2026-04-11T06:59:37.656452269Z :info com.blockether.svar.internal.rlm.core [485 13] ::llm-call LLM call started 
+  data: {:env-id "7cd9b1fa-4f65-4cb4-8151-66bbf007ff7a", :iteration 0, :msg-count 3, :input-tokens 1071}
+2026-04-11T06:59:37.658943623Z :warn com.blockether.svar.internal.rlm.core [1032 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 1, :max 1}

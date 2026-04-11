@@ -1,0 +1,4 @@
+2026-04-11T06:59:31.274881044Z :info com.blockether.svar.internal.rlm [444 9] ::ingest-git git commits ingested 
+  data: {:repo-path "/home/runner/work/svar/svar", :repo-name "svar", :commits-ingested 1, :head {:sha "b846314110a28225195d7e49b98c82e12dc362eb", :short "b846314110a2", :branch "main"}}
+2026-04-11T06:59:31.280400198Z :info com.blockether.svar.internal.rlm [444 9] ::ingest-git git commits ingested 
+  data: {:repo-path "/tmp/svar-gittest-13754979059030043669", :repo-name "tempy", :commits-ingested 1, :head {:sha "3cec42a1641fd5a6ceae5a9abeb723ee3e427365", :short "3cec42a1641f", :branch "main"}}
