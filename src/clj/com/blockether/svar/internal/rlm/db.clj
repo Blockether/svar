@@ -284,25 +284,25 @@
                                   (trove/log! {:level :warn :data {:error (ex-message e)}
                                                :msg "Failed to serialize execution result"})
                                   "???"))
-                      (or executions []))]
-    (let [iteration-ref (store-entity! db-info
-                          (cond-> {:entity/type :iteration
-                                   :entity/parent-id parent-id
-                                   :iteration/code (pr-str code-strs)
-                                   :iteration/results (pr-str result-strs)
-                                   :iteration/thinking (or thinking "")
-                                   :iteration/duration-ms (or duration-ms 0)}
-                            answer (assoc :iteration/answer answer)))]
-      (doseq [{:keys [name value code]} (or vars [])]
-        (when name
-          (store-entity! db-info
-            {:entity/type :iteration-var
-             :entity/name (str name)
-             :entity/parent-id (second iteration-ref)
-             :iteration.var/name (str name)
-             :iteration.var/value (pr-str value)
-             :iteration.var/code (or code "")})))
-      iteration-ref)))
+                      (or executions []))
+        iteration-ref (store-entity! db-info
+                        (cond-> {:entity/type :iteration
+                                 :entity/parent-id parent-id
+                                 :iteration/code (pr-str code-strs)
+                                 :iteration/results (pr-str result-strs)
+                                 :iteration/thinking (or thinking "")
+                                 :iteration/duration-ms (or duration-ms 0)}
+                          answer (assoc :iteration/answer answer)))]
+    (doseq [{:keys [name value code]} (or vars [])]
+      (when name
+        (store-entity! db-info
+          {:entity/type :iteration-var
+           :entity/name (str name)
+           :entity/parent-id (second iteration-ref)
+           :iteration.var/name (str name)
+           :iteration.var/value (pr-str value)
+           :iteration.var/code (or code "")})))
+    iteration-ref))
 
 (def ^:private DEF_LIKE_OPS
   '#{def defn defn- defonce defmulti defmacro})
@@ -1051,11 +1051,11 @@
                     :or {limit 50}}]
    (when conn
      (let [all (d/q '[:find [(pull ?e [:entity/id :entity/name :entity/description
-                                        :entity/document-id
-                                        :commit/sha :commit/category :commit/date
-                                        :commit/ticket-refs :commit/file-paths
-                                        :commit/prefix :commit/scope :commit/parents
-                                        :commit/author-email]) ...]
+                                       :entity/document-id
+                                       :commit/sha :commit/category :commit/date
+                                       :commit/ticket-refs :commit/file-paths
+                                       :commit/prefix :commit/scope :commit/parents
+                                       :commit/author-email]) ...]
                       :where [?e :entity/type :event] [?e :commit/sha _]]
                  (d/db conn))]
        (->> all
@@ -1119,8 +1119,8 @@
   [{:keys [conn]}]
   (when conn
     (->> (d/q '[:find [(pull ?e [:repo/name :repo/path :repo/head-sha
-                                  :repo/head-short :repo/branch
-                                  :repo/commits-ingested :repo/ingested-at]) ...]
+                                 :repo/head-short :repo/branch
+                                 :repo/commits-ingested :repo/ingested-at]) ...]
                 :where [?e :entity/type :repo] [?e :repo/name _]]
            (d/db conn))
       (sort-by :repo/name)
@@ -1194,10 +1194,11 @@
      {:entity/id, :entity/name, :entity/type, :entity/document-id,
       :distance, :vitality-score, :vitality-zone, :via-relationship}"
   ([db-info anchor-id] (find-related db-info anchor-id {}))
-  ([{:keys [conn] :as db-info} anchor-id {:keys [depth min-vitality limit]
-                                          :or {depth 2 min-vitality 0.1 limit 50}}]
+  ([{:keys [conn]} anchor-id {:keys [depth min-vitality limit]
+                              :or {depth 2 min-vitality 0.1 limit 50}}]
    (when conn
      (let [depth (min depth 5)
+           _min-vitality min-vitality
            db (d/db conn)
            ;; Build adjacency: entity-id → [{:neighbor-id :rel-type :rel-description}]
            all-rels (d/q '[:find [(pull ?e [:relationship/source-entity-id
@@ -1581,7 +1582,7 @@
    `now`           - java.util.Date, optional. Current time (default: now)."
   ([access-count created-at last-accessed children-count]
    (compute-page-vitality access-count created-at last-accessed children-count (now)))
-  ([access-count created-at last-accessed children-count now]
+  ([access-count _created-at last-accessed children-count now]
    (let [d 0.5 ;; ACT-R decay parameter
          ;; Use time-since-last-access as primary decay driver (not lifetime).
          ;; Re-accessing a page resets its decay clock — core ACT-R behavior.
@@ -1966,11 +1967,11 @@
                                       db page-id))
                            0)]
       (when (:page/created-at page)
-        (let [{:keys [score zone]} (compute-page-vitality
-                                     (or (:page/access-count page) 0.0)
-                                     (:page/created-at page)
-                                     (or (:page/last-accessed page) (:page/created-at page))
-                                     children-count)
+        (let [{:keys [score]} (compute-page-vitality
+                                (or (:page/access-count page) 0.0)
+                                (:page/created-at page)
+                                (or (:page/last-accessed page) (:page/created-at page))
+                                children-count)
               ;; Multiply by document certainty — stale documents degrade their pages
               doc-certainty (when-let [doc-id (:page/document-id page)]
                               (:certainty (document-certainty db-info doc-id)))

@@ -6,12 +6,12 @@
    [com.blockether.svar.internal.rlm.db :as rlm-db
     :refer [create-rlm-conn dispose-rlm-conn!
             db-list-documents db-list-final-results
-            db-store-pageindex-document! store-entity! update-entity! str-truncate]]
+            db-store-pageindex-document! str-truncate]]
+   [com.blockether.svar.internal.rlm.data :as rlm-data]
    [com.blockether.svar.internal.rlm.routing
     :refer [make-routed-llm-query-fn resolve-root-model provider-has-reasoning?]]
    [com.blockether.svar.internal.rlm.schema
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
-            ENTITY_TYPE_VALUES RELATIONSHIP_TYPE_VALUES
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
             *eval-timeout-ms*
             validate-final bytes->base64 *rlm-ctx*]]
@@ -20,7 +20,6 @@
    [edamame.core :as edamame]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.spec :as spec]
-   [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
    [sci.core :as sci]
    [taoensso.trove :as trove]))
@@ -42,6 +41,11 @@ Pattern: [thing] [action] [reason]. [next step].")
   [data msg]
   (when (:rlm-debug? *rlm-ctx*)
     (trove/log! {:level :info :data (assoc data :rlm-phase (:rlm-phase *rlm-ctx*)) :msg msg})))
+
+(defn- status->id
+  [status]
+  (when status
+    (keyword "rlm.status" (name status))))
 
 ;; =============================================================================
 ;; RLM Environment
@@ -798,7 +802,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
 (defn- restorable-var-snapshots
   "Returns serializable snapshots of user vars introduced by this iteration."
   [rlm-env executions]
-  (let [execution->defs (mapv (fn [{:keys [code error] :as execution}]
+  (let [execution->defs (mapv (fn [{:keys [error] :as execution}]
                                 [execution (when-not error (set (map symbol (extract-def-names [execution]))))])
                           executions)
         defined (into #{} (mapcat second) execution->defs)
@@ -869,26 +873,11 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
             (catch Exception _ nil))))
       results)))
 
-(defn- render-conversation-thread
-  "Renders compact conversation thread XML from previous final results and current query."
-  [final-results current-query]
-  (let [prev-entries (map-indexed (fn [idx result]
-                                    (let [parent-id (:entity/parent-id result)
-                                          answer-preview (str-truncate (or (:iteration/answer result) "") 100)]
-                                      (str "  [" (inc idx) "] " (pr-str answer-preview)
-                                        " \u2192 final-result-" (inc idx))))
-                       final-results)
-        current (str "  [current] " (pr-str (str-truncate current-query 100)))]
-    (str "<conversation>\n"
-      (when (seq prev-entries)
-        (str (str/join "\n" prev-entries) "\n"))
-      current
-      "\n</conversation>")))
-
 (defn iteration-loop [rlm-env query
                       {:keys [output-spec max-context-tokens custom-docs system-prompt
-                              pre-fetched-context on-chunk on-iteration query-ref user-messages
-                              max-iterations max-consecutive-errors max-restarts]}]
+                              pre-fetched-context query-ref user-messages
+                              max-iterations max-consecutive-errors max-restarts
+                              hooks cancel-atom current-iteration-atom]}]
   (let [max-iterations (or max-iterations 50)
         max-consecutive-errors (or max-consecutive-errors 5)
         max-restarts (or max-restarts 3)
@@ -941,11 +930,10 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                 {:role "user" :content initial-user-content}]
                            (when (and user-messages
                                    (some #(sequential? (:content %)) user-messages))
-                             ;; Include original multimodal messages (images etc.) as additional context
+                              ;; Include original multimodal messages (images etc.) as additional context
                              user-messages))
         ;; Store initial messages if history tracking is enabled
         db-info (when-let [atom (:db-info-atom rlm-env)] @atom)
-        env-id (:env-id rlm-env)
         ;; Cost tracking: accumulate token usage across all iterations
         usage-atom (atom {:input-tokens 0 :output-tokens 0 :reasoning-tokens 0 :cached-tokens 0})
         accumulate-usage! (fn [api-usage]
@@ -998,7 +986,17 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                              (:conversation-ref rlm-env))
         ;; Rehydration mutates SCI vars; mark var-index as stale.
         _ (swap! var-index-revision-atom inc)
-        restore-context (build-restore-context db-info (:conversation-ref rlm-env))]
+        restore-context (build-restore-context db-info (:conversation-ref rlm-env))
+        on-chunk (:on-chunk hooks)
+        on-iteration (:on-iteration hooks)
+        on-cancel (:on-cancel hooks)
+        emit-hook! (fn [hook-fn payload log-msg]
+                     (when hook-fn
+                       (try
+                         (hook-fn payload)
+                         (catch Exception e
+                           (trove/log! {:level :warn :data {:error (ex-message e)}
+                                        :msg log-msg})))))]
     (rlm-debug! {:query query :max-iterations max-iterations :model effective-model
                  :has-output-spec? (some? output-spec) :has-pre-fetched? (some? pre-fetched-context)
                  :has-reasoning? has-reasoning?
@@ -1009,16 +1007,21 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
       (loop [iteration 0 messages initial-messages trace [] consecutive-errors 0 restarts 0
              prev-executions nil prev-iteration -1
              journal [] prev-optimize nil]
+        (when current-iteration-atom
+          (reset! current-iteration-atom iteration))
         (cond
-          ;; Cooperative cancellation check — set from any thread by
-          ;; rlm/cancel-query!. Fires at the top of each iteration so the
-          ;; CURRENT iteration's LLM call + SCI eval finishes cleanly
-          ;; before we break.
-          (when-let [ca (:cancel-atom rlm-env)] @ca)
+          ;; Cooperative cancellation — caller-owned :cancel-atom from query-env!
+          ;; (or an internal per-query atom when not supplied).
+          (when cancel-atom @cancel-atom)
           (do (trove/log! {:level :info :data {:iteration iteration}
-                           :msg "Query cancelled via cancel-query!"})
+                           :msg "Query cancelled via cancel-atom"})
+              (emit-hook! on-cancel {:iteration iteration
+                                     :status :cancelled
+                                     :status-id (status->id :cancelled)}
+                "on-cancel hook threw — swallowing")
               (merge {:answer nil
                       :status :cancelled
+                      :status-id (status->id :cancelled)
                       :trace trace
                       :iterations iteration}
                 (finalize-cost)))
@@ -1030,6 +1033,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                          :msg "Max iterations reached — call (request-more-iterations N) earlier to extend budget"})
             (merge {:answer nil
                     :status :max-iterations
+                    :status-id (status->id :max-iterations)
                     :trace trace
                     :iterations iteration}
               (when debug? {:locals locals})
@@ -1060,6 +1064,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                                    :restarts restarts}
                                :msg "Error budget exhausted — too many consecutive errors across restarts. Simplify your code or break the task into smaller steps."})
                   (merge {:answer nil :status :error-budget-exhausted :trace trace :iterations iteration}
+                    {:status-id (status->id :error-budget-exhausted)}
                     (finalize-cost))))
             (let [_ (rlm-debug! {:iteration iteration :msg-count (count messages)} "Iteration start")
                   ;; Build single-shot prompt: conversation + journal + execution results + var index
@@ -1113,19 +1118,17 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                     {:query-ref query-ref
                      :vars []
                      :executions nil :thinking nil :duration-ms 0})
-                  ;; W10: fire :on-iteration callback — error path
-                  (when on-iteration
-                    (try
-                      (on-iteration {:iteration iteration
-                                     :status :error
-                                     :thinking nil
-                                     :executions nil
-                                     :final-result nil
-                                     :error iter-err
-                                     :duration-ms 0})
-                      (catch Exception e
-                        (trove/log! {:level :warn :data {:error (ex-message e)}
-                                     :msg "on-iteration callback threw (error branch) — swallowing"}))))
+                  ;; Global observer hook after store-iteration! (error path)
+                  (emit-hook! on-iteration
+                    {:iteration iteration
+                     :status :error
+                     :status-id (status->id :error)
+                     :thinking nil
+                     :executions nil
+                     :final-result nil
+                     :error iter-err
+                     :duration-ms 0}
+                    "on-iteration hook threw (error branch) — swallowing")
                   (recur (inc iteration)
                     (conj messages {:role "user" :content error-feedback})
                     (conj trace trace-entry)
@@ -1144,22 +1147,23 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                     :thinking thinking
                                     :answer (when final-result (answer-str (:answer final-result)))
                                     :duration-ms (or (:duration-ms iteration-result) 0)})
-                      ;; W10: fire :on-iteration callback — success path (with or without final)
-                      _ (when on-iteration
-                          (try
-                            (on-iteration {:iteration iteration
-                                           :status (cond
-                                                     final-result :final
-                                                     (empty? executions) :empty
-                                                     :else :success)
-                                           :thinking thinking
-                                           :executions executions
-                                           :final-result final-result
-                                           :error nil
-                                           :duration-ms (or (:duration-ms iteration-result) 0)})
-                            (catch Exception e
-                              (trove/log! {:level :warn :data {:error (ex-message e)}
-                                           :msg "on-iteration callback threw (success branch) — swallowing"}))))
+                      ;; Global observer hook after store-iteration! (success/empty/final)
+                      _ (emit-hook! on-iteration
+                          {:iteration iteration
+                           :status (cond
+                                     final-result :final
+                                     (empty? executions) :empty
+                                     :else :success)
+                           :status-id (status->id (cond
+                                                    final-result :final
+                                                    (empty? executions) :empty
+                                                    :else :success))
+                           :thinking thinking
+                           :executions executions
+                           :final-result final-result
+                           :error nil
+                           :duration-ms (or (:duration-ms iteration-result) 0)}
+                          "on-iteration hook threw (success branch) — swallowing")
                       trace-entry {:iteration iteration
                                    :response response
                                    :thinking thinking
@@ -1355,71 +1359,12 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                 (trove/log! {:level :warn :data {:node-type (:page.node/type vnode) :error (ex-message e)}
                              :msg "Entity extraction failed for visual node"})
                 (swap! errors-atom inc)))))))
-    ;; Store entities and relationships in DB (two-phase)
+    ;; Persist extraction results (entity + relationship transactions)
     (let [entities @entities-atom
           relationships @relationships-atom
-          conn (:conn db-info)
-          name->uuid (atom {})]
-      ;; Phase 1: Store entities, build name→UUID map
-      (doseq [entity entities]
-        (try
-          (let [entity-id (util/uuid)
-                entity-name (or (:entity/name entity) (:name entity) "unknown")
-                raw-type (or (:entity/type entity) (:type entity))
-                entity-type (let [t-name (some-> raw-type name)]
-                              (if (and t-name (contains? ENTITY_TYPE_VALUES t-name))
-                                (keyword t-name)
-                                :concept))
-                ;; Cross-document linking: find existing entity with same name+type
-                canonical-id (or (first (d/q '[:find [?cid ...]
-                                               :in $ ?name-lower ?type
-                                               :where [?e :entity/name ?n]
-                                               [?e :entity/type ?type]
-                                               [?e :entity/canonical-id ?cid]
-                                               [(clojure.string/lower-case ?n) ?nl]
-                                               [(= ?nl ?name-lower)]]
-                                          (d/db conn)
-                                          (str/lower-case entity-name)
-                                          entity-type))
-                               (util/uuid))
-                entity-data (cond-> {:entity/id entity-id
-                                     :entity/name entity-name
-                                     :entity/type entity-type
-                                     :entity/canonical-id canonical-id
-                                     :entity/description (or (:entity/description entity) (:description entity) "")
-                                     :entity/document-id (str doc-id)
-                                     :entity/created-at (java.util.Date.)}
-                              (or (:entity/section entity) (:section entity))
-                              (assoc :entity/section (or (:entity/section entity) (:section entity)))
-                              (or (:entity/page entity) (:page entity))
-                              (assoc :entity/page (long (or (:entity/page entity) (:page entity)))))]
-            (d/transact! conn [entity-data])
-            (swap! name->uuid assoc (str/lower-case entity-name) entity-id))
-          (catch Exception e
-            (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store entity"}))))
-      ;; Phase 2: Resolve entity names to UUIDs and store relationships
-      (doseq [rel relationships]
-        (try
-          (let [src-name (or (:relationship/source-entity-id rel) (:source rel))
-                tgt-name (or (:relationship/target-entity-id rel) (:target rel))
-                src-id (get @name->uuid (some-> src-name str str/lower-case))
-                tgt-id (get @name->uuid (some-> tgt-name str str/lower-case))]
-            (when (and src-id tgt-id)
-              (let [raw-rel-type (or (:relationship/type rel) (:type rel))
-                    rel-type (let [rt-name (some-> raw-rel-type name)]
-                               (if (and rt-name (contains? RELATIONSHIP_TYPE_VALUES rt-name))
-                                 (keyword rt-name)
-                                 :related-to))]
-                (d/transact! conn [{:relationship/id (util/uuid)
-                                    :relationship/type rel-type
-                                    :relationship/source-entity-id src-id
-                                    :relationship/target-entity-id tgt-id
-                                    :relationship/description (or (:relationship/description rel) (:description rel) "")
-                                    :relationship/document-id (str doc-id)}]))))
-          (catch Exception e
-            (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store relationship"}))))
-      {:entities-extracted (count entities)
-       :relationships-extracted (count relationships)
+          persisted (rlm-data/store-extraction-results! db-info doc-id entities relationships)]
+      {:entities-extracted (:entities-extracted persisted)
+       :relationships-extracted (:relationships-extracted persisted)
        :pages-processed (count pages)
        :extraction-errors @errors-atom
        :visual-nodes-scanned @vision-count-atom})))

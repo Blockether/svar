@@ -23,8 +23,7 @@
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.rlm :as sut]
    [com.blockether.svar.internal.rlm.core :as rlm-core]
-   [com.blockether.svar.internal.rlm.db :as rlm-db]
-   [com.blockether.svar.internal.rlm.git :as rlm-git])
+   [com.blockether.svar.internal.rlm.db :as rlm-db])
   (:import
    [java.io File]
    [java.nio.file Files]

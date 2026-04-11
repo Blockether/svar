@@ -3,11 +3,10 @@
    category squashing, git log → entity conversion, and DB storage."
   (:require
    [clojure.string :as str]
-   [com.blockether.svar.internal.rlm.db :as db]
    [com.blockether.svar.internal.rlm.git :as git]
    [com.blockether.svar.internal.rlm.schema :refer [RLM_SCHEMA]]
    [datalevin.core :as d]
-   [lazytest.core :refer [defdescribe describe expect it throws?]]))
+   [lazytest.core :refer [defdescribe describe expect it]]))
 
 ;; =============================================================================
 ;; parse-commit-message
@@ -375,7 +374,7 @@
                           :date "2025-01-16T10:00:00Z" :subject "fix: b"
                           :prefix "fix" :scope nil :category :bug
                           :body nil :ticket-refs [] :file-paths ["src/core.clj"]}]
-                result (git/ingest-commits! db-info commits {:repo-name "repo"})
+                _ (git/ingest-commits! db-info commits {:repo-name "repo"})
                 files (d/q '[:find ?name
                              :where [?e :entity/type :file] [?e :entity/name ?name]]
                         (d/db conn))]

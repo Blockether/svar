@@ -38,7 +38,7 @@
 
 (defn- seed-entities!
   "Seeds entities with canonical-id linking and relationships across documents."
-  [{:keys [conn]} p1-id p3-id]
+  [{:keys [conn]}]
   (let [canonical-id (util/uuid)
         e1-id (util/uuid)
         e2-id (util/uuid)]
@@ -130,7 +130,7 @@
             [p1-id _p2-id p3-id] page-ids]
         (try
           ;; Link pages via shared canonical entity
-          (seed-entities! db-info p1-id p3-id)
+          (seed-entities! db-info)
           ;; Record access on p1 (fetch weight)
           (let [before (d/pull (d/db conn) [:page/access-count] [:page/id p3-id])
                 _ (db/record-page-access! db-info p1-id 1.0)
@@ -143,7 +143,7 @@
       (let [{:keys [conn db-info page-ids]} (seed-pages!)
             [p1-id _p2-id p3-id] page-ids]
         (try
-          (seed-entities! db-info p1-id p3-id)
+          (seed-entities! db-info)
           (let [before (d/pull (d/db conn) [:page/access-count] [:page/id p3-id])
                 _ (db/record-page-access! db-info p1-id 0.2)
                 after (d/pull (d/db conn) [:page/access-count] [:page/id p3-id])]
@@ -154,7 +154,7 @@
       (let [{:keys [conn db-info page-ids]} (seed-pages!)
             [p1-id _p2-id p3-id] page-ids]
         (try
-          (seed-entities! db-info p1-id p3-id)
+          (seed-entities! db-info)
           (let [before-count (:page/access-count (d/pull (d/db conn) [:page/access-count] [:page/id p3-id]))
                 _ (db/record-page-access! db-info p1-id 1.0)
                 after-count (:page/access-count (d/pull (d/db conn) [:page/access-count] [:page/id p3-id]))
@@ -172,7 +172,7 @@
   (describe "cross-document entity linking"
     (it "entities with same name+type get same canonical-id"
       (let [{:keys [conn db-info]} (seed-pages!)
-            canonical-id (seed-entities! db-info "doc1-page-0" "doc2-page-0")]
+            canonical-id (seed-entities! db-info)]
         (try
           ;; Both entities should have the same canonical-id
           (let [entities (d/q '[:find [(pull ?e [:entity/canonical-id :entity/document-id]) ...]

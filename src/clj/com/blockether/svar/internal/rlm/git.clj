@@ -339,8 +339,7 @@
    * :author    Restrict to commits by this author email (exact match)."
   [^Repository repo {:keys [n since since-sha path author]
                      :or {n 100}}]
-  (with-open [git (Git/wrap repo)
-              rw (RevWalk. repo)]
+  (with-open [git (Git/wrap repo)]
     (let [log-cmd (.log git)
           head-id (.resolve repo "HEAD")]
       (when head-id
@@ -352,7 +351,7 @@
             (.not log-cmd oid)))
         (let [since-instant (when since
                               (try (Instant/parse since)
-                                (catch Exception _ nil)))
+                                   (catch Exception _ nil)))
               since-epoch (when since-instant (.getEpochSecond since-instant))
               iter (.iterator (.call log-cmd))]
           (loop [acc (transient [])

@@ -558,6 +558,9 @@
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
          claims-atom (when verify? (atom []))
+         ;; Exposed to tool wrappers so execute-tool can stamp invocation/outcome
+         ;; with the live iteration number without dynamic bindings.
+         current-iteration-atom (atom 0)
          cite-bindings (when verify?
                          {'CITE (rlm-tools/make-cite-fn claims-atom)
                           'CITE-UNVERIFIED (rlm-tools/make-cite-unverified-fn claims-atom)
@@ -598,11 +601,13 @@
          ;; The wrapper reads tool-registry-atom on each call, so late-merged
          ;; hooks are picked up even if the LLM re-enters the tool mid-query.
          tool-registry-atom (:tool-registry-atom env)
+         query-ctx {:hooks hooks
+                    :iteration-atom current-iteration-atom}
          _ (when (and sci-ctx tool-registry-atom)
              (doseq [[sym {:keys [fn]}] @tool-registry-atom]
                (when fn
                  (rlm-tools/sci-update-binding! sci-ctx sym
-                   (rlm-tools/wrap-tool-for-sci env sym fn tool-registry-atom)))))
+                   (rlm-tools/wrap-tool-for-sci env sym fn tool-registry-atom query-ctx)))))
          ;; Update per-query bindings in the existing SCI ctx.
          ;; `custom-bindings` here holds constants/values from register-env-def!
          ;; — tool fns from register-env-fn! were flashed above as wrappers.
@@ -642,7 +647,7 @@
                                                    :routing {:optimize :intelligence}}))
                plan-context (when-let [plan (:result plan-result)]
                               (str "<plan>\n" plan "\n</plan>"))
-                ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
+                 ;; iteration-loop returns {:answer :trace :iterations} or {:answer :trace :iterations :status :locals}
                iteration-result (rlm-core/iteration-loop rlm-env query-str
                                   (cond-> {:max-iterations max-iterations
                                            :query-ref query-ref
@@ -652,12 +657,14 @@
                                            :system-prompt system-prompt
                                            :pre-fetched-context plan-context
                                            :user-messages messages
+                                           :current-iteration-atom current-iteration-atom
                                            :hooks hooks
                                            :cancel-atom cancel-atom}))
                {answer :answer
                 trace :trace
                 iterations :iterations
                 status :status
+                status-id :status-id
                 locals :locals
                 tokens :tokens
                 cost :cost
@@ -705,6 +712,7 @@
                (let [result-map (cond-> {:answer nil
                                          :raw-answer (:result answer answer)
                                          :status status
+                                         :status-id status-id
                                          :trace trace
                                          :iterations iterations
                                          :duration-ms duration-ms
@@ -1672,7 +1680,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          multi-hop-batches (when (seq multi-hop-pairs)
                              (vec (partition-all batch-size (mapcat identity multi-hop-pairs))))
          all-batches (into standard-batches (or multi-hop-batches []))
-         batch-count (clojure.core/count all-batches)
          standard-batch-count (clojure.core/count standard-batches)
          work-items (map-indexed
                       (fn [idx batch]

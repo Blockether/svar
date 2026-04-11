@@ -495,24 +495,24 @@
                        'date-minus-days date-minus-days 'date-format date-format 'today-str today-str}
         db-bindings (when db-info-atom
                       (cond->
-                        {;; Unified document tools
-                         'search-documents (make-search-documents-fn db-info-atom)
-                         'fetch-content (make-fetch-content-fn db-info-atom)
-                         'find-related (fn find-related
-                                         ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
-                                         ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
-                         'search-batch (fn search-batch
-                                         ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
-                                         ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
-                         'results->md (fn results->md [results] (db/results->markdown results))
-                         'search-entities (fn search-entities
-                                            ([query] (when-let [db @db-info-atom] (db-search-entities db query)))
-                                            ([query opts] (when-let [db @db-info-atom] (db-search-entities db query opts))))
-                         'get-entity (fn get-entity
-                                       [entity-id] (when-let [db @db-info-atom] (db-get-entity db entity-id)))
-                         'list-relationships (fn list-relationships
-                                               ([entity-id] (when-let [db @db-info-atom] (db-list-relationships db entity-id)))
-                                               ([entity-id opts] (when-let [db @db-info-atom] (db-list-relationships db entity-id opts))))}
+                       {;; Unified document tools
+                        'search-documents (make-search-documents-fn db-info-atom)
+                        'fetch-content (make-fetch-content-fn db-info-atom)
+                        'find-related (fn find-related
+                                        ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
+                                        ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
+                        'search-batch (fn search-batch
+                                        ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
+                                        ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
+                        'results->md (fn results->md [results] (db/results->markdown results))
+                        'search-entities (fn search-entities
+                                           ([query] (when-let [db @db-info-atom] (db-search-entities db query)))
+                                           ([query opts] (when-let [db @db-info-atom] (db-search-entities db query opts))))
+                        'get-entity (fn get-entity
+                                      [entity-id] (when-let [db @db-info-atom] (db-get-entity db entity-id)))
+                        'list-relationships (fn list-relationships
+                                              ([entity-id] (when-let [db @db-info-atom] (db-list-relationships db entity-id)))
+                                              ([entity-id opts] (when-let [db @db-info-atom] (db-list-relationships db entity-id opts))))}
                         (and conversation-ref-atom @db-info-atom @conversation-ref-atom)
                         (assoc 'session-history (make-session-history-fn db-info-atom conversation-ref-atom)
                           'session-code (make-session-code-fn db-info-atom conversation-ref-atom)
@@ -1002,6 +1002,21 @@
    :depth 0
    :parent-dispatch-id nil})
 
+(defn- status-id
+  [status]
+  (when status
+    (keyword "rlm.status" (name status))))
+
+(defn- ensure-error-map
+  [err default-id]
+  (cond
+    (nil? err) nil
+    (map? err) (cond-> err
+                 (not (:error-id err)) (assoc :error-id default-id))
+    :else {:type :rlm/unknown-tool-error
+           :error-id default-id
+           :message (str err)}))
+
 (declare execute-tool)
 
 (defn- gen-anon-id
@@ -1055,7 +1070,6 @@
    add hooks incrementally without explicit unregister steps."
   [existing incoming]
   (let [incoming-by-id (into {} (map (juxt :id identity)) incoming)
-        incoming-ids (set (keys incoming-by-id))
         ;; Replace in place
         merged (mapv (fn [entry]
                        (if-let [updated (get incoming-by-id (:id entry))]
@@ -1110,7 +1124,9 @@
 
               (and (map? ret) (contains? ret :error))
               (reduced (assoc acc
-                         :short-circuit {:result nil :error (:error ret)}
+                         :short-circuit {:result nil
+                                         :error (ensure-error-map (:error ret)
+                                                  :rlm.error/hook-before-returned-error)}
                          :skipped? true))
 
               (and (map? ret) (contains? ret :skip))
@@ -1130,6 +1146,7 @@
             (reduced (assoc acc
                        :short-circuit {:result nil
                                        :error {:type :hook-exception
+                                               :error-id :rlm.error/hook-exception
                                                :message (ex-message t)
                                                :stage :before
                                                :id id}}
@@ -1163,7 +1180,9 @@
             (and (map? ret) (or (contains? ret :result) (contains? ret :error)))
             (cond-> outcome
               (contains? ret :result) (assoc :result (:result ret))
-              (contains? ret :error)  (assoc :error  (:error ret)))
+              (contains? ret :error)  (assoc :error
+                                        (ensure-error-map (:error ret)
+                                          :rlm.error/hook-after-returned-error)))
 
             :else
             (do (trove/log! {:level :warn
@@ -1173,6 +1192,7 @@
         (catch Throwable t
           (update outcome :hook-errors (fnil conj [])
             {:stage :after :id id :error {:type :hook-exception
+                                          :error-id :rlm.error/hook-exception
                                           :message (ex-message t)}}))))
     initial-outcome
     hooks))
@@ -1285,6 +1305,7 @@
                                    (catch Throwable t
                                      {:result nil
                                       :error {:type :tool-exception
+                                              :error-id :rlm.error/tool-exception
                                               :message (ex-message t)
                                               :data (ex-data t)}})))
                   composed (compose-wrap-chain wrap-hooks base-handler)]
@@ -1293,16 +1314,22 @@
                 (catch Throwable t
                   {:result nil
                    :error {:type :wrap-exception
+                           :error-id :rlm.error/wrap-exception
                            :message (ex-message t)}}))))
           duration-ms (double (/ (- (System/nanoTime) start-ns) 1e6))
           initial-outcome (merge invocation
                             {:args transformed-args
                              :result result
-                             :error error
+                             :error (ensure-error-map error :rlm.error/tool-error)
                              :duration-ms duration-ms
                              :skipped? (boolean skipped?)
                              :hook-errors []})
-          final-outcome (run-after-chain after-hooks initial-outcome)]
+          final-outcome (let [post-after (run-after-chain after-hooks initial-outcome)
+                              status (cond
+                                       (:error post-after) :error
+                                       (:skipped? post-after) :skipped
+                                       :else :success)]
+                          (assoc post-after :status status :status-id (status-id status)))]
       ;; Global :on-tool-completed — pure observer, return ignored
       (when-let [g (:on-tool-completed hooks)]
         (try (g final-outcome)

@@ -5,7 +5,7 @@
    [com.blockether.svar.internal.rlm.db :as db]
    [com.blockether.svar.internal.rlm.schema :refer [RLM_SCHEMA]]
    [datalevin.core :as d]
-   [lazytest.core :refer [defdescribe describe expect it throws?]]))
+   [lazytest.core :refer [defdescribe describe expect it]]))
 
 (defn- temp-conn
   "Creates a temporary Datalevin connection with RLM schema."
