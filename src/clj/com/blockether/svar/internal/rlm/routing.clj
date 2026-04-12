@@ -61,10 +61,10 @@
    prepended as system messages. Max 2 skills per call. Unknown skill → error.
 
    `routing` — default routing opts, e.g. {} or {:optimize :cost}.
-   `skill-registry` — map {skill-keyword → skill-def} or nil.
+   `skill-registry-atom` — atom holding {skill-keyword → skill-def} or nil.
    `rlm-env-atom` — atom holding the parent rlm-env (needed for iterated path).
                      Set after env construction via reset!. Nil → iterated path unavailable."
-  [routing depth-atom rlm-router skill-registry rlm-env-atom]
+  [routing depth-atom rlm-router skill-registry-atom rlm-env-atom]
   (fn sub-rlm-query
     ([prompt] (sub-rlm-query prompt {}))
     ([prompt opts]
@@ -72,7 +72,7 @@
        (fn []
          (let [call-routing (merge routing (:routing opts {}))
                [skill-msg skills-loaded] (when-let [skills (seq (:skills opts))]
-                                           (resolve-skill-messages (vec skills) skill-registry))
+                                           (resolve-skill-messages (vec skills) (when skill-registry-atom @skill-registry-atom)))
                max-iter (or (:max-iter opts) 1)
                iterated? (> max-iter 1)]
            ;; ITERATED PATH: delegate to run-sub-rlm (reuses iteration-loop)

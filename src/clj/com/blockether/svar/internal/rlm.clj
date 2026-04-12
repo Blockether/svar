@@ -139,15 +139,19 @@
         var-index-revision-atom (atom 0)
         qa-corpus-snapshot-cache-atom (atom nil)
         qa-corpus-snapshot-stats-atom (atom {:hits 0 :misses 0 :last-digest-ms nil :last-revision 0})
-        skill-registry (rlm-skills/load-skills {})
+        skill-registry-map (rlm-skills/load-skills {})
+        skill-registry-atom (atom skill-registry-map)
+        ;; Ingest skills into Datalevin as :skill documents (searchable)
+        _ (when db-info-atom
+            (rlm-skills/ingest-skills! @db-info-atom skill-registry-map))
         rlm-env-atom (atom nil) ;; filled after env construction — sub-rlm-query reads it for iterated path
-        sub-rlm-query-fn (rlm-routing/make-routed-sub-rlm-query-fn {} depth-atom router skill-registry rlm-env-atom)
-        cheap-sub-rlm-query-fn (rlm-routing/make-routed-sub-rlm-query-fn {:optimize :cost} depth-atom router skill-registry rlm-env-atom)
+        sub-rlm-query-fn (rlm-routing/make-routed-sub-rlm-query-fn {} depth-atom router skill-registry-atom rlm-env-atom)
+        cheap-sub-rlm-query-fn (rlm-routing/make-routed-sub-rlm-query-fn {:optimize :cost} depth-atom router skill-registry-atom rlm-env-atom)
         env-id (str (util/uuid))
         root-model (or (rlm-routing/resolve-root-model router) "unknown")
         has-reasoning? (boolean (rlm-routing/provider-has-reasoning? router))
         system-prompt (rlm-core/build-system-prompt {:has-reasoning? has-reasoning?
-                                                     :skill-registry skill-registry})
+                                                     :skill-registry skill-registry-map})
         resolved-conversation-ref (rlm-db/db-resolve-conversation-ref db-info conversation)
         conversation-ref (or resolved-conversation-ref
                            (rlm-db/store-conversation! db-info
@@ -172,7 +176,7 @@
              :router router
              :sub-rlm-query-fn sub-rlm-query-fn
              :cheap-sub-rlm-query-fn cheap-sub-rlm-query-fn
-             :skill-registry skill-registry}]
+             :skill-registry-atom skill-registry-atom}]
     (reset! rlm-env-atom env)
     env))
 
@@ -583,7 +587,7 @@
          root-model (or (when rlm-router (rlm-routing/resolve-root-model rlm-router)) model)
          depth-atom (atom 0)
          db-info-atom (:db-info-atom env)
-         cheap-sub-rlm-fn (rlm-routing/make-routed-sub-rlm-query-fn {:optimize :cost} depth-atom rlm-router (:skill-registry env) (atom env))
+         cheap-sub-rlm-fn (rlm-routing/make-routed-sub-rlm-query-fn {:optimize :cost} depth-atom rlm-router (:skill-registry-atom env) (atom env))
          custom-bindings (when-let [atom (:custom-bindings-atom env)] @atom)
          custom-docs (when-let [atom (:custom-docs-atom env)] @atom)
          claims-atom (when verify? (atom []))
@@ -616,7 +620,9 @@
                                 {:granted granted :new-budget new-budget :cap schema/MAX_ITERATION_CAP})))}
          sub-rlm-query-overrides {'sub-rlm-query cheap-sub-rlm-fn
                                   'sub-rlm-query-batch (fn [items]
-                                                         (rlm-batch/sub-rlm-query-batch cheap-sub-rlm-fn items))}
+                                                         (rlm-batch/sub-rlm-query-batch cheap-sub-rlm-fn items))
+                                  'skill-manage (fn [action opts]
+                                                  (rlm-skills/skill-manage db-info-atom (:skill-registry-atom env) action opts))}
          ;; Reuse env's SCI ctx — all def'd vars persist naturally across queries
          sci-ctx (:sci-ctx env)
          ;; Re-flash registered tool fns into SCI as HOOK-WRAPPED closures.

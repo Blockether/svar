@@ -440,6 +440,7 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    ;; Documents
    :document/id         {:db/valueType :db.type/string :db/unique :db.unique/identity}
    :document/name       {:db/valueType :db.type/string}
+   :document/type       {:db/valueType :db.type/keyword :db/doc "Document kind — :document (default), :skill, :repo"}
    :document/title      {:db/valueType :db.type/string :db/fulltext true}
    :document/abstract   {:db/valueType :db.type/string :db/fulltext true}
    :document/extension  {:db/valueType :db.type/string}
@@ -450,6 +451,13 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    ;; Bayesian certainty (Beta distribution for document freshness)
    :document/certainty-alpha {:db/valueType :db.type/double :db/doc "Beta dist alpha — increases on confirmed access"}
    :document/certainty-beta  {:db/valueType :db.type/double :db/doc "Beta dist beta — increases over time, jumps on re-index"}
+
+   ;; Skills (stored as :document/type :skill)
+   :skill/body         {:db/valueType :db.type/string :db/fulltext true :db/doc "Full SKILL.md body (markdown)"}
+   :skill/source-path  {:db/valueType :db.type/string :db/doc "Filesystem path of the SKILL.md file"}
+   :skill/agent-config {:db/valueType :db.type/string :db/doc "EDN-serialized agent config map"}
+   :skill/requires     {:db/valueType :db.type/string :db/doc "EDN-serialized requires map"}
+   :skill/version      {:db/valueType :db.type/string}
 
    ;; Pages
    :page/id           {:db/valueType :db.type/string :db/unique :db.unique/identity}

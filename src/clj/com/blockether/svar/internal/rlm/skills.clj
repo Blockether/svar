@@ -1,15 +1,20 @@
 (ns com.blockether.svar.internal.rlm.skills
-  "SKILL.md discovery, parsing, validation, and registry construction.
+  "SKILL.md discovery, parsing, validation, registry, and Datalevin ingestion.
 
-   Loads skills from project + global paths (see PROJECT_SUBPATHS / GLOBAL_PATHS)
-   and returns a registry map of {skill-name → skill-def}. The registry is
-   injected into the RLM env at query-env! init time and consumed by both
-   build-system-prompt (for the main RLM manifest) and sub-rlm-query (for
-   per-call skill body injection)."
+   Skills are loaded from filesystem paths AND ingested into Datalevin as
+   :document/type :skill documents. The RLM searches skills the same way it
+   searches any other document — via search-documents + fetch-document-content.
+
+   Skill lifecycle:
+   1. load-skills — scan files → parse → validate → registry
+   2. ingest-skills! — store into Datalevin as :skill documents (searchable)
+   3. skill-manage — SCI tool for RLM to create/patch/refine/delete skills
+   4. save-skill! — write back to SKILL.md on disk (procedural memory)"
   (:require
    [babashka.fs :as fs]
    [clojure.string :as str]
    [clojure.walk :as walk]
+   [datalevin.core :as d]
    [taoensso.trove :as trove]
    [yamlstar.core :as yaml]))
 
@@ -286,3 +291,182 @@
                   entries)]
       (str "\nSKILLS (pass :skills [...] to sub-rlm-query, max 2 per call):\n"
         (str/join "\n" lines) "\n"))))
+
+;; =============================================================================
+;; Datalevin Ingestion — skills as searchable documents
+;; =============================================================================
+
+(defn ingest-skills!
+  "Ingests skill registry into Datalevin as :document/type :skill documents.
+   Existing skill documents are upserted (matched by :document/id = \"skill-<name>\").
+   Skills become searchable via search-documents and fetchable via fetch-document-content.
+
+   Params:
+   `db-info`        — map with :conn key (Datalevin connection).
+   `skill-registry` — map from load-skills.
+
+   Returns count of ingested skills."
+  [{:keys [conn]} skill-registry]
+  (when (and conn (seq skill-registry))
+    (let [entities (mapv (fn [[skill-name skill]]
+                           (let [n (clojure.core/name skill-name)]
+                             (cond-> {:document/id        (str "skill-" n)
+                                      :document/name      n
+                                      :document/type      :skill
+                                      :document/title     (or (:description skill) n)
+                                      :document/abstract  (or (:abstract skill) "")
+                                      :document/extension "md"
+                                      :document/created-at (java.util.Date.)
+                                      :document/updated-at (java.util.Date.)
+                                      :document/certainty-alpha 2.0
+                                      :document/certainty-beta  1.0
+                                      :skill/body         (:body skill)
+                                      :skill/source-path  (or (:source-path skill) "")}
+                               (:agent skill)
+                               (assoc :skill/agent-config (pr-str (:agent skill)))
+                               (:requires skill)
+                               (assoc :skill/requires (pr-str (:requires skill)))
+                               (:version skill)
+                               (assoc :skill/version (str (:version skill))))))
+                     skill-registry)]
+      (d/transact! conn entities)
+      (trove/log! {:level :info :id ::skills-ingested
+                   :data {:count (count entities)
+                          :names (mapv (comp clojure.core/name first) skill-registry)}
+                   :msg "Skills ingested into Datalevin"})
+      (count entities))))
+
+;; =============================================================================
+;; Skill Management — RLM can create/patch/refine/delete skills
+;; =============================================================================
+
+(defn- skill-dir
+  "Returns the default project skill directory path for a given skill name.
+   Creates .svar/skills/<name>/ if it doesn't exist."
+  [skill-name]
+  (let [dir (str (fs/path (str (fs/cwd)) ".svar" "skills" (clojure.core/name skill-name)))]
+    (fs/create-dirs dir)
+    dir))
+
+(defn- build-frontmatter
+  "Builds YAML frontmatter string from a skill-manage opts map."
+  [{:keys [name description abstract agent requires version]}]
+  (str "---\n"
+    "name: " (clojure.core/name name) "\n"
+    "description: " (or description "") "\n"
+    (when abstract (str "abstract: " abstract "\n"))
+    (when version (str "version: " version "\n"))
+    (when agent
+      (str "agent:\n"
+        (when (:tools agent) (str "  tools: " (pr-str (:tools agent)) "\n"))
+        (when (:max-iter agent) (str "  max-iter: " (:max-iter agent) "\n"))
+        (when (:timeout-ms agent) (str "  timeout-ms: " (:timeout-ms agent) "\n"))))
+    (when requires
+      (str "requires:\n"
+        (when (some? (:docs requires)) (str "  docs: " (:docs requires) "\n"))
+        (when (some? (:git requires)) (str "  git: " (:git requires) "\n"))
+        (when (seq (:env requires)) (str "  env: " (pr-str (:env requires)) "\n"))))
+    "---\n"))
+
+(defn save-skill!
+  "Writes a skill to disk as SKILL.md. Creates .svar/skills/<name>/SKILL.md.
+   Used by skill-manage :create and :refine to persist RLM-generated skills."
+  [skill-def]
+  (let [dir (skill-dir (:name skill-def))
+        path (str (fs/path dir "SKILL.md"))
+        content (str (build-frontmatter skill-def) "\n" (:body skill-def))]
+    (spit path content)
+    (trove/log! {:level :info :id ::skill-saved
+                 :data {:name (:name skill-def) :path path}
+                 :msg "Skill saved to disk"})
+    path))
+
+(defn skill-manage
+  "SCI-callable skill management tool. RLM uses this to create, patch, refine,
+   or delete skills. Changes are persisted to disk AND Datalevin.
+
+   Actions:
+   :create  — create a new skill
+             {:name :kw :description \"...\" :body \"...\" :abstract \"...\"
+              :agent {:tools [...] :max-iter N} :requires {...}}
+   :patch   — targeted body update (string replacement)
+             {:name :kw :old \"old text\" :new \"new text\"}
+   :refine  — update the abstract/description without changing body
+             {:name :kw :abstract \"new abstract\" :description \"new desc\"}
+   :delete  — remove a skill from disk and Datalevin
+             {:name :kw}
+
+   Params:
+   `db-info-atom`    — atom with Datalevin db-info.
+   `skill-registry`  — atom with current skill registry map.
+   `action`          — keyword (:create :patch :refine :delete).
+   `opts`            — action-specific opts map."
+  [db-info-atom skill-registry action opts]
+  (case action
+    :create
+    (let [{:keys [name body]} opts
+          _ (when-not name (throw (ex-info "skill-manage :create requires :name" {:type :rlm/skill-manage-error})))
+          _ (when-not body (throw (ex-info "skill-manage :create requires :body" {:type :rlm/skill-manage-error})))
+          skill-def (-> opts
+                      (assoc :name (keyword name))
+                      (enrich-skill))
+          path (save-skill! skill-def)]
+      ;; Update registry
+      (swap! skill-registry assoc (:name skill-def) (assoc skill-def :source-path path))
+      ;; Ingest into Datalevin
+      (when-let [db @db-info-atom]
+        (ingest-skills! db {(:name skill-def) skill-def}))
+      {:created (:name skill-def) :path path})
+
+    :patch
+    (let [{:keys [name old new]} opts
+          skill-name (keyword name)
+          skill (get @skill-registry skill-name)]
+      (when-not skill (throw (ex-info (str "Unknown skill: " skill-name) {:type :rlm/unknown-skill})))
+      (let [updated-body (str/replace (:body skill) old new)
+            updated-skill (assoc skill :body updated-body)
+            path (save-skill! updated-skill)]
+        (swap! skill-registry assoc skill-name (assoc updated-skill :source-path path))
+        (when-let [db @db-info-atom]
+          (ingest-skills! db {skill-name updated-skill}))
+        {:patched skill-name :path path}))
+
+    :refine
+    (let [{:keys [name abstract description]} opts
+          skill-name (keyword name)
+          skill (get @skill-registry skill-name)]
+      (when-not skill (throw (ex-info (str "Unknown skill: " skill-name) {:type :rlm/unknown-skill})))
+      (let [updated (cond-> skill
+                      abstract (assoc :abstract abstract)
+                      description (assoc :description description))
+            path (save-skill! updated)]
+        (swap! skill-registry assoc skill-name (assoc updated :source-path path))
+        (when-let [db @db-info-atom]
+          (ingest-skills! db {skill-name updated}))
+        {:refined skill-name :path path}))
+
+    :delete
+    (let [skill-name (keyword (:name opts))
+          skill (get @skill-registry skill-name)]
+      (when skill
+        ;; Remove from disk
+        (when-let [sp (:source-path skill)]
+          (when (fs/exists? sp)
+            (fs/delete sp)
+            (let [parent (fs/parent sp)]
+              (when (and (fs/exists? parent) (empty? (fs/list-dir parent)))
+                (fs/delete parent)))))
+        ;; Remove from Datalevin
+        (when-let [{:keys [conn]} @db-info-atom]
+          (when conn
+            (when-let [eid (d/entid (d/db conn) [:document/id (str "skill-" (clojure.core/name skill-name))])]
+              (d/transact! conn [[:db/retractEntity eid]]))))
+        ;; Remove from registry
+        (swap! skill-registry dissoc skill-name)
+        (trove/log! {:level :info :id ::skill-deleted
+                     :data {:name skill-name}
+                     :msg "Skill deleted"})
+        {:deleted skill-name}))
+
+    (throw (ex-info (str "Unknown skill-manage action: " action)
+             {:type :rlm/skill-manage-error :action action}))))

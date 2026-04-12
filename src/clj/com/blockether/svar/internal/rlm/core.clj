@@ -931,7 +931,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                             :system-prompt system-prompt
                                             :git-repos git-repos
                                             :max-context-tokens max-context-tokens
-                                            :skill-registry (:skill-registry rlm-env)})
+                                            :skill-registry (when-let [a (:skill-registry-atom rlm-env)] @a)})
         context-data (:context rlm-env)
         context-str (pr-str context-data)
         context-preview (if (> (count context-str) 2000)
