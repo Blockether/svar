@@ -123,10 +123,14 @@
         ;; skill-registry-atom is kept as a thin wrapper that reads/writes
         ;; :skill-registry inside state-atom, for compat with routing/sub/skills.
         skill-registry-atom (atom skill-registry-map)
+        ;; Inject rlm-core/iteration-loop so make-routed-sub-rlm-query-fn can
+        ;; delegate to run-sub-rlm without sub.clj needing a cyclic require on core.
         sub-rlm-query-fn (rlm-routing/make-routed-sub-rlm-query-fn
-                           {} depth-atom router skill-registry-atom rlm-env-atom)
+                           {} depth-atom router skill-registry-atom rlm-env-atom
+                           rlm-core/iteration-loop)
         cheap-sub-rlm-query-fn (rlm-routing/make-routed-sub-rlm-query-fn
-                                 {:optimize :cost} depth-atom router skill-registry-atom rlm-env-atom)
+                                 {:optimize :cost} depth-atom router skill-registry-atom rlm-env-atom
+                                 rlm-core/iteration-loop)
         env-id (str (util/uuid))
         root-model (or (rlm-routing/resolve-root-model router) "unknown")
         has-reasoning? (boolean (rlm-routing/provider-has-reasoning? router))

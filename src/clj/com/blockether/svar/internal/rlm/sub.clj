@@ -1,36 +1,21 @@
 (ns com.blockether.svar.internal.rlm.sub
-  "Sub-RLM iterated execution. Wraps the existing iteration-loop with a
-   constructed system prompt (from skill bodies) and delegates to the parent
-   env's SCI ctx. Shared sandbox — sub-RLM defs are visible to the parent.
+  "Sub-RLM iterated execution. Wraps iteration-loop with a constructed system
+   prompt (from skill bodies) and delegates to the parent env's SCI ctx.
+   Shared sandbox — sub-RLM defs are visible to the parent.
 
    This is the Phase 4 primitive: when sub-rlm-query receives :max-iter > 1
    (with or without :skills), routing.clj delegates here instead of doing a
    single-shot llm/ask!.
 
-   CYCLIC DEP NOTE: rlm.core requires rlm.routing which requires this ns. So
-   we cannot :require rlm.core — it would create core → routing → sub → core.
-   iteration-loop is injected at load time via set-iteration-loop! called
-   from rlm.core (see bottom of that file). No per-call requiring-resolve."
+   NO CYCLIC DEP: this ns does NOT require rlm.core. iteration-loop is
+   received as an explicit function parameter by run-sub-rlm. Callers higher
+   in the stack (env.clj, query.clj) require rlm.core and pass it in.
+   Pure dependency injection — no load-time magic, no requiring-resolve."
   (:require
    [clojure.edn :as edn]
    [clojure.string :as str]
    [com.blockether.svar.internal.rlm.skills :as rlm-skills]
    [taoensso.trove :as trove]))
-
-;; Wired at load time by rlm.core — see bottom of rlm/core.clj.
-;; Holds the iteration-loop fn. Deref once per run-sub-rlm call.
-(defonce ^:private iteration-loop-ref (atom nil))
-
-(defn set-iteration-loop!
-  "Called once by rlm.core to inject iteration-loop without a cyclic require.
-   Idempotent — subsequent calls replace the reference."
-  [f]
-  (reset! iteration-loop-ref f))
-
-(defn- iteration-loop-fn []
-  (or @iteration-loop-ref
-    (throw (ex-info "iteration-loop not wired — rlm.core must be loaded before sub-rlm calls"
-             {:type :rlm/iteration-loop-unwired}))))
 
 (defn- auto-refine-async!
   "Fires an async skill refinement pass after a sub-rlm-query with skills.
@@ -42,9 +27,13 @@
    - db-info-atom and skill-registry-atom available for skill-manage
 
    Refinement uses a cheap single-shot sub-rlm-query to analyze what happened
-   and patch/refine the skill accordingly."
-  [rlm-env skills-loaded sub-result]
-  (when (and (seq skills-loaded)
+   and patch/refine the skill accordingly.
+
+   `iteration-loop-fn` — injected rlm.core/iteration-loop (caller-provided to
+   avoid cyclic dep). When nil, auto-refine is skipped."
+  [iteration-loop-fn rlm-env skills-loaded sub-result]
+  (when (and iteration-loop-fn
+          (seq skills-loaded)
           (:skill-registry-atom rlm-env)
           (:db-info-atom rlm-env))
     (let [status (:status sub-result)
@@ -68,7 +57,7 @@
                                     (let [c (:content sub-result)]
                                       (if (> (count c) 200) (subs c 0 200) c))))
                   ;; Use a cheap sub-rlm to analyze what went wrong/right
-                  make-sub-rlm (iteration-loop-fn)
+                  make-sub-rlm iteration-loop-fn
                   refine-prompt (str "A skill named :" (name skill-name)
                                   " was used and produced this outcome:\n"
                                   (pr-str trace-summary)
@@ -140,6 +129,8 @@
    low-confidence results. Never blocks the response.
 
    Params:
+   `iteration-loop-fn` — rlm.core/iteration-loop, injected by caller to avoid
+                          a cyclic require (core → routing → sub → core).
    `rlm-env`  — parent RLM env (from create-env). Must have :sci-ctx, :router,
                  :db-info-atom.
    `prompt`   — string, the user query for the sub-RLM.
@@ -160,17 +151,19 @@
     :trace      <vec|nil>       ; iteration trace, only when :include-trace
     :status     <kw|nil>        ; nil on success, :max-iterations, :cancelled, :error-budget-exhausted
     :skills-loaded <vec|nil>}"
-  [rlm-env prompt {:keys [system-prompt max-iter cancel-atom
-                          include-trace skills-loaded]
-                   :or   {max-iter 5}}]
+  [iteration-loop-fn rlm-env prompt {:keys [system-prompt max-iter cancel-atom
+                                            include-trace skills-loaded]
+                                     :or   {max-iter 5}}]
+  (when-not iteration-loop-fn
+    (throw (ex-info "run-sub-rlm requires iteration-loop-fn — caller must inject it"
+             {:type :rlm/missing-iteration-loop})))
   (trove/log! {:level :info :id ::sub-rlm-start
                :data {:prompt-len (count prompt)
                       :max-iter max-iter
                       :has-system-prompt (some? system-prompt)
                       :skills-loaded skills-loaded}
                :msg "Sub-RLM iterated query starting"})
-  (let [iteration-loop (iteration-loop-fn)
-        result (iteration-loop
+  (let [result (iteration-loop-fn
                  rlm-env
                  prompt
                  {:system-prompt          system-prompt
@@ -207,6 +200,7 @@
                         :has-answer (some? answer-str)
                         :code-blocks (count code)}
                  :msg "Sub-RLM iterated query done"})
-    ;; Fire async auto-refine — never blocks the response
-    (auto-refine-async! rlm-env skills-loaded sub-result)
+    ;; Fire async auto-refine — never blocks the response.
+    ;; Uses the same injected iteration-loop-fn for the single-shot refine call.
+    (auto-refine-async! iteration-loop-fn rlm-env skills-loaded sub-result)
     sub-result))
