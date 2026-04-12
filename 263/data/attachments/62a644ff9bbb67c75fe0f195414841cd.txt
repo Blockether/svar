@@ -1,0 +1,16 @@
+2026-04-12T09:42:37.274144087Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 791, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T09:42:43.748054299Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 6474.55197, :content-len 1967, :has-reasoning false, :input-tokens 788, :output-tokens 553, :reasoning-tokens nil}
+2026-04-12T09:42:43.752990876Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1206, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T09:42:49.717433475Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 5965.1198, :content-len 1886, :has-reasoning false, :input-tokens 1203, :output-tokens 454, :reasoning-tokens nil}
+2026-04-12T09:42:49.721267121Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1077, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T09:42:54.335956008Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 4615.257838, :content-len 1373, :has-reasoning false, :input-tokens 1074, :output-tokens 350, :reasoning-tokens nil}
+2026-04-12T09:42:54.340608147Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1211, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T09:43:02.860954370Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 8521.317981, :content-len 3239, :has-reasoning false, :input-tokens 1208, :output-tokens 749, :reasoning-tokens nil}

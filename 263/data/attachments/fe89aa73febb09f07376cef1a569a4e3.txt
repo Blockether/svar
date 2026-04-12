@@ -1,0 +1,8 @@
+2026-04-12T09:45:53.004266607Z :info com.blockether.svar.internal.rlm.skills [266 6] ::skills-loaded Skills loaded 
+  data: {:count 0, :names []}
+2026-04-12T09:45:53.018393068Z :info com.blockether.svar.internal.rlm.skills [266 6] ::skills-loaded Skills loaded 
+  data: {:count 0, :names []}
+2026-04-12T09:45:53.037934433Z :info com.blockether.svar.internal.rlm.core [501 13] ::llm-call LLM call started 
+  data: {:env-id "bc743102-c76b-412d-9947-0bdebe29b242", :iteration 0, :msg-count 3, :input-tokens 1368}
+2026-04-12T09:45:53.039998354Z :warn com.blockether.svar.internal.rlm.core [1049 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 1, :max 1}

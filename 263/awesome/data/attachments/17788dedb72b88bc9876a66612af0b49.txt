@@ -1,0 +1,6 @@
+2026-04-12T09:45:53.182430199Z :info com.blockether.svar.internal.rlm.routing [94 16] ::sub-rlm-call Sub-RLM query (sub-rlm-query) 
+  data: {:depth 1, :prompt-len 12, :routing {:strategy :root}, :skills-loaded nil}
+2026-04-12T09:45:53.183280836Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "http://localhost/chat/completions", :msg-count 2, :input-tokens 87, :timeout-ms 300000, :max-tokens 2048}
+2026-04-12T09:45:53.189841373Z :warn com.blockether.svar.internal.rlm.routing [23 9] sub-rlm-query failed 
+  data: {:error nil, :prefs {:strategy :root}}
