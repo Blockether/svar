@@ -18,22 +18,53 @@
    [taoensso.trove :as trove]
    [yamlstar.core :as yaml]))
 
-(def PROJECT_SUBPATHS
+(def SVAR_DIR_NAME
+  "Configurable SVAR directory name (where skills, caches, trajectories live).
+   Defaults to \".svar\"; override via env var SVAR_DIR.
+
+   Example: SVAR_DIR=.myorg clj -M ...
+   → discovers skills under .myorg/skills/ and saves new skills there.
+
+   For programmatic override without restarting the JVM, rebind *svar-dir*."
+  (or (System/getenv "SVAR_DIR") ".svar"))
+
+(def ^:dynamic *svar-dir*
+  "Dynamic override for SVAR_DIR_NAME. Rebind to change the skills root at
+   runtime. Example: (binding [*svar-dir* \".myorg\"] (load-skills {} ...))"
+  SVAR_DIR_NAME)
+
+(defn- svar-skills-subpath
+  "Returns the current svar-dir/skills string (respects *svar-dir* rebinding)."
+  []
+  (str *svar-dir* "/skills"))
+
+(defn project-subpaths
   "Project-local SKILL.md discovery subdirectories, searched under the git root
-   walked up from cwd. Project entries win on name collision."
-  [".svar/skills"
+   walked up from cwd. Project entries win on name collision.
+
+   Resolved at call time so *svar-dir* rebindings take effect."
+  []
+  [(svar-skills-subpath)
    ".claude/skills"
    ".opencode/skills"
    ".agents/skills"
    "skills"])
 
-(def GLOBAL_SUBPATHS
+(defn global-subpaths
   "Global SKILL.md discovery subdirectories, searched under the user home dir.
-   Project entries override these on name collision."
-  [".svar/skills"
+   Project entries override these on name collision.
+
+   Resolved at call time so *svar-dir* rebindings take effect."
+  []
+  [(svar-skills-subpath)
    ".claude/skills"
    ".config/opencode/skills"
    ".agents/skills"])
+
+;; Legacy constant names kept for backward compatibility — now snapshot values.
+;; Prefer project-subpaths / global-subpaths fns for new code.
+(def PROJECT_SUBPATHS (project-subpaths))
+(def GLOBAL_SUBPATHS (global-subpaths))
 
 (def NAME_RE
   "Skill name validation regex. Lowercase letters/digits with optional hyphens,
@@ -245,9 +276,10 @@
   [{:keys [project-root roots]}]
   (let [proj-root (or project-root (str (fs/cwd)))
         git-root (find-project-root proj-root)
-        project-dirs (mapv #(str (fs/path git-root %)) PROJECT_SUBPATHS)
+        ;; Resolved at call time so *svar-dir* rebindings propagate.
+        project-dirs (mapv #(str (fs/path git-root %)) (project-subpaths))
         extra-dirs  (mapv #(str (fs/path git-root %)) (or roots []))
-        global-dirs (mapv #(str (fs/path (home) %)) GLOBAL_SUBPATHS)]
+        global-dirs (mapv #(str (fs/path (home) %)) (global-subpaths))]
     (vec (concat project-dirs extra-dirs global-dirs))))
 
 (defn load-skills
@@ -390,9 +422,10 @@
 
 (defn- skill-dir
   "Returns the default project skill directory path for a given skill name.
-   Creates .svar/skills/<name>/ if it doesn't exist."
+   Creates <*svar-dir*>/skills/<name>/ if it doesn't exist.
+   Respects the SVAR_DIR env var and *svar-dir* rebinding (default \".svar\")."
   [skill-name]
-  (let [dir (str (fs/path (str (fs/cwd)) ".svar" "skills" (clojure.core/name skill-name)))]
+  (let [dir (str (fs/path (str (fs/cwd)) *svar-dir* "skills" (clojure.core/name skill-name)))]
     (fs/create-dirs dir)
     dir))
 
