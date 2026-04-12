@@ -1,8 +1,14 @@
 (ns com.blockether.svar.internal.rlm.routing
   (:require
+   [clojure.string :as str]
    [com.blockether.svar.internal.llm :as llm]
-   [com.blockether.svar.internal.rlm.schema :refer [*max-recursion-depth*]]
+   [com.blockether.svar.internal.rlm.schema :refer [*max-recursion-depth* SUB_RLM_QUERY_SPEC]]
+   [com.blockether.svar.internal.rlm.sub :as rlm-sub]
    [taoensso.trove :as trove]))
+
+(def ^:private MAX_SKILLS_PER_CALL
+  "Hard ceiling on :skills vec length per sub-rlm-query call."
+  2)
 
 (defn- with-depth-tracking
   "Executes f within recursion depth tracking. Returns error content map on max
@@ -14,56 +20,108 @@
       (swap! depth-atom inc)
       (f)
       (catch Exception e
-        (trove/log! {:level :warn :data {:error (ex-message e) :prefs prefs} :msg "llm-query failed"})
+        (trove/log! {:level :warn :data {:error (ex-message e) :prefs prefs} :msg "sub-rlm-query failed"})
         {:content (str "ERROR: " (ex-message e)) :error true})
       (finally (swap! depth-atom dec)))))
 
-(defn make-routed-llm-query-fn
-  "Creates an llm-query function that routes across providers via a router.
-   Errors are caught and returned as {:content \"ERROR: ...\" :error true} so the
-   LLM can see them and adapt (e.g., retry with different approach).
+(defn- resolve-skill-messages
+  "Resolves :skills opts into a vec of system messages prepended to the ask! call.
+   Validates skill names, enforces MAX_SKILLS_PER_CALL. Returns [messages skills-loaded]
+   or throws on validation error."
+  [skills skill-registry]
+  (when (and (seq skills) skill-registry)
+    (let [deduped (vec (distinct skills))]
+      (when (> (count deduped) MAX_SKILLS_PER_CALL)
+        (throw (ex-info (str "Too many skills (" (count deduped) "), max " MAX_SKILLS_PER_CALL)
+                 {:type :rlm/too-many-skills :skills deduped :max MAX_SKILLS_PER_CALL})))
+      (let [resolved (mapv (fn [skill-name]
+                             (let [skill (get skill-registry skill-name)]
+                               (when-not skill
+                                 (throw (ex-info (str "Unknown skill: " skill-name)
+                                          {:type :rlm/unknown-skill :skill skill-name
+                                           :available (vec (keys skill-registry))})))
+                               skill))
+                       deduped)
+            body (str/join "\n\n---\n\n"
+                   (mapv :body resolved))]
+        [{:role "system" :content body} deduped]))))
 
-   `routing` — routing opts map, e.g. {} or {:optimize :cost}"
-  [routing depth-atom rlm-router]
-  (fn llm-query
-    ([prompt]
-     (with-depth-tracking depth-atom routing
-       (fn []
-         (trove/log! {:level :info :id ::sub-llm-call
-                      :data {:depth @depth-atom
-                             :prompt-len (count prompt)
-                             :routing routing
-                             :has-spec false}
-                      :msg "Sub-LLM call (llm-query)"})
-         (let [result (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] {:routing routing})]
-           (trove/log! {:level :info :id ::sub-llm-response
-                        :data {:depth @depth-atom
-                               :content-len (count (str (:content result)))}
-                        :msg "Sub-LLM response"})
-           result))))
+(defn make-routed-sub-rlm-query-fn
+  "Creates a sub-rlm-query function that routes across providers via a router.
+
+   Output contract: {:content <str> :code <vec<str>|nil> :skills-loaded <vec|nil> ...}
+     - :content is the prose answer (always present, SUB_RLM_QUERY_SPEC enforced).
+     - :code is a vec of Clojure expressions when the sub-LLM emits them, else nil.
+     - :skills-loaded echoes which skills were injected (nil when no skills).
+
+   Internals: always calls llm/ask! with SUB_RLM_QUERY_SPEC. Provider-enforced
+   JSON output guarantees the shape.
+
+   When opts contains :skills [...], the corresponding skill bodies are
+   prepended as system messages. Max 2 skills per call. Unknown skill → error.
+
+   `routing` — default routing opts, e.g. {} or {:optimize :cost}.
+   `skill-registry` — map {skill-keyword → skill-def} or nil.
+   `rlm-env-atom` — atom holding the parent rlm-env (needed for iterated path).
+                     Set after env construction via reset!. Nil → iterated path unavailable."
+  [routing depth-atom rlm-router skill-registry rlm-env-atom]
+  (fn sub-rlm-query
+    ([prompt] (sub-rlm-query prompt {}))
     ([prompt opts]
      (with-depth-tracking depth-atom routing
        (fn []
-         (trove/log! {:level :info :id ::sub-llm-call
-                      :data {:depth @depth-atom
-                             :prompt-len (count prompt)
-                             :routing routing
-                             :has-spec (boolean (:spec opts))}
-                      :msg "Sub-LLM call (llm-query)"})
-         (let [result (if-let [spec (:spec opts)]
-                        (let [r (llm/ask! rlm-router {:spec spec
-                                                      :messages [(llm/user prompt)]
-                                                      :routing routing})]
-                          {:content (pr-str (:result r))
-                           :routed/provider-id (:routed/provider-id r)
-                           :routed/model (:routed/model r)
-                           :routed/base-url (:routed/base-url r)})
-                        (llm/routed-chat-completion rlm-router [{:role "user" :content prompt}] {:routing routing}))]
-           (trove/log! {:level :info :id ::sub-llm-response
-                        :data {:depth @depth-atom
-                               :content-len (count (str (:content result)))}
-                        :msg "Sub-LLM response"})
-           result))))))
+         (let [call-routing (merge routing (:routing opts {}))
+               [skill-msg skills-loaded] (when-let [skills (seq (:skills opts))]
+                                           (resolve-skill-messages (vec skills) skill-registry))
+               max-iter (or (:max-iter opts) 1)
+               iterated? (> max-iter 1)]
+           ;; ITERATED PATH: delegate to run-sub-rlm (reuses iteration-loop)
+           (if (and iterated? rlm-env-atom @rlm-env-atom)
+             (let [skill-system-prompt (when skill-msg (:content skill-msg))]
+               (rlm-sub/run-sub-rlm
+                 @rlm-env-atom
+                 prompt
+                 {:system-prompt  skill-system-prompt
+                  :max-iter       max-iter
+                  :cancel-atom    (:cancel-atom opts)
+                  :routing        call-routing
+                  :include-trace  (:include-trace opts)
+                  :skills-loaded  skills-loaded}))
+             ;; SINGLE-SHOT PATH: llm/ask! with SUB_RLM_QUERY_SPEC
+             (let [messages (cond-> []
+                              skill-msg (conj skill-msg)
+                              true (conj {:role "user" :content prompt}))]
+               (trove/log! {:level :info :id ::sub-rlm-call
+                            :data {:depth @depth-atom
+                                   :prompt-len (count prompt)
+                                   :routing call-routing
+                                   :skills-loaded skills-loaded}
+                            :msg "Sub-RLM query (sub-rlm-query)"})
+               (let [r (llm/ask! rlm-router
+                         {:spec SUB_RLM_QUERY_SPEC
+                          :messages messages
+                          :routing call-routing
+                          :check-context? false})
+                     parsed (:result r)
+                     code (when-let [c (:code parsed)]
+                            (let [v (vec c)]
+                              (when (seq v) v)))
+                     result {:content (:content parsed)
+                             :code code
+                             :skills-loaded skills-loaded
+                             :iter 1
+                             :tokens (:tokens r)
+                             :reasoning (:reasoning r)
+                             :routed/provider-id (:routed/provider-id r)
+                             :routed/model (:routed/model r)
+                             :routed/base-url (:routed/base-url r)}]
+                 (trove/log! {:level :info :id ::sub-rlm-response
+                              :data {:depth @depth-atom
+                                     :content-len (count (str (:content result)))
+                                     :code-blocks (count (:code result))
+                                     :skills-loaded skills-loaded}
+                              :msg "Sub-RLM response"})
+                 result)))))))))
 
 (defn resolve-root-model
   "Resolves the root model name from a router, or falls back to a default.

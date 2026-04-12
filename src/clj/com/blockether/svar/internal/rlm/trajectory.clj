@@ -60,8 +60,8 @@
 
    Scoring signals:
    +2 — Used (def ...) for variable storage
-   +3 — Used llm-query or rlm-query (teaches recursion)
-   +2 — Used llm-query-batch (teaches parallel fanout)
+   +3 — Used sub-rlm-query (teaches recursion)
+   +2 — Used sub-rlm-query-batch (teaches parallel fanout)
    +1 — Used search tools (teaches document navigation)
    +2 — Low iteration count relative to budget (efficient strategy)
    -2 — Had consecutive errors > 2 (noisy trace)
@@ -78,9 +78,9 @@
           error-count (count (filter #(nil? (:iteration/code %)) iterations))
           score (atom 0)]
       (when (re-find #"\(def\s+" all-code) (swap! score + 2))
-      (when (re-find #"\((?:llm-query|rlm-query)\s" all-code) (swap! score + 3))
-      (when (re-find #"\(llm-query-batch\s" all-code) (swap! score + 2))
-      (when (re-find #"\((?:search-documents|fetch-content)\s" all-code) (swap! score + 1))
+      (when (re-find #"\(sub-rlm-query\s" all-code) (swap! score + 3))
+      (when (re-find #"\(sub-rlm-query-batch\s" all-code) (swap! score + 2))
+      (when (re-find #"\((?:search-documents|fetch-document-content)\s" all-code) (swap! score + 1))
       (when (and (pos? max-iterations) (< iter-count (/ max-iterations 2))) (swap! score + 2))
       (when (> error-count 2) (swap! score - 2))
       (when-let [last-iter (last iterations)]

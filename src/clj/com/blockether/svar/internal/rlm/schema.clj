@@ -31,7 +31,7 @@
 
 (def DEFAULT_EVAL_TIMEOUT_MS
   "Default timeout in milliseconds for code evaluation in SCI sandbox.
-   Must be long enough for nested llm-query calls."
+   Must be long enough for nested sub-rlm-query calls."
   120000)
 
 (def MIN_EVAL_TIMEOUT_MS
@@ -48,6 +48,36 @@
    :eval-timeout-ms opt. Nested queries inherit outer binding. Clamped at
    the rlm.clj API boundary to [MIN_EVAL_TIMEOUT_MS, MAX_EVAL_TIMEOUT_MS]."
   DEFAULT_EVAL_TIMEOUT_MS)
+
+;; =============================================================================
+;; Concurrency Settings
+;; =============================================================================
+
+(def DEFAULT_CONCURRENCY
+  "Default concurrency settings for sub-rlm-query-batch and nested calls.
+   Applied when :concurrency opt is absent from query-env!."
+  {:max-parallel-llm   8       ; HTTP calls in flight to LLM provider (reentrant sem)
+   :max-skills-per-call 2      ; ceiling on :skills vec length per sub-rlm-query
+   :default-timeout-ms 30000   ; total wall-clock per sub-rlm-query call
+   :http-timeout-ms    20000}) ; per HTTP request to provider
+
+(def ^:dynamic *sub-rlm-deadline*
+  "Absolute wall-clock deadline (java.time.Instant) for the current sub-rlm-query
+   call tree. Nested sub-rlm-query calls inherit min(caller, parent-remaining).
+   Nil when no deadline is active (unbounded)."
+  nil)
+
+(def ^:dynamic *concurrency*
+  "Merged concurrency settings for the current query-env! session.
+   Bound at query-env! entry, inherited by nested calls via Clojure binding
+   propagation through future macro."
+  DEFAULT_CONCURRENCY)
+
+(def ^:dynamic *concurrency-semaphore*
+  "Query-env-scoped reentrant semaphore (from rlm.concurrency). Bound at
+   query-env! entry, used by sub-rlm-query-batch for HTTP slot acquisition.
+   Nil when no query-env! session is active."
+  nil)
 
 (defn clamp-eval-timeout-ms
   "Clamp a candidate eval timeout to [MIN_EVAL_TIMEOUT_MS, MAX_EVAL_TIMEOUT_MS].
@@ -301,7 +331,7 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
     (spec/field {::spec/name :sources
                  ::spec/type :spec.type/string
                  ::spec/cardinality :spec.cardinality/many
-                 ::spec/description "IDs of sources used to derive the answer. Include page.node IDs, document IDs, or entity IDs that you fetched/searched and actually used. REQUIRED when you used search-documents or fetch-content."})))
+                 ::spec/description "IDs of sources used to derive the answer. Include page.node IDs, document IDs, or entity IDs that you fetched/searched and actually used. REQUIRED when you used search-documents or fetch-document-content."})))
 
 (def ITERATION_SPEC
   "Spec for each RLM iteration response. Forces structured output from LLM.
@@ -355,6 +385,26 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
                  ::spec/cardinality :spec.cardinality/one
                  ::spec/required false
                  ::spec/description "Set when you have the final answer. Omit to continue iterating."})))
+
+(def SUB_RLM_QUERY_SPEC
+  "Spec for sub-rlm-query responses. Forces structured output: prose content +
+   optional Clojure code blocks. Used by make-routed-sub-rlm-query-fn so callers
+   receive a provider-enforced {:content :code} shape with no regex parsing.
+
+   :content is always present (prose answer).
+   :code is a vec of complete Clojure expressions. Each entry is one form.
+   Omit :code or return empty vec when no code applies."
+  (spec/spec
+    {:refs []}
+    (spec/field {::spec/name :content
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/one
+                 ::spec/description "Prose answer. Include reasoning and explanations here."})
+    (spec/field {::spec/name :code
+                 ::spec/type :spec.type/string
+                 ::spec/cardinality :spec.cardinality/many
+                 ::spec/required false
+                 ::spec/description "Optional Clojure expressions to execute in the caller sandbox. One complete form per vec entry. Omit when not applicable."})))
 
 (defn bytes->base64
   "Converts raw bytes to a base64 string.

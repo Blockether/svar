@@ -569,7 +569,7 @@
 (defn- brevify-node
   "Strips full content from a page node, replacing with a 150-char preview.
    Preserves vitality fields (:vitality-score, :vitality-zone) if present.
-   The LLM uses fetch-content to load full content when needed."
+   The LLM uses fetch-document-content to load full content when needed."
   [node]
   (let [content (or (:page.node/content node) (:page.node/description node) "")
         preview (if (> (count content) 150)
@@ -584,7 +584,7 @@
   "Searches page nodes by text content with vitality-weighted reranking.
 
    Returns BRIEF results — metadata + 150-char preview + vitality score/zone.
-   Use fetch-content to fetch full content into a variable.
+   Use fetch-document-content to fetch full content into a variable.
 
    Results are ranked by: 0.7 × text-relevance + 0.3 × vitality-score.
    Archived nodes (vitality < 0.1) are filtered by default.

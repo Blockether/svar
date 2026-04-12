@@ -209,7 +209,7 @@
 ;; -----------------------------------------------------------------------------
 
 (def ^:private FETCH_CONTENT_PAGE_SIZE
-  "Characters per chunk when fetch-content returns a document as a vector of pages."
+  "Characters per chunk when fetch-document-content returns a document as a vector of pages."
   4000)
 
 (defn- chunk-text
@@ -270,8 +270,8 @@
            {:pages (do-pages) :toc (do-toc) :entities (do-ents)}))
        (if in [] {:pages [] :toc [] :entities []})))))
 
-(defn make-fetch-content-fn
-  "Creates fetch-content — fetches content using Datalevin lookup ref syntax.
+(defn make-fetch-document-content-fn
+  "Creates fetch-document-content — fetches content using Datalevin lookup ref syntax.
 
    Returns:
      [:page.node/id id]    → content string
@@ -280,15 +280,15 @@
      [:entity/id id]       → {:entity {...} :relationships [...]}
 
    The LLM stores results in variables:
-     (def clause (fetch-content [:page.node/id \"abc\"]))
-     (def doc (fetch-content [:document/id \"doc-1\"]))
+     (def clause (fetch-document-content [:page.node/id \"abc\"]))
+     (def doc (fetch-document-content [:document/id \"doc-1\"]))
      (count doc)      ;; number of pages
      (nth doc 5)      ;; page 5 content
-     (def p (fetch-content [:entity/id \"e1\"]))
+     (def p (fetch-document-content [:entity/id \"e1\"]))
      (:entity p)      ;; entity map
      (:relationships p) ;; connected entities"
   [db-info-atom]
-  (fn fetch-content [lookup-ref]
+  (fn fetch-document-content [lookup-ref]
     (when-let [{:keys [conn] :as db-info} @db-info-atom]
       (when (and (vector? lookup-ref) (= 2 (count lookup-ref)))
         (let [[attr id] lookup-ref]
@@ -327,7 +327,7 @@
               {:entity entity
                :relationships (db-list-relationships db-info id {})})
 
-            (throw (ex-info (str "fetch-content unknown lookup attribute: " attr
+            (throw (ex-info (str "fetch-document-content unknown lookup attribute: " attr
                               ". Use :page.node/id, :document/id, :document.toc/id, or :entity/id")
                      {:type :svar/invalid-lookup-ref :attr attr :id id}))))))))
 
@@ -478,15 +478,15 @@
 
    Params:
    `context-data` - The data context to analyze
-   `llm-query-fn` - Function for simple LLM text queries
+   `sub-rlm-query-fn` - Function for simple LLM text queries
    `db-info-atom` - Atom with database info (can be nil)
    `conversation-ref-atom` - Atom with active conversation lookup ref (can be nil)
    `custom-bindings` - Map of symbol->value for custom bindings (can be nil)"
-  [context-data llm-query-fn db-info-atom conversation-ref-atom custom-bindings]
+  [context-data sub-rlm-query-fn db-info-atom conversation-ref-atom custom-bindings]
   (let [restore-var-fn (when (and db-info-atom conversation-ref-atom @db-info-atom @conversation-ref-atom)
                          (make-restore-var-fn db-info-atom conversation-ref-atom))
         base-bindings {'context context-data
-                       'llm-query llm-query-fn
+                       'sub-rlm-query sub-rlm-query-fn
                        'spec spec/spec
                        'field spec/field
                        ;; Date helper functions
@@ -497,7 +497,7 @@
                       (cond->
                        {;; Unified document tools
                         'search-documents (make-search-documents-fn db-info-atom)
-                        'fetch-content (make-fetch-content-fn db-info-atom)
+                        'fetch-document-content (make-fetch-document-content-fn db-info-atom)
                         'find-related (fn find-related
                                         ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
                                         ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
@@ -653,8 +653,8 @@
         (sci-update-binding! sci-ctx 'restore-var binding-restore-var)
         (sci-update-binding! sci-ctx 'restore-vars binding-restore-vars)))
     ;; Inject doc metadata so (doc fn-name) works in SCI
-    (doseq [[sym doc args] [['llm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
-                            ['llm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
+    (doseq [[sym doc args] [['sub-rlm-query "Ask a sub-LLM anything. Returns text or structured data." '([prompt] [prompt {:spec spec}])]
+                            ['sub-rlm-query-batch "Parallel batch of LLM sub-calls. Returns vector of results." '([[prompt1 prompt2 ...]])]
                             ['request-more-iterations "Request n more iterations. Returns {:granted n :new-budget N}." '([n])]
                             ['spec "Create a structured output spec." '([& fields])]
                             ['field "Create a spec field." '([& kvs])]
@@ -663,7 +663,7 @@
                             ['today-str "Today as ISO-8601 string." '([])]
                              ;; Document navigation — 2 unified tools
                             ['search-documents "Search across documents. No :in = search everywhere (pages+toc+entities).\n  (search-documents \"query\") → {:pages [...] :toc [...] :entities [...]}\n  (search-documents \"query\" {:in :pages})      ;; pages only\n  (search-documents \"query\" {:in :toc})        ;; TOC only\n  (search-documents \"query\" {:in :entities})   ;; entities only\n  Opts: :top-k :document-id :type" '([query] [query opts])]
-                            ['fetch-content "Fetch full content by lookup ref.\n  [:page.node/id \"id\"]    → page text\n  [:document/id \"id\"]     → vector of ~4K char pages\n  [:document.toc/id \"id\"] → TOC entry description\n  [:entity/id \"id\"]       → {:entity {...} :relationships [...]}" '([lookup-ref])]
+                            ['fetch-document-content "Fetch full content by lookup ref.\n  [:page.node/id \"id\"]    → page text\n  [:document/id \"id\"]     → vector of ~4K char pages\n  [:document.toc/id \"id\"] → TOC entry description\n  [:entity/id \"id\"]       → {:entity {...} :relationships [...]}" '([lookup-ref])]
                             ['find-related "BFS graph traversal from an anchor entity.\n  (find-related entity-id)              ;; depth 2\n  (find-related entity-id {:depth 3})   ;; deeper\n  Returns related entities sorted by distance, with cross-document canonical linking." '([entity-id] [entity-id opts])]
                             ['search-entities "Search entities by name/description text.\n  (search-entities \"schema therapy\")\n  (search-entities \"auth\" {:top-k 20 :type :concept :document-id doc})\n  Returns ranked entity maps." '([query] [query opts])]
                             ['get-entity "Get a single entity by UUID.\n  (get-entity entity-uuid)  → entity map or nil" '([entity-id])]

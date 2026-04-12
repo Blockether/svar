@@ -9,12 +9,13 @@
             db-store-pageindex-document! str-truncate]]
    [com.blockether.svar.internal.rlm.data :as rlm-data]
    [com.blockether.svar.internal.rlm.routing
-    :refer [make-routed-llm-query-fn resolve-root-model provider-has-reasoning?]]
+    :refer [make-routed-sub-rlm-query-fn resolve-root-model provider-has-reasoning?]]
    [com.blockether.svar.internal.rlm.schema
     :refer [ENTITY_EXTRACTION_SPEC ENTITY_EXTRACTION_OBJECTIVE
             ITERATION_SPEC ITERATION_SPEC_CODE_ONLY
             *eval-timeout-ms*
             validate-final bytes->base64 *rlm-ctx*]]
+   [com.blockether.svar.internal.rlm.skills :as rlm-skills]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value build-var-index]]
    [com.blockether.svar.internal.paren-repair :as paren-repair]
    [edamame.core :as edamame]
@@ -63,7 +64,7 @@ Pattern: [thing] [action] [reason]. [next step].")
      - :documents - Vector of PageIndex documents to preload (stored exactly as-is).
 
    Returns:
-   Map with :sci-ctx, :context, :llm-query-fn, :locals-atom,
+   Map with :sci-ctx, :context, :sub-rlm-query-fn, :locals-atom,
    :db-info-atom, :router."
   ([context-data depth-atom router]
    (create-rlm-env context-data depth-atom router {}))
@@ -75,10 +76,10 @@ Pattern: [thing] [action] [reason]. [next step].")
          _ (when (and db-info-atom (seq documents))
              (doseq [doc documents]
                (db-store-pageindex-document! @db-info-atom doc)))
-         llm-query-fn (make-routed-llm-query-fn {} depth-atom router)
-         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data llm-query-fn db-info-atom nil nil)]
+         sub-rlm-query-fn (make-routed-sub-rlm-query-fn {} depth-atom router nil nil)
+         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data sub-rlm-query-fn db-info-atom nil nil)]
      {:sci-ctx sci-ctx :sandbox-ns sandbox-ns :initial-ns-keys initial-ns-keys :context context-data
-      :llm-query-fn llm-query-fn
+      :sub-rlm-query-fn sub-rlm-query-fn
       :db-info-atom db-info-atom
       :router router})))
 
@@ -386,23 +387,38 @@ Git tools available this session — all prefixed `git-`:
 
    `git-repos` is a vec of `:repo/*` entity maps (from rlm.db/db-list-repos)
    or nil/empty."
-  [{:keys [output-spec custom-docs has-reasoning? has-documents? document-summary system-prompt git-repos]}]
+  [{:keys [output-spec custom-docs has-reasoning? has-documents? document-summary system-prompt git-repos skill-registry]}]
   (str
     "Clojure SCI agent. Write, exec, iterate.
 
 ARCH:
-- Single-shot. No msg history. State → def'd vars (persist).
-- <var_index> → vars (name, type, size, doc). <execution_results> → last return.
-- (doc fn) for docs. (llm-query \"q\") for sub-LLM.
+- Single-shot iter. No msg history. State → def'd vars (persist).
+- <var_index> → vars. <execution_results> → last return.
+- (doc fn) for docs.
 - Aliases: str/ set/ walk/ edn/ json/ zp/ pp/ lt/ test/
+
+LLM SUB-CALLS:
+- (sub-rlm-query \"q\") → {:content :code} prose + Clojure code blocks (vec<str>).
+- (sub-rlm-query \"q\" {:routing {:optimize :cost}}) → cheap path.
+- (sub-rlm-query-batch [\"q1\" \"q2\" ...]) → vec of results. N≥2 independent → batch. Dependent → serial.
+- Independent = output of A NOT input of B. Same question × many inputs = batch.
+- Shape guaranteed by provider-enforced JSON. :content always present, :code nil when no code applies.
+- Eval returned :code via the usual iteration flow (each entry = one complete form).
+- Need typed data? Ask the sub-RLM to emit code that defs the data structure; eval it.
 
 GOTCHAS:
 - Quote lists: '(1 2 3). Bare () = fn call.
 - No nested #(). Use (fn [...] ...).
 - 'code' entry = complete expr. No fragments. No split across strings.
 - Docstring defs: (def x \"doc\" val) → aids <var_index>.
-- future/pmap/promise/deliver OK. (deref f ms :timeout).
+- AVOID LAZY SEQS. Prefer eager: mapv filterv reduce into.
+  - (map f xs) = lazy. (filter p xs) = lazy. (for [...] ...) = lazy. Result not computed.
+  - (future (map f xs)) = TRAP. Future holds unrealized seq. Deref → serial on consumer thread. WRONG.
+  - Fix: (future (mapv f xs)) OR (future (doall (map f xs))) OR (pmap f xs).
+  - Only use lazy when consuming once without realization (very rare here).
+- future/promise/deliver available. Parallel = sub-rlm-query-batch (preferred) OR (mapv deref (mapv #(future ...) xs)).
 "
+    (rlm-skills/skills-manifest-block skill-registry)
     (format-git-context git-repos)
     (when (and has-documents? document-summary)
       (str
@@ -413,12 +429,12 @@ Doc tools (2 fns):
 1. (search-documents \"q\") → {:pages [...] :toc [...] :entities [...]} 
    (search-documents \"q\" {:in :pages})  — narrow to :pages|:toc|:entities
    (search-documents \"q\" {:top-k 20 :document-id \"doc-1\"})
-2. (fetch-content ref) → full content:
+2. (fetch-document-content ref) → full content:
    [:page.node/id \"id\"] → page text
    [:document/id \"id\"] → vec of ~4K char pages
    [:document.toc/id \"id\"] → TOC desc
    [:entity/id \"id\"] → {:entity {...} :relationships [...]} 
-(def pages (fetch-content [:document/id \"doc-1\"]))
+(def pages (fetch-document-content [:document/id \"doc-1\"]))
 Search in English. Translate non-EN queries first.
 "))
     (when system-prompt
@@ -914,7 +930,8 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                             :has-reasoning? has-reasoning?
                                             :system-prompt system-prompt
                                             :git-repos git-repos
-                                            :max-context-tokens max-context-tokens})
+                                            :max-context-tokens max-context-tokens
+                                            :skill-registry (:skill-registry rlm-env)})
         context-data (:context rlm-env)
         context-str (pr-str context-data)
         context-preview (if (> (count context-str) 2000)

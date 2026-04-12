@@ -68,7 +68,7 @@
     (with-test-env* {:data "test"} (fn [env]
                                      (expect (contains? env :sci-ctx))
                                      (expect (contains? env :context))
-                                     (expect (contains? env :llm-query-fn))
+                                     (expect (contains? env :sub-rlm-query-fn))
                                      (expect (contains? env :initial-ns-keys)))))
 
   (it "stores context in environment"
@@ -488,7 +488,7 @@
     (let [prompt (#'rlm-core/build-system-prompt {:has-documents? true :document-summary "1 document"})]
       (expect (str/includes? prompt "DOCUMENTS"))
       (expect (str/includes? prompt "search-documents"))
-      (expect (str/includes? prompt "fetch-content"))
+      (expect (str/includes? prompt "fetch-document-content"))
       (expect (str/includes? prompt ":entity/id"))))
 
   (it "includes spec schema when provided"
@@ -660,13 +660,13 @@
                                (expect (throws? clojure.lang.ExceptionInfo
                                          #(sut/query-env! env nil))))))))
 
-(defdescribe make-routed-llm-query-fn-test
+(defdescribe make-routed-sub-rlm-query-fn-test
   (describe "recursion depth tracking"
     (it "enforces max recursion depth"
       (let [depth-atom (atom 0)
             r (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                  :models [{:name "gpt-4o"}]}])
-            query-fn (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom r)]
+            query-fn (#'rlm-routing/make-routed-sub-rlm-query-fn {:strategy :root} depth-atom r nil nil)]
         (reset! depth-atom sut/DEFAULT_RECURSION_DEPTH)
         (let [result (query-fn "test")]
           (expect (map? result))
@@ -676,7 +676,7 @@
       (let [depth-atom (atom 0)
             r (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                  :models [{:name "gpt-4o"}]}])
-            query-fn (#'rlm-routing/make-routed-llm-query-fn {:strategy :root} depth-atom r)]
+            query-fn (#'rlm-routing/make-routed-sub-rlm-query-fn {:strategy :root} depth-atom r nil nil)]
         (try
           (query-fn "What is 2+2?")
           (catch Exception _))
@@ -1394,9 +1394,9 @@
                            (expect (contains? (:result result) :toc))
                            (expect (contains? (:result result) :entities))))))
 
-  (it "fetch-content returns nil for non-existent entity lookup"
+  (it "fetch-document-content returns nil for non-existent entity lookup"
     (with-test-env* {} (fn [env]
-                         (let [result (#'rlm-core/execute-code env "(fetch-content [:entity/id (java.util.UUID/randomUUID)])")]
+                         (let [result (#'rlm-core/execute-code env "(fetch-document-content [:entity/id (java.util.UUID/randomUUID)])")]
                            (expect (nil? (:error result)))
                            (expect (nil? (:result result)))))))
 
