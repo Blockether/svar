@@ -1,0 +1,72 @@
+2026-04-12T12:02:44.592926891Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 791, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:02:49.918049321Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 5325.502091, :content-len 1577, :has-reasoning false, :input-tokens 788, :output-tokens 434, :reasoning-tokens nil}
+2026-04-12T12:02:49.921841079Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1206, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:02:55.496142356Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 5575.339199, :content-len 1935, :has-reasoning false, :input-tokens 1203, :output-tokens 466, :reasoning-tokens nil}
+2026-04-12T12:02:55.499731475Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1055, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:03.359755532Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 7860.974767, :content-len 2287, :has-reasoning false, :input-tokens 1052, :output-tokens 603, :reasoning-tokens nil}
+2026-04-12T12:03:03.363934035Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1226, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:10.480822272Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 7117.917093, :content-len 2502, :has-reasoning false, :input-tokens 1223, :output-tokens 596, :reasoning-tokens nil}
+2026-04-12T12:03:10.482605240Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 438, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:12.841515600Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2359.112288, :content-len 414, :has-reasoning false, :input-tokens 435, :output-tokens 108, :reasoning-tokens nil}
+2026-04-12T12:03:12.844291577Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1030, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:17.557073494Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 4713.693503, :content-len 1328, :has-reasoning false, :input-tokens 1027, :output-tokens 383, :reasoning-tokens nil}
+2026-04-12T12:03:17.559594664Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1076, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:23.810851450Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 6251.857471, :content-len 1606, :has-reasoning false, :input-tokens 1073, :output-tokens 404, :reasoning-tokens nil}
+2026-04-12T12:03:23.812747580Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 753, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:26.236812677Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2424.488489, :content-len 491, :has-reasoning false, :input-tokens 750, :output-tokens 130, :reasoning-tokens nil}
+2026-04-12T12:03:26.238722071Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 736, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:28.912132886Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2673.834618, :content-len 598, :has-reasoning false, :input-tokens 733, :output-tokens 158, :reasoning-tokens nil}
+2026-04-12T12:03:28.914263725Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 736, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:31.238853193Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2325.250976, :content-len 567, :has-reasoning false, :input-tokens 733, :output-tokens 141, :reasoning-tokens nil}
+2026-04-12T12:03:31.241461185Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 741, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:34.799185357Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 3558.531413, :content-len 1002, :has-reasoning false, :input-tokens 738, :output-tokens 232, :reasoning-tokens nil}
+2026-04-12T12:03:34.800835036Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 728, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:37.057131591Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2256.678661, :content-len 443, :has-reasoning false, :input-tokens 725, :output-tokens 120, :reasoning-tokens nil}
+2026-04-12T12:03:37.058702572Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 726, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:39.392890716Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2334.564739, :content-len 468, :has-reasoning false, :input-tokens 723, :output-tokens 119, :reasoning-tokens nil}
+2026-04-12T12:03:39.394786295Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 733, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:42.209694153Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2815.275576, :content-len 649, :has-reasoning false, :input-tokens 730, :output-tokens 140, :reasoning-tokens nil}
+2026-04-12T12:03:42.212369632Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1881, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:43.872116053Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 1660.609598, :content-len 39, :has-reasoning false, :input-tokens 1878, :output-tokens 15, :reasoning-tokens nil}
+2026-04-12T12:03:43.874572993Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1374, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:51.935985534Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 8062.090761, :content-len 2636, :has-reasoning false, :input-tokens 1371, :output-tokens 667, :reasoning-tokens nil}
+2026-04-12T12:03:51.939432747Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1842, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:03:54.297898239Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 2359.448481, :content-len 561, :has-reasoning false, :input-tokens 1839, :output-tokens 142, :reasoning-tokens nil}
+2026-04-12T12:03:54.300234603Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1412, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:04:02.363439707Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 8063.816448, :content-len 2998, :has-reasoning false, :input-tokens 1409, :output-tokens 704, :reasoning-tokens nil}

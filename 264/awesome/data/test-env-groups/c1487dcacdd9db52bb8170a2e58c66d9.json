@@ -1,0 +1,1 @@
+{"id":"c1487dcacdd9db52bb8170a2e58c66d9","fullName":"com.blockether.svar.internal.rlm.git-wiring-test.ingest-git-test.sut/ingest-git!.ingests commits + persists :repo entity + returns stats","name":"ingest-git-test > sut/ingest-git! > ingests commits + persists :repo entity + returns stats","status":"passed","testResultsByEnv":{"default":"393db2caaa207a65535853857520a74d"}}

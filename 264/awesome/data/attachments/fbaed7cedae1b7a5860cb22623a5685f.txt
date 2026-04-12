@@ -1,0 +1,4 @@
+2026-04-12T12:04:44.011162839Z :info com.blockether.svar.internal.rlm.skills [271 6] ::skills-loaded Skills loaded 
+  data: {:count 0, :names []}
+2026-04-12T12:04:44.031328163Z :info com.blockether.svar.internal.rlm.core [1190 25] FINAL detected 
+  data: {:iteration 0, :answer "done"}

@@ -1,0 +1,12 @@
+2026-04-12T12:04:44.119006434Z :info com.blockether.svar.internal.rlm.skills [271 6] ::skills-loaded Skills loaded 
+  data: {:count 0, :names []}
+2026-04-12T12:04:44.135481797Z :warn com.blockether.svar.internal.rlm.core [1049 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 0, :max 0}
+2026-04-12T12:04:44.138364895Z :info com.blockether.svar.internal.rlm.core [44 5] RLM query-env! started 
+  data: {:query "No-op", :root-model "gpt-4o", :max-iterations 0, :verify? false, :plan? false, :refine-mode :final-confidence, :rlm-phase :query}
+2026-04-12T12:04:44.145140680Z :info com.blockether.svar.internal.rlm.core [44 5] Iteration loop started 
+  data: {:rlm-phase :query, :prev-final-results 0, :has-restore-context? true, :max-iterations 0, :has-pre-fetched? false, :msg-count 2, :has-output-spec? false, :has-reasoning? false, :query "No-op", :model "gpt-4o"}
+2026-04-12T12:04:44.147344176Z :warn com.blockether.svar.internal.rlm.core [1049 13] Max iterations reached — call (request-more-iterations N) earlier to extend budget 
+  data: {:iteration 0, :max 0}
+2026-04-12T12:04:44.147429635Z :info com.blockether.svar.internal.rlm.core [44 5] RLM query-env! finished (max iterations) 
+  data: {:status :max-iterations, :iterations 0, :duration-ms 8.934457, :rlm-phase :query}
