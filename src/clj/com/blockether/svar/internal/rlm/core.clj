@@ -16,6 +16,7 @@
             *eval-timeout-ms*
             validate-final bytes->base64 *rlm-ctx*]]
    [com.blockether.svar.internal.rlm.skills :as rlm-skills]
+   [com.blockether.svar.internal.rlm.sub :as rlm-sub]
    [com.blockether.svar.internal.rlm.tools :refer [create-sci-context realize-value build-var-index]]
    [com.blockether.svar.internal.paren-repair :as paren-repair]
    [edamame.core :as edamame]
@@ -1401,6 +1402,13 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
        :pages-processed (count pages)
        :extraction-errors @errors-atom
        :visual-nodes-scanned @vision-count-atom})))
+
+;; =============================================================================
+;; Wire sub.clj's iteration-loop reference — breaks the cyclic dep
+;; (core → routing → sub → core) without per-call requiring-resolve.
+;; =============================================================================
+
+(rlm-sub/set-iteration-loop! iteration-loop)
 
 ;; =============================================================================
 ;; Public API - Component-Based Architecture

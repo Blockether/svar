@@ -50,13 +50,20 @@
       (and (instance? clojure.lang.ExceptionInfo e)
         (some-> cause retryable-exception?)))))
 
+(def ^:private shared-http-executor
+  "Virtual-thread-per-task executor that backs the shared HttpClient.
+   Held separately from the client so shutdown-http-client! can close it
+   explicitly. Without this the JVM keeps non-daemon threads alive, blocking
+   clean exit in REPLs, test runners, and scripts."
+  (delay (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor)))
+
 (def ^:private shared-http-client
   "Single shared HttpClient reused across ALL LLM requests. Without this each
    http/post call constructs a new JDK HttpClient with its own SelectorManager
    thread, which never gets GC'd before the JVM runs out of thread stack. Ran
    into this during the 4clojure benchmark (OOM after ~108 tasks).
-   Uses a virtual-thread-per-task executor so blocked HTTP calls cost almost
-   nothing and don't pin OS threads.
+   Uses shared-http-executor so blocked HTTP calls cost almost nothing and
+   don't pin OS threads.
 
    HTTP/1.1 PIN — DO NOT CHANGE WITHOUT TESTING OCR PIPELINE.
    :version :http1.1 is load-bearing for local GLM-OCR via LM Studio and for
@@ -64,8 +71,37 @@
    pageindex/vision.clj :ocr extraction strategy. If you need HTTP/2 for a
    specific call, build a second client — do NOT flip this default."
   (delay
-    (let [vt-executor (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor)]
-      (http/client (assoc http/default-client-opts :executor vt-executor :version :http1.1)))))
+    (http/client (assoc http/default-client-opts
+                   :executor @shared-http-executor
+                   :version :http1.1))))
+
+(defn shutdown-http-client!
+  "Closes the shared HTTP client's virtual-thread executor.
+   Idempotent — safe to call multiple times. Call before JVM exit in
+   scripts/tests to avoid hanging on non-daemon threads. Registered as
+   a shutdown hook automatically; manual invocation is only needed when
+   the JVM would otherwise not exit.
+
+   After shutdown, subsequent HTTP calls will fail with
+   RejectedExecutionException. Do not call during active request traffic."
+  []
+  (when (realized? shared-http-executor)
+    (try
+      (.shutdown ^java.util.concurrent.ExecutorService @shared-http-executor)
+      (catch Exception e
+        (trove/log! {:level :warn :id ::http-executor-shutdown-failed
+                     :data {:error (ex-message e)}
+                     :msg "Failed to shutdown shared HTTP executor"}))))
+  nil)
+
+;; Register a JVM shutdown hook so the executor is always closed on normal exit.
+;; Users don't need to call shutdown-http-client! manually in typical usage.
+#_{:clj-kondo/ignore [:unused-private-var]}
+(defonce ^:private http-shutdown-hook-registered?
+  (do
+    (.addShutdownHook (Runtime/getRuntime)
+      (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
+    true))
 
 (defn- http-post!
   "Makes an HTTP POST request with JSON body.

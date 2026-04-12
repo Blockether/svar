@@ -7,23 +7,30 @@
    (with or without :skills), routing.clj delegates here instead of doing a
    single-shot llm/ask!.
 
-   NOTE: does NOT require rlm.core to avoid cyclic dep (core→routing→sub→core).
-   Instead, iteration-loop-fn is resolved lazily via requiring-resolve."
+   CYCLIC DEP NOTE: rlm.core requires rlm.routing which requires this ns. So
+   we cannot :require rlm.core — it would create core → routing → sub → core.
+   iteration-loop is injected at load time via set-iteration-loop! called
+   from rlm.core (see bottom of that file). No per-call requiring-resolve."
   (:require
    [clojure.edn :as edn]
    [clojure.string :as str]
+   [com.blockether.svar.internal.rlm.skills :as rlm-skills]
    [taoensso.trove :as trove]))
 
-(defn- resolve-iteration-loop
-  "Lazily resolves rlm.core/iteration-loop to break the cyclic dependency.
-   Cached after first resolve by Clojure's requiring-resolve."
-  []
-  @(requiring-resolve 'com.blockether.svar.internal.rlm.core/iteration-loop))
+;; Wired at load time by rlm.core — see bottom of rlm/core.clj.
+;; Holds the iteration-loop fn. Deref once per run-sub-rlm call.
+(defonce ^:private iteration-loop-ref (atom nil))
 
-(defn- resolve-skill-manage
-  "Lazily resolves rlm.skills/skill-manage to break import dep."
-  []
-  @(requiring-resolve 'com.blockether.svar.internal.rlm.skills/skill-manage))
+(defn set-iteration-loop!
+  "Called once by rlm.core to inject iteration-loop without a cyclic require.
+   Idempotent — subsequent calls replace the reference."
+  [f]
+  (reset! iteration-loop-ref f))
+
+(defn- iteration-loop-fn []
+  (or @iteration-loop-ref
+    (throw (ex-info "iteration-loop not wired — rlm.core must be loaded before sub-rlm calls"
+             {:type :rlm/iteration-loop-unwired}))))
 
 (defn- auto-refine-async!
   "Fires an async skill refinement pass after a sub-rlm-query with skills.
@@ -52,7 +59,7 @@
             (let [skill-name (first skills-loaded)
                   skill-registry-atom (:skill-registry-atom rlm-env)
                   skill (get @skill-registry-atom skill-name)
-                  skill-manage-fn (resolve-skill-manage)
+                  skill-manage-fn rlm-skills/skill-manage
                   trace-summary (cond-> {:status status
                                          :iterations (:iter sub-result)
                                          :confidence confidence}
@@ -61,7 +68,7 @@
                                     (let [c (:content sub-result)]
                                       (if (> (count c) 200) (subs c 0 200) c))))
                   ;; Use a cheap sub-rlm to analyze what went wrong/right
-                  make-sub-rlm (resolve-iteration-loop)
+                  make-sub-rlm (iteration-loop-fn)
                   refine-prompt (str "A skill named :" (name skill-name)
                                   " was used and produced this outcome:\n"
                                   (pr-str trace-summary)
@@ -162,7 +169,7 @@
                       :has-system-prompt (some? system-prompt)
                       :skills-loaded skills-loaded}
                :msg "Sub-RLM iterated query starting"})
-  (let [iteration-loop (resolve-iteration-loop)
+  (let [iteration-loop (iteration-loop-fn)
         result (iteration-loop
                  rlm-env
                  prompt

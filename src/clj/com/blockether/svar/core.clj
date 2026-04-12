@@ -241,19 +241,12 @@
                  {:max-iterations 50})"
   rlm/query-env!)
 
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def register-hook! "Attach a hook to an existing tool's :before / :after / :wrap chain." rlm/register-hook!)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def unregister-hook! "Remove a per-tool hook entry by :id." rlm/unregister-hook!)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def list-tool-hooks "Return hook chains registered for a tool symbol." rlm/list-tool-hooks)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def list-registered-tools "Return a vec of {:sym :hook-counts} for every registered tool." rlm/list-registered-tools)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def list-queries "Lists query records from an RLM environment." rlm/list-queries)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def export-trajectories! "Exports filtered trajectories as JSONL for fine-tuning." rlm/export-trajectories!)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def pprint-trace "Pretty-prints an RLM trace to a string." rlm/pprint-trace)
 (def print-trace "Pretty-prints an RLM trace to stdout." rlm/print-trace)
 (def query-env-qa! "Generates Q&A pairs from ingested documents using a multi-stage pipeline." rlm/query-env-qa!)
