@@ -1,0 +1,16 @@
+2026-04-12T12:38:19.479879773Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 791, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:38:24.527380759Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 5048.385384, :content-len 1480, :has-reasoning false, :input-tokens 788, :output-tokens 415, :reasoning-tokens nil}
+2026-04-12T12:38:24.531203355Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1196, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:38:32.788035779Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 8257.373213, :content-len 2849, :has-reasoning false, :input-tokens 1193, :output-tokens 676, :reasoning-tokens nil}
+2026-04-12T12:38:32.793585991Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1045, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:38:38.653134580Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 5860.672919, :content-len 1876, :has-reasoning false, :input-tokens 1042, :output-tokens 474, :reasoning-tokens nil}
+2026-04-12T12:38:38.657684119Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1220, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T12:38:48.024984878Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 9368.579499, :content-len 3097, :has-reasoning false, :input-tokens 1217, :output-tokens 706, :reasoning-tokens nil}
