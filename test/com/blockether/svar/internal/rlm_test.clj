@@ -2052,13 +2052,13 @@
                       :toc-count 0
                       :node-count 2
                       :content-hash "sha256:cached"}]
-          (reset! (:qa-corpus-snapshot-cache-atom env) {:revision revision :snapshot cached})
+          (swap! (:qa-corpus-atom env) assoc :snapshot-cache {:revision revision :snapshot cached})
           (expect (= cached (#'sut/qa-corpus-snapshot env @(:db-info-atom env))))
           (expect (= 1 (:hits (sut/qa-corpus-snapshot-stats env))))
 
           ;; Any ingest mutation should invalidate cache immediately.
           (sut/ingest-to-env! env [(make-test-single-page-document)])
-          (expect (nil? @(:qa-corpus-snapshot-cache-atom env)))
+          (expect (nil? (:snapshot-cache @(:qa-corpus-atom env))))
           (expect (> (rlm-db/get-corpus-revision @(:db-info-atom env)) revision))
 
           ;; First call after invalidation is a miss and records digest timing.

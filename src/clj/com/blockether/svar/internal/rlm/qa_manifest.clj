@@ -88,10 +88,11 @@
 
 (defn- qa-corpus-cache-hit!
   [env revision]
-  (let [stats (when-let [stats-atom (:qa-corpus-snapshot-stats-atom env)]
-                (swap! stats-atom #(-> %
-                                     (update :hits (fnil inc 0))
-                                     (assoc :last-revision revision))))]
+  (let [stats (when-let [corpus-atom (:qa-corpus-atom env)]
+                (:stats (swap! corpus-atom update :stats
+                          #(-> %
+                             (update :hits (fnil inc 0))
+                             (assoc :last-revision revision)))))]
     (trove/log! {:level :info :id ::qa-corpus-cache-hit
                  :data {:revision revision
                         :hits (:hits stats)
@@ -100,11 +101,12 @@
 
 (defn- qa-corpus-cache-miss!
   [env revision digest-ms]
-  (let [stats (when-let [stats-atom (:qa-corpus-snapshot-stats-atom env)]
-                (swap! stats-atom #(-> %
-                                     (update :misses (fnil inc 0))
-                                     (assoc :last-digest-ms digest-ms)
-                                     (assoc :last-revision revision))))]
+  (let [stats (when-let [corpus-atom (:qa-corpus-atom env)]
+                (:stats (swap! corpus-atom update :stats
+                          #(-> %
+                             (update :misses (fnil inc 0))
+                             (assoc :last-digest-ms digest-ms)
+                             (assoc :last-revision revision)))))]
     (trove/log! {:level :info :id ::qa-corpus-cache-miss
                  :data {:revision revision
                         :digest-ms digest-ms
@@ -129,10 +131,10 @@
   [env {:keys [conn] :as db-info}]
   (if-not conn
     {:revision 0 :document-count 0 :toc-count 0 :node-count 0 :content-hash "sha256:0"}
-    (let [cache-atom (:qa-corpus-snapshot-cache-atom env)
+    (let [corpus-atom (:qa-corpus-atom env)
           db (d/db conn)
           revision (qa-corpus-revision db-info)
-          cached (when cache-atom @cache-atom)]
+          cached (when corpus-atom (:snapshot-cache @corpus-atom))]
       (if (and cached (= revision (:revision cached)))
         (do
           (qa-corpus-cache-hit! env revision)
@@ -140,23 +142,23 @@
         (let [start (System/nanoTime)
               snapshot (compute-qa-corpus-snapshot db revision)
               digest-ms (/ (- (System/nanoTime) start) 1000000.0)]
-          (when cache-atom
-            (reset! cache-atom {:revision revision :snapshot snapshot}))
+          (when corpus-atom
+            (swap! corpus-atom assoc :snapshot-cache {:revision revision :snapshot snapshot}))
           (qa-corpus-cache-miss! env revision digest-ms)
           snapshot)))))
 
 (defn invalidate-qa-corpus-snapshot-cache!
-  "Resets the corpus snapshot cache atom so the next call recomputes."
+  "Resets the corpus snapshot cache so the next call recomputes."
   [env]
-  (when-let [cache-atom (:qa-corpus-snapshot-cache-atom env)]
-    (reset! cache-atom nil)))
+  (when-let [corpus-atom (:qa-corpus-atom env)]
+    (swap! corpus-atom assoc :snapshot-cache nil)))
 
 (defn qa-corpus-snapshot-stats
   "Returns QA corpus snapshot cache stats for observability.
    Shape: {:hits N :misses N :last-digest-ms ms|nil :last-revision rev}."
   [env]
-  (if-let [stats-atom (:qa-corpus-snapshot-stats-atom env)]
-    @stats-atom
+  (if-let [corpus-atom (:qa-corpus-atom env)]
+    (:stats @corpus-atom)
     {:hits 0 :misses 0 :last-digest-ms nil :last-revision 0}))
 
 ;; -----------------------------------------------------------------------------

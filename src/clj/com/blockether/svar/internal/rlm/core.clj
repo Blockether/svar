@@ -998,23 +998,27 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                            :cost cost}))
         ;; Cache var-index by env-level execution revision so it survives across queries.
         ;; SCI may keep stable sandbox map identity across (def ...) updates.
-        var-index-cache-atom (or (:var-index-cache-atom rlm-env) (atom {:revision -1 :index nil}))
-        var-index-revision-atom (or (:var-index-revision-atom rlm-env) (atom 0))
+        ;; Use grouped :var-index-atom when available (new layout), fall back to local atom.
+        ;; Layout: {:index built-idx :revision last-cache-build-rev :current-revision live-rev}
+        ;;   :current-revision — bumped on every SCI mutation (was var-index-revision-atom)
+        ;;   :revision         — revision at which :index was last built (was :revision in cache)
+        ;; Cache hit: (:revision vi) == (:current-revision vi)
+        var-index-atom (or (:var-index-atom rlm-env) (atom {:index nil :revision -1 :current-revision 0}))
         get-var-index (fn []
-                        (let [var-index-revision @var-index-revision-atom
-                              {:keys [revision index]} @var-index-cache-atom]
-                          (if (= revision var-index-revision)
+                        (let [{:keys [index revision current-revision]} @var-index-atom]
+                          (if (= revision current-revision)
                             index
                             (let [sandbox-map (get-in @(:env (:sci-ctx rlm-env)) [:namespaces 'sandbox])
-                                  idx (build-var-index (:sci-ctx rlm-env) (:initial-ns-keys rlm-env) sandbox-map)]
-                              (reset! var-index-cache-atom {:revision var-index-revision :index idx})
+                                  idx (build-var-index (:sci-ctx rlm-env) (:initial-ns-keys rlm-env) sandbox-map)
+                                  live-rev (:current-revision @var-index-atom)]
+                              (swap! var-index-atom assoc :index idx :revision live-rev)
                               idx))))
         ;; Keep final-result rehydration for backwards-compatible SCI access.
         prev-final-results (rehydrate-final-results! (:sci-ctx rlm-env)
                              (:db-info-atom rlm-env)
                              (:conversation-ref rlm-env))
         ;; Rehydration mutates SCI vars; mark var-index as stale.
-        _ (swap! var-index-revision-atom inc)
+        _ (swap! var-index-atom update :current-revision inc)
         restore-context (build-restore-context db-info (:conversation-ref rlm-env))
         on-chunk (:on-chunk hooks)
         on-iteration (:on-iteration hooks)
@@ -1263,7 +1267,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                         (let [had-successful-execution? (some #(nil? (:error %)) executions)
                               next-errors (if had-successful-execution? 0 (inc consecutive-errors))
                               _ (when had-successful-execution?
-                                  (swap! var-index-revision-atom inc))
+                                  (swap! var-index-atom update :current-revision inc))
                               journal-entry {:iteration iteration
                                              :thinking thinking
                                              :var-names (extract-def-names executions)}]

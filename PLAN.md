@@ -20,7 +20,7 @@ Kill the god namespace. `rlm.clj` (originally 3535 lines, 92 fns) → focused mo
 | 6 | Race condition fix (atomic CAS in with-depth-tracking) + concurrent test | ✅ DONE |
 | 7 | Log-annotate silent catch blocks | ✅ DONE |
 | 8 | Unit tests: batch, concurrency, skills, trajectory | ✅ DONE |
-| 4 | Extract rlm/env.clj + atom grouping (13 → 5) | ⏳ IN PROGRESS |
+| 4 | Extract rlm/env.clj + atom grouping (12 → 7) | ✅ DONE |
 
 Plus bonus changes:
 - ✅ Rename `generate-qa-env!` → `query-env-qa!` (consistent with `query-env!`)
@@ -66,7 +66,26 @@ Test count: ~830 → ~1000+ cases (new Phase 8 tests).
 
 ---
 
-## Remaining Work — Phase 4 (env.clj + atom grouping)
+## Phase 4 Outcome (DONE)
+
+Landed at 12 atoms → 7 (spec said "~5"; 2 kept standalone for routing/SCI compatibility).
+
+**Final grouping:**
+- `:depth-atom` — standalone (hot concurrent path)
+- `:tool-registry-atom` — standalone (high traffic, 10+ sites)
+- `:db-info-atom` — standalone (DB conn, existing)
+- `:skill-registry-atom` — standalone (routing/sub/skills compat)
+- `:var-index-atom` — grouped `{:index :revision :current-revision}` (was 2 atoms)
+- `:qa-corpus-atom` — grouped `{:snapshot-cache :stats {:hits :misses :last-digest-ms :last-revision}}` (was 2 atoms)
+- `:state-atom` — grouped `{:custom-bindings :custom-docs :skill-registry :rlm-env :conversation-ref}` (was 5 atoms)
+
+**Deviations from spec:**
+- `conversation-ref-atom` kept as a local in create-env (not exposed on env map) because `create-sci-context` takes it as a direct atom arg. Moving it into state-atom would require deeper changes in tools.clj.
+- `rlm-env-atom` kept as a local — only used transiently to break self-reference cycle during env construction.
+
+---
+
+## Historical — Phase 4 Spec (for reference)
 
 ### Problem
 

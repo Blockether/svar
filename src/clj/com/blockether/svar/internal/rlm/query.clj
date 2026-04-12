@@ -93,8 +93,8 @@
           cheap-sub-rlm-fn       (rlm-routing/make-routed-sub-rlm-query-fn
                                    {:optimize :cost} depth-atom rlm-router
                                    (:skill-registry-atom env) (atom env))
-          custom-bindings        (when-let [a (:custom-bindings-atom env)] @a)
-          custom-docs            (when-let [a (:custom-docs-atom env)] @a)
+          custom-bindings        (when-let [a (:state-atom env)] (:custom-bindings @a))
+          custom-docs            (when-let [a (:state-atom env)] (:custom-docs @a))
           claims-atom            (when verify? (atom []))
           current-iteration-atom (atom 0)
           cite-bindings          (when verify?

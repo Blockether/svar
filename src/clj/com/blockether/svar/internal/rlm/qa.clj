@@ -399,9 +399,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   [env]
   (assoc env
     :sci-ctx (sci/fork (:sci-ctx env))
-    ;; Fork-local var index cache/revision (must not be shared across SCI forks).
-    :var-index-cache-atom (atom {:revision -1 :index nil})
-    :var-index-revision-atom (atom 0)))
+    ;; Fork-local var index (must not be shared across SCI forks).
+    :var-index-atom (atom {:index nil :revision -1 :current-revision 0})))
 
 ;; -----------------------------------------------------------------------------
 ;; Main QA pipeline
