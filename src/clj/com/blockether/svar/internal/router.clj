@@ -98,6 +98,14 @@
 ;; Provider-scoped model availability, pricing, and context limits
 ;; =============================================================================
 
+;; Pricing data last verified: 2026-04-12.
+;; USD per million tokens. Values drift — re-audit quarterly.
+;; Authoritative sources:
+;;   Anthropic:   https://docs.claude.com/en/docs/about-claude/models/pricing
+;;   OpenAI:      https://openai.com/api/pricing/
+;;   Google:      https://ai.google.dev/gemini-api/docs/pricing
+;;   Z.ai / GLM:  https://bigmodel.cn/pricing
+;;   MiniMax:     https://platform.minimax.io/docs/guides/pricing-paygo
 (def KNOWN_PROVIDER_MODELS
   {:blockether
    {"claude-opus-4-6"           {:pricing {:input 5.00  :output 25.00} :context 1000000}
@@ -112,21 +120,25 @@
     "gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
     "gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
     "gpt-5-mini"                {:pricing {:input 0.25  :output 2.00}  :context 128000}
-    "gpt-5.1"                   {:pricing {:input 1.25  :output 10.00} :context 128000}
+    ;; gpt-5.1 / gpt-5.4: with API key, both cost ~$1/$1 per 1M tokens (flat rate).
+    ;; Without API key (ChatGPT console) the rates are higher. We assume API usage.
+    "gpt-5.1"                   {:pricing {:input 1.00  :output 1.00}  :context 128000}
+    ;; gpt-5.2: deprecated by OpenAI — prefer gpt-5.4. Kept for legacy usage tracking.
     "gpt-5.2"                   {:pricing {:input 1.75  :output 14.00} :context 200000}
-    "gpt-5.4"                   {:pricing {:input 2.50  :output 15.00} :context 1000000}
+    "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
     "o3-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}
     "minimax-m2.5"              {:pricing {:input 0.50  :output 2.00}  :context 128000}
-    "minimax-m2.7:cloud"        {:pricing {:input 0.80  :output 3.00}  :context 128000}}
+    "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 128000}}
 
    :openai
    {"gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
     "gpt-4.1"                   {:pricing {:input 2.00  :output 8.00}  :context 1000000}
     "gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
     "gpt-5-mini"                {:pricing {:input 0.25  :output 2.00}  :context 128000}
-    "gpt-5.1"                   {:pricing {:input 1.25  :output 10.00} :context 128000}
+    "gpt-5.1"                   {:pricing {:input 1.00  :output 1.00}  :context 128000}
+    ;; gpt-5.2: deprecated — prefer gpt-5.4.
     "gpt-5.2"                   {:pricing {:input 1.75  :output 14.00} :context 200000}
-    "gpt-5.4"                   {:pricing {:input 2.50  :output 15.00} :context 1000000}
+    "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
     "o3"                        {:pricing {:input 2.00  :output 8.00}  :context 200000}
     "o3-pro"                    {:pricing {:input 20.00 :output 80.00} :context 200000}
     "o3-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}
@@ -143,7 +155,7 @@
    :zai
    {"glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
     "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "minimax-m2.7:cloud"        {:pricing {:input 0.60  :output 2.20}  :context 200000}
+    "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}
     "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
