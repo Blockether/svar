@@ -71,8 +71,11 @@
      (with-depth-tracking depth-atom routing
        (fn []
          (let [call-routing (merge routing (:routing opts {}))
-               [skill-msg skills-loaded] (when-let [skills (seq (:skills opts))]
-                                           (resolve-skill-messages (vec skills) (when skill-registry-atom @skill-registry-atom)))
+               ;; Skills load ONLY at depth 0 (main RLM → sub-rlm-query).
+               ;; Sub-RLMs cannot load skills into sub-sub-RLMs.
+               at-root? (zero? @depth-atom)
+               [skill-msg skills-loaded] (when (and at-root? (seq (:skills opts)))
+                                           (resolve-skill-messages (vec (:skills opts)) (when skill-registry-atom @skill-registry-atom)))
                max-iter (or (:max-iter opts) 1)
                iterated? (> max-iter 1)]
            ;; ITERATED PATH: delegate to run-sub-rlm (reuses iteration-loop)
