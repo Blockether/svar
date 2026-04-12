@@ -17,6 +17,7 @@
    [com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
    [com.blockether.svar.internal.rlm.pageindex.vision :as vision]
    [com.blockether.svar.internal.rlm.routing :as rlm-routing]
+   [com.blockether.svar.internal.rlm.batch :as rlm-batch]
    [com.blockether.svar.internal.rlm.concurrency :as concurrency]
    [com.blockether.svar.internal.rlm.schema :as schema]
    [com.blockether.svar.internal.rlm.trajectory :as trajectory]
@@ -258,6 +259,26 @@
     (rlm-tools/sci-update-binding! sci-ctx sym
       (rlm-tools/wrap-tool-for-sci env sym f (:tool-registry-atom env))))
   (swap! (:custom-docs-atom env) conj (assoc tool-def :type :fn :sym sym))
+  env)
+
+(defn register-hook!
+  "Attach a hook to an existing tool's chain.
+
+   Params:
+   `env`  - RLM environment.
+   `sym`  - Tool symbol (must already be registered via register-env-fn!).
+   `opts` - Map with:
+     :stage - One of :before / :after / :wrap.
+     :id    - Keyword, unique within the stage+tool. Replaces on collision.
+     :fn    - Hook function. Shape depends on stage:
+              :before — (fn [invocation] ...) → {:args new-args} or {:short-circuit val}
+              :after  — (fn [outcome] ...) → {:result new-result} or passthrough
+              :wrap   — (fn [handler] (fn [args] ...)) middleware
+
+   Returns the env."
+  [env sym {:keys [stage id fn]}]
+  (rlm-tools/register-tool-def! (:tool-registry-atom env) sym
+    {stage [{:id id :fn fn}]})
   env)
 
 (defn unregister-hook!
@@ -594,15 +615,8 @@
                                              :msg "LLM requested more iterations"})
                                 {:granted granted :new-budget new-budget :cap schema/MAX_ITERATION_CAP})))}
          sub-rlm-query-overrides {'sub-rlm-query cheap-sub-rlm-fn
-                                  'sub-rlm-query-batch (fn [prompts]
-                                                         (let [chs (mapv (fn [p]
-                                                                           (async/thread
-                                                                             (try
-                                                                               (cheap-sub-rlm-fn p)
-                                                                               (catch Exception e
-                                                                                 {:error (ex-message e)}))))
-                                                                     prompts)]
-                                                           (mapv async/<!! chs)))}
+                                  'sub-rlm-query-batch (fn [items]
+                                                         (rlm-batch/sub-rlm-query-batch cheap-sub-rlm-fn items))}
          ;; Reuse env's SCI ctx — all def'd vars persist naturally across queries
          sci-ctx (:sci-ctx env)
          ;; Re-flash registered tool fns into SCI as HOOK-WRAPPED closures.

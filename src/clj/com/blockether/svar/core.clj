@@ -502,6 +502,30 @@
   rlm/query-env!)
 
 #_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def register-hook!
+  "Attach a hook to an existing tool's :before / :after / :wrap chain.
+   See internal.rlm for details."
+  rlm/register-hook!)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def unregister-hook!
+  "Remove a per-tool hook entry by :id.
+   See internal.rlm for details."
+  rlm/unregister-hook!)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def list-tool-hooks
+  "Return hook chains registered for a tool symbol.
+   See internal.rlm for details."
+  rlm/list-tool-hooks)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
+(def list-registered-tools
+  "Return a vec of {:sym :hook-counts} for every registered tool.
+   See internal.rlm for details."
+  rlm/list-registered-tools)
+
+#_{:clojure-lsp/ignore [:clojure-lsp/unused-public-var]}
 (def list-queries
   "Lists query records from an RLM environment.
    See internal.rlm for details."
