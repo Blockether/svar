@@ -1,0 +1,4 @@
+2026-04-12T15:54:48.619303494Z :info com.blockether.svar.internal.rlm [2746 11] Starting text extraction from file 
+  data: {:file "resources-test/example.pdf"}
+2026-04-12T15:54:48.621052061Z :info com.blockether.svar.internal.rlm [2808 5] Text extraction complete 
+  data: {:document/name "example", :pages 1, :toc-entries 1, :has-metadata true, :title-inferred false, :has-abstract false}
