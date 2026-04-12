@@ -1,0 +1,10 @@
+2026-04-12T09:20:03.324071821Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 937, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T09:20:09.005076575Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 5681.445636, :content-len 1520, :has-reasoning false, :input-tokens 934, :output-tokens 443, :reasoning-tokens nil}
+2026-04-12T09:20:09.007908367Z :info com.blockether.svar.internal.llm [333 11] ::llm-request LLM request 
+  data: {:model "gpt-4o", :url "https://llm.blockether.com/v1/chat/completions", :msg-count 3, :input-tokens 1219, :timeout-ms 300000, :max-tokens nil}
+2026-04-12T09:20:10.985790131Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 1978.398181, :content-len 415, :has-reasoning false, :input-tokens 1216, :output-tokens 107, :reasoning-tokens nil}
+2026-04-12T09:20:10.987055518Z :warn com.blockether.svar.internal.llm [1057 13] ::cod-non-map-result SAP returned non-map for CoD spec — check jsonish/spec pipeline 
+  data: {:result-type clojure.lang.PersistentVector, :result "[{:entity \"August 25, 2012\", :rationale \"This marks the date Voyager 1 entered interstellar space, a major milestone in its journey.\", :score 1.0} [\"levelCLASS_wcert.validator True-floating\"]]"}

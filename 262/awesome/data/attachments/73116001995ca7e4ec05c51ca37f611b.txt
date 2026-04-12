@@ -1,0 +1,13 @@
+CHUNK 1 [7/7] event=French Revolution toll=40000
+CHUNK 2 [7/7] event=French Revolution toll=40000
+CHUNK 3 [7/7] event=French Revolution toll=40000
+2026-04-12T09:20:33.366612503Z :info com.blockether.svar.internal.llm [831 11] ::llm-response LLM response 
+  data: {:model "gpt-4o", :duration-ms 3249.623917, :content-len 980, :has-reasoning false, :input-tokens 261, :output-tokens 249, :reasoning-tokens 0}
+CHUNK 4 [7/7] event=French Revolution toll=40000
+
+=== COMPLEX STREAMING ===
+Total chunks: 4
+Final: {:event French Revolution, :date 1789–1799, :location Versailles, France; expanded across France, :key-figures [Louis XVI Marie Antoinette Maximilien Robespierre Georges Danton Marquis de Lafayette], :causes [Fiscal crisis in the monarchy Widespread crop failures and food shortages Growing influence of Enlightenment ideals Social inequality and anger at the feudal system], :consequences [Abolition of feudalism in France Issuance of the Declaration of the Rights of Man and of the Citizen Execution of King Louis XVI and Queen Marie Antoinette The Reign of Terror (~17,000 executions) Rise of Napoleon Bonaparte Transformation of French society and politics Inspiration for democratic movements worldwide Creation of the metric system Development of modern concepts of citizenship and civil rights], :death-toll 40000}
+Tokens: {:input 261, :output 249, :reasoning 0, :total 510} Cost: {:input-cost 6.525E-4, :output-cost 0.00249, :total-cost 0.0031425}
+=========================
+

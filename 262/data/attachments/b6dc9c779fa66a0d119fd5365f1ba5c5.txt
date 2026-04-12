@@ -1,0 +1,6 @@
+2026-04-12T09:20:47.316960951Z :info com.blockether.svar.internal.rlm.skills [266 6] ::skills-loaded Skills loaded 
+  data: {:count 0, :names []}
+2026-04-12T09:20:47.330932893Z :info com.blockether.svar.internal.rlm [1415 5] ::qa-corpus-cache-hit QA corpus snapshot cache hit 
+  data: {:revision 1, :hits 1, :misses 0}
+2026-04-12T09:20:47.342039882Z :info com.blockether.svar.internal.rlm [1428 5] ::qa-corpus-cache-miss QA corpus snapshot cache miss 
+  data: {:revision 2, :digest-ms 5.988894, :hits 1, :misses 1}

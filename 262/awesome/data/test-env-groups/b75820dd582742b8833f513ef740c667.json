@@ -1,0 +1,1 @@
+{"id":"b75820dd582742b8833f513ef740c667","fullName":"com.blockether.svar.internal.rlm.git-ingestion-test.parse-commit-message-test.non-conventional commit.returns nil prefix, full subject","name":"parse-commit-message-test > non-conventional commit > returns nil prefix, full subject","status":"passed","testResultsByEnv":{"default":"cfb7ec3613de47c15376329ae6ec1f7c"}}

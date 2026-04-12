@@ -1,0 +1,6 @@
+2026-04-12T09:20:40.347559747Z :info com.blockether.svar.internal.rlm.skills [266 6] ::skills-loaded Skills loaded 
+  data: {:count 0, :names []}
+2026-04-12T09:20:40.384331294Z :info com.blockether.svar.internal.rlm [452 9] ::ingest-git git commits ingested 
+  data: {:repo-path "/home/runner/work/svar/svar", :repo-name "svar", :commits-ingested 1, :head {:sha "322d047b32e512690235394d44e5f4cc6fdd2708", :short "322d047b32e5", :branch "main"}}
+2026-04-12T09:20:40.389367931Z :info com.blockether.svar.internal.rlm [452 9] ::ingest-git git commits ingested 
+  data: {:repo-path "/tmp/svar-gittest-5113438509097654214", :repo-name "tempy", :commits-ingested 1, :head {:sha "8f4d8669adfad912a9ab1f35db2127247e22be4f", :short "8f4d8669adfa", :branch "main"}}
