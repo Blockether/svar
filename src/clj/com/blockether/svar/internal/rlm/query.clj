@@ -9,6 +9,7 @@
    [com.blockether.svar.internal.rlm.concurrency :as concurrency]
    [com.blockether.svar.internal.rlm.core :as rlm-core]
    [com.blockether.svar.internal.rlm.db :as rlm-db]
+   [com.blockether.svar.internal.rlm.env :as rlm-env]
    [com.blockether.svar.internal.rlm.routing :as rlm-routing]
    [com.blockether.svar.internal.rlm.schema :as schema]
    [com.blockether.svar.internal.rlm.skills :as rlm-skills]
@@ -94,8 +95,8 @@
                                    {:optimize :cost} depth-atom rlm-router
                                    (:skill-registry-atom env) (atom env)
                                    rlm-core/iteration-loop)
-          custom-bindings        (when-let [a (:state-atom env)] (:custom-bindings @a))
-          custom-docs            (when-let [a (:state-atom env)] (:custom-docs @a))
+          custom-bindings        (rlm-env/custom-bindings env)
+          custom-docs            (rlm-env/custom-docs env)
           claims-atom            (when verify? (atom []))
           current-iteration-atom (atom 0)
           cite-bindings          (when verify?

@@ -125,7 +125,7 @@
      (anomaly/incorrect! "Invalid documents - must be vector of PageIndex documents"
        {:type :rlm/invalid-documents
         :explanation (schema/explain-documents documents)}))
-   (let [db-info @(:db-info-atom env)
+   (let [db-info (rlm-env/db-info env)
          rlm-router (:router env)
          extract? (:extract-entities? opts false)
          base-results (mapv #(rlm-db/db-store-pageindex-document! db-info %) documents)
@@ -205,7 +205,7 @@
       (anomaly/not-found! (str "Not a git repository: " resolved-path)
         {:type :rlm/not-a-git-repo :repo-path resolved-path}))
     (try
-      (let [db-info @(:db-info-atom env)
+      (let [db-info (rlm-env/db-info env)
             commits (rlm-git/read-commits repo
                       (cond-> {:n n}
                         since     (assoc :since since)
@@ -255,12 +255,12 @@
 (defn list-queries
   "Lists query records from an RLM environment."
   [env & [opts]]
-  (trajectory/list-queries @(:db-info-atom env) opts))
+  (trajectory/list-queries (rlm-env/db-info env) opts))
 
 (defn export-trajectories!
   "Exports filtered trajectories as JSONL for fine-tuning."
   [env output-dir & [opts]]
-  (trajectory/export-trajectories! @(:db-info-atom env) output-dir opts))
+  (trajectory/export-trajectories! (rlm-env/db-info env) output-dir opts))
 
 ;; =============================================================================
 ;; Trace Pretty Printing

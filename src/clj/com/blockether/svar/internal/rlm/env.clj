@@ -47,6 +47,56 @@
   @(:qa-corpus-atom env))
 
 ;; =============================================================================
+;; Env accessor API — hides atom access pattern from call sites.
+;; Prefer these over direct (:xxx-atom env) / @(:xxx-atom env) access.
+;; =============================================================================
+
+(defn db-info
+  "Current db-info map for env (deref of :db-info-atom). Nil-safe."
+  [env]
+  (when-let [a (:db-info-atom env)] @a))
+
+(defn tools
+  "Current tool registry map {sym → tool-def}. Nil-safe."
+  [env]
+  (when-let [a (:tool-registry-atom env)] @a))
+
+(defn skills
+  "Current skill registry map {keyword → skill-def}. Nil-safe."
+  [env]
+  (when-let [a (:skill-registry-atom env)] @a))
+
+(defn custom-bindings
+  "Current custom SCI bindings {sym → value}."
+  [env]
+  (some-> (:state-atom env) deref :custom-bindings))
+
+(defn custom-docs
+  "Current custom doc entries (vec of tool-defs)."
+  [env]
+  (some-> (:state-atom env) deref :custom-docs))
+
+(defn qa-corpus
+  "Current qa-corpus state map."
+  [env]
+  (some-> (:qa-corpus-atom env) deref))
+
+(defn var-index
+  "Current var-index state map."
+  [env]
+  (some-> (:var-index-atom env) deref))
+
+(defn depth
+  "Current recursion depth (long)."
+  [env]
+  (if-let [a (:depth-atom env)] @a 0))
+
+(defn conversation-ref
+  "Current conversation ref [e-id] vec or nil."
+  [env]
+  (some-> (:state-atom env) deref :conversation-ref))
+
+;; =============================================================================
 ;; create-env
 ;; =============================================================================
 
