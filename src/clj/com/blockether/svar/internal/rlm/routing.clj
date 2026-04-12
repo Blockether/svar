@@ -12,17 +12,27 @@
 
 (defn- with-depth-tracking
   "Executes f within recursion depth tracking. Returns error content map on max
-   depth exceeded or on exception (surfaced to the LLM so it can adapt)."
+   depth exceeded or on exception (surfaced to the LLM so it can adapt).
+
+   Uses swap-vals! (atomic old+new pair, side-effect-free) so concurrent
+   sub-rlm-query-batch calls cannot race past *max-recursion-depth*.
+   Never put side effects inside swap!'s fn — it retries on CAS contention."
   [depth-atom prefs f]
-  (if (>= @depth-atom *max-recursion-depth*)
-    {:content (str "Max recursion depth (" *max-recursion-depth* ") exceeded") :error true}
-    (try
-      (swap! depth-atom inc)
-      (f)
-      (catch Exception e
-        (trove/log! {:level :warn :data {:error (ex-message e) :prefs prefs} :msg "sub-rlm-query failed"})
-        {:content (str "ERROR: " (ex-message e)) :error true})
-      (finally (swap! depth-atom dec)))))
+  (let [limit (long *max-recursion-depth*)
+        [old-d new-d] (swap-vals! depth-atom
+                        (fn [d]
+                          (if (>= (long d) limit)
+                            d
+                            (inc (long d)))))
+        acquired? (> (long new-d) (long old-d))]
+    (if-not acquired?
+      {:content (str "Max recursion depth (" limit ") exceeded") :error true}
+      (try
+        (f)
+        (catch Exception e
+          (trove/log! {:level :warn :data {:error (ex-message e) :prefs prefs} :msg "sub-rlm-query failed"})
+          {:content (str "ERROR: " (ex-message e)) :error true})
+        (finally (swap! depth-atom dec))))))
 
 (defn- resolve-skill-messages
   "Resolves :skills opts into a vec of system messages prepended to the ask! call.
