@@ -1,650 +1,425 @@
-# PLAN.md — Skills, Hooks, Tools, Concurrency
+# PLAN.md — The Great Rlm.clj Breakup + Codebase Hardening
 
 Style: caveman-full. Machine + agent context.
 
 ## Goal
 
-SVAR gives primitives for tools, hooks, skills. Main RLM decides parallelism + skill selection. Skills = sub-RLM recipes, invoked via `sub-rlm-query` / `sub-rlm-query-batch`. Main context stays tiny — compact skill manifest only, bodies never leak.
+Kill the god namespace. `rlm.clj` (3535 lines, 92 fns) → 7 focused modules. Fix re-export boilerplate via macro. Harden error handling, fix race condition, eliminate atom sprawl. Every phase independently shippable — verify.sh green after each.
 
 ---
 
-## Architecture
-
-### Three primitives
-
-1. **Tools** — SCI fns in sandbox. Registered via `register-tool!`. v3 hook infra exists (tools.clj:972+).
-2. **Hooks** — `:before`/`:after`/`:wrap` chains per tool + global. Built. Needs public wrappers.
-3. **Skills** — sub-RLM recipes in SKILL.md. Main RLM invokes via `sub-rlm-query` with explicit `:skills [...]`. New.
-
-### Encapsulation rule
-
-- Skill **bodies** never touch main RLM context.
-- Main system prompt gets compact **manifest**: name + short desc (≤200 chars) per skill.
-- Main RLM reads manifest, picks skills, passes to `sub-rlm-query` calls.
-- Bodies load only inside the `sub-rlm-query` call that references them.
-- Main context bounded: ≈20 tok/skill. 20 skills ≈ 400 tok hard ceiling.
-
-### Who decides what
-
-| Decision | Who | When |
-|---|---|---|
-| Which skills exist | SVAR loader | `query-env!` init |
-| Which skills are loadable | SVAR loader | `query-env!` init (`requires` validation) |
-| Which skills to invoke for a query | **Main RLM** | Per `sub-rlm-query` call, explicit `:skills [...]` |
-| How to parallelize | **Main RLM** | Via `sub-rlm-query-batch` |
-| Concurrency cap | SVAR engine | Via `:concurrency` settings |
-
-No router LLM pass. No auto-activation. Main RLM fully in control.
-
----
-
-## SKILL.md spec — frozen
-
-```yaml
----
-name: ocr-pdf                          # REQ, [a-z0-9-]{1,64}, matches dir (lowercase)
-description: |                         # REQ, ≤1024 chars, full detail
-  OCR image-based PDFs via GLM-OCR 2-pass. Use when user asks to
-  extract text from scanned/image PDFs. Returns cleaned md + code.
-description-short: |                   # OPT, ≤200 chars, for main manifest
-  OCR image PDFs → cleaned md + code.  # SVAR-only extension. Auto-truncated from description if absent.
-compatibility: [svar]                  # REQ. Missing svar → skill ignored.
-
-agent:                                 # sub-RLM config
-  tools:      [sub-rlm-query, fetch-document-content, search-documents]
-  reasoning:  false
-  max-iter:   5
-  timeout-ms: 30000
-
-requires:                              # availability gate, validated at query-env! init
-  docs: true
-  git:  false
-  env:  [BLOCKETHER_API_KEY]
-
-version: 1.0.0                         # OPT
-license: MIT                           # OPT
----
-
-## System prompt
-<body — becomes sub-RLM system prompt when skill loaded>
-
-## When to use
-## Procedure
-## Pitfalls
-## Verification
-```
-
-### Load-time validation (runs at `query-env!` init, AFTER SCI ctx built)
-
-Init order is fixed:
-1. `create-sci-context` builds SCI registry (all available tools)
-2. `load-skills` validates `requires.tools` against the built registry
-
-Reverse order → every skill fails `:missing-tool`. Fixed init sequence, explicit in Step 8.
-
-Validation:
-- `compatibility` normalized → set of lowercase strings → must contain `"svar"`.
-- `name` lowercase `[a-z0-9-]{1,64}`, matches dir name lowercase. Mixed case anywhere → reject (cross-platform FS gotcha).
-- `requires.tools` all in SCI registry → else drop with `:missing-tool`.
-- `requires.docs: true` + no docs → drop.
-- `requires.git: true` + no repo → drop.
-- `requires.env` vars set → drop on miss.
-- `agent.max-iter` clamped to global cap.
-- `agent.tools` all in SCI registry.
-- Body token count ≤ 4000 (≈300 lines) → reject if over.
-- Unknown top-level keys → warn, keep.
-
----
-
-## Discovery paths — frozen
+## Current State (the mess)
 
 ```
-PROJECT (walk from cwd to git root):
-  .svar/skills/*/SKILL.md          ← SVAR-native, highest precedence
-  .claude/skills/*/SKILL.md
-  .opencode/skills/*/SKILL.md
-  .agents/skills/*/SKILL.md
-  skills/*/SKILL.md
-
-GLOBAL:
-  ~/.svar/skills/*/SKILL.md
-  ~/.claude/skills/*/SKILL.md
-  ~/.config/opencode/skills/*/SKILL.md
-  ~/.agents/skills/*/SKILL.md
-
-PLUGINS (opt-in via :skills/load-plugins true, default false):
-  ~/.claude/plugins/*/skills/*/SKILL.md
+rlm.clj (3535 lines) — EVERYTHING lives here:
+  L86-181    create-env          → 13 atoms, env construction
+  L183-345   register-env-fn/def!, hooks, ingest helpers
+  L345-505   ingest-to-env!, ingest-git!, dispose-env!
+  L506-909   query-env!          → 400-line monster, 30 let bindings
+  L911-990   list-queries, export-trajectories!, trace formatting
+  L992-1362  QA prompt builders, multi-hop, verification, dedup, revision
+  L1363-1553 QA manifest persistence (crash-resume)
+  L1553-1870 generate-qa-env!    → 300-line monster
+  L1872-1960 save-qa!
+  L1960-2045 File type detection helpers
+  L2045-2900 PageIndex internals (translate IDs, group nodes, TOC, PDF extract)
+  L2900-3082 index! orchestration + manifest
+  L3082-3535 index! impl, load-index, inspect
 ```
 
-Collision: project > global > plugin. First `name` wins. Discards logged.
+---
 
-Parser: **clj-yaml** (safe mode — reject `!!java/*` tags). Frontmatter split = handroll (~15 LoC).
+## Target State
 
-### Skill filtering opts on `query-env!`
+```
+rlm.clj           (~200 lines) — thin facade: create-env, dispose-env!, query-env!, re-exports
+rlm/env.clj       (~250 lines) — env construction, atom grouping, register-env-fn/def!, hooks
+rlm/query.clj     (~350 lines) — query-env! decomposed into phases
+rlm/qa.clj        (~500 lines) — generate-qa-env!, save-qa!, prompt builders, dedup, revision
+rlm/qa_manifest.clj (~200 lines) — QA manifest persistence, fingerprinting, crash-resume
+rlm/pageindex.clj  (~600 lines) — index!, load-index, inspect, file detection, PDF/TOC/node processing
+rlm/trace.clj     (~80 lines)  — format-trace, pprint-trace, print-trace
+core.clj           (~150 lines) — re-export macro kills 80% boilerplate
+```
+
+Plus cross-cutting fixes: race condition, swallowed exceptions, count shadowing, cost accumulator dedup.
+
+---
+
+## Phases
+
+### Phase 0 — Re-Export Macro (core.clj: 628 → ~150 lines)
+
+**What**: macro `re-export` that copies var + meta from source ns. Kills 107 `#_{:clojure-lsp/ignore}` annotations + 500 lines of mechanical defs. Programmatic generation for TYPE_INT_V_1..12, TYPE_STRING_V_1..12, TYPE_DOUBLE_V_1..12.
+
+**Files**:
+- `src/clj/com/blockether/svar/core.clj` — rewrite
+
+**Macro shape**:
+```clojure
+(defmacro re-export
+  "Re-exports vars from source namespace, preserving metadata."
+  [source-ns & syms]
+  `(do ~@(map (fn [sym]
+                `(let [src-var# (var ~(symbol (str source-ns) (str sym)))]
+                   (def ~(with-meta sym {}) @src-var#)
+                   (alter-meta! (var ~sym) merge (select-keys (meta src-var#) [:doc :arglists]))))
+              syms)))
+```
+
+**Vector types — generated**:
+```clojure
+(doseq [[prefix kw-prefix] [["INT" "int"] ["STRING" "string"] ["DOUBLE" "double"]]
+        n (range 1 13)]
+  (intern *ns*
+    (with-meta (symbol (str "TYPE_" prefix "_V_" n))
+      {:doc (format "Type: Fixed-size %s vector (%d element%s)." kw-prefix n (if (= n 1) "" "s"))})
+    (keyword "spec.type" (str kw-prefix "-v-" n))))
+```
+
+**Verify**: `./verify.sh` green. All README doctests pass (they `require` core).
+
+**Commit**: `refactor(core): re-export macro, kill 500 lines of boilerplate`
+
+---
+
+### Phase 1 — Extract `rlm/trace.clj` (easiest, zero deps)
+
+**What**: move `format-trace`, `pprint-trace`, `print-trace` (L925-990) → new `rlm/trace.clj`. Pure functions, no state, no circular deps.
+
+**Files**:
+- NEW `src/clj/com/blockether/svar/internal/rlm/trace.clj`
+- `src/clj/com/blockether/svar/internal/rlm.clj` — remove fns, add require, delegate
+- `src/clj/com/blockether/svar/core.clj` — update re-export source
+
+**Verify**: `./verify.sh` green.
+
+**Commit**: `refactor(rlm): extract trace formatting to rlm/trace.clj`
+
+---
+
+### Phase 2 — Extract `rlm/pageindex.clj` (1575 lines → own module)
+
+**What**: everything from L1960 to end of file (PageIndex internals + `index!` + `load-index` + `inspect`). This is ~1575 lines — nearly half the file — and has ZERO coupling to query-env!/generate-qa-env!. Clean cut.
+
+**Functions moving**:
+- `extract-doc-name`, `extract-extension`, `file-type`, `SUPPORTED_EXTENSIONS`, `supported-extension?`, `file-path?`
+- `translate-page-ids`, `translate-all-ids`, `visual-node?`, `last-visual-of-type`, `group-continuations`
+- `collect-all-nodes`, `has-toc-entries?`, `heading-level->toc-level`, `build-toc-from-structure`
+- `link-toc-entries`, `postprocess-toc`, `collect-section-descriptions`, `generate-document-abstract`
+- `validate-page-number`, `normalize-range`, `normalize-page-spec`, `filter-pages`
+- `extract-text`, `detect-input-type`, `strip-nil-keys`, `render-page-pngs!`, `write-embedded-image-nodes!`
+- `extract-pdf-pages`, `finalize-pdf-document`, `derive-index-path`, `ensure-absolute`
+- `write-document-edn!`, `file-hash`, `read-manifest`, `manifest-write-lock`, `write-manifest!`, `update-manifest-page!`
+- `read-document-edn`, `with-index-lock!`, `index!`, `load-index`, `print-toc-tree`, `inspect`
+
+**Files**:
+- NEW `src/clj/com/blockether/svar/internal/rlm/pageindex.clj` (orchestration module — uses pdf.clj, markdown.clj, vision.clj)
+- `src/clj/com/blockether/svar/internal/rlm.clj` — remove all above, add require + delegate `index!`, `load-index`
+
+**Verify**: `./verify.sh` green. `test/com/blockether/svar/internal/rlm/pageindex_test.clj` must still pass.
+
+**Commit**: `refactor(rlm): extract PageIndex to rlm/pageindex.clj (~1575 lines)`
+
+---
+
+### Phase 3 — Extract `rlm/qa_manifest.clj` + `rlm/qa.clj`
+
+**What**: two extractions in one phase (qa_manifest has no test coupling, qa.clj depends on it).
+
+#### 3a — `rlm/qa_manifest.clj` (~200 lines)
+
+Functions moving (L1363-1553):
+- `QA_MANIFEST_VERSION`, `sha256-hex`, `digest-update!`, `digest->sha256`
+- `qa-corpus-revision`, `qa-corpus-documents`, `qa-corpus-toc-entries`, `qa-corpus-page-nodes`
+- `qa-corpus-content-hash`, `qa-corpus-cache-hit!`, `qa-corpus-cache-miss!`
+- `compute-qa-corpus-snapshot`, `qa-corpus-snapshot`
+- `qa-manifest-fingerprint`, `fresh-qa-manifest`, `qa-manifest-path`
+- `read-qa-manifest`, `qa-manifest-write-lock`, `write-qa-manifest!`, `update-qa-batch-status!`
+
+**Fix while extracting**: `qa-manifest-write-lock` → per-env or per-path lock (currently global `Object.` shared across all envs).
+
+#### 3b — `rlm/qa.clj` (~500 lines)
+
+Functions moving:
+- `build-toc-based-selection-prompt`, `build-generation-prompt`, `create-multi-hop-pairs`
+- `build-verification-prompt`, `compute-distribution`, `dedup-batch`, `DEDUP_WINDOW_SIZE`
+- `deduplicate-questions`, `revise-questions`, `filter-verified-questions`, `fork-env-for-query`
+- `generate-qa-env!`, `save-qa!`
+- `invalidate-qa-corpus-snapshot-cache!`, `qa-corpus-snapshot-stats`
+
+**Fix while extracting**: `create-multi-hop-pairs` — replace `(atom [])` + `swap! conj` with `for` comprehension. Pure fn, no atoms needed.
+
+**Fix while extracting**: rename `:keys [count ...]` destructure in `generate-qa-env!` → `:keys [target-count ...]`. Kills all 15 `clojure.core/count` qualifications.
+
+**Files**:
+- NEW `src/clj/com/blockether/svar/internal/rlm/qa_manifest.clj`
+- NEW `src/clj/com/blockether/svar/internal/rlm/qa.clj`
+- `src/clj/com/blockether/svar/internal/rlm.clj` — remove ~700 lines, delegate
+
+**Verify**: `./verify.sh` green.
+
+**Commit**: `refactor(rlm): extract QA pipeline to rlm/qa.clj + rlm/qa_manifest.clj`
+
+---
+
+### Phase 4 — Extract `rlm/env.clj` (env construction + registration)
+
+**What**: `create-env` and all registration/hook wrappers → own module. This is where the atom grouping fix lives.
+
+**Functions moving**:
+- `create-env` (L86-181)
+- `register-env-fn!` (L196-267)
+- `register-hook!`, `unregister-hook!`, `list-tool-hooks`, `list-registered-tools` (L268-313)
+- `register-env-def!` (L314-344)
+
+**Structural fix — atom grouping**: reduce 13 atoms → 5 by merging related state:
 
 ```clojure
-{:skills/allow          [:ocr-pdf :summarize]  ; whitelist (mutex with deny)
- :skills/deny           [:bad-one]             ; blacklist (mutex with allow)
- :skills/roots          [".svar/skills"]       ; restrict discovery paths
- :skills/load-plugins   false}                 ; opt-in to plugin dirs
+;; BEFORE: 13 separate atoms
+{:depth-atom (atom 0)
+ :var-index-cache-atom (atom nil)
+ :var-index-revision-atom (atom -1)
+ :qa-corpus-snapshot-cache-atom (atom nil)
+ :qa-corpus-snapshot-stats-atom (atom nil)
+ ...}
+
+;; AFTER: 5 grouped atoms
+{:depth-atom        (atom 0)                          ; standalone — concurrent access
+ :var-index-atom    (atom {:cache nil :revision -1})   ; related pair → single atom
+ :qa-corpus-atom    (atom {:snapshot nil :stats nil})   ; related pair → single atom
+ :tool-registry-atom (atom {})                         ; standalone — independent lifecycle
+ :state-atom        (atom {:custom-bindings {}          ; everything else
+                           :custom-docs {}
+                           :db-info nil
+                           :skill-registry nil
+                           :rlm-env nil
+                           :conversation-ref nil})}
 ```
 
-Applied after load, before manifest generation.
+**Every deref site** in core.clj, tools.clj, query.clj, qa.clj must update. Use helper fns:
+- `(env-db-info env)` → `(:db-info @(:state-atom env))`
+- `(env-update-state! env f)` → `(swap! (:state-atom env) f)`
+
+**Files**:
+- NEW `src/clj/com/blockether/svar/internal/rlm/env.clj`
+- `src/clj/com/blockether/svar/internal/rlm.clj` — remove, delegate
+- ALL files that deref env atoms — update access patterns
+
+**Risk**: highest-risk phase. Every atom access changes. Run full test suite multiple times.
+
+**Verify**: `./verify.sh` green.
+
+**Commit**: `refactor(rlm): extract env.clj, group 13 atoms → 5`
 
 ---
 
-## `sub-rlm-query` — unified primitive (replaces old `llm-query`)
+### Phase 5 — Extract `rlm/query.clj` (decompose query-env!)
 
-**NAMING NOTE**: preserves the existing "query" suffix. SCI binding symbol goes from `'llm-query` to `'sub-rlm-query`. The existing Clojure-side local binding `sub-llm-query-fn` in `internal/rlm.clj:140,557` (a cost-optimized pre-bound variant) renames to `cheap-sub-rlm-query-fn` — local-scope, zero external impact.
+**What**: the 400-line `query-env!` monster → phases in `rlm/query.clj`. Facade `query-env!` in `rlm.clj` stays as thin wrapper.
 
-### Modes
+**Decomposition**:
 
 ```clojure
-;; MODE 1 — cheap single-shot (current llm-query behavior preserved)
-(sub-rlm-query "what is 2+2?")
-(sub-rlm-query {:prompt "..." :routing {:optimize :cost}})
-;   No skills, no tools, no iter. One chat completion.
-;   Returns {:content <prose> :code <vec<str>|nil>}.
+;; rlm/query.clj
 
-;; MODE 2 — ad-hoc iterated (tools, no skill) — NEW machinery
-(sub-rlm-query {:prompt    "analyze doc 1, extract entities"
-                :tools     [fetch-document-content search-documents]
-                :max-iter  5})
+(defn prepare-query-context
+  "Validates inputs, resolves bindings, sets up atoms.
+   Returns query-context map."
+  [env messages opts]
+  ...)
 
-;; MODE 3 — skill-based (main RLM picked from manifest) — NEW machinery
-(sub-rlm-query {:prompt "ocr doc 1, return cleaned md"
-                :skills [:ocr-pdf]})
-;   Skill body → sub-RLM system prompt.
-;   Sub-RLM runs with skill's agent.tools allowlist.
-;   Max 2 skills per call (enforced, :max-skills-per-call setting).
+(defn run-iteration-phase
+  "Calls iteration-loop, collects raw result.
+   Returns {:trace :iterations :answer :confidence :sources ...}"
+  [env query-ctx]
+  ...)
+
+(defn run-refinement-phase
+  "Cross-model verify if confidence < threshold.
+   Returns updated result with :eval-scores :refinement-count."
+  [env query-ctx raw-result]
+  ...)
+
+(defn update-q-values!
+  "Q-value reward for cited/uncited/unfetched pages."
+  [env query-ctx result]
+  ...)
+
+(defn finalize-query-result
+  "Merges cost, tokens, claims → final result map."
+  [query-ctx raw-result refinement-result]
+  ...)
 ```
 
-**MODE 2/3 are new primitives, NOT a rename.** Single-shot is the only existing path today. Building the iterated path is Step 9a below.
+**Also moving**: `Q_REWARD_UNCITED`, `Q_REWARD_FAILURE`, `confidence->base-reward`, `compute-q-reward` — these are query-specific, not env-level.
 
-### Output contract — uniform, differentiated by spec path
+**Cost accumulator dedup fix**: extract shared pattern:
 
 ```clojure
-{:content      <str|nil>        ; raw LLM text when NO :spec used (prose path, mode 1/2/3)
-                                ; nil when :spec used (spec path — structured data in :result)
- :code         <vec<str>|nil>   ; extracted from :content fences, matches ITERATION_SPEC cardinality
-                                ; nil when :content nil OR zero fences
-                                ; matches schema.clj:317 :spec.cardinality/many — same shape codebase-wide
- :result       <any|nil>        ; parsed spec :result when :spec used (from llm/ask!)
-                                ; also :final map when iterated
- :iter         <int>             ; 1 for single-shot, N for iterated
- :tokens       <int>             ; total (sum across iters + nested calls)
- :trace        <vec|nil>         ; iteration log — OPT-IN via {:include-trace true}
-                                ; default nil to prevent context bloat in batches
- :skills-loaded <vec|nil>        ; echoed from input, renamed from :skills-used
- :routed/provider-id ...
- :routed/model       ...}
+(defn make-cost-accumulator []
+  (atom {:input 0 :output 0 :reasoning 0 :cached 0 :total 0}))
+
+(defn accumulate-cost! [acc cost-map]
+  (swap! acc (fn [a] (merge-with + a (select-keys cost-map [:input :output :reasoning :cached :total])))))
 ```
 
-**`:content` vs `:spec` path split** (contract mismatch fix):
-- No `:spec`: `:content` is raw prose, `:code` auto-extracted from ```clojure fences.
-- With `:spec`: `:content` nil, `:code` nil, `:result` holds structured data from `llm/ask!`.
-- Current `routing.clj:57` returns `(pr-str (:result r))` as `:content` — WRONG for our contract. Fix: strip that, set `:content nil :result (:result r)` in the spec path.
+Use in both `rlm/query.clj` and `rlm/core.clj` — kill the duplicate merge-cost!/accumulate-usage! divergence.
 
-**`:trace` is NOT in default result.** Iteration log could be 10-50 KB per call × 50 batch items = 2.5 MB bubbling up. Opt-in via `{:include-trace true}`. Default result is slim.
+**Files**:
+- NEW `src/clj/com/blockether/svar/internal/rlm/query.clj`
+- `src/clj/com/blockether/svar/internal/rlm.clj` — `query-env!` becomes ~30 lines: validate, delegate, return
+- `src/clj/com/blockether/svar/internal/rlm/core.clj` — use shared cost accumulator
 
-### Recursion depth
+**Verify**: `./verify.sh` green. `test/com/blockether/svar/internal/rlm_test.clj` must pass (all query-env! tests).
 
-Sub-rlm-query can nest. Cap via existing `*max-recursion-depth*` (schema.clj:42). Default 3.
-Implementation: existing `depth-atom` pattern at routing.clj:27 — pass through nested calls, increment on entry, decrement on exit.
-
-### Timeout semantics — locked
-
-- `:timeout-ms` = total wall-clock budget for the entire call, including all sub-RLM iterations.
-- Sub-RLM iterations carve from that budget. No per-iter multiplier.
-- **Nested** `sub-rlm-query` calls inherit `min(caller-specified, parent-remaining)` via dynamic var `*sub-rlm-deadline*` (absolute instant). Child never exceeds parent.
-- Separate `:http-timeout-ms` per HTTP request (default 20000).
-- Budget exhausted mid-iter → partial result with `:error :timeout`.
-
-### Precedence table (call-site + skill + global)
-
-```
-max-iter  = (min caller-max-iter skill-agent-max-iter global-cap)
-            default 1 when no skills + no caller (degenerate loop = single-shot)
-tools     = skill.agent.tools when :skills passed (caller :tools ignored + warn)
-            else caller :tools
-            else parent SCI ctx bindings
-timeout   = (min caller-timeout skill-agent-timeout env-default-timeout)
-skills    = dedupe + reject :nonexistent + (take max-skills-per-call)
-```
-
-### Call-site schema — precise
-
-```
-:skills [:a :b]   → valid, dedup, validate names exist → else :unknown-skill error
-:skills []        → same as absent (mode 1/2)
-:skills nil       → same as absent
-:skills :none     → same as absent (explicit)
-:tools + :skills  → :tools ignored, warn
-:max-iter 0       → error :invalid-max-iter
-:max-iter N       → clamped to (min N skill.agent.max-iter global-cap)
-(zero args)       → error :missing-prompt
-```
+**Commit**: `refactor(rlm): decompose query-env! into phased rlm/query.clj`
 
 ---
 
-## `sub-rlm-query-batch` — parallel fan-out (replaces old `llm-query-batch`)
+### Phase 6 — Fix Race Condition in `routing.clj`
 
+**What**: `with-depth-tracking` read-then-write on `depth-atom` is not atomic. Two concurrent `sub-rlm-query-batch` calls can exceed max depth.
+
+**Current (broken)**:
 ```clojure
-(sub-rlm-query-batch
-  [{:prompt "q1"}                                    ; cheap single-shot
-   {:prompt "..." :tools [fetch-document-content]}   ; ad-hoc with tools
-   {:prompt "ocr d1" :skills [:ocr-pdf]}             ; skill
-   {:prompt "ocr d2" :skills [:ocr-pdf]}             ; skill parallel
-   {:prompt "summarize d3" :skills [:summarize]}])
-;=> [{:content :code ...} {...} {...} {...} {...}]   ; same order
+(if (>= @depth-atom *max-recursion-depth*)   ;; READ
+  {:error true}
+  (do (swap! depth-atom inc)                  ;; WRITE — gap between read and write
+    (try (f) (finally (swap! depth-atom dec)))))
 ```
 
-### Implementation requirements
-
-- Heterogeneous modes mix freely.
-- Parallelism via `sci.addons.future` + **query-env-scoped reentrant semaphore**.
-- Semaphore bounded by `:concurrency.max-parallel-llm` (default 8).
-- **Reentrant keyed by thread id** — same thread can re-enter without blocking. Prevents deadlock when nested `sub-rlm-query` calls contend with outer batch items.
-- Scope: ONE semaphore per `query-env!` session. Shared across batches + nested calls.
-- Slot held during actual HTTP request only. Iterating sub-RLMs release between iters.
-- **`:timeout-ms` clock starts at slot acquisition**, not batch submission. Queue wait unbounded by default; optional `:queue-timeout-ms` for bounded queuing.
-- **Cancel propagation**: batch reads parent env's `:cancel-atom` (core.clj:1013). Checks before each slot acquisition. In-flight items complete (no HTTP interrupt); queued items return `{:error :cancelled}`.
-- **Binding propagation**: use native `(future ...)` macro (captures bindings via `bound-fn*`). Never raw `ExecutorService.submit`. Dynamic vars `*max-recursion-depth*`, `*sub-rlm-deadline*` propagate automatically.
-- **Per-item errors**: result vec same size as input. Errored items = `{:error <keyword> :message <str> :cause <any>}`. Batch itself never throws unless opts malformed.
-- Order-preserving result vec.
-
----
-
-## Concurrency — settings, not prompt
-
-### Settings block on `query-env!`
-
+**Fix (atomic CAS)**:
 ```clojure
-(svar/query-env!
-  {:concurrency {:max-parallel-llm    8       ; HTTP calls in flight, query-env-scoped reentrant sem
-                 :max-skills-per-call 2       ; ceiling on :skills [...] count
-                 :default-timeout-ms  30000   ; total per-call wall clock
-                 :http-timeout-ms     20000}  ; per HTTP request
-   ...})
+(let [acquired (volatile! false)]
+  (swap! depth-atom
+    (fn [d]
+      (if (>= d *max-recursion-depth*)
+        d
+        (do (vreset! acquired true) (inc d)))))
+  (if-not @acquired
+    {:content "Max recursion depth exceeded" :error true}
+    (try (f) (finally (swap! depth-atom dec)))))
 ```
 
-**Four knobs.** No separate pools. Tools use Clojure default thread pool (local, not LLM).
+**Files**:
+- `src/clj/com/blockether/svar/internal/rlm/routing.clj`
 
-Concurrency is env-scoped, fixed at `query-env!` init. Per-call `:routing` can tune cost/speed but cannot override concurrency caps.
+**Also add test**: `test/com/blockether/svar/internal/rlm/routing_test.clj` — concurrent depth exhaustion test.
+
+**Verify**: `./verify.sh` green.
+
+**Commit**: `fix(rlm): atomic depth check in with-depth-tracking, add concurrency test`
 
 ---
 
-## Main RLM system prompt additions — CAVEMAN, locked
+### Phase 7 — Harden Exception Handling (swallowed exceptions audit)
 
-Two new caveman blocks for `build-system-prompt` (core.clj:383):
+**What**: add `trove/log!` at `:warn` or `:debug` to all silent catch blocks. 20+ locations across rlm.clj (now split), core.clj, db.clj, sub.clj, llm.clj.
 
-### Block 1 — LLM primitives (always present)
+**Rules**:
+- Data-path catches (db.clj fulltext fallback, entity deser, rehydrate) → `:warn` level
+- SCI sandbox helper catches (date parsing, format helpers) → `:debug` level (nil-on-bad-input is intended)
+- SSE/stream catches (llm.clj) → `:warn` level
+- Auto-refine catches (sub.clj) → `:warn` level
 
-```
-LLM:
-- (sub-rlm-query "...") — single-shot. {:content :code}
-- (sub-rlm-query {:prompt :tools :max-iter :skills}) — iterated w/ opt skills
-- (sub-rlm-query-batch [{...} {...}]) — parallel, sem-capped
-- Output: {:content :code :result :iter :tokens :skills-loaded}
-- :code is vec<str> — matches iter spec cardinality
-- (doc sub-rlm-query-batch) for full shape
-```
-
-Replaces core.clj:404 `future/pmap/promise/deliver OK.` line.
-
-### Block 2 — Skills manifest (only when ≥1 skill loaded)
-
-```
-SKILLS (pass :skills [...] to sub-rlm-query/batch, max 2 per call):
-  :ocr-pdf       — OCR image PDFs → md + code
-  :summarize     — Per-doc summary → struct + code
-  :extract-ents  — Entity extraction → entity vec + code
-  :git-triage    — Bug hunt over commits → hypothesis + code
-```
-
-Format: `:name — <description-short ≤200 chars>`. One line/skill. No bodies. No `agent`/`requires`.
-
-Hard cap: 20 skills × ~30 tok = ~600 tok worst case. Over 20 → truncate + log discard.
-
-Both blocks follow CLAUDE.md caveman rules: drop articles, one-word-when-enough, no hedging, `→` for causality.
-
----
-
-## Rename pass — two merged renames
-
-### (A) `fetch-content` → `fetch-document-content`
-
-Files touched (verified via grep):
-- `src/clj/com/blockether/svar/internal/rlm/tools.clj` — `make-fetch-content-fn` + SCI binding `'fetch-content` at line 500
-- `src/clj/com/blockether/svar/internal/rlm/db.clj`
-- `src/clj/com/blockether/svar/internal/rlm/core.clj` — system prompt docs
-- `src/clj/com/blockether/svar/internal/rlm/schema.clj`
-- `src/clj/com/blockether/svar/internal/rlm/trajectory.clj`
-- `test/com/blockether/svar/internal/rlm_test.clj`
-- `README.md` — doctest blocks
-- `CHANGELOG.md` — BREAKING entry
-- **Audit before committing**: `grep -rn fetch-content bench/ scripts/ docs/ CLAUDE.md`
-- **Datalevin persisted trajectories**: bump schema version; document breakage.
-- **Bench trajectories** (`bench/trajectories/**/*.edn`): literal strings inside persisted code; sed-based migration script OR note as breakage.
-
-### (B) `llm-query` → `sub-rlm-query` + `llm-query-batch` → `sub-rlm-query-batch`
-
-Files touched (full grep verified):
-- `src/clj/com/blockether/svar/internal/rlm/routing.clj` — `make-routed-llm-query-fn` → `make-routed-sub-rlm-query-fn`, fn literal name, trove IDs `::sub-llm-call` → `::sub-rlm-call`, `::sub-llm-response` → `::sub-rlm-response`
-- `src/clj/com/blockether/svar/internal/rlm/tools.clj` — SCI binding `'llm-query` → `'sub-rlm-query` at line 489, docstrings, `create-sci-context` parameter name `llm-query-fn` → `sub-rlm-query-fn`
-- `src/clj/com/blockether/svar/internal/rlm/core.clj` — import at line 12, call site at line 78, system prompt docs, trove IDs
-- **`src/clj/com/blockether/svar/internal/rlm.clj`** (was missing from previous plan) — 3 call sites:
-  - `rlm.clj:139` — `llm-query-fn` local binding → `sub-rlm-query-fn`
-  - `rlm.clj:140` — `sub-llm-query-fn` (cost-optimized variant) → `cheap-sub-rlm-query-fn`
-  - `rlm.clj:557` — second cost-optimized instance → `cheap-sub-rlm-query-fn`
-- `test/com/blockether/svar/internal/rlm_test.clj` — `make-routed-llm-query-fn-test` block at line 663, call sites at 669, 679
-- `README.md` — doctest blocks
-- `CHANGELOG.md` — BREAKING entry
-- `CLAUDE.md` — any references
-- **Audit**: `grep -rn 'llm-query\|::sub-llm' src/ test/ bench/ scripts/ docs/ CLAUDE.md README.md`
-- **`svar/core.clj` public API audit — DONE**: grep returned zero matches. `llm-query` and `fetch-content` are **internal-only symbols**. Rename does NOT break external library consumers. Good news, no migration burden.
-
-### Trove log IDs — enumerated
-
-Current (routing.clj:32, 39, 47, 62):
-- `::sub-llm-call` → `::sub-rlm-call`
-- `::sub-llm-response` → `::sub-rlm-response`
-
-External log monitors / metrics dashboards hard-coded to these IDs will break silently. Document in CHANGELOG.
-
-### Rationale
-
-- `fetch-content` → `fetch-document-content`: unambiguous, matches `search-documents`, makes room for `fetch-page-content`/`fetch-commit-content`.
-- `llm-query` → `sub-rlm-query`: naming reflects reality. Every call is a (possibly degenerate) sub-RLM invocation. Preserves "query" suffix for continuity.
-- `sub-llm-query-fn` → `cheap-sub-rlm-query-fn`: local binding rename. Avoids `sub-sub-rlm` confusion. Cost-optimized variant called out in the name.
-- No backward-compat aliases. Clean break (per CLAUDE.md).
-
----
-
-## Sub-RLM SCI context scoping — design spike
-
-**Question**: when `sub-rlm-query {:skills [:ocr-pdf]}` runs, sub-RLM gets narrowed tools from `agent.tools`. How?
-
-**Finding (W5)**: `create-sci-context` (tools.clj:476) takes `[context-data llm-query-fn db-info-atom conversation-ref-atom custom-bindings]`. **No allowlist param.** Bindings merged internally at tools.clj:529. Full `sci/init` is expensive (huge namespace map via `sci-future/install`).
-
-### Options
-
-**Option A — fresh ctx per call**
-- New `create-sci-context` call with narrowed bindings.
-- Cost: full `sci/init` per call (likely 50-200ms based on ns count).
-- **Likely non-viable for batches or nested calls.**
-
-**Option B — cache ctxs by allowlist hash**
-- Build once per unique allowlist, reuse.
-- Hazard: sub-RLM `def`s mutate ns — need child ctx or snapshot-restore pattern.
-- Complex state management.
-
-**Option C — single ctx, runtime allowlist gate**
-- Parent ctx reused wholesale.
-- Dispatch wrapper checks `(contains? allowlist tool-sym)` before invoke.
-- Cheapest. Weakest isolation — `(resolve 'forbidden)` still works.
-- **Likely only viable option.**
-
-### Spike requirements (Step 7)
-
-1. Benchmark `create-sci-context` + `sci/init` cost via `criterium`.
-2. If >50ms → Option A rejected.
-3. Option B viability depends on mutation isolation — spike the def/undef cycle.
-4. Pick winner, document decision + benchmark numbers in this section (replace spike text).
-5. **Fallback**: if spike inconclusive, default to Option C + mark as tech-debt. Forward progress guaranteed.
-
----
-
-## Hooks primitives — public wrappers
-
-Existing infra: `register-tool-def!` at tools.clj:1411 takes `:before`/`:after`/`:wrap`. Works. Needs public surface.
-
-### New public API
-
+**Shape** (every catch block gets):
 ```clojure
-(svar/register-tool!  'my-fn {:fn f :doc "..." :args [...]})
-(svar/register-hook!  'my-fn {:stage :before :id :my-hook :fn f})
-(svar/unregister-hook! 'my-fn :before :my-hook)
-(svar/list-hooks      'my-fn)
-(svar/register-skill! {:name :x :description "..." :body "..." :agent {...} :requires {...}})
+(catch Exception e
+  (trove/log! {:level :warn :id ::fn-name-fallback
+               :data {:error (ex-message e)} :msg "description"})
+  nil) ;; or {} or [] — keep existing fallback
 ```
 
-`register-skill!` covers the **asymmetry** — file-based discovery is not the only path. Programmatic registration uses the same validation + registry.
+**Files**: all files with silent catches (db.clj, core.clj, sub.clj, llm.clj, and the new split modules).
 
-**Globals**: existing `query-env!` opts handle `:on-tool-invoked` / `:on-tool-completed`. Public API does NOT add runtime registration for globals (env-scoped only). Document.
+**Also fix**: `auto-refine-async!` in `sub.clj` — check `(:conn @db-info-atom)` before transacting. Don't write to closed DB.
 
-Thin delegation to tools.clj v3 fns. No new infra.
+**Verify**: `./verify.sh` green.
+
+**Commit**: `fix(rlm): add logging to 20+ silent catch blocks, guard auto-refine against closed DB`
 
 ---
 
-## Build order — incremental commits
+### Phase 8 — Tests for Untested RLM Modules
 
-Each step = one commit. `./verify.sh` between. Low-risk steps (doc/prompt edits) use `--quick`.
+**What**: 6 RLM internal modules have ZERO tests. Add focused unit tests for the most critical ones.
 
-### Step 0 — Benchmark baseline
-- Run `4clojure`, `humaneval`, `swebench-verified` with current code.
-- Capture trajectories in `.verification/baseline/`.
-- No code change. Reference for Step 12 regression check.
+**Priority order** (risk × complexity):
 
-### Step 1 — Concurrency settings plumbing
-- `:concurrency` opt on `query-env!` schema (schema.clj).
-- Thread through routing.clj.
-- Dynamic var `*sub-rlm-deadline*` (absolute wall-clock instant) for nested budget inheritance.
-- Defaults: `{:max-parallel-llm 8 :max-skills-per-call 2 :default-timeout-ms 30000 :http-timeout-ms 20000}`.
-- Reentrant semaphore (thread-id keyed) as query-env-scoped singleton.
-- Tests: settings propagation, reentrancy (no deadlock on nested acquire), deadline inheritance.
+1. **`routing_test.clj`** — depth tracking (incl. concurrent CAS test from Phase 6), max-depth enforcement
+2. **`concurrency_test.clj`** — reentrant semaphore under concurrent load, thread-id keying, deadlock-freedom
+3. **`batch_test.clj`** — parallel fan-out ordering, error isolation, semaphore bounding
+4. **`skills_test.clj`** — SKILL.md parsing, validation rules, change detection, content hashing
+5. **`trajectory_test.clj`** — query scoring, JSONL export format
 
-### Step 2 — Rename `fetch-content` → `fetch-document-content`
-- Full grep sweep (src/test/bench/scripts/docs/CLAUDE.md/README).
-- Datalevin schema version bump; bench trajectory migration script.
-- CHANGELOG BREAKING.
-- `./verify.sh` full.
+`sub.clj` tested indirectly via rlm_test.clj integration tests — lower priority.
 
-### Step 3 — Rename `llm-query` → `sub-rlm-query` + `llm-query-batch` → `sub-rlm-query-batch`
-- **Include `internal/rlm.clj`** (3 call sites). Rename local `sub-llm-query-fn` → `cheap-sub-rlm-query-fn`.
-- Update routing.clj (`make-routed-llm-query-fn` → `make-routed-sub-rlm-query-fn`), tools.clj (SCI binding, create-sci-context param), core.clj, all trove IDs (`::sub-llm-call` → `::sub-rlm-call`, `::sub-llm-response` → `::sub-rlm-response`).
-- Update test file (`make-routed-llm-query-fn-test` → `make-routed-sub-rlm-query-fn-test` + call sites).
-- README doctests + CLAUDE.md references.
-- CHANGELOG BREAKING.
-- `./verify.sh` full.
-- **This is a mechanical rename only.** No behavior change. MODE 2/3 remain unimplemented.
+**Files**:
+- NEW `test/com/blockether/svar/internal/rlm/routing_test.clj`
+- NEW `test/com/blockether/svar/internal/rlm/concurrency_test.clj`
+- NEW `test/com/blockether/svar/internal/rlm/batch_test.clj`
+- NEW `test/com/blockether/svar/internal/rlm/skills_test.clj`
+- NEW `test/com/blockether/svar/internal/rlm/trajectory_test.clj`
 
-### Step 4 — `:code` extraction + contract differentiation
-- Post-call parser: regex `(?s)```clojure\s*\n(.*?)```` → vec of captures.
-- Populate `:code` as `vec<str>|nil` matching ITERATION_SPEC cardinality (schema.clj:317).
-- **Fix spec-path bug**: remove `(pr-str (:result r))` from routing.clj:57. Spec path → `:content nil :result (:result r) :code nil`. No-spec path → `:content <prose> :code <vec|nil> :result nil`.
-- Existing callers reading `:content` in no-spec mode unaffected.
-- Tests: zero-fence → `:code nil`; single-fence → 1-elem vec; multi-fence → N-elem vec; malformed → graceful skip; spec path → `:content nil :code nil`.
+**Verify**: `./verify.sh` green. Test count should increase from ~830 → ~900+.
 
-### Step 5 — `sub-rlm-query-batch`
-- New fn in new ns `internal/rlm/batch.clj` (keeps routing.clj focused on single-call path).
-- Input: vec of opts maps, heterogeneous modes.
-- Reentrant semaphore (Step 1) bounded by `:max-parallel-llm`, query-env-scoped.
-- Timeout clock starts at slot acquisition. Optional `:queue-timeout-ms`.
-- Uses native `(future ...)` macro for binding propagation.
-- Per-item `{:error ...}` maps; batch never throws.
-- Reads parent env `:cancel-atom` (core.clj:1013); propagates cancel to queued items.
-- Order-preserving result vec.
-- Tests: ordering, sem cap across batches, reentrancy no-deadlock, timeout timing, mixed modes, errors per item, cancel propagation.
-
-### Step 6 — System prompt shrink + LLM block
-- `build-system-prompt` (core.clj:383): drop `future/pmap/promise` line (core.clj:404).
-- Add caveman LLM block (see "Main RLM system prompt additions" section).
-- Zero skill info yet (manifest lands Step 10).
-- `--quick` verify OK.
-
-### Step 7 — SCI ctx scoping spike
-- Benchmark `create-sci-context` + `sci/init` cost via `criterium`.
-- Prototype Options A/B/C.
-- Write benchmark numbers + decision into this doc's "Sub-RLM SCI context scoping" section.
-- If inconclusive → default Option C, mark tech-debt.
-- No production code yet.
-
-### Step 8 — `internal/rlm/skills.clj` (loader)
-- `scan-skill-paths` — walk discovery paths, respect `:skills/roots`, `:skills/load-plugins`.
-- `parse-skill` — read SKILL.md, split frontmatter/body, **clj-yaml safe mode**.
-- `normalize-compatibility` — handle scalar/seq/string/keyword YAML shapes.
-- `validate-skill` — compatibility, name-lowercase, requires.tools (against SCI registry), requires.docs/git/env, max-iter clamp, body token count ≤4000.
-- `load-skills` — scan + parse + validate + dedupe + filter by `:skills/allow`/`:skills/deny`.
-- `skill-registry` — map in the rlm-env, populated at `query-env!` init.
-- **Init order**: SCI ctx built FIRST (Step 8a), skills loaded SECOND (Step 8b). Explicit call sequence in `query-env!`.
-- Add `clj-yaml` to `deps.edn`.
-- Tests: fixtures covering all valid/invalid/collision cases:
-  - valid minimal / all optional fields
-  - missing name / description / compatibility
-  - compatibility without svar / as scalar / as seq / as map
-  - invalid YAML / missing `---` / BOM / CRLF
-  - duplicate names (collision)
-  - unknown top-level keys
-  - `requires.tools` missing from registry
-  - `requires.docs`/`git`/`env` unmet
-  - over `max-iter` clamp
-  - description > 1024 chars (warn, truncate in manifest)
-  - body > 4000 tokens (reject)
-  - YAML injection attack (`!!java/*` tag → rejected by safe mode)
-  - mixed-case dir name
-
-### Step 9a — Build `run-sub-rlm-query` iterated primitive (NEW MACHINERY)
-- **This is the biggest step.** Builds what the plan earlier assumed existed.
-- New module: `internal/rlm/sub.clj` (or inline in routing.clj — TBD).
-- Signature:
-  ```clojure
-  (run-sub-rlm-query
-    {:parent-env    <rlm-env>
-     :system-prompt <str>
-     :tool-allowlist #{'sym ...}   ; from Step 7 decision
-     :prompt        <str>
-     :max-iter      <int>
-     :deadline      <inst>         ; absolute wall clock
-     :routing       <map>
-     :cancel-atom   <atom>
-     :include-trace? <bool>})
-  ```
-- Constructs child `rlm-env` with narrowed SCI ctx (per Step 7 decision) or uses runtime gate.
-- Builds initial messages: `[{:role "system" :content system-prompt} {:role "user" :content prompt}]`.
-- Loops via existing `run-iteration` (core.clj:468) until `:final` or `max-iter` reached or deadline expired or cancel-atom set.
-- **Iteration spec selection**: `(if (provider-has-reasoning? (:router child-env)) ITERATION_SPEC_CODE_ONLY ITERATION_SPEC)` — reuse existing helper at routing.clj.
-- Collects iterations into trace vec (only retained if `:include-trace?`).
-- Propagates nested sub-rlm-query calls via `*sub-rlm-deadline*` dynamic var.
-- Returns `{:content :code :result :iter :tokens :trace :skills-loaded ...}`.
-- Uses reentrant semaphore for HTTP slot acquisition (Step 1).
-- Tests: 1-iter cheap path, multi-iter with tools, deadline hit, cancel mid-iter, nested sub-rlm-query, recursion depth cap, reasoning/non-reasoning spec selection.
-
-### Step 9b — Wire skill bodies into `run-sub-rlm-query`
-- Apply Step 7 ctx scoping decision for tool narrowing.
-- When `sub-rlm-query {:skills [:a :b]}`: build sub-RLM system prompt = **call-site order** concat of skill bodies with separator. `a` body first, then `b` body. Document: later overrides earlier on conflict.
-- `tool-allowlist` = union of `:skills`' `agent.tools` (validated against parent ctx).
-- Clamp `max-iter` and `timeout-ms` per precedence table.
-- Enforce `:max-skills-per-call` cap → error if exceeded.
-- `:skills-loaded` echoed in result.
-- Reject unknown skill names with `:unknown-skill` error.
-- Tests: skill body reaches sub-RLM system prompt, tools allowlisted, bodies never leak to parent context, call-site order respected, max-skills enforced, unknown-skill error, dedup dupes.
-
-### Step 10 — Main RLM skills manifest injection
-- Edit `build-system-prompt` (core.clj:383) to add caveman SKILLS block when ≥1 skill loaded.
-- Format per "Main RLM system prompt additions" section.
-- Auto-truncate `description` to 200 chars if `description-short` absent.
-- Hard cap: 20 skills in manifest; over 20 → truncate alphabetically, log discard.
-- Tests: manifest present when skills loaded, absent otherwise, token budget, truncation, caveman formatting.
-
-### Step 11 — Hooks + register-skill! public wrappers
-- `svar/register-tool!`, `svar/register-hook!`, `svar/unregister-hook!`, `svar/list-hooks`.
-- `svar/register-skill!` — programmatic skill registration (validates via same path as file loader).
-- Document: globals stay as `query-env!` opts (no runtime registration path).
-- Thin delegation to tools.clj v3 fns + Step 8 skills loader.
-- Tests: registration, unregistration, chain ordering, programmatic skill register.
-
-### Step 12 — Benchmark verification
-- Re-run `4clojure`, `humaneval`, `swebench-verified`.
-- Compare to Step 0 baseline.
-- Fail if regression >5% on any metric.
-- Trajectories to `.verification/post/`.
-- Investigate regressions before shipping.
-
-### Step 13 — Docs + README
-- README `## Skills` section.
-- SKILL.md template with commented fields.
-- Example `./skills/ocr-pdf/SKILL.md`.
-- Doctest blocks for `sub-rlm-query` modes + `sub-rlm-query-batch`.
-- CLAUDE.md updates: new fn names, new SCI bindings, caveman rules for skill bodies.
-- `--quick` verify OK.
+**Commit**: `test(rlm): add unit tests for routing, concurrency, batch, skills, trajectory`
 
 ---
 
-## Open questions — real list
+## Phase Dependency Graph
 
-1. **Sub-RLM ctx scoping** — Step 7 spike outcome. Likely Option C (runtime gate). Affects Step 9a/9b.
-2. **Bench trajectory migration** — sed script vs accept breakage. Decide in Step 2.
-3. **Reasoning mode mismatch** — sub-RLM picks spec via `provider-has-reasoning?`. Wired in Step 9a.
-4. **Skill hot-reload** — out of scope v1.
-5. **`:skills/roots` override** — add to Step 8 (small cost).
-6. **Plugin skill trust** — `:skills/load-plugins false` default. Revisit if community plugins emerge.
+```
+Phase 0 (re-export macro)     — independent, do first
+Phase 1 (trace.clj)           — independent, easiest extraction
+Phase 2 (pageindex.clj)       — independent, biggest line reduction
+Phase 3 (qa.clj + manifest)   — independent of 1,2 but touches rlm.clj
+Phase 4 (env.clj)             — AFTER 1,2,3 (fewer lines to audit atom access)
+Phase 5 (query.clj)           — AFTER 4 (needs env accessor helpers)
+Phase 6 (race condition)      — independent, can do anytime
+Phase 7 (exception hardening) — AFTER 1-5 (catches move with extractions)
+Phase 8 (tests)               — AFTER 6 (routing test needs CAS fix), otherwise independent
+```
 
-## Out of scope (v1)
+**Recommended execution order**: 0 → 1 → 2 → 3 → 6 → 4 → 5 → 7 → 8
 
-- `svar/register-context!` user-defined state predicates.
-- SKILL.md hot-reload.
-- Bundled skill scripts (Python/bash). SCI-Clojure only.
-- AGENTS.md parsing — separate concept.
-- Router LLM pass for auto-skill-selection — dropped.
-- Skill versioning beyond project>global>plugin precedence.
-- Skill dependencies / composition declarations.
-- Global hooks runtime registration (env-scoped only).
-- Native-image compat for `clj-yaml`.
+Each phase = 1 commit. `verify.sh` green after each. No big-bang merge.
 
 ---
 
-## Reference card — what main RLM sees (caveman, locked)
+## Line Count Impact
 
-### Block 1 — LLM primitives (always)
+| File | Before | After |
+|------|--------|-------|
+| `rlm.clj` | 3535 | ~200 (facade + re-exports from sub-modules) |
+| `core.clj` | 628 | ~150 (re-export macro) |
+| `rlm/trace.clj` | — | ~80 (new) |
+| `rlm/pageindex.clj` | — | ~600 (new, from rlm.clj L1960-3535) |
+| `rlm/qa.clj` | — | ~500 (new, from rlm.clj L992-1960) |
+| `rlm/qa_manifest.clj` | — | ~200 (new, from rlm.clj L1363-1553) |
+| `rlm/env.clj` | — | ~250 (new, from rlm.clj L86-345) |
+| `rlm/query.clj` | — | ~350 (new, from rlm.clj L506-909) |
 
-```
-LLM:
-- (sub-rlm-query "...") — single-shot. {:content :code}
-- (sub-rlm-query {:prompt :tools :max-iter :skills}) — iterated w/ opt skills
-- (sub-rlm-query-batch [{...} {...}]) — parallel, sem-capped
-- Output: {:content :code :result :iter :tokens :skills-loaded}
-- :code is vec<str>
-- (doc sub-rlm-query-batch) for full shape
-```
-
-### Block 2 — Skills manifest (when ≥1 loaded)
-
-```
-SKILLS (pass :skills [...] to sub-rlm-query/batch, max 2 per call):
-  :ocr-pdf       — OCR image PDFs → md + code
-  :summarize     — Per-doc summary → struct + code
-  :extract-ents  — Entity extraction → entity vec + code
-```
-
-No bodies. No `agent`/`requires`. No concurrency lecture. Engine enforces caps.
-
-### Inside `sub-rlm-query` (hidden from main RLM)
-
-```
-parent ctx → narrowed SCI ctx (tool allowlist via Step 7 decision) →
-sub-RLM system prompt = skill bodies (call-site order) →
-run-iteration loop bounded by timeout + max-iter + cancel-atom →
-extract :code from :content →
-return {:content :code :result :iter :tokens :skills-loaded ...}
-```
-
-Bodies bounded to call frame. Main context never sees them.
+**Net**: ~4163 lines → ~2330 lines across 8 files. Max file: ~600 lines. No file > 700.
 
 ---
 
-## Summary of W-findings (third grill pass, from actual code inspection)
+## Risk Mitigation
 
-| # | Finding | Status in plan |
-|---|---|---|
-| W1 | MODE 2/3 are new machinery, not rename — Step 9 split into 9a (build iterated primitive) + 9b (wire skills) | PATCHED |
-| W2 | `internal/rlm.clj` 3 call sites missing from rename list | PATCHED — explicit in Step 3 |
-| W3 | Existing `sub-llm-query-fn` naming collision — renamed to `cheap-sub-rlm-query-fn` | PATCHED |
-| W4 | `:content` contract wrong for spec path — `(pr-str (:result r))` bug | PATCHED — Step 4 split path |
-| W5 | `create-sci-context` no allowlist — Option A likely non-viable | PATCHED — Step 7 spike benchmark mandatory |
-| W6 | `execute-code` takes single string, caller iterates — wording fix | PATCHED |
-| W7 | `cancel-atom` wiring into batch | PATCHED — Step 5 explicit |
-| W8 | Reasoning spec selection via `provider-has-reasoning?` for sub-RLM | PATCHED — Step 9a |
-| W9 | `svar/core.clj` public API clean — no external breakage | PATCHED — noted in Rename (B) |
-| W10 | Trove log IDs enumerated (`::sub-llm-*` → `::sub-rlm-*`) | PATCHED — explicit list |
-| W11 | T2 binding-propagation retracted — Clojure `future` handles it natively | PATCHED — explicit note |
+1. **Circular deps**: env.clj ← query.clj ← core.clj. No cycles. Sub.clj still uses `requiring-resolve` for core/iteration-loop (unchanged — separate tech-debt ticket).
+2. **Atom grouping (Phase 4)**: highest risk. Every deref changes. Mitigate: accessor fns, mechanical find-replace, run tests after each atom merge.
+3. **Re-export macro (Phase 0)**: if macro approach causes issues with clj-kondo/lsp, fallback to `potemkin/import-vars` or keep mechanical defs but generate vector types programmatically (still saves ~100 lines).
+4. **PageIndex extraction (Phase 2)**: `load-index` forward declaration in rlm.clj → becomes normal require. Simpler.
+5. **Test count**: verify.sh enforces >500 cases. Phase 8 adds ~70+ new tests. Must not accidentally lose existing tests during extractions.
+
+---
+
+## What This Plan Does NOT Cover (future work)
+
+- **Circular dep elimination** (sub.clj requiring-resolve) — needs interface/protocol extraction, separate effort
+- **Inconsistent error handling** (anomaly vs ex-info vs silent) — convention doc + incremental alignment
+- **Half-baked features cleanup** (citations, Q-values, streaming) — product decision: finish or delete
+- **Shared HTTP client shutdown** — add shutdown hook, low priority
+- **Pricing data dedup in router.clj** — canonical model metadata, incremental
+- **`generate-qa-env!` further decomposition** — after Phase 3 extraction, can split phases internally

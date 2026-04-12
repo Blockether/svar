@@ -63,7 +63,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 | [**<code>dispose&#8209;env!</code>**](#rlm--recursive-language-model) | Dispose an RLM environment and clean up resources. |
 | [**<code>register&#8209;env&#8209;fn!</code>**](#sandbox-extensibility) | Register a custom function in the RLM's SCI sandbox. |
 | [**<code>register&#8209;env&#8209;def!</code>**](#sandbox-extensibility) | Register a constant in the RLM's SCI sandbox. |
-| [**<code>generate&#8209;qa&#8209;env!</code>**](#qa-generation-generate-qa-env) | Generate question-answer pairs from ingested documents. |
+| [**<code>query&#8209;env&#8209;qa!</code>**](#qa-generation-query-env-qa) | Generate question-answer pairs from ingested documents. |
 | [**<code>index!</code>**](#rlm--recursive-language-model) | Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files. |
 | [**<code>load&#8209;index</code>**](#rlm--recursive-language-model) | Load an indexed document from a .pageindex directory. |
 | [**<code>pprint&#8209;trace</code>**](#debugging-rlm-traces) | Pretty-print an RLM trace to stdout (also returns the string). |
@@ -913,17 +913,17 @@ Every `query-env!` result includes a `:trace` vector. Pretty-print it for debugg
       )))
 ```
 
-### Q&A Generation (`generate-qa-env!`)
+### Q&A Generation (`query-env-qa!`)
 
 Generate question-answer pairs from ingested documents. The LLM iteratively explores the corpus using search functions, then produces diverse, grounded Q&A pairs with source provenance.
 
 ```clojure
 (comment
   ;; Generate 10 Q&A pairs (default settings)
-  (svar/generate-qa-env! env)
+  (svar/query-env-qa! env)
 
   ;; Customized generation
-  (svar/generate-qa-env! env
+  (svar/query-env-qa! env
     {:count 20                                       ;; target number of Q&A pairs
      :difficulty #{:easy :medium :hard}               ;; difficulty mix
      :categories #{:factual :inferential :comparative} ;; question types

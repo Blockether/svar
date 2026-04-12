@@ -5,7 +5,6 @@
    [clojure.core.async :as async]
    [clojure.edn :as edn]
    [clojure.java.io :as io]
-   [clojure.pprint :as pprint]
    [clojure.set :as set]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
@@ -13,6 +12,7 @@
    [com.blockether.svar.internal.rlm.core :as rlm-core]
    [com.blockether.svar.internal.rlm.db :as rlm-db]
    [com.blockether.svar.internal.rlm.git :as rlm-git]
+   [com.blockether.svar.internal.rlm.pageindex :as rlm-pageindex]
    [com.blockether.svar.internal.rlm.pageindex.markdown :as markdown]
    [com.blockether.svar.internal.rlm.pageindex.pdf :as pdf]
    [com.blockether.svar.internal.rlm.pageindex.vision :as vision]
@@ -20,6 +20,7 @@
    [com.blockether.svar.internal.rlm.batch :as rlm-batch]
    [com.blockether.svar.internal.rlm.concurrency :as concurrency]
    [com.blockether.svar.internal.rlm.schema :as schema]
+   [com.blockether.svar.internal.rlm.trace :as rlm-trace]
    [com.blockether.svar.internal.rlm.trajectory :as trajectory]
    [com.blockether.svar.internal.rlm.skills :as rlm-skills]
    [com.blockether.svar.internal.rlm.tools :as rlm-tools]
@@ -27,16 +28,12 @@
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [datalevin.core :as d]
-   [fast-edn.core :as fast-edn]
    [taoensso.trove :as trove])
   (:import
-   [java.io RandomAccessFile]
    [java.nio.file AtomicMoveNotSupportedException CopyOption Files StandardCopyOption]
    [java.security MessageDigest]
    [java.time Instant]
    [java.util Date]))
-
-(declare load-index)
 
 (def RLM_SCHEMA schema/RLM_SCHEMA)
 (def MAX_ITERATIONS schema/MAX_ITERATIONS)
@@ -922,69 +919,20 @@
 ;; Trace Pretty Printing
 ;; =============================================================================
 
-(defn format-trace
+(def format-trace
   "Formats an RLM execution trace into a string. Internal helper."
-  [trace {:keys [max-response-length max-code-length max-result-length show-stdout?]
-          :or {max-response-length 500 max-code-length 300 max-result-length 200
-               show-stdout? true}}]
-  (let [truncate (fn [s n] (if (and s (> (count s) n)) (str (subs s 0 n) "...") s))
-        format-execution (fn [{:keys [id code result stdout error execution-time-ms]}]
-                           (str "║ [" id "] "
-                             (truncate (str/replace (or code "") #"\n" " ") max-code-length) "\n"
-                             "║     "
-                             (if error
-                               (str "ERROR: " error)
-                               (str "=> " (truncate (pr-str result) max-result-length)))
-                             (when execution-time-ms (str " (" execution-time-ms "ms)"))
-                             (when (and show-stdout? stdout (not (str/blank? stdout)))
-                               (str "\n║     STDOUT: " (truncate stdout max-result-length)))))
-        format-iteration (fn [{:keys [iteration response executions final?]}]
-                           (str "\n"
-                             "╔══════════════════════════════════════════════════════════════════════════════\n"
-                             "║ ITERATION " iteration (when final? " [FINAL]") "\n"
-                             "╠══════════════════════════════════════════════════════════════════════════════\n"
-                             "║ RESPONSE:\n"
-                             "║ " (str/replace (truncate response max-response-length) #"\n" "\n║ ") "\n"
-                             (when (seq executions)
-                               (str "╠──────────────────────────────────────────────────────────────────────────────\n"
-                                 "║ EXECUTIONS (" (count executions) "):\n"
-                                 (str/join "\n"
-                                   (map format-execution executions))
-                                 "\n"))
-                             "╚══════════════════════════════════════════════════════════════════════════════"))]
-    (if (empty? trace)
-      "No trace entries."
-      (str "RLM EXECUTION TRACE (" (count trace) " iterations)\n"
-        (str/join "\n" (map format-iteration trace))))))
+  rlm-trace/format-trace)
 
-(defn pprint-trace
-  "Pretty-prints an RLM execution trace to stdout for debugging.
+(def pprint-trace
+  "Pretty-prints an RLM execution trace to stdout for debugging."
+  rlm-trace/pprint-trace)
 
-   Prints the formatted trace to *out* and returns the formatted string.
-
-   Params:
-   `trace` - Vector of trace entries from query-env! result.
-   `opts` - Map, optional:
-     - :max-response-length - Truncate LLM response (default: 500).
-     - :max-code-length - Truncate code blocks (default: 300).
-     - :max-result-length - Truncate execution results (default: 200).
-     - :show-stdout? - Show stdout output (default: true).
-
-   Returns:
-   String with formatted trace output (also printed to stdout)."
-  ([trace] (pprint-trace trace {}))
-  ([trace opts]
-   (let [s (format-trace trace opts)]
-     (println s)
-     s)))
-
-(defn print-trace
+(def print-trace
   "Prints an RLM execution trace to stdout. Alias for pprint-trace."
-  ([trace] (pprint-trace trace))
-  ([trace opts] (pprint-trace trace opts)))
+  rlm-trace/print-trace)
 
 ;; =============================================================================
-;; generate-qa-env! - Multi-stage Q&A generation from ingested documents
+;; query-env-qa! - Multi-stage Q&A generation from ingested documents
 ;; =============================================================================
 
 ;; -- Bloom's taxonomy difficulty levels --
@@ -1361,7 +1309,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     :var-index-revision-atom (atom 0)))
 
 ;; -----------------------------------------------------------------------------
-;; QA Manifest — crash-resumable generate-qa-env!
+;; QA Manifest — crash-resumable query-env-qa!
 ;; -----------------------------------------------------------------------------
 
 (def ^:private ^:const QA_MANIFEST_VERSION 2)
@@ -1486,7 +1434,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
           snapshot)))))
 
 (defn- qa-manifest-fingerprint
-  "Returns a stable fingerprint for generate-qa-env! inputs.
+  "Returns a stable fingerprint for query-env-qa! inputs.
    Includes key generation options + corpus summary so resume only reuses
    manifest state when run inputs are compatible."
   [env {:keys [conn] :as _db-info} qa-opts]
@@ -1550,7 +1498,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (swap! manifest-atom assoc-in [:batches batch-idx] status-map)
   (write-qa-manifest! env @manifest-atom))
 
-(defn generate-qa-env!
+(defn query-env-qa!
   "Generates question-answer pairs from ingested documents.
    Supports crash-resume via qa-manifest.edn for persistent envs.
 
@@ -1599,7 +1547,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
        :final-count, :by-difficulty (counts), :by-category (counts).
      - :iterations - Total iterations across all phases.
      - :duration-ms - Total execution time."
-  ([env] (generate-qa-env! env {}))
+  ([env] (query-env-qa! env {}))
   ([env {:keys [count difficulty categories model batch-size verify? debug? parallel
                 selection-model k-candidates multi-hop? personas]
          :or {count 10
@@ -1653,7 +1601,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                           :data {:batches-done (->> (:batches existing-qa-manifest)
                                                  (filter (fn [[_ v]] (= :done (:status v))))
                                                  clojure.core/count)}
-                          :msg "Resuming generate-qa-env! from manifest"}))
+                          :msg "Resuming query-env-qa! from manifest"}))
 
           ;; ===== PHASE 1: Passage Selection (fast-model TOC routing) =====
          phase1 (if (= :done (get-in @manifest-atom [:phase1 :status]))
@@ -1849,7 +1797,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                 :by-category (frequencies (map :category final-questions))}]
 
      (trove/log! {:level :info :id ::qa-done :data stats
-                  :msg "generate-qa-env! complete"})
+                  :msg "query-env-qa! complete"})
 
      ;; Mark manifest as completed
      (swap! manifest-atom assoc :completed-at (str (java.time.Instant/now)))
@@ -1870,10 +1818,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 ;; =============================================================================
 
 (defn save-qa!
-  "Saves generate-qa-env! results to EDN and/or Markdown files.
+  "Saves query-env-qa! results to EDN and/or Markdown files.
 
    Params:
-   `result` - Map. Result from generate-qa-env!.
+   `result` - Map. Result from query-env-qa!.
    `path` - String. Base file path without extension.
    `opts` - Map, optional:
      - :formats - Set of keywords. Output formats (default: #{:edn :markdown}).
@@ -1958,15 +1906,27 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   (print-method (Date/from inst) w))
 
 ;; =============================================================================
+;; PageIndex — pure helper delegates
+;; =============================================================================
+
+(def normalize-page-spec rlm-pageindex/normalize-page-spec)
+(def filter-pages rlm-pageindex/filter-pages)
+(def group-continuations rlm-pageindex/group-continuations)
+(def write-document-edn! rlm-pageindex/write-document-edn!)
+(def read-document-edn rlm-pageindex/read-document-edn)
+(def load-index rlm-pageindex/load-index)
+(def inspect rlm-pageindex/inspect)
+
+;; =============================================================================
 ;; Helper: Extract Document Name
 ;; =============================================================================
 
 (defn- extract-doc-name
   "Extracts document name from file path (without extension).
-   
+
    Params:
    `file-path` - String. Path to file.
-   
+
    Returns:
    String. Document name without extension."
   [file-path]
@@ -1977,10 +1937,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
 (defn- extract-extension
   "Extracts file extension from file path.
-   
+
    Params:
    `file-path` - String. Path to file.
-   
+
    Returns:
    String. File extension (e.g., \"pdf\", \"md\", \"txt\")."
   [file-path]
@@ -1994,10 +1954,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
 (defn- file-type
   "Determines the type of file based on extension.
-   
+
    Params:
    `file-path` - String. Path to file.
-   
+
    Returns:
    Keyword - :pdf, :markdown, :text, :image, or :unknown."
   [file-path]
@@ -2025,7 +1985,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
 (defn- file-path?
   "Returns true if input is a valid file path (file must exist).
-   
+
    We don't use heuristics like 'contains /' because content strings
    can contain paths (URLs, code examples, etc.). The only reliable
    check is whether the file actually exists."
@@ -2044,27 +2004,23 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
 (defn- translate-page-ids
   "Translates local node IDs to globally unique UUIDs for a single page.
-   
+
    Each page extraction produces local IDs (1, 2, 3...) that collide across pages.
    This function:
    1. Creates a mapping of local-id -> UUID for all nodes on the page
    2. Updates all :page.node/id and :document.toc/id to use UUIDs
    3. Updates all parent-id references to use UUIDs
    4. Updates all target-section-id references to use UUIDs
-   
+
    Handles both :page.node/* namespace (most nodes) and :document.toc/* namespace (TOC entries).
-   
+
    Params:
    `page` - Map with :page/index and :page/nodes.
-   
+
    Returns:
    Updated page with all IDs translated to UUIDs."
   [page]
   (let [nodes (:page/nodes page)
-        ;; Build mapping of local-id -> UUID for all nodes on this page
-        ;; Collect IDs from both :page.node/id and :document.toc/id
-        ;; Build separate mappings for page nodes and TOC entries to avoid ID collision.
-        ;; A paragraph with id="1" and TOC entry with id="1" must get different UUIDs.
         node-id-mapping (reduce
                           (fn [acc node]
                             (if-let [local-id (:page.node/id node)]
@@ -2077,34 +2033,27 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                              (assoc acc local-id (str (util/uuid)))
                              acc))
                          {} nodes)
-        ;; Translate IDs in all nodes (both namespaces)
         translated-nodes (mapv
                            (fn [node]
                              (cond-> node
-                               ;; Translate :page.node/id
                                (:page.node/id node)
                                (assoc :page.node/id (get node-id-mapping (:page.node/id node)))
 
-                               ;; Translate :page.node/parent-id (references other page.node IDs)
                                (and (:page.node/parent-id node)
                                  (get node-id-mapping (:page.node/parent-id node)))
                                (assoc :page.node/parent-id (get node-id-mapping (:page.node/parent-id node)))
 
-                               ;; Translate :page.node/target-section-id (references page.node IDs)
                                (and (:page.node/target-section-id node)
                                  (get node-id-mapping (:page.node/target-section-id node)))
                                (assoc :page.node/target-section-id (get node-id-mapping (:page.node/target-section-id node)))
 
-                               ;; Translate :document.toc/id
                                (:document.toc/id node)
                                (assoc :document.toc/id (get toc-id-mapping (:document.toc/id node)))
 
-                               ;; Translate :document.toc/parent-id (references other TOC IDs)
                                (and (:document.toc/parent-id node)
                                  (get toc-id-mapping (:document.toc/parent-id node)))
                                (assoc :document.toc/parent-id (get toc-id-mapping (:document.toc/parent-id node)))
 
-                               ;; Translate :document.toc/target-section-id (references page.node IDs)
                                (and (:document.toc/target-section-id node)
                                  (get node-id-mapping (:document.toc/target-section-id node)))
                                (assoc :document.toc/target-section-id (get node-id-mapping (:document.toc/target-section-id node)))))
@@ -2113,132 +2062,39 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
 (defn- translate-all-ids
   "Translates all local node IDs to globally unique UUIDs across all pages.
-   
+
    Params:
    `pages` - Vector of page maps.
-   
+
    Returns:
    Vector of pages with all IDs translated to UUIDs."
   [pages]
   (mapv translate-page-ids pages))
 
 ;; =============================================================================
-;; Continuation Grouping
-;; =============================================================================
-
-(defn- visual-node?
-  "Returns true if node is a visual element (image or table)."
-  [node]
-  (#{:image :table} (:page.node/type node)))
-
-(defn- last-visual-of-type
-  "Finds the last visual node of the given type on a page."
-  [page node-type]
-  (->> (:page/nodes page)
-    (filter #(= node-type (:page.node/type %)))
-    last))
-
-(defn group-continuations
-  "Groups continuation nodes across pages by assigning a shared :page.node/group-id.
-   
-   Walks pages in order. When a visual node (image/table) has continuation?=true,
-   looks back to the last same-type node on the preceding page and assigns both
-   the same group-id UUID. Propagates group-id forward for 3+ page chains.
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes (must have UUIDs already).
-   
-   Returns:
-   Updated pages with :page.node/group-id assigned to grouped nodes."
-  [pages]
-  (if (< (count pages) 2)
-    pages
-    (let [;; Build a mutable state: node-id -> group-id
-          group-assignments (atom {})
-          ;; Process pages pairwise
-          _ (doseq [i (range 1 (count pages))]
-              (let [prev-page (nth pages (dec (long i)))
-                    curr-page (nth pages i)]
-                (doseq [node (:page/nodes curr-page)]
-                  (when (and (visual-node? node)
-                          (:page.node/continuation? node))
-                    (let [node-type (:page.node/type node)
-                          prev-visual (last-visual-of-type prev-page node-type)]
-                      (when prev-visual
-                        (let [prev-id (:page.node/id prev-visual)
-                              curr-id (:page.node/id node)
-                              ;; Propagate existing group-id or create new one
-                              existing-group (get @group-assignments prev-id)
-                              group-id (or existing-group (str (util/uuid)))]
-                          ;; Assign group-id to both predecessor and current
-                          (swap! group-assignments assoc prev-id group-id)
-                          (swap! group-assignments assoc curr-id group-id))))))))
-          assignments @group-assignments]
-      (if (empty? assignments)
-        pages
-        (mapv (fn [page]
-                (update page :page/nodes
-                  (fn [nodes]
-                    (mapv (fn [node]
-                            (if-let [gid (get assignments (:page.node/id node))]
-                              (assoc node :page.node/group-id gid)
-                              node))
-                      nodes))))
-          pages)))))
-
-;; =============================================================================
 ;; TOC Post-Processing
 ;; =============================================================================
 
 (defn- collect-all-nodes
-  "Collects all nodes from all pages into a flat sequence.
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes.
-   
-   Returns:
-   Lazy sequence of all nodes across all pages."
+  "Collects all nodes from all pages into a flat sequence."
   [pages]
   (mapcat :page/nodes pages))
 
 (defn- has-toc-entries?
-  "Returns true if any TocEntry nodes exist in the pages.
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes.
-   
-   Returns:
-   Boolean."
+  "Returns true if any TocEntry nodes exist in the pages."
   [pages]
   (boolean (some #(= :toc-entry (:document.toc/type %)) (collect-all-nodes pages))))
 
 (defn- heading-level->toc-level
-  "Converts heading level (h1, h2, etc.) to TOC level (l1, l2, etc.).
-   
-   Params:
-   `heading-level` - String like 'h1', 'h2', etc.
-   
-   Returns:
-   String like 'l1', 'l2', etc."
+  "Converts heading level (h1, h2, etc.) to TOC level (l1, l2, etc.)."
   [heading-level]
   (when heading-level
     (str "l" (subs heading-level 1))))
 
 (defn- build-toc-from-structure
-  "Builds TOC entries from Section/Heading structure.
-   
-   Scans all pages for Section nodes that have associated Heading nodes,
-   and creates TocEntry nodes linking to them.
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes.
-   
-   Returns:
-   Vector of TocEntry node maps, or empty vector if no sections found."
+  "Builds TOC entries from Section/Heading structure."
   [pages]
   (let [all-nodes (vec (collect-all-nodes pages))
-        ;; Build a map of section-id -> heading for that section
-        ;; A heading belongs to a section if its parent-id matches the section's id
         section-headings (reduce
                            (fn [acc node]
                              (if (and (= :heading (:page.node/type node))
@@ -2247,9 +2103,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                acc))
                            {}
                            all-nodes)
-        ;; Find all sections and create TOC entries
         sections (filter #(= :section (:page.node/type %)) all-nodes)
-        ;; Find page index for each section
         section-page-index (reduce
                              (fn [acc {:keys [page/index page/nodes]}]
                                (reduce
@@ -2276,20 +2130,9 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         sections))))
 
 (defn- link-toc-entries
-  "Links existing TocEntry nodes to matching Section nodes.
-   
-   Matches TocEntry titles to Heading content to find the target Section.
-   Uses normalized exact matching (trim + lowercase) for robustness.
-   Also copies the Section's description to the TocEntry.
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes (must have UUIDs already).
-   
-   Returns:
-   Updated pages with TocEntry target-section-id and description populated where matches found."
+  "Links existing TocEntry nodes to matching Section nodes."
   [pages]
   (let [all-nodes (vec (collect-all-nodes pages))
-        ;; Build map of section-id -> section node (for description lookup)
         section-by-id (reduce
                         (fn [acc node]
                           (if (= :section (:page.node/type node))
@@ -2297,8 +2140,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                             acc))
                         {}
                         all-nodes)
-        ;; Build map of normalized heading content -> section-id
-        ;; A heading's parent-id is the section it introduces
         heading->section (reduce
                            (fn [acc node]
                              (if (and (= :heading (:page.node/type node))
@@ -2311,7 +2152,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                acc))
                            {}
                            all-nodes)]
-    ;; Update TocEntry nodes with target-section-id and description
     (mapv
       (fn [page]
         (update page :page/nodes
@@ -2336,25 +2176,12 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
       pages)))
 
 (defn- postprocess-toc
-  "Post-processes pages to ensure TOC exists and is properly linked.
-   
-   1. If no TocEntry nodes exist, generates TOC from Section/Heading structure
-   2. If TocEntry nodes exist, links target-section-id to matching Sections
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes.
-   
-   Returns:
-   Map with:
-     :pages - Updated pages (with linked TocEntry if they existed)
-     :toc - Vector of TocEntry nodes (generated or extracted from pages)"
+  "Post-processes pages to ensure TOC exists and is properly linked."
   [pages]
   (if (has-toc-entries? pages)
-    ;; TOC exists - link entries to sections, then move them out of pages.
     (let [linked-pages (link-toc-entries pages)
           toc-entries (vec (filter #(= :toc-entry (:document.toc/type %))
                              (collect-all-nodes linked-pages)))
-          ;; Strip TocEntry maps from :page/nodes — they live in :document/toc now.
           pages-without-toc (mapv
                               (fn [page]
                                 (update page :page/nodes
@@ -2365,7 +2192,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                    :msg "Linked existing TOC entries to sections"})
       {:pages pages-without-toc
        :toc toc-entries})
-    ;; No TOC - generate from structure
     (let [generated-toc (build-toc-from-structure pages)]
       (trove/log! {:level :debug :data {:generated-entries (count generated-toc)}
                    :msg "Generated TOC from document structure"})
@@ -2377,13 +2203,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 ;; =============================================================================
 
 (defn- collect-section-descriptions
-  "Collects all :page.node/description values from Section nodes across all pages.
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes.
-   
-   Returns:
-   Vector of non-empty description strings."
+  "Collects all :page.node/description values from Section nodes across all pages."
   [pages]
   (->> pages
     (mapcat :page/nodes)
@@ -2393,25 +2213,13 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     vec))
 
 (defn- generate-document-abstract
-  "Generates a document-level abstract from all section descriptions.
-   
-   Collects all :page.node/description values from Section nodes and uses
-   abstract! to create a cohesive document summary.
-   
-   Params:
-   `pages` - Vector of page maps with :page/nodes.
-   `opts` - Map with :model and :config keys for LLM.
-   
-   Returns:
-   String. Document abstract, or nil if no section descriptions found."
+  "Generates a document-level abstract from all section descriptions."
   [pages {:keys [rlm-router text-model]}]
   (let [descriptions (collect-section-descriptions pages)]
     (when (seq descriptions)
       (trove/log! {:level :info :data {:section-count (count descriptions)}
                    :msg "Generating document abstract from section descriptions"})
-      (let [;; Combine all descriptions into a single text for summarization
-            combined-text (str/join "\n\n" descriptions)
-             ;; Target ~150 words for document abstract
+      (let [combined-text (str/join "\n\n" descriptions)
             abstracts (llm/abstract! rlm-router (cond-> {:text combined-text
                                                          :strategy :root
                                                          :target-length 150
@@ -2424,113 +2232,19 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
             abstract))))))
 
 ;; =============================================================================
-;; Page Range Normalization
-;; =============================================================================
-
-(defn- validate-page-number
-  "Validates a single 1-indexed page number against total-page-count.
-   Throws on invalid input."
-  [n total-page-count]
-  (when-not (integer? n)
-    (anomaly/incorrect! (str "Page spec must be an integer, got: " (pr-str n))
-      {:type :svar.pageindex/invalid-page-spec
-       :value n}))
-  (when (< n 1)
-    (anomaly/incorrect! (str "Page number must be >= 1, got: " n)
-      {:type :svar.pageindex/invalid-page-spec
-       :value n}))
-  (when (> n total-page-count)
-    (anomaly/incorrect! (str "Page " n " exceeds total page count " total-page-count)
-      {:type :svar.pageindex/page-out-of-bounds
-       :value n
-       :total-page-count total-page-count})))
-
-(defn- normalize-range
-  "Expands a [from to] 1-indexed range into a set of 0-indexed page indices."
-  [[from to] total-page-count]
-  (validate-page-number from total-page-count)
-  (validate-page-number to total-page-count)
-  (when (> from to)
-    (anomaly/incorrect! (str "Invalid page range: start " from " > end " to)
-      {:type :svar.pageindex/invalid-page-range
-       :from from
-       :to to}))
-  (set (range (dec from) to)))
-
-(defn normalize-page-spec
-  "Normalizes a page specification into a set of 0-indexed page indices.
-   
-   Accepts:
-   - nil             → nil (all pages)
-   - integer n       → #{(dec n)} (single 1-indexed page)
-   - [from to]       → set of 0-indexed pages in range (both ints, exactly 2 elements)
-   - [[1 3] 5 [7 10]] → union of expanded ranges and single pages
-   
-   Throws on invalid input (out of bounds, bad types, reversed ranges)."
-  [pages-spec total-page-count]
-  (cond
-    (nil? pages-spec)
-    nil
-
-    (integer? pages-spec)
-    (do (validate-page-number pages-spec total-page-count)
-        #{(dec pages-spec)})
-
-    (vector? pages-spec)
-    (if (and (= 2 (count pages-spec))
-          (every? integer? pages-spec))
-      ;; Two-integer vector → range [from to]
-      (normalize-range pages-spec total-page-count)
-      ;; Mixed vector of ranges and singles
-      (reduce (fn [acc item]
-                (cond
-                  (vector? item)
-                  (into acc (normalize-range item total-page-count))
-
-                  (integer? item)
-                  (do (validate-page-number item total-page-count)
-                      (conj acc (dec item)))
-
-                  :else
-                  (anomaly/incorrect! (str "Invalid element in page spec: " (pr-str item))
-                    {:type :svar.pageindex/invalid-page-spec
-                     :value item})))
-        #{}
-        pages-spec))
-
-    :else
-    (anomaly/incorrect! (str "Invalid page spec type: " (pr-str pages-spec))
-      {:type :svar.pageindex/invalid-page-spec
-       :value pages-spec})))
-
-(defn filter-pages
-  "Filters a page-list by a set of 0-indexed page indices.
-   
-   If page-set is nil, returns page-list unchanged (all pages).
-   Otherwise returns only pages whose :page/index is in page-set."
-  [page-list page-set]
-  (if (nil? page-set)
-    page-list
-    (filterv #(contains? page-set (:page/index %)) page-list)))
-
-;; =============================================================================
 ;; Text Extraction
 ;; =============================================================================
 
+(defn- detect-input-type
+  "Detects the type of input for build-index dispatch."
+  [input opts]
+  (cond
+    (:content-type opts) :string
+    (file-path? input) :path
+    :else :string))
+
 (defn- extract-text
-  "Extract text from document.
-   
-   Routes to appropriate extractor based on file type:
-   - PDF: Convert to images, then vision LLM extraction
-   - Markdown: Parse heading structure (no LLM - deterministic)
-   - Text: Uses LLM for text extraction
-   - Image: Direct vision LLM extraction
-   
-   Markdown parsing is fast and deterministic - top-level headings become pages.
-   
-   Throws for unsupported file types.
-   
-   Returns page-list vector."
+  "Extract text from document. Routes to appropriate extractor based on file type."
   [file-path opts]
   (let [ftype (file-type file-path)]
     (when (= :unknown ftype)
@@ -2542,8 +2256,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
            :supported-extensions SUPPORTED_EXTENSIONS})))
     (trove/log! {:level :info :data {:file file-path :type ftype}
                  :msg "Extracting text from document"})
-    ;; For PDFs, resolve :pages to :page-set before extraction so vision layer
-    ;; can skip LLM calls for excluded pages.
     (let [pdf-opts (if (and (= :pdf ftype) (:pages opts))
                      (let [total (pdf/page-count file-path)
                            page-set (normalize-page-spec (:pages opts) total)]
@@ -2563,53 +2275,25 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
       page-list)))
 
 ;; =============================================================================
-;; Input Type Detection
-;; =============================================================================
-
-(defn- detect-input-type
-  "Detects the type of input for build-index dispatch.
-   
-   Params:
-   `input` - String. Either a file path or raw content.
-   `opts` - Map. Options that may contain :content-type.
-   
-   Returns:
-   Keyword - :path (file path) or :string (raw content)."
-  [input opts]
-  (cond
-    ;; Explicit content-type means it's raw string content
-    (:content-type opts)
-    :string
-
-    ;; Check if file actually exists - this is the only reliable check
-    ;; We don't use heuristics because content can contain paths/URLs
-    (file-path? input)
-    :path
-
-    ;; Default to string content (will require :content-type validation later)
-    :else
-    :string))
-
-;; =============================================================================
 ;; Main API - Multimethod
 ;; =============================================================================
 
 (defmulti build-index
   "Builds an index from a document by extracting content as nodes.
-   
+
    Multimethod that dispatches based on input type:
    - `:path` - File path (auto-detects type from extension: .pdf, .md, .txt)
    - `:string` - Raw string content (requires :content-type in opts)
-   
+
    Supported file types:
    - PDF (.pdf) - Uses vision LLM for node-based extraction
    - Markdown (.md, .markdown) - Parses headings as heading/paragraph nodes
    - Plain text (.txt, .text) - Chunks by paragraphs into paragraph nodes
-   
+
    Post-processing:
    - If document has TOC pages, extracts TocEntry nodes and links to Sections
    - If no TOC exists, generates one from Section/Heading structure
-   
+
      Params:
      `router` - Router from llm/make-router.
      `input` - String. File path or raw content.
@@ -2617,19 +2301,19 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
        ;; For dispatch (string input)
        `:content-type` - Keyword. Required for string input: :md, :markdown, :txt, :text
        `:doc-name` - String. Document name (required for string input).
-       
+
        ;; For metadata (string input only - PDF extracts from file)
        `:doc-title` - String. Document title.
        `:doc-author` - String. Document author.
        `:created-at` - Instant. Creation date.
        `:updated-at` - Instant. Modification date.
-       
+
        ;; For processing
        `:model` - String. Vision LLM model to use.
        `:pages` - Page selector (1-indexed). Limits which pages are included.
                   Supports: integer, [from to] range, or [[1 3] 5 [7 10]] mixed vector.
                   nil = all pages (default). Applied after extraction.
-       
+
        ;; Quality refinement (opt-in)
        `:refine?` - Boolean, optional. Enable post-extraction quality refinement (default: false).
        `:refine-model` - String, optional. Model for eval/refine steps (default: \"gpt-4o\").
@@ -2637,7 +2321,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
        `:refine-threshold` - Float, optional. Min eval score to pass (default: 0.8).
        `:refine-sample-size` - Integer, optional. Pages to sample for eval (default: 3).
                                For PDFs, samples first + last + random middle pages.
-   
+
    Returns:
    Map with:
      `:document/name` - String. Document name without extension.
@@ -2666,15 +2350,12 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 ;; =============================================================================
 
 (defn- strip-nil-keys
-  "Drops entries whose value is nil from a map. Keeps the stricter load-index
-   spec happy (e.g. :page.node/image-index must be int? when the key is present)."
+  "Drops entries whose value is nil from a map."
   [m]
   (into (empty m) (remove (fn [[_ v]] (nil? v))) m))
 
 (defn- render-page-pngs!
-  "Renders each selected PDF page as a full-page PNG into `<output-dir>/page-NNN.png`
-   (1-indexed). Silently skips files that already exist, so it is safe to call
-   repeatedly from incremental `index!` runs."
+  "Renders each selected PDF page as a full-page PNG into `<output-dir>/page-NNN.png`."
   [file-path pages output-dir]
   (try
     (let [page-indices (sort (mapv :page/index pages))
@@ -2694,8 +2375,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
 
 (defn- write-embedded-image-nodes!
   "For every :image/:table node that still carries raw `:page.node/image-data`
-   bytes, writes the bytes to `<output-dir>/<node-id>.png` and replaces the
-   bytes with a relative `:page.node/image-path`."
+   bytes, writes the bytes to `<output-dir>/<node-id>.png`."
   [pages output-dir]
   (let [dir-file (io/file output-dir)]
     (when-not (.exists dir-file)
@@ -2724,11 +2404,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
   "Phase 1 of the PDF indexing pipeline: run vision extraction, normalize IDs,
    group cross-page continuations, strip nil node keys, write per-page and
    per-image PNGs to `:output-dir`, and return the raw page list plus enough
-   metadata for phase 2 to assemble the final document.
-
-   This phase is safe to call per-page (by passing `:pages page-num` in opts)
-   and its output can be accumulated across many invocations before a single
-   finalize pass runs abstract + title inference once for the whole document."
+   metadata for phase 2 to assemble the final document."
   [router file-path opts]
   (when-not (.exists (io/file file-path))
     (anomaly/not-found! (str "File not found: " file-path)
@@ -2747,10 +2423,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                        :msg "Starting text extraction from file"})
         page-list-all (extract-text file-path (merge opts vision-opts))
         pdf? (= :pdf (file-type file-path))
-        ;; Filter pages if :pages specified — only needed for non-PDF extractors
-        ;; and stubbed extract-text in tests. The PDF vision layer already applied
-        ;; the user's :pages selection, so re-filtering its shrunken list would
-        ;; misinterpret the spec.
         page-list-raw (if pdf?
                         page-list-all
                         (filter-pages page-list-all
@@ -2778,11 +2450,8 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
      :file-metadata file-metadata}))
 
 (defn- finalize-pdf-document
-  "Phase 2 of the PDF indexing pipeline: take the accumulated page list from
-   `extract-pdf-pages` (possibly from many per-page invocations merged together)
-   and run TOC post-processing, document abstract, and title inference once.
-
-   Returns a full document map ready for spec validation and on-disk write."
+  "Phase 2 of the PDF indexing pipeline: run TOC post-processing, document abstract,
+   and title inference once on the merged page set."
   [router {:keys [pages doc-name extension file-metadata]} opts]
   (let [{:keys [pages toc]} (postprocess-toc pages)
         text-model (:text-model opts)
@@ -2836,7 +2505,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
         _vision-model (or (:model opts) vision/DEFAULT_VISION_MODEL)
         vision-objective (or (:objective opts) vision/DEFAULT_VISION_OBJECTIVE)
         vision-opts {:rlm-router router :objective vision-objective}]
-    ;; Validate required options
     (when-not content-type
       (anomaly/incorrect! "Missing required :content-type option for string input"
         {:type :svar.pageindex/missing-content-type :valid-types [:md :txt]}))
@@ -2856,16 +2524,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                             {:type :svar.pageindex/unknown-content-type
                              :content-type content-type
                              :valid-types [:md :txt]}))
-          ;; Step 1: Translate local IDs to global UUIDs
           page-list-uuids (translate-all-ids page-list-raw)
-          ;; Step 2: Group continuation nodes across pages
           page-list (group-continuations page-list-uuids)
-          ;; Step 3: Post-process TOC (build/link with UUIDs)
           {:keys [pages toc]} (postprocess-toc page-list)
-          ;; Step 4: Generate document abstract from section descriptions
           abstract-opts {:rlm-router router}
           document-abstract (generate-document-abstract pages abstract-opts)
-          ;; Step 5: Infer title if not provided
           inferred-title (when-not doc-title
                            (vision/infer-document-title pages {:rlm-router router}))
           final-title (or doc-title inferred-title)
@@ -2888,13 +2551,11 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
        :document/author doc-author})))
 
 ;; =============================================================================
-;; EDN + PNG Serialization
+;; index! — incremental document indexing
 ;; =============================================================================
 
 (defn- derive-index-path
-  "Derive the EDN output directory from the input file path.
-   
-   Example: /path/to/document.pdf -> /path/to/document.pageindex/"
+  "Derive the EDN output directory from the input file path."
   [input-path]
   (let [parent (fs/parent input-path)
         base-name (fs/strip-ext (fs/file-name input-path))]
@@ -2907,68 +2568,10 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
     (str path)
     (str (fs/absolutize path))))
 
-;; =============================================================================
-;; Public Serialization API
-;; =============================================================================
-
-(defn write-document-edn!
-  "Writes a document to an EDN file, extracting image bytes to separate PNG files.
-   
-   Image data (byte arrays) in :page.node/image-data are written as PNG files
-   in an 'images' subdirectory. The EDN stores the relative path instead of bytes.
-   
-   Instants are serialized as #inst tagged literals (EDN native).
-   
-   Params:
-   `output-dir` - String. Path to the output directory (e.g., 'docs/manual.pageindex').
-   `document` - Map. The PageIndex document.
-   
-   Returns:
-   The output directory path."
-  [output-dir document]
-  (let [dir-file (io/file output-dir)
-        images-dir (io/file output-dir "images")
-        ;; Extract images and replace bytes with relative paths
-        doc-with-paths (update document :document/pages
-                         (fn [pages]
-                           (mapv (fn [page]
-                                   (update page :page/nodes
-                                     (fn [nodes]
-                                       (mapv (fn [node]
-                                               (let [img-bytes (:page.node/image-data node)]
-                                                 (if (and (bytes? img-bytes)
-                                                       (#{:image :table} (:page.node/type node)))
-                                                   (let [img-name (str (:page.node/id node) ".png")
-                                                         img-path (io/file images-dir img-name)]
-                                                                 ;; Ensure images dir exists
-                                                     (when-not (.exists images-dir)
-                                                       (.mkdirs images-dir))
-                                                                 ;; Write PNG
-                                                     (with-open [out (io/output-stream img-path)]
-                                                       (.write out ^bytes img-bytes))
-                                                     (trove/log! {:level :debug
-                                                                  :data {:node-id (:page.node/id node) :path (str "images/" img-name)}
-                                                                  :msg "Wrote image file"})
-                                                                 ;; Replace bytes with relative path
-                                                     (-> node
-                                                       (dissoc :page.node/image-data)
-                                                       (assoc :page.node/image-path (str "images/" img-name))))
-                                                   node)))
-                                         nodes))))
-                             pages)))
-        edn-file (io/file dir-file "document.edn")]
-    ;; Ensure output dir exists
-    (when-not (.exists dir-file)
-      (.mkdirs dir-file))
-    ;; Write pretty-printed EDN
-    (spit edn-file (with-out-str (pprint/pprint doc-with-paths)))
-    (trove/log! {:level :debug :data {:path (str edn-file)} :msg "Wrote document EDN"})
-    output-dir))
-
 (defn- file-hash
   "Computes SHA-256 hash of a file for change detection."
   [file-path]
-  (let [digest (java.security.MessageDigest/getInstance "SHA-256")
+  (let [digest (MessageDigest/getInstance "SHA-256")
         buffer (byte-array 8192)]
     (with-open [is (java.io.FileInputStream. (str file-path))]
       (loop []
@@ -3000,63 +2603,19 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
       (pr-str manifest))))
 
 (defn- update-manifest-page!
-  "Updates a single page's status in the manifest and persists immediately.
-   Thread-safe: swap! is atomic, write-manifest! is locked."
+  "Updates a single page's status in the manifest and persists immediately."
   [output-path manifest-atom page-idx status-map]
   (swap! manifest-atom assoc-in [:pages page-idx] status-map)
   (write-manifest! output-path @manifest-atom))
 
-(defn read-document-edn
-  "Reads a document from an EDN file, resolving image paths back to byte arrays.
-   
-   Image paths in :page.node/image-path are read back as byte arrays
-   into :page.node/image-data.
-   
-   Params:
-   `index-dir` - String. Path to the pageindex directory.
-   
-   Returns:
-   The PageIndex document map with image bytes restored."
-  [index-dir]
-  (let [edn-file (io/file index-dir "document.edn")
-        doc (fast-edn/read-once edn-file)]
-    ;; Resolve image paths back to byte arrays
-    (update doc :document/pages
-      (fn [pages]
-        (mapv (fn [page]
-                (update page :page/nodes
-                  (fn [nodes]
-                    (mapv (fn [node]
-                            (if-let [img-rel-path (:page.node/image-path node)]
-                              (let [img-file (io/file index-dir img-rel-path)]
-                                (if (.exists img-file)
-                                  (let [img-bytes (let [ba (byte-array (.length img-file))]
-                                                    (with-open [is (java.io.FileInputStream. img-file)]
-                                                      (.read is ba))
-                                                    ba)]
-                                    (-> node
-                                      (dissoc :page.node/image-path)
-                                      (assoc :page.node/image-data img-bytes)))
-                                  (do
-                                    (trove/log! {:level :warn
-                                                 :data {:path (str img-file)}
-                                                 :msg "Image file not found, skipping"})
-                                    (dissoc node :page.node/image-path))))
-                              node))
-                      nodes))))
-          pages)))))
-
 (defn- with-index-lock!
-  "Acquires a file lock on `lock.lck` inside the output directory.
-   Prevents concurrent index! calls on the same document from corrupting
-   the manifest. Calls `(f)` while holding the lock, returns its result.
-   Throws if the lock cannot be acquired (another index! is in progress)."
+  "Acquires a file lock on `lock.lck` inside the output directory."
   [output-path f]
   (let [dir (io/file output-path)]
     (when-not (.exists dir)
       (.mkdirs dir))
     (let [lock-file (io/file dir "lock.lck")
-          raf (RandomAccessFile. lock-file "rw")
+          raf (java.io.RandomAccessFile. lock-file "rw")
           ch (.getChannel raf)]
       (try
         (let [lock (.tryLock ch)]
@@ -3146,8 +2705,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                                     :data {:output-path output-path :error (ex-message e)}
                                                     :msg "Failed loading existing indexed document; rebuilding"})
                                        nil)))
-         ;; Merge existing manifest pages with pending entries for pages-to-process.
-         ;; Crucially: preserve :done status from prior runs so crash-recovery works.
                manifest-initial-pages (if selected-page-indices
                                         (let [existing-pages (or (:pages existing-manifest) {})
                                               now-str (str (Instant/now))]
@@ -3232,8 +2789,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                                   (:document/pages existing-document)))
                      page-map-atom (atom (if needs-full-reindex? {} existing-page-map))
                      toc-atom (atom (or (:document/toc existing-document) []))
-               ;; Seed metadata from existing doc OR from file path so we always
-               ;; have :document/name and :document/extension even if all pages error.
                      metadata-atom (atom (merge {:document/name (fs/strip-ext (fs/file-name abs-path))
                                                  :document/extension (some-> (fs/extension abs-path) name)}
                                            (select-keys existing-document
@@ -3246,10 +2801,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                  (if (seq pages-to-process)
                    (let [total-to-process (count pages-to-process)
                          page-times-atom (atom [])
-                         ;; Worker pool: process up to `parallel` pages concurrently.
-                         ;; Each worker runs a full extract-pdf-pages call for one
-                         ;; page, updates the manifest atomically, and appends timing
-                         ;; info. Manifest writes are locked; the atom is thread-safe.
                          worker-count (max 1 (or parallel 3))
                          pool (java.util.concurrent.Executors/newFixedThreadPool worker-count)
                          per-page-task
@@ -3296,8 +2847,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                  (let [processed-so-far @processed-count
                                        remaining (- total-to-process processed-so-far)
                                        new-avg (/ (reduce + @page-times-atom) (count @page-times-atom))
-                                       ;; Parallel runs finish worker-count pages roughly simultaneously,
-                                       ;; so wall-clock ETA is (remaining × avg) / workers.
                                        new-eta-ms (long (/ (* new-avg remaining) worker-count))]
                                    (trove/log! {:level :info
                                                 :id :svar.pageindex/indexed-page
@@ -3333,9 +2882,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                          (.submit pool ^Callable (fn [] (per-page-task n idx))))
                                    (map-indexed vector (sort pages-to-process)))]
                      (try
-                       ;; Block until every page worker has finished. Exceptions are
-                       ;; already caught and logged per-page so .get here should be
-                       ;; safe, but we still swallow interruption cleanly.
                        (doseq [^java.util.concurrent.Future f futures]
                          (try (.get f)
                               (catch Exception e
@@ -3343,7 +2889,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                              :msg "Q-value update failed (non-fatal)"}))))
                        (finally
                          (.shutdown pool))))
-             ;; Fallback: file types without per-page tracking (e.g. unknown extensions)
                    (try
                      (let [doc (build-index router abs-path (cond-> common-index-opts
                                                               pages (assoc :pages pages)))
@@ -3372,9 +2917,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                     :msg (format "Bulk indexing failed: %s" (ex-message e))}))))
 
                  (let [final-pages (->> @page-map-atom (sort-by key) (mapv val))
-                       ;; Phase 2: run TOC post-processing + abstract + title inference
-                       ;; exactly ONCE on the merged page set, regardless of how many
-                       ;; per-page extract invocations contributed to it.
                        final-document (if (seq final-pages)
                                         (finalize-pdf-document
                                           router
@@ -3390,8 +2932,6 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                                            :document/toc @toc-atom}))
                        elapsed-ms (- (System/currentTimeMillis) start-time)
                        all-failed? (and (pos? @errors-count) (empty? final-pages))]
-             ;; Only validate+write document when we have pages.
-             ;; When all pages errored, persist manifest so next call retries.
                    (when-not all-failed?
                      (when-not (schema/valid-document? final-document)
                        (let [explanation (schema/explain-document final-document)]
@@ -3430,106 +2970,3 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                       :hash-changed? (boolean needs-full-reindex?)
                       :pages-processed @processed-count
                       :errors-count @errors-count})))))))))))
-
-(defn load-index
-  "Load an indexed document from a pageindex directory (EDN + PNG files).
-
-   Params:
-   `index-path` - String. Path to the pageindex directory.
-
-   Returns:
-   The RLM document map.
-
-   Throws:
-   - ex-info if path not found or not a directory
-   - ex-info if document fails spec validation
-
-   Example:
-   (load-index \"docs/manual.pageindex\")"
-  [index-path]
-  (let [abs-path (ensure-absolute index-path)]
-    (when-not (fs/exists? abs-path)
-      (trove/log! {:level :error :data {:path abs-path} :msg "Index path not found"})
-      (anomaly/not-found! "Index path not found" {:type :svar.pageindex/index-not-found :path abs-path}))
-    (when-not (fs/directory? abs-path)
-      (anomaly/incorrect! "Index path must be a pageindex directory"
-        {:type :svar.pageindex/invalid-path :path abs-path}))
-
-    (trove/log! {:level :debug :data {:path abs-path} :msg "Loading index"})
-    (let [document (read-document-edn abs-path)]
-
-      ;; Validate the document - throw on failure
-      (when-not (schema/valid-document? document)
-        (let [explanation (schema/explain-document document)]
-          (trove/log! {:level :error :data {:path abs-path :explanation explanation} :msg "Loaded document failed spec validation"})
-          (anomaly/incorrect! "Loaded document failed spec validation"
-            {:type :rlm/invalid-document
-             :path abs-path
-             :explanation explanation})))
-
-      (trove/log! {:level :info :data {:path abs-path
-                                       :document/name (:document/name document)
-                                       :pages (count (:document/pages document))
-                                       :toc-entries (count (:document/toc document))}
-                   :msg "Loaded document"})
-      document)))
-
-(defn- print-toc-tree
-  "Print the TOC as a tree structure."
-  [toc]
-  (doseq [entry toc]
-    (let [depth (dec (count (str/split (or (:node/structure entry) "1") #"\.")))
-          indent (str/join "" (repeat depth "  "))]
-      (printf "%s%s %s\n" indent (or (:node/structure entry) "?") (:node/title entry)))))
-
-(defn ^:export inspect
-  "Load and print a full summary of an indexed document including TOC tree.
-   
-   Params:
-   `doc-or-path` - Either a document map or String path to EDN file.
-   
-   Returns:
-   Summary map with document stats.
-   
-   Throws:
-   - ex-info if path provided and file not found
-   - ex-info if document fails spec validation
-   
-   Example:
-   (inspect \"docs/manual.edn\")
-   (inspect my-document)"
-  [doc-or-path]
-  (trove/log! {:level :debug :data {:input (if (string? doc-or-path) doc-or-path :document-map)} :msg "Inspecting document"})
-  (let [doc (if (string? doc-or-path)
-              (load-index doc-or-path)
-              ;; Validate document map if passed directly
-              (do
-                (when-not (schema/valid-document? doc-or-path)
-                  (let [explanation (schema/explain-document doc-or-path)]
-                    (trove/log! {:level :error :data {:explanation explanation} :msg "Document failed spec validation"})
-                    (anomaly/incorrect! "Document failed spec validation"
-                      {:type :rlm/invalid-document
-                       :explanation explanation})))
-                doc-or-path))
-        toc (:document/toc doc)
-        pages (:document/pages doc)]
-    (println "\n=== Document Summary ===")
-    (println "Name:      " (:document/name doc))
-    (println "Title:     " (or (:document/title doc) "(none)"))
-    (println "Extension: " (:document/extension doc))
-    (println "Author:    " (or (:document/author doc) "(none)"))
-    (println "Pages:     " (count pages))
-    (println "TOC entries:" (count toc))
-    (println "Created:   " (:document/created-at doc))
-    (println "Updated:   " (:document/updated-at doc))
-    (when (:document/abstract doc)
-      (println "\n--- Abstract ---")
-      (println (:document/abstract doc)))
-    (println "\n--- TOC Tree ---")
-    (print-toc-tree toc)
-    (println)
-    {:document/name (:document/name doc)
-     :document/title (:document/title doc)
-     :page-count (count pages)
-     :toc-count (count toc)
-     :has-abstract (boolean (:document/abstract doc))}))

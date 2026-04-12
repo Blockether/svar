@@ -1987,7 +1987,7 @@
             (#'rlm-db/dispose-rlm-conn! db-info)))))))
 
 ;; =============================================================================
-;; generate-qa-env! pipeline unit tests
+;; query-env-qa! pipeline unit tests
 ;; =============================================================================
 
 (defdescribe qa-corpus-snapshot-cache-test
@@ -2053,11 +2053,11 @@
                                         :trace []
                                         :iterations 1})]
           ;; First run: should execute generation and create manifest.
-          (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
+          (sut/query-env-qa! env {:count 2 :batch-size 5 :verify? false})
           (expect (= 1 @query-calls))
 
           ;; Second run with same opts: should reuse cached batch and skip query-env!.
-          (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
+          (sut/query-env-qa! env {:count 2 :batch-size 5 :verify? false})
           (expect (= 1 @query-calls))
 
           ;; Mutate corpus via ingestion path: bumps revision and invalidates snapshot cache.
@@ -2065,11 +2065,11 @@
                                      :document/name "single-page-extra")])
 
           ;; Third run with same opts after corpus change: should reset + rerun.
-          (sut/generate-qa-env! env {:count 2 :batch-size 5 :verify? false})
+          (sut/query-env-qa! env {:count 2 :batch-size 5 :verify? false})
           (expect (= 2 @query-calls))
 
           ;; Fourth run with changed opts: fingerprint mismatch should reset + rerun.
-          (sut/generate-qa-env! env {:count 3 :batch-size 5 :verify? false})
+          (sut/query-env-qa! env {:count 3 :batch-size 5 :verify? false})
           (expect (= 3 @query-calls)))
         (finally
           (sut/dispose-env! env)

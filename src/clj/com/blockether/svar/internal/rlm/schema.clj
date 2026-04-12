@@ -674,7 +674,7 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
                  ::spec/description "Question category"})))
 
 (def QUESTIONIFY_SPEC
-  "Spec for generate-qa-env! Q&A generation output."
+  "Spec for query-env-qa! Q&A generation output."
   (spec/spec
     {:refs [QUESTION_SPEC]}
     (spec/field {::spec/name :questions
