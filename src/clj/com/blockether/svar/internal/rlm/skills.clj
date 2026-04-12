@@ -190,25 +190,54 @@
    :env  []})
 
 (defn- derive-abstract
-  "Returns :abstract if present in frontmatter, else auto-truncates :description
-   to MAX_ABSTRACT_CHARS. Used in the main RLM skill manifest."
+  "Returns :abstract if present in frontmatter, else truncates :description as
+   a placeholder. The placeholder gets replaced by LLM-generated abstract via
+   refine-abstract! at ingest time (async, non-blocking)."
   [{:keys [description abstract]}]
-  (or (when (string? abstract) (str/trim abstract))
+  (or (when (and (string? abstract) (not (str/blank? abstract)))
+        (str/trim abstract))
     (when (string? description)
       (let [trimmed (str/trim description)]
         (if (> (count trimmed) MAX_ABSTRACT_CHARS)
           (str (subs trimmed 0 (- MAX_ABSTRACT_CHARS 3)) "...")
           trimmed)))))
 
+(defn content-hash
+  "SHA-256 hash of a string. Used for change detection — skip re-ingest when
+   SKILL.md content hasn't changed."
+  [^String content]
+  (let [digest (java.security.MessageDigest/getInstance "SHA-256")
+        bytes (.digest digest (.getBytes content "UTF-8"))]
+    (apply str (map #(format "%02x" %) bytes))))
+
+(defn- scan-reference-files
+  "Scans references/ dir alongside a SKILL.md for bundled reference files.
+   Returns a vec of {:path <relative> :content <str>} or nil if none."
+  [skill-md-path]
+  (let [parent (fs/parent skill-md-path)
+        refs-dir (fs/path parent "references")]
+    (when (and (fs/exists? refs-dir) (fs/directory? refs-dir))
+      (vec
+        (for [f (fs/list-dir refs-dir)
+              :when (and (fs/regular-file? f)
+                      (str/ends-with? (str (fs/file-name f)) ".md"))]
+          {:path (str (fs/relativize parent f))
+           :content (slurp (str f))})))))
+
 (defn- enrich-skill
   "Fills in SVAR-specific defaults for skills that lack them (compatibility layer
    for existing Claude/OpenCode skills). Merges defaults under :agent and :requires
-   only when the skill doesn't already provide them."
+   only when the skill doesn't already provide them. Computes content hash for
+   change detection and scans reference files."
   [skill]
-  (-> skill
-    (update :agent #(merge DEFAULT_AGENT %))
-    (update :requires #(merge DEFAULT_REQUIRES %))
-    (assoc :abstract (derive-abstract skill))))
+  (let [full-content (str (:description skill) "\n" (:body skill))
+        refs (when (:source-path skill) (scan-reference-files (:source-path skill)))]
+    (cond-> (-> skill
+              (update :agent #(merge DEFAULT_AGENT %))
+              (update :requires #(merge DEFAULT_REQUIRES %))
+              (assoc :abstract (derive-abstract skill))
+              (assoc :content-hash (content-hash full-content)))
+      (seq refs) (assoc :references refs))))
 
 (defn- discovery-paths
   "Returns the ordered vec of absolute directory paths to scan for SKILL.md
@@ -296,8 +325,21 @@
 ;; Datalevin Ingestion — skills as searchable documents
 ;; =============================================================================
 
+(defn- skill-changed?
+  "Returns true if the skill's content hash differs from what's stored in Datalevin.
+   Returns true when no stored version exists (new skill)."
+  [conn skill-name new-hash]
+  (let [doc-id (str "skill-" (clojure.core/name skill-name))
+        stored (d/q '[:find ?h .
+                      :in $ ?id
+                      :where [?e :document/id ?id]
+                      [?e :skill/content-hash ?h]]
+                 (d/db conn) doc-id)]
+    (or (nil? stored) (not= stored new-hash))))
+
 (defn ingest-skills!
-  "Ingests skill registry into Datalevin as :document/type :skill documents.
+  "Ingests skill registry into Datalevin as :document.type/skill documents.
+   Skips skills whose content-hash hasn't changed (change detection).
    Existing skill documents are upserted (matched by :document/id = \"skill-<name>\").
    Skills become searchable via search-documents and fetchable via fetch-document-content.
 
@@ -305,36 +347,42 @@
    `db-info`        — map with :conn key (Datalevin connection).
    `skill-registry` — map from load-skills.
 
-   Returns count of ingested skills."
+   Returns count of ingested skills (only those that actually changed)."
   [{:keys [conn]} skill-registry]
   (when (and conn (seq skill-registry))
-    (let [entities (mapv (fn [[skill-name skill]]
+    (let [changed (filterv (fn [[skill-name skill]]
+                             (skill-changed? conn skill-name (:content-hash skill)))
+                    skill-registry)
+          entities (mapv (fn [[skill-name skill]]
                            (let [n (clojure.core/name skill-name)]
-                             (cond-> {:document/id        (str "skill-" n)
-                                      :document/name      n
-                                      :document/type      :skill
-                                      :document/title     (or (:description skill) n)
-                                      :document/abstract  (or (:abstract skill) "")
-                                      :document/extension "md"
-                                      :document/created-at (java.util.Date.)
-                                      :document/updated-at (java.util.Date.)
+                             (cond-> {:document/id          (str "skill-" n)
+                                      :document/name        n
+                                      :document/type        :document.type/skill
+                                      :document/title       (or (:description skill) n)
+                                      :document/abstract    (or (:abstract skill) "")
+                                      :document/extension   "md"
+                                      :document/updated-at  (java.util.Date.)
                                       :document/certainty-alpha 2.0
                                       :document/certainty-beta  1.0
-                                      :skill/body         (:body skill)
-                                      :skill/source-path  (or (:source-path skill) "")}
+                                      :skill/body           (:body skill)
+                                      :skill/source-path    (or (:source-path skill) "")
+                                      :skill/content-hash   (or (:content-hash skill) "")}
                                (:agent skill)
                                (assoc :skill/agent-config (pr-str (:agent skill)))
                                (:requires skill)
                                (assoc :skill/requires (pr-str (:requires skill)))
                                (:version skill)
                                (assoc :skill/version (str (:version skill))))))
-                     skill-registry)]
-      (d/transact! conn entities)
+                     changed)]
+      (when (seq entities)
+        (d/transact! conn entities))
       (trove/log! {:level :info :id ::skills-ingested
-                   :data {:count (count entities)
-                          :names (mapv (comp clojure.core/name first) skill-registry)}
-                   :msg "Skills ingested into Datalevin"})
-      (count entities))))
+                   :data {:total (count skill-registry)
+                          :changed (count changed)
+                          :skipped (- (count skill-registry) (count changed))
+                          :names (mapv (comp clojure.core/name first) changed)}
+                   :msg "Skills ingested into Datalevin (change-detected)"})
+      (count changed))))
 
 ;; =============================================================================
 ;; Skill Management — RLM can create/patch/refine/delete skills

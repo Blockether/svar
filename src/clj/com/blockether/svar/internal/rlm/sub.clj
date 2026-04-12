@@ -10,6 +10,7 @@
    NOTE: does NOT require rlm.core to avoid cyclic dep (core→routing→sub→core).
    Instead, iteration-loop-fn is resolved lazily via requiring-resolve."
   (:require
+   [clojure.edn :as edn]
    [clojure.string :as str]
    [taoensso.trove :as trove]))
 
@@ -65,10 +66,12 @@
                                   " was used and produced this outcome:\n"
                                   (pr-str trace-summary)
                                   "\n\nCurrent skill abstract: " (pr-str (:abstract skill))
-                                  "\n\nBased on the outcome, write a BETTER abstract (≤200 chars) "
-                                  "that more accurately describes what this skill does and when it works. "
-                                  "If the skill failed, note the limitation. "
-                                  "Return ONLY the new abstract text, nothing else.")
+                                  "\n\nCurrent skill body (procedure):\n" (:body skill)
+                                  "\n\n---\nAnalyze the outcome. Return a JSON-like map with TWO keys:\n"
+                                  "1. \"abstract\" — better abstract (≤200 chars). More accurate for what the skill does/when it works. Note limitations if it failed.\n"
+                                  "2. \"body-patch\" — if the procedure needs fixing, return {\"old\": \"exact text to replace\", \"new\": \"replacement\"}. If procedure is fine, return null.\n"
+                                  "Example: {\"abstract\": \"OCR image PDFs, fails on encrypted\", \"body-patch\": {\"old\": \"step 3 text\", \"new\": \"revised step 3\"}}\n"
+                                  "Return ONLY the map, no explanation.")
                   refine-result (make-sub-rlm
                                   rlm-env
                                   refine-prompt
@@ -76,22 +79,39 @@
                                    :cancel-atom (atom false)
                                    :max-consecutive-errors 1
                                    :max-restarts 0})
-                  new-abstract (when-let [a (:answer refine-result)]
-                                 (let [s (str (if (map? a) (:result a) a))]
-                                   (when-not (str/blank? s)
-                                     (let [trimmed (str/trim s)]
-                                       (if (> (count trimmed) 200)
-                                         (str (subs trimmed 0 197) "...")
-                                         trimmed)))))]
+                  raw-answer (when-let [a (:answer refine-result)]
+                               (str (if (map? a) (:result a) a)))
+                  ;; Try to parse as EDN map
+                  parsed (when (and raw-answer (not (str/blank? raw-answer)))
+                           (try (edn/read-string raw-answer)
+                                (catch Exception _ nil)))
+                  new-abstract (when-let [a (get parsed "abstract")]
+                                 (when (and (string? a) (not (str/blank? a)))
+                                   (let [trimmed (str/trim a)]
+                                     (if (> (count trimmed) 200)
+                                       (str (subs trimmed 0 197) "...")
+                                       trimmed))))
+                  body-patch (get parsed "body-patch")]
+              ;; Apply abstract refinement
               (when new-abstract
                 (skill-manage-fn (:db-info-atom rlm-env) skill-registry-atom
                   :refine {:name skill-name :abstract new-abstract})
-                (trove/log! {:level :info :id ::skill-auto-refined
+                (trove/log! {:level :info :id ::skill-auto-refined-abstract
                              :data {:skill skill-name
                                     :old-abstract (:abstract skill)
                                     :new-abstract new-abstract
                                     :trigger (or status :low-confidence)}
-                             :msg "Skill auto-refined after execution"})))
+                             :msg "Skill abstract auto-refined"}))
+              ;; Apply body patch if provided
+              (when (and (map? body-patch) (get body-patch "old") (get body-patch "new"))
+                (skill-manage-fn (:db-info-atom rlm-env) skill-registry-atom
+                  :patch {:name skill-name
+                          :old (get body-patch "old")
+                          :new (get body-patch "new")})
+                (trove/log! {:level :info :id ::skill-auto-refined-body
+                             :data {:skill skill-name
+                                    :trigger (or status :low-confidence)}
+                             :msg "Skill body auto-patched"})))
             (catch Exception e
               (trove/log! {:level :warn :id ::skill-auto-refine-failed
                            :data {:error (ex-message e)

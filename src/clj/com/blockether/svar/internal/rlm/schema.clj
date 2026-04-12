@@ -453,11 +453,12 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :document/certainty-beta  {:db/valueType :db.type/double :db/doc "Beta dist beta — increases over time, jumps on re-index"}
 
    ;; Skills (stored as :document/type :skill)
-   :skill/body         {:db/valueType :db.type/string :db/fulltext true :db/doc "Full SKILL.md body (markdown)"}
-   :skill/source-path  {:db/valueType :db.type/string :db/doc "Filesystem path of the SKILL.md file"}
-   :skill/agent-config {:db/valueType :db.type/string :db/doc "EDN-serialized agent config map"}
-   :skill/requires     {:db/valueType :db.type/string :db/doc "EDN-serialized requires map"}
-   :skill/version      {:db/valueType :db.type/string}
+   :skill/body          {:db/valueType :db.type/string :db/fulltext true :db/doc "Full SKILL.md body (markdown)"}
+   :skill/source-path   {:db/valueType :db.type/string :db/doc "Filesystem path of the SKILL.md file"}
+   :skill/agent-config  {:db/valueType :db.type/string :db/doc "EDN-serialized agent config map"}
+   :skill/requires      {:db/valueType :db.type/string :db/doc "EDN-serialized requires map"}
+   :skill/version       {:db/valueType :db.type/string}
+   :skill/content-hash  {:db/valueType :db.type/string :db/doc "SHA-256 of description+body — skip re-ingest when unchanged"}
 
    ;; Pages
    :page/id           {:db/valueType :db.type/string :db/unique :db.unique/identity}
