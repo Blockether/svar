@@ -98,7 +98,11 @@ Pattern: [thing] [action] [reason]. [next step].")
                        acc
                        (assoc! acc k (if (instance? clojure.lang.IDeref v) @v v))))
           (transient {}) sandbox)))
-    (catch Exception _ {})))
+    (catch Exception e
+      (trove/log! {:level :warn :id ::get-locals-fallback
+                   :data {:error (ex-message e)}
+                   :msg "Failed to read sandbox locals, returning empty map"})
+      {})))
 
 ;; =============================================================================
 ;; Code Execution
@@ -811,7 +815,11 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                                         (symbol? name))
                                   name)))))
                     distinct)
-                  (catch Exception _ [])))))
+                  (catch Exception e
+                    (trove/log! {:level :debug :id ::extract-def-names-fallback
+                                 :data {:error (ex-message e)}
+                                 :msg "Failed to parse code forms for def names, returning empty"})
+                    [])))))
     (map str)
     vec))
 
@@ -886,7 +894,11 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
               (sci/eval-string+ sci-ctx
                 (str "(def ^{:doc " (pr-str doc-str) "} " var-name " " (pr-str val-map) ")")
                 {:ns sandbox-ns}))
-            (catch Exception _ nil))))
+            (catch Exception e
+              (trove/log! {:level :debug :id ::store-answer-in-sandbox-fallback
+                           :data {:error (ex-message e)}
+                           :msg "Failed to store final-result var in sandbox, skipping"})
+              nil))))
       results)))
 
 (defn iteration-loop [rlm-env query

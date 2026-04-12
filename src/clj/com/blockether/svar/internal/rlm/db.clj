@@ -30,7 +30,11 @@
     fallback
     (try
       (edn/read-string s)
-      (catch Exception _ fallback))))
+      (catch Exception e
+        (trove/log! {:level :debug :id ::read-edn-safe-fallback
+                     :data {:error (ex-message e)}
+                     :msg "EDN parse failed, returning fallback"})
+        fallback))))
 
 (defn- now
   "Returns the current time as a java.util.Date."
@@ -196,8 +200,12 @@
       (d/transact! conn [(merge {:entity/id id :entity/updated-at now} attrs)]))))
 
 (defn store-conversation!
-  "Stores or retrieves a conversation entity for an env session."
-  [db-info {:keys [env-id system-prompt model]}]
+  "Stores or retrieves a conversation entity for an env session.
+
+   Optional :name is a caller-supplied stable identity (e.g. 'telegram:12345').
+   When provided, it's stored as :conversation/name (unique identity) so
+   subsequent create-env calls can look the conversation up by name."
+  [db-info {:keys [env-id system-prompt model name]}]
   (when-let [conn (:conn db-info)]
     (let [existing (d/q '[:find ?id . :in $ ?env-id
                           :where [?e :conversation/env-id ?env-id]
@@ -206,11 +214,12 @@
       (if existing
         [:entity/id existing]
         (store-entity! db-info
-          {:entity/type :conversation
-           :entity/name (or env-id "session")
-           :conversation/env-id env-id
-           :conversation/system-prompt (or system-prompt "")
-           :conversation/model (or model "")})))))
+          (cond-> {:entity/type :conversation
+                   :entity/name (or name env-id "session")
+                   :conversation/env-id env-id
+                   :conversation/system-prompt (or system-prompt "")
+                   :conversation/model (or model "")}
+            (string? name) (assoc :conversation/name name)))))))
 
 (defn db-get-conversation
   "Returns a conversation entity by lookup ref or nil."
@@ -230,20 +239,35 @@
       :entity/id
       (vector :entity/id))))
 
+(defn db-find-named-conversation-ref
+  "Returns lookup ref for a conversation with the given :conversation/name, or nil."
+  [{:keys [conn]} nm]
+  (when (and conn (string? nm))
+    (some->> (d/q '[:find ?id .
+                    :in $ ?nm
+                    :where [?e :conversation/name ?nm]
+                    [?e :entity/id ?id]]
+               (d/db conn) nm)
+      (vector :entity/id))))
+
 (defn db-resolve-conversation-ref
   "Resolves a conversation selector to a lookup ref.
 
    selector:
-   - nil        -> nil
-   - :latest    -> latest conversation
-   - UUID       -> [:entity/id uuid]
-   - lookup ref -> passed through"
+   - nil              -> nil
+   - :latest          -> latest conversation by created-at
+   - UUID             -> [:entity/id uuid]
+   - [:entity/id uuid] -> passed through
+   - {:name \"x\"}    -> [:entity/id uuid-of-conv-with-that-name] or nil if not found
+                         (caller-supplied stable identity — enables shared-DB multi-tenant usage)"
   [db-info selector]
   (cond
     (nil? selector) nil
     (= :latest selector) (db-find-latest-conversation-ref db-info)
     (and (vector? selector) (= :entity/id (first selector))) selector
     (uuid? selector) [:entity/id selector]
+    (and (map? selector) (string? (:name selector)))
+    (db-find-named-conversation-ref db-info (:name selector))
     :else nil))
 
 (defn store-query!
@@ -314,7 +338,11 @@
   [code]
   (try
     (edamame/parse-string-all (or code "") edamame-opts)
-    (catch Exception _ [])))
+    (catch Exception e
+      (trove/log! {:level :debug :id ::parse-forms-safe-fallback
+                   :data {:error (ex-message e)}
+                   :msg "Code form parse failed, returning empty"})
+      [])))
 
 (defn- form->defined-symbol
   [form]
@@ -564,7 +592,11 @@
   "Search page nodes with fulltext, falling back to scan."
   [conn query]
   (try (fulltext-page-nodes conn query)
-       (catch Exception _ (scan-page-nodes conn query))))
+       (catch Exception e
+         (trove/log! {:level :warn :id ::search-page-nodes-raw-fallback
+                      :data {:error (ex-message e)}
+                      :msg "Fulltext page-node search failed, falling back to scan"})
+         (scan-page-nodes conn query))))
 
 (defn- brevify-node
   "Strips full content from a page node, replacing with a 150-char preview.
@@ -628,7 +660,11 @@
              cooc-boost-map (if (and (seq recent-pages) (seq result-page-ids))
                               (try
                                 (batch-cooccurrence-boosts conn result-page-ids recent-pages)
-                                (catch Exception _ {}))
+                                (catch Exception e
+                                  (trove/log! {:level :warn :id ::cooc-boost-fallback
+                                               :data {:error (ex-message e)}
+                                               :msg "Co-occurrence boost lookup failed, using empty map"})
+                                  {}))
                               {})
              ranked (->> raw-results
                       (map-indexed
@@ -854,7 +890,11 @@
   "Search TOC entries with fulltext, falling back to scan."
   [conn query]
   (try (fulltext-toc-entries conn query)
-       (catch Exception _ (scan-toc-entries conn query))))
+       (catch Exception e
+         (trove/log! {:level :warn :id ::search-toc-entries-raw-fallback
+                      :data {:error (ex-message e)}
+                      :msg "Fulltext TOC search failed, falling back to scan"})
+         (scan-toc-entries conn query))))
 
 (defn- normalize-toc-entry
   "Normalize a raw TOC entry into a clean result map."

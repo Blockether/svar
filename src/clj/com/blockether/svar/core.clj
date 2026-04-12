@@ -255,18 +255,14 @@
 (def export-trajectories! "Exports filtered trajectories as JSONL for fine-tuning." rlm/export-trajectories!)
 #_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def pprint-trace "Pretty-prints an RLM trace to a string." rlm/pprint-trace)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def print-trace "Pretty-prints an RLM trace to stdout." rlm/print-trace)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def query-env-qa! "Generates Q&A pairs from ingested documents using a multi-stage pipeline." rlm/query-env-qa!)
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def save-qa! "Saves query-env-qa! results to EDN and/or Markdown files." rlm/save-qa!)
 
 ;; =============================================================================
 ;; PageIndex
 ;; =============================================================================
 
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def index!
   "Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files.
 
@@ -286,7 +282,6 @@
      :parallel-refine    - Max concurrent eval/refine operations (default: 2)"
   rlm/index!)
 
-#_{:clj-kondo/ignore [:clojure-lsp/unused-public-var]}
 (def load-index
   "Load an indexed document from a .pageindex directory.
    Reads the EDN + PNG files produced by `index!` and returns the document map."

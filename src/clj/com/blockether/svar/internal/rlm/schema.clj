@@ -555,7 +555,8 @@ RELATIONSHIP TYPES (pick exactly one per relationship):
    :repo/ingested-at    {:db/valueType :db.type/instant :db/doc "Wall-clock timestamp of the last ingest-git! call"}
 
    ;; Conversation-specific attrs (entity/type = :conversation)
-   :conversation/env-id        {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "RLM env-id"}
+   :conversation/env-id        {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "RLM env-id (per-process handle)"}
+   :conversation/name          {:db/valueType :db.type/string  :db/unique :db.unique/identity :db/doc "Caller-supplied stable conversation name (e.g. 'telegram:12345', 'session:uuid'). Enables shared-DB multi-tenant usage."}
    :conversation/system-prompt {:db/valueType :db.type/string  :db/doc "System prompt for this session"}
    :conversation/model         {:db/valueType :db.type/string  :db/doc "Root model used"}
 

@@ -223,6 +223,54 @@
         (finally
           (fs/delete-tree dir)))))
 
+  (it "create-env with {:name s} creates a conversation tagged with that name"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "rlm-named-"}))]
+      (try
+        (let [env (sut/create-env router {:db dir :conversation {:name "telegram:12345"}})
+              conv-ref (:conversation-ref env)
+              db-info @(:db-info-atom env)
+              conv (rlm-db/db-get-conversation db-info conv-ref)]
+          (try
+            (expect (vector? conv-ref))
+            (expect (= "telegram:12345" (:conversation/name conv)))
+            (finally
+              (sut/dispose-env! env))))
+        (finally
+          (fs/delete-tree dir)))))
+
+  (it "create-env with same {:name s} in shared DB reuses the same conversation"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "rlm-named-shared-"}))]
+      (try
+        (let [env-a (sut/create-env router {:db dir :conversation {:name "session:abc"}})
+              conv-a (:conversation-ref env-a)
+              _ (sut/dispose-env! env-a)
+              env-b (sut/create-env router {:db dir :conversation {:name "session:abc"}})]
+          (try
+            (expect (= conv-a (:conversation-ref env-b)))
+            (finally
+              (sut/dispose-env! env-b))))
+        (finally
+          (fs/delete-tree dir)))))
+
+  (it "create-env with different names in shared DB produces distinct conversations"
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "rlm-named-distinct-"}))]
+      (try
+        (let [env-a (sut/create-env router {:db dir :conversation {:name "chat:alice"}})
+              env-b (sut/create-env router {:db dir :conversation {:name "chat:bob"}})]
+          (try
+            (expect (not= (:conversation-ref env-a) (:conversation-ref env-b)))
+            (finally
+              (sut/dispose-env! env-a)
+              (sut/dispose-env! env-b))))
+        (finally
+          (fs/delete-tree dir)))))
+
   (it "restore-var returns the latest persisted value for a defined var"
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                     :models [{:name "gpt-4o"}]}])

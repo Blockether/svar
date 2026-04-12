@@ -117,9 +117,16 @@
         system-prompt (rlm-core/build-system-prompt {:has-reasoning? has-reasoning?
                                                      :skill-registry skill-registry-map})
         resolved-conversation-ref (rlm-db/db-resolve-conversation-ref db-info conversation)
+        ;; If caller passed {:name s} and no existing conversation with that name,
+        ;; forward the name to store-conversation! so the new conversation is
+        ;; tagged with it. Subsequent create-env calls with the same :name reuse it.
+        conversation-name (when (and (map? conversation) (string? (:name conversation)))
+                            (:name conversation))
         conversation-ref (or resolved-conversation-ref
                            (rlm-db/store-conversation! db-info
-                             {:env-id env-id :model root-model :system-prompt system-prompt}))
+                             {:env-id env-id :model root-model
+                              :system-prompt system-prompt
+                              :name conversation-name}))
         conversation-ref-atom (atom conversation-ref)
         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (rlm-tools/create-sci-context nil cheap-sub-rlm-query-fn db-info-atom conversation-ref-atom @custom-bindings-atom)
         env {:env-id env-id

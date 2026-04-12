@@ -14,7 +14,8 @@
    when a git repo is attached to the env."
   (:require
    [clojure.string :as str]
-   [datalevin.core :as d])
+   [datalevin.core :as d]
+   [taoensso.trove :as trove])
   (:import
    [java.io ByteArrayOutputStream File]
    [java.time Instant ZoneOffset]
@@ -260,7 +261,11 @@
                     (.findGitDir (File. (str path)))
                     (.readEnvironment))]
       (.build builder))
-    (catch Exception _ nil)))
+    (catch Exception e
+      (trove/log! {:level :debug :id ::open-repo-fallback
+                   :data {:path (str path) :error (ex-message e)}
+                   :msg "Failed to open git repo, returning nil"})
+      nil)))
 
 (defn git-available?
   "True iff `path` resolves to a usable git repository."

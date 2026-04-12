@@ -84,7 +84,11 @@
                   ;; Try to parse as EDN map
                   parsed (when (and raw-answer (not (str/blank? raw-answer)))
                            (try (edn/read-string raw-answer)
-                                (catch Exception _ nil)))
+                                (catch Exception e
+                                  (trove/log! {:level :debug :id ::skill-refine-edn-parse-fallback
+                                               :data {:error (ex-message e)}
+                                               :msg "Skill refine answer not valid EDN, skipping patch"})
+                                  nil)))
                   new-abstract (when-let [a (get parsed "abstract")]
                                  (when (and (string? a) (not (str/blank? a)))
                                    (let [trimmed (str/trim a)]

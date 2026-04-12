@@ -934,6 +934,12 @@ Generate question-answer pairs from ingested documents. The LLM iteratively expl
 
 Returns `{:questions [{:question "..." :answer "..." :source-document "..." :source-page N :difficulty :medium :category :factual} ...] :trace [...] :iterations N :duration-ms N}`.
 
+## Further reading
+
+- [`docs/RECOMMENDATIONS.md`](docs/RECOMMENDATIONS.md) — opinionated usage guide (when to use what, production checklists, debugging playbook, `.svar` directory renaming)
+- [`PLAN.md`](PLAN.md) — active refactor plan + known tech debt
+- [`CHANGELOG.md`](CHANGELOG.md) — version history
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).

@@ -72,7 +72,11 @@
           all-code (->> iterations
                      (mapcat (fn [it]
                                (try (edn/read-string (or (:iteration/code it) "[]"))
-                                    (catch Exception _ []))))
+                                    (catch Exception e
+                                      (trove/log! {:level :debug :id ::score-query-code-parse-fallback
+                                                   :data {:error (ex-message e)}
+                                                   :msg "Iteration code EDN parse failed, using empty"})
+                                      []))))
                      (str/join "\n"))
           iter-count (count iterations)
           error-count (count (filter #(nil? (:iteration/code %)) iterations))
@@ -132,8 +136,18 @@
   (when conn
     (let [iterations (list-iterations db-info query-ref)]
       (mapv (fn [it]
-              (cond-> {:code (try (edn/read-string (:iteration/code it)) (catch Exception _ []))
-                       :results (try (edn/read-string (:iteration/results it)) (catch Exception _ []))
+              (cond-> {:code (try (edn/read-string (:iteration/code it))
+                                  (catch Exception e
+                                    (trove/log! {:level :debug :id ::reconstruct-code-parse-fallback
+                                                 :data {:error (ex-message e)}
+                                                 :msg "Iteration code EDN parse failed in reconstruct-conversation"})
+                                    []))
+                       :results (try (edn/read-string (:iteration/results it))
+                                     (catch Exception e
+                                       (trove/log! {:level :debug :id ::reconstruct-results-parse-fallback
+                                                    :data {:error (ex-message e)}
+                                                    :msg "Iteration results EDN parse failed in reconstruct-conversation"})
+                                       []))
                        :duration-ms (:iteration/duration-ms it)}
                 (:iteration/answer it) (assoc :answer (:iteration/answer it))
                 (seq (:iteration/thinking it)) (assoc :thinking (:iteration/thinking it))))
