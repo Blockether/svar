@@ -246,12 +246,11 @@
        (cond
          (:success result) (:success result)
          (:retry result) (do
-                           (trove/log! {:level :warn :data {:attempt attempt
-                                                            :status (:status result)
-                                                            :reason (:reason result)
-                                                            :error (ex-message (:error result))
-                                                            :delay-ms delay-ms}
-                                        :msg "Retrying HTTP request"})
+                           (trove/log! {:level :warn :id ::http-retry
+                                        :msg (str "↻ RETRY  attempt=" attempt
+                                               "  reason=" (name (:reason result))
+                                               "  delay=" (long delay-ms) "ms"
+                                               "  error=" (ex-message (:error result)))})
                            (Thread/sleep (long delay-ms))
                            (recur (inc attempt)
                              (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
@@ -375,9 +374,8 @@
             (catch clojure.lang.ExceptionInfo e
               (when-let [body (:body (ex-data e))]
                 (trove/log! {:level :warn :id ::llm-error-body
-                             :data {:status (:status (ex-data e))
-                                    :body (if (string? body) (subs body 0 (min 500 (count body))) (str body))}
-                             :msg "LLM error response body"}))
+                             :msg (str "✘ HTTP  status=" (:status (ex-data e))
+                                    "  body=" (if (string? body) (subs body 0 (min 200 (count body))) (str body)))}))
               (throw e))))
         retry-opts)
       (catch Exception e
@@ -395,12 +393,10 @@
                               (str api-key-error " (Original: " (ex-message e) ")")
                               (ex-message e))]
           (when api-key-error
-            (trove/log! {:level :error
-                         :data {:api-key-error api-key-error
-                                :api-key-length (count api-key)
-                                :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))
-                                :response-body response-body}
-                         :msg "LLM API key configuration error detected"}))
+            (trove/log! {:level :error :id ::api-key-error
+                         :msg (str "✘ API KEY  " api-key-error
+                                "  key-len=" (count api-key)
+                                "  prefix=" (when api-key (subs api-key 0 (min 8 (count api-key)))))}))
           (anomaly/fault! error-message
             (cond-> (merge (ex-data e) {:type :svar.core/http-error
                                         :llm-request sanitized-request})

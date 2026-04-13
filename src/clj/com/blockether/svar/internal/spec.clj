@@ -1213,6 +1213,9 @@
                 result (apply-spec-field-defaults namespaced spec-def main-key-ns)]
             {:result result :key-mapping key-mapping :keyword-fields keyword-fields
              :key-ns-map key-ns-map :warnings warnings}))]
+    (when (seq warnings)
+      (trove/log! {:level :warn :id ::sap-warnings
+                   :msg (str "⚠ SAP  " (count warnings) " warning(s): " (str/join ", " warnings))}))
     (trove/log! {:level :debug :data {:duration-ms duration-ms
                                       :warnings-count (count warnings)
                                       :key-remaps (count key-mapping)
