@@ -15,6 +15,27 @@
    (java.io BufferedReader InputStreamReader)))
 
 ;; =============================================================================
+;; Correlation context
+;; =============================================================================
+
+(def ^:dynamic *log-context*
+  "Optional map bound by callers to add context to SVAR logs.
+   e.g. {:query-id \"abc\" :iteration 0}
+   When bound, all HTTP logs include this context."
+  nil)
+
+(defn- log-ctx
+  "Prepends *log-context* prefix to a log message when bound."
+  [msg]
+  (if-let [ctx *log-context*]
+    (let [parts (keep identity
+                  [(when-let [q (:query-id ctx)] (str "q=" q))
+                   (when-let [i (:iteration ctx)] (str "i=" i))])
+          prefix (when (seq parts) (str "[" (str/join " " parts) "] "))]
+      (str prefix msg))
+    msg))
+
+;; =============================================================================
 ;; HTTP Utilities
 ;; =============================================================================
 
@@ -247,10 +268,10 @@
          (:success result) (:success result)
          (:retry result) (do
                            (trove/log! {:level :warn :id ::http-retry
-                                        :msg (str "↻ RETRY  attempt=" attempt
-                                               "  reason=" (name (:reason result))
-                                               "  delay=" (long delay-ms) "ms"
-                                               "  error=" (ex-message (:error result)))})
+                                        :msg (log-ctx (str "↻ RETRY  attempt=" attempt
+                                                       "  reason=" (name (:reason result))
+                                                       "  delay=" (long delay-ms) "ms"
+                                                       "  error=" (ex-message (:error result))))})
                            (Thread/sleep (long delay-ms))
                            (recur (inc attempt)
                              (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
@@ -361,10 +382,10 @@
         headers      (make-llm-headers api-style api-key)
         extract-fn   (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
         _ (trove/log! {:level :info :id ::llm-request
-                       :msg (str "→ HTTP  model=" model
-                              "  tokens=" input-tokens
-                              "  max-out=" (:max_tokens extra-body)
-                              "  timeout=" timeout-ms "ms")})]
+                       :msg (log-ctx (str "→ HTTP  model=" model
+                                      "  tokens=" input-tokens
+                                      "  max-out=" (:max_tokens extra-body)
+                                      "  timeout=" timeout-ms "ms"))})]
     (try
       (with-retry
         (fn []
@@ -862,12 +883,12 @@
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
                                                               (chat-completion messages model api-key chat-url retry-opts))
         _ (trove/log! {:level :info :id ::llm-response
-                       :msg (str "← HTTP  model=" model
-                              "  " duration-ms "ms"
-                              "  in=" (:prompt_tokens api-usage)
-                              "  out=" (:completion_tokens api-usage)
-                              (when (seq reasoning) "  reasoning=true")
-                              "  len=" (count (str content)))})
+                       :msg (log-ctx (str "← HTTP  model=" model
+                                      "  " duration-ms "ms"
+                                      "  in=" (:prompt_tokens api-usage)
+                                      "  out=" (:completion_tokens api-usage)
+                                      (when (seq reasoning) "  reasoning=true")
+                                      "  len=" (count (str content))))})
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
         token-stats (router/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}
