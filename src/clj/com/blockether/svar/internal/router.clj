@@ -368,8 +368,8 @@
    :max-wait-ms            30000
    :transient-status-codes #{429 500 502 503 504}
    ;; Circuit breaker defaults
-   :cb-failure-threshold   5
-   :cb-recovery-ms         60000})
+   :failure-threshold   5
+   :recovery-ms         60000})
 
 (def ^:private INTELLIGENCE_ORDER
   {:frontier 4 :high 3 :medium 2 :low 1})
@@ -421,8 +421,8 @@
   (let [now (router-now-ms router)
         recovery-ms (if is-rate-limit?
                       (:cooldown-ms router)
-                      (:cb-recovery-ms router))
-        threshold (:cb-failure-threshold router)]
+                      (:recovery-ms router))
+        threshold (:failure-threshold router)]
     (swap! (:state router) update provider-id
       (fn [ps]
         (let [current-state (cb-state router ps)
@@ -700,8 +700,8 @@
      :network   - {:timeout-ms N :max-retries N ...} router-level network defaults
      :tokens    - {:check-context? bool :pricing {} :context-limits {}} token defaults
      :budget    - {:max-tokens N :max-cost N} spend limits (nil = no limit)
-     :cb-failure-threshold - Int. Failures before circuit opens (default: 5)
-     :cb-recovery-ms       - Int. Ms before open→half-open (default: 60000)
+     :failure-threshold - Int. Failures before circuit opens (default: 5)
+     :recovery-ms       - Int. Ms before open→half-open (default: 60000)
 
    Example:
      (make-router [{:id :blockether :api-key <key>
@@ -744,8 +744,8 @@
       :window-ms              (:window-ms merged)
       :cooldown-ms            (:cooldown-ms merged)
       :max-wait-ms            (:max-wait-ms merged)
-      :cb-failure-threshold   (:cb-failure-threshold merged)
-      :cb-recovery-ms         (:cb-recovery-ms merged)
+      :failure-threshold   (:failure-threshold merged)
+      :recovery-ms         (:recovery-ms merged)
       :transient-status-codes (:transient-status-codes merged)})))
 
 ;; =============================================================================

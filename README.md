@@ -23,7 +23,7 @@
 <div align="center">
 <h3>
 
-[Rationale](#rationale) • [Functionalities](#functionalities) • [Quick Start](#quick-start) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference)
+[Rationale](#rationale) • [Functionalities](#functionalities) • [Quick Start](#quick-start) • [Router](#router) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference)
 
 </h3>
 </div>
@@ -36,27 +36,16 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 
 ## Functionalities
 
-| Function | Description |
-|----------|-------------|
-| [**<code>ask!</code>**](#schemaless-adaptive-parsing-ask) | Structured output from LLMs via a type-safe spec DSL. Returns validated Clojure maps with token/cost tracking. Uses SAP (Schemaless Adaptive Parsing) — a Java-based parser that handles malformed JSON, unquoted keys, trailing commas, markdown blocks, and single quotes. Includes accurate token counting and cost estimation via JTokkit. |
-| [**<code>abstract!</code>**](#summarization-abstract) | Chain of Density summarization for entity-rich summaries. Optional CoVe faithfulness verification via `:refine?`. |
-| [**<code>eval!</code>**](#self-evaluation-eval) | LLM self-evaluation for quality assessment. |
-| [**<code>refine!</code>**](#iterative-refinement-refine) | Iterative refinement with decomposition and verification. |
-| [**<code>models!</code>**](#available-models-models) | Lists available models from your LLM provider. |
-| [**<code>sample!</code>**](#test-data-generation-sample) | Generates test data matching a spec with quality evaluation and self-correction. |
-| [**<code>static&#8209;guard</code>**](#guardrails) | Pattern-based prompt injection detection. |
-| [**<code>moderation&#8209;guard</code>**](#guardrails) | LLM-based content moderation against configurable policies. |
-| [**<code>guard</code>**](#guardrails) | Chains multiple guards on input — static first (fast, free), then LLM moderation. |
-| [**<code>humanize&#8209;string</code>**](#humanizer) | Strips AI-style phrases from text (safe + aggressive modes). |
-| [**<code>humanize&#8209;data</code>**](#humanizer) | Recursively humanizes all strings in a data structure. |
-| [**<code>humanizer</code>**](#humanizer) | Creates a reusable humanizer function with optional custom patterns. |
-| [**<code>spec</code>**](#spec-dsl-reference) | Define expected output schemas: types, cardinality, enums, optional fields, nested refs, namespaced keys, fixed-size vectors. |
-| [**<code>field</code>**](#spec-dsl-reference) | Define a field within a spec: name, type, cardinality, description, enum values, optionality. |
-| [**<code>spec&#8209;>prompt</code>**](#spec-prompt) | Generate the LLM prompt text from a spec definition. |
-| [**<code>str&#8209;>data</code>**](#data-str--str-data) | Schemaless parse — JSON string to Clojure data, no spec needed. |
-| [**<code>str&#8209;>data&#8209;with&#8209;spec</code>**](#parsing--validation) | Parse JSON string with spec validation and type coercion. |
-| [**<code>data&#8209;>str</code>**](#data-str--str-data) | Serialize Clojure data to JSON string. |
-| [**<code>validate&#8209;data</code>**](#parsing--validation) | Validate parsed data against a spec. |
+| Category | Functions | Description |
+|----------|-----------|-------------|
+| [**Router**](#router) | `make-router`, `router-stats`, `reset-budget!`, `reset-provider!` | Multi-provider routing with circuit breakers, cost budgets, automatic fallback. The entry point to the library. |
+| [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Token counting + cost estimation via JTokkit. |
+| [**Spec DSL**](#spec-dsl-reference) | `spec`, `field`, `spec->prompt`, `validate-data` | Define output shapes: types, enums, refs, optional fields, namespaced keys, fixed-size vectors. |
+| [**Parsing**](#parsing--validation) | `str->data`, `str->data-with-spec`, `data->str` | Schemaless and spec-validated JSON↔Clojure. Handles malformed JSON out of the box. |
+| [**Refinement**](#summarization-abstract) | `abstract!`, `eval!`, `refine!`, `sample!` | Chain of Density summarization, LLM self-evaluation, iterative refinement, test data generation. |
+| [**Guards**](#guardrails) | `guard`, `static-guard`, `moderation-guard` | Two-layer input protection: fast pattern matching + LLM-based content moderation. |
+| [**Humanizer**](#humanizer) | `humanize-string`, `humanize-data`, `humanizer` | Strip AI-style phrases from LLM outputs. Safe + aggressive modes. |
+| [**Models**](#available-models-models) | `models!` | List available models from your provider. |
 
 ## Quick Start
 
@@ -74,6 +63,93 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
   (def router (svar/make-router [{:id :openai
                                   :api-key (System/getenv "OPENAI_API_KEY")
                                   :models [{:name "gpt-4o"}]}])))
+```
+
+## Router
+
+The router is the single entry point for all LLM calls. Create it once at boot, pass it to every function. It handles provider selection, circuit breaking, cost budgets, and automatic fallback.
+
+### Basic Setup
+
+```clojure
+(comment
+  ;; Single provider
+  (def router
+    (svar/make-router [{:id :openai
+                        :api-key (System/getenv "OPENAI_API_KEY")
+                        :models [{:name "gpt-4o"}
+                                 {:name "gpt-4o-mini"}]}])))
+```
+
+### Multi-Provider with Fallback
+
+Vector order = priority. If the first provider fails (rate limit, outage), the router automatically falls back to the next:
+
+```clojure
+(comment
+  ;; First provider is preferred; second is fallback
+  (def router
+    (svar/make-router
+      [{:id :anthropic
+        :api-key (System/getenv "ANTHROPIC_API_KEY")
+        :models [{:name "claude-sonnet-4-20250514"}]}
+       {:id :openai
+        :api-key (System/getenv "OPENAI_API_KEY")
+        :models [{:name "gpt-4o"}]}])))
+```
+
+### Cost Budgets & Circuit Breakers
+
+```clojure
+(comment
+  ;; Spend limits + circuit breaker tuning
+  (def router
+    (svar/make-router
+      [{:id :openai
+        :api-key (System/getenv "OPENAI_API_KEY")
+        :models [{:name "gpt-4o"} {:name "gpt-4o-mini"}]}]
+      {:budget {:max-tokens 1000000 :max-cost 5.0}  ;; hard spend cap
+       :failure-threshold 5                          ;; failures before circuit opens
+       :recovery-ms 60000})))                        ;; ms before retry after open
+```
+
+### Routing Options
+
+Every `ask!` call accepts `:routing` to control provider/model selection:
+
+```clojure
+(comment
+  ;; Let the router pick the cheapest model
+  (svar/ask! router {:spec my-spec
+                     :messages [(svar/user "...")]
+                     :routing {:optimize :cost}})
+
+  ;; Or the most capable
+  (svar/ask! router {:spec my-spec
+                     :messages [(svar/user "...")]
+                     :routing {:optimize :intelligence}})
+
+  ;; Pin to a specific provider + model
+  (svar/ask! router {:spec my-spec
+                     :messages [(svar/user "...")]
+                     :routing {:provider :openai :model "gpt-4o-mini"}}))
+```
+
+### Observability
+
+```clojure
+(comment
+  ;; Cumulative + windowed stats per provider:
+  ;;   :total      - {:requests N :tokens N}
+  ;;   :providers  - per-provider circuit-breaker state, windowed + cumulative stats
+  ;;   :budget     - {:limit ... :spent {:total-tokens N :total-cost N}}
+  (svar/router-stats router)
+
+  ;; Reset spend counters (e.g. start of billing cycle)
+  (svar/reset-budget! router)
+
+  ;; Manually close a circuit breaker after provider recovers
+  (svar/reset-provider! router :openai))
 ```
 
 ## Usage
@@ -780,8 +856,6 @@ Serialize Clojure data to/from LLM-compatible strings:
 
 ## Further reading
 
-- [`docs/RECOMMENDATIONS.md`](docs/RECOMMENDATIONS.md) — opinionated usage guide (when to use what, production checklists, debugging playbook, `.svar` directory renaming)
-- [`PLAN.md`](PLAN.md) — active refactor plan + known tech debt
 - [`CHANGELOG.md`](CHANGELOG.md) — version history
 
 ## License

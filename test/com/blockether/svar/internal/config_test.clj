@@ -102,15 +102,15 @@
     (it "uses default CB thresholds"
       (let [r (llm/make-router [{:id :openai :api-key "sk-test"
                                  :models [{:name "gpt-4o"}]}])]
-        (expect (= 5 (:cb-failure-threshold r)))
-        (expect (= 60000 (:cb-recovery-ms r)))))
+        (expect (= 5 (:failure-threshold r)))
+        (expect (= 60000 (:recovery-ms r)))))
 
     (it "allows custom CB thresholds"
       (let [r (llm/make-router [{:id :openai :api-key "sk-test"
                                  :models [{:name "gpt-4o"}]}]
-                {:cb-failure-threshold 3 :cb-recovery-ms 30000})]
-        (expect (= 3 (:cb-failure-threshold r)))
-        (expect (= 30000 (:cb-recovery-ms r)))))))
+                {:failure-threshold 3 :recovery-ms 30000})]
+        (expect (= 3 (:failure-threshold r)))
+        (expect (= 30000 (:recovery-ms r)))))))
 
 (defdescribe router-stats-test
   "Tests for router-stats function"
