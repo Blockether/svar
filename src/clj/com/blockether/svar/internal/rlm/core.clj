@@ -21,7 +21,6 @@
    [edamame.core :as edamame]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.spec :as spec]
-   [datalevin.core :as d]
    [sci.core :as sci]
    [taoensso.trove :as trove]))
 
@@ -303,27 +302,18 @@ Pattern: [thing] [action] [reason]. [next step].")
       [doc-1] Annual Report 2024 (pdf, 48 pages)
       [doc-2] API Reference (html, 12 pages)
       [doc-3] Meeting Notes (md, 82 pages)\""
-  [{:keys [conn]}]
-  (when conn
-    (let [docs (d/q '[:find [(pull ?e [:document/id :document/name :document/title :document/extension]) ...]
-                      :where [?e :document/id _]]
-                 (d/db conn))
+  [db-info]
+  (when (:datasource db-info)
+    (let [docs (rlm-db/db-list-documents db-info {:include-toc? false})
           page-counts (when (seq docs)
                         (into {}
                           (for [doc docs]
                             [(:document/id doc)
-                             (or (d/q '[:find (count ?p) .
-                                        :in $ ?doc-id
-                                        :where [?p :page.node/document-id ?doc-id]]
-                                   (d/db conn) (:document/id doc))
-                               0)])))
+                             (rlm-db/db-count-document-pages db-info (:document/id doc))])))
           total-pages (reduce + 0 (vals page-counts))
-          entity-stats (let [entities (d/q '[:find [(pull ?e [:entity/type]) ...]
-                                             :where [?e :entity/id _]]
-                                        (d/db conn))
-                             types-map (frequencies (map :entity/type entities))]
-                         {:total (count entities) :types types-map})
-          total-entities (:total entity-stats)]
+          types-map (rlm-db/db-entity-type-counts db-info)
+          total-entities (reduce + 0 (vals types-map))
+          entity-stats {:total total-entities :types types-map}]
       (when (seq docs)
         (str (count docs) " documents, " total-pages " pages"
           (when (pos? total-entities)
@@ -400,6 +390,56 @@ ARCH:
 - (doc fn) for docs.
 - Aliases: str/ set/ walk/ edn/ json/ zp/ pp/ lt/ test/
 
+EXECUTION RECEIPTS (next iteration's <execution_results>):
+- Each :code entry gets one receipt with the FULL evaluated :value — no
+  summarisation, no preview truncation. Lazy seqs are capped at 100 items
+  by realize-value; everything else is printed in full. Ground your answer
+  on what you see here, never on memory or guesses.
+- (def sym expr) is first-class. The receipt shows:
+    [1] (def here (list-dir \"/tmp\"))
+        {:success? true :result-kind :var :var-name \"here\"
+         :value-type map :value-size 4-items
+         :value {:path \"/tmp\" :entries [{:name \"a\" :type \"file\"} ...
+                 ... every entry, every key, every value, no truncation]}}
+  You can reference the var `here` in the next iteration and see its full
+  contents there too.
+- Need last iteration's var rendered again? Either USE it in code
+  (e.g. `(pr-str here)`), PRINT it (`(prn here)` — stdout is captured), or
+  DEF it into a new var. Nothing carries over implicitly besides what you
+  actively surface.
+- Lazy seqs only: capped at 100 items with \"...<truncated lazy seq at 100
+  elements>\" marker. For more, slice explicitly: (vec (take N my-seq)).
+
+DEF DISCIPLINE:
+- Every `(def …)` you write MUST include a docstring:
+    (def here \"current directory listing from list-dir\" (list-dir \"/tmp\"))
+  The docstring lands in <var_index> alongside the var preview and helps
+  future-you recognise what each var is for. Anonymous data = lost data.
+
+SINGLE-WORD FINAL:
+- If your :final.answer is one token (e.g. \"here\", \"reply\", \"listing\"),
+  the runtime will try to resolve it as a var name and substitute the var's
+  full value verbatim. So `{:final {:answer \"reply\"}}` when `reply` is a
+  def'd string prints the whole string to the user, no truncation.
+- If the token is not a var, it is returned literally.
+- Use this when the answer is already stored in a var — don't copy-paste
+  the whole blob into :final.answer, just name the var.
+
+GROUNDING (anti-hallucination — read carefully):
+- Your tools = the functions listed below in this prompt. If not listed, it does not exist in this runtime.
+- Not available here: shell, git CLI, docker, CI, deploy, Obsidian, Jira, Slack, PRD/ticket tools, design tools, web fetch, package installers, IDE actions. Do not claim them.
+- When the user asks what you can do, list the real function names with one-line signatures from the tool list below. No categories, no paraphrase, no marketing.
+- Never describe results of a call you did not actually execute. No imagined output.
+- DATA GROUNDING (hard rule): any concrete data in :final.answer — file names,
+  directory entries, sizes, counts, ids, values — MUST come verbatim from
+  <execution_results> or <var_index>. Do NOT fill from prior knowledge,
+  training data, or memory. If you need data that isn't in the results, run
+  the tool to fetch it. Fabricating entries is a critical failure.
+- When the listing you received does not match what you think it should
+  contain, TRUST THE TOOL OUTPUT. Your intuition about the filesystem is
+  wrong; the tool is right. Report what the tool returned, not what you
+  expected.
+
 LLM SUB-CALLS:
 - (sub-rlm-query \"q\") → {:content :code} prose + Clojure code blocks (vec<str>).
 - (sub-rlm-query \"q\" {:routing {:optimize :cost}}) → cheap path.
@@ -465,6 +505,25 @@ RULES:
 
 CODE:
 - Complete evaluable expr per entry. No split.
+- :code is Clojure expressions SCI will eval. Legit uses:
+  (a) call tools / fetch data / transform values
+  (b) test or verify the very snippet that will become your :final.answer
+      (e.g. run the fn once, check the return, THEN set :final with the code)
+- DO NOT put prose, natural-language sentences, Polish/English explanations,
+  or formatted markdown tables in :code. Those are answers → :final.answer
+  with :final.answer-type = text. A bare string literal as :code is the
+  smell — if the string is a message to the user, it belongs in :final.
+- You can emit :code AND :final in the SAME iteration. Use that: verify in
+  :code, deliver in :final, done. Don't burn an iteration just to echo.
+- :final.answer is LITERAL text displayed verbatim to the user. It is NOT a
+  template — a bare var name (e.g. `here` in backticks) is NOT substituted
+  with its value. To include a runtime value, build the display string in
+  :code (e.g. (def reply (str \"Path: \" (:path here))) ), then put `reply`'s
+  string value into :final.answer in the same iteration.
+- :final.answer MUST contain the real, substantive reply the user will read.
+  Never a one-word placeholder like \"listing\", \"result\", \"done\",
+  \"ok\", \"output\" standing in for the actual content. If the task is to
+  show X, :final.answer contains the formatted X — not the word for it.
 - Simplest solution. No over-eng. No unused abstractions. No speculative features. No impossible-error handling.
 
 OUTPUT (iterations):
@@ -532,17 +591,48 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
       ;; Check for final answer in spec response
       (if-let [final-data (:final parsed)]
         (let [raw-answer (str (:answer final-data))
+              ;; Single-word :final mechanic — if the answer is one token AND
+              ;; that token is a user-def'd var in the sandbox, substitute the
+              ;; var's full pr-str'd value. Lets the LLM finalize with just
+              ;; `{:final {:answer "reply"}}` after building `reply` in :code,
+              ;; instead of copy-pasting the whole string. If the token is not
+              ;; a var, keep the literal word.
+              locals (try (get-locals rlm-env) (catch Throwable _ {}))
+              single-token? (and (re-matches #"\S+" raw-answer)
+                              (try (symbol? (read-string raw-answer)) (catch Throwable _ false)))
+              resolved-var-value (when single-token?
+                                   (let [sym (symbol raw-answer)
+                                         resolved (get locals sym)]
+                                     (when (some? resolved)
+                                       (let [v (if (instance? clojure.lang.IDeref resolved)
+                                                 @resolved resolved)]
+                                         (cond
+                                           (string? v) v
+                                           :else (pr-str v))))))
+              raw-answer (or resolved-var-value raw-answer)
+              _ (when resolved-var-value
+                  (rlm-debug! {:token raw-answer
+                               :resolved-chars (count resolved-var-value)}
+                    "Single-word :final resolved to var value"))
               final-answer (paren-repair/repair-code raw-answer)
               confidence (or (:confidence final-data) :high)
-              ;; Language: SCI execution + validation only for Clojure
+              ;; Answer-type decides whether SCI execution + syntax validation applies.
+              ;; :answer-type = "text"|"data" → prose / structured data — no code required.
+              ;; :answer-type = "code" → Clojure (by default) unless :language says otherwise.
+              ;; Historical behaviour treated missing :language as Clojure, which forced
+              ;; text-only chat replies to submit code and produced prose-in-:code loops.
+              answer-type (some-> (:answer-type final-data) keyword)
               language (when-let [l (:language final-data)] (keyword l))
-              clojure? (or (= language :clojure) (nil? language))
+              code-answer? (= answer-type :code)
+              clojure? (and code-answer? (or (= language :clojure) (nil? language)))
               code-blocks (vec (remove str/blank? (or (:code parsed) [])))
-              ;; Execute code blocks in SCI — only for Clojure
+              ;; Execute code blocks in SCI — only for Clojure code answers.
               exec-results (when (and clojure? (seq code-blocks))
                              (mapv (fn [code] (execute-code rlm-env code)) code-blocks))
               exec-errors (when exec-results
                             (seq (filter :error exec-results)))
+              ;; Only require a self-test when the FINAL answer is Clojure code.
+              ;; Text / data answers can finalize on iteration 0 without running code.
               untested? (and clojure? (zero? (or iteration 0)) (empty? code-blocks))
               parse-check (when clojure?
                             (parse-clojure-syntax final-answer))
@@ -711,9 +801,51 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
              (str "{" code-str " → " val-part (or stdout-part "") (or warning-part "") "}")))
       executions)))
 
+(def ^:private EXECUTION_SAFETY_CAP_CHARS
+  "Safety cap for one value rendering in an execution receipt. Receipts show
+   the FULL value — lazy seqs are already bounded by realize-value's 100-item
+   cap. This guard only protects against pathological non-lazy dumps (e.g.
+   a 50MB string). In normal use no truncation happens."
+  200000)
+
+(def ^:private EXECUTION_STDERR_CHARS
+  "Budget for captured stderr — diagnostics only, not a full data dump."
+  2000)
+
+(defn- type-label-of
+  "Short human-readable type label for result serialization."
+  [v]
+  (cond
+    (nil? v) "nil"
+    (map? v) "map"
+    (vector? v) "vector"
+    (set? v) "set"
+    (sequential? v) "seq"
+    (string? v) "string"
+    (integer? v) "int"
+    (float? v) "float"
+    (boolean? v) "bool"
+    (keyword? v) "keyword"
+    :else (.getSimpleName (class v))))
+
+(defn- size-suffix
+  "Optional ' :size N-units' tail for collections / strings, blank otherwise."
+  [v]
+  (cond
+    (nil? v) ""
+    (string? v) (str " :size " (count v) "-chars")
+    (coll? v) (str " :size " (count v) "-items")
+    :else ""))
+
 (defn- format-execution-results
-  "Formats previous iteration's executions as structured XML receipt.
-   Shows success/failure, result-type, size, errors per code block."
+  "Formats previous iteration's executions as an XML receipt. Each block
+   shows the FULL evaluated value — no summarisation, no preview. Lazy
+   sequences are already bounded by realize-value's 100-item cap; everything
+   else is pr-str'd in full, protected only by a pathological-size safety
+   guard. The LLM should be able to ground :final on what it sees here.
+
+   (def sym expr) is rendered as :result-kind :var :var-name \"sym\" so the
+   LLM can reference the symbol on the next iteration."
   [executions iteration]
   (when (seq executions)
     (str "<execution_results iteration=\"" iteration "\">\n"
@@ -721,35 +853,37 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
         (map-indexed
           (fn [idx {:keys [code error result stdout stderr]}]
             (let [code-str (str/trim (or code ""))
+                  stdout-part (when-not (str/blank? stdout)
+                                (str " :stdout " (pr-str stdout)))
+                  stderr-part (when-not (str/blank? stderr)
+                                (str " :stderr " (pr-str (str-truncate stderr EXECUTION_STDERR_CHARS))))
                   result-info (cond
                                 error
-                                (str "{:success? false :error " (pr-str (str-truncate error 200)) "}")
+                                (str "{:success? false :error " (pr-str (str-truncate error 400)) "}")
 
                                 (fn? result)
                                 "{:success? false :error \"Result is a function, not a value\"}"
 
+                                (instance? clojure.lang.Var result)
+                                (let [^clojure.lang.Var var-obj result
+                                      var-name (name (.sym var-obj))
+                                      bound (realize-value (.getRawRoot var-obj))
+                                      value-str (str-truncate (pr-str bound) EXECUTION_SAFETY_CAP_CHARS)]
+                                  (str "{:success? true :result-kind :var"
+                                    " :var-name " (pr-str var-name)
+                                    " :value-type " (type-label-of bound)
+                                    (str/replace (size-suffix bound) ":size" ":value-size")
+                                    " :value " value-str
+                                    stdout-part stderr-part
+                                    "}"))
+
                                 :else
                                 (let [v (realize-value result)
-                                      type-label (cond
-                                                   (nil? v) "nil"
-                                                   (map? v) "map"
-                                                   (vector? v) "vector"
-                                                   (set? v) "set"
-                                                   (sequential? v) "seq"
-                                                   (string? v) "string"
-                                                   (integer? v) "int"
-                                                   (float? v) "float"
-                                                   (boolean? v) "bool"
-                                                   (keyword? v) "keyword"
-                                                   :else (.getSimpleName (class v)))
-                                      size (cond
-                                             (nil? v) ""
-                                             (string? v) (str " :size " (count v) "-chars")
-                                             (coll? v) (str " :size " (count v) "-items")
-                                             :else "")]
-                                  (str "{:success? true :result-type " type-label size
-                                    (when-not (str/blank? stdout) (str " :stdout " (pr-str (str-truncate stdout 100))))
-                                    (when-not (str/blank? stderr) (str " :stderr " (pr-str (str-truncate stderr 100))))
+                                      value-str (str-truncate (pr-str v) EXECUTION_SAFETY_CAP_CHARS)]
+                                  (str "{:success? true :result-type " (type-label-of v)
+                                    (size-suffix v)
+                                    " :value " value-str
+                                    stdout-part stderr-part
                                     "}")))]
               (str "  [" (inc idx) "] " code-str "\n      " result-info)))
           executions))

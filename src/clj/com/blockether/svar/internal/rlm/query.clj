@@ -16,7 +16,6 @@
    [com.blockether.svar.internal.rlm.tools :as rlm-tools]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
-   [datalevin.core :as d]
    [taoensso.trove :as trove]))
 
 ;; -----------------------------------------------------------------------------
@@ -247,24 +246,7 @@
         refine?      (= confidence :low)]
     (if refine?
       (let [answer-as-str    (rlm-core/answer-str iter-answer)
-            conn             (:conn db-info)
-            stored-docs      (when conn
-                               (let [docs (d/q '[:find [(pull ?e [*]) ...]
-                                                 :where [?e :document/id _]]
-                                            (d/db conn))]
-                                 (when (seq docs)
-                                   (mapv (fn [doc]
-                                           (let [doc-id (or (:document/id doc) (:document/name doc))
-                                                 nodes  (d/q '[:find [(pull ?e [:page.node/page-id :page.node/content]) ...]
-                                                               :in $ ?doc-id
-                                                               :where [?e :page.node/document-id ?doc-id]]
-                                                          (d/db conn) doc-id)]
-                                             {:id    doc-id
-                                              :pages (mapv (fn [pn]
-                                                             {:page (or (:page.node/page-id pn) "0")
-                                                              :text (or (:page.node/content pn) "")})
-                                                       nodes)}))
-                                     docs))))
+            stored-docs      (rlm-db/db-stored-docs-for-refinement db-info)
             [refine-provider
              refine-model-map] (or (llm/select-provider rlm-router
                                      {:prefer        :intelligence
@@ -339,15 +321,8 @@
       ;; success path - differentiate cited vs uncited
       (let [accessed         (rlm-db/pages-accessed-since db-info query-start-time)
             cited-source-ids (set (or sources []))
-            cited-page-ids   (when (and (seq cited-source-ids) (:conn db-info))
-                               (let [conn (:conn db-info)]
-                                 (set (d/q '[:find  [?pid ...]
-                                             :in    $ [?sid ...]
-                                             :where (or [?e :page.node/id ?sid]
-                                                      [?e :page/id ?sid]
-                                                      [?e :page.node/document-id ?sid])
-                                             [?e :page.node/page-id ?pid]]
-                                        (d/db conn) (vec cited-source-ids)))))
+            cited-page-ids   (when (seq cited-source-ids)
+                               (rlm-db/db-cited-page-ids db-info cited-source-ids))
             max-iters        (or @max-iterations-atom max-iterations)
             high-reward      (compute-q-reward eval-scores confidence iterations max-iters)]
         (when (seq accessed)
@@ -401,13 +376,13 @@
       ;; success path
       (do
         (when (and verify? (seq @claims-atom))
-          (let [conn     (:conn db-info)
-                query-id (util/uuid)]
+          (let [query-id (util/uuid)]
             (doseq [claim @claims-atom]
               (try
-                (d/transact! conn [(merge claim {:claim/id        (util/uuid)
-                                                 :claim/query-id  query-id
-                                                 :claim/verified? (boolean (get claim :claim/verified? true))})])
+                (rlm-db/db-store-claim! db-info
+                  (merge claim {:claim/id        (util/uuid)
+                                :claim/query-id  query-id
+                                :claim/verified? (boolean (get claim :claim/verified? true))}))
                 (catch Exception e
                   (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to store claim"}))))))
         (rlm-core/rlm-debug! {:iterations       iterations

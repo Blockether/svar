@@ -5,7 +5,6 @@
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [com.blockether.svar.internal.rlm.db :as rlm-db]
-   [datalevin.core :as d]
    [taoensso.trove :as trove])
   (:import
    [java.nio.file AtomicMoveNotSupportedException CopyOption Files StandardCopyOption]
@@ -46,37 +45,9 @@
   [db-info]
   (long (rlm-db/get-corpus-revision db-info)))
 
-(defn- qa-corpus-documents
-  [db]
-  (->> (d/q '[:find [(pull ?e [:document/id :document/name :document/title
-                               :document/extension :document/abstract]) ...]
-              :where [?e :document/id _]]
-         db)
-    (sort-by (juxt :document/id :document/name))
-    vec))
-
-(defn- qa-corpus-toc-entries
-  [db]
-  (->> (d/q '[:find [(pull ?e [:document.toc/id :document.toc/document-id
-                               :document.toc/title :document.toc/level
-                               :document.toc/target-page :document.toc/target-section-id
-                               :document.toc/description]) ...]
-              :where [?e :document.toc/id _]]
-         db)
-    (sort-by (juxt :document.toc/document-id :document.toc/target-page
-               :document.toc/level :document.toc/title :document.toc/id))
-    vec))
-
-(defn- qa-corpus-page-nodes
-  [db]
-  (->> (d/q '[:find [(pull ?e [:page.node/id :page.node/document-id :page.node/page-id
-                               :page.node/type :page.node/local-id
-                               :page.node/content :page.node/description]) ...]
-              :where [?e :page.node/id _]]
-         db)
-    (sort-by (juxt :page.node/document-id :page.node/page-id
-               :page.node/local-id :page.node/id))
-    vec))
+(defn- qa-corpus-documents [db-info] (rlm-db/qa-corpus-documents db-info))
+(defn- qa-corpus-toc-entries [db-info] (rlm-db/qa-corpus-toc-entries db-info))
+(defn- qa-corpus-page-nodes [db-info] (rlm-db/qa-corpus-page-nodes db-info))
 
 (defn- qa-corpus-content-hash
   [docs toc nodes]
@@ -115,10 +86,10 @@
                  :msg "QA corpus snapshot cache miss"})))
 
 (defn- compute-qa-corpus-snapshot
-  [db revision]
-  (let [docs (qa-corpus-documents db)
-        toc (qa-corpus-toc-entries db)
-        nodes (qa-corpus-page-nodes db)]
+  [db-info revision]
+  (let [docs (qa-corpus-documents db-info)
+        toc (qa-corpus-toc-entries db-info)
+        nodes (qa-corpus-page-nodes db-info)]
     {:revision revision
      :document-count (count docs)
      :toc-count (count toc)
@@ -128,11 +99,10 @@
 (defn qa-corpus-snapshot
   "Returns deterministic corpus stats + content hash for manifest fingerprinting.
    Hash includes document metadata, TOC entries, and full page-node text payloads."
-  [env {:keys [conn] :as db-info}]
-  (if-not conn
+  [env db-info]
+  (if-not (:datasource db-info)
     {:revision 0 :document-count 0 :toc-count 0 :node-count 0 :content-hash "sha256:0"}
     (let [corpus-atom (:qa-corpus-atom env)
-          db (d/db conn)
           revision (qa-corpus-revision db-info)
           cached (when corpus-atom (:snapshot-cache @corpus-atom))]
       (if (and cached (= revision (:revision cached)))
@@ -140,7 +110,7 @@
           (qa-corpus-cache-hit! env revision)
           (:snapshot cached))
         (let [start (System/nanoTime)
-              snapshot (compute-qa-corpus-snapshot db revision)
+              snapshot (compute-qa-corpus-snapshot db-info revision)
               digest-ms (/ (- (System/nanoTime) start) 1000000.0)]
           (when corpus-atom
             (swap! corpus-atom assoc :snapshot-cache {:revision revision :snapshot snapshot}))
@@ -169,8 +139,8 @@
   "Returns a stable fingerprint for query-env-qa! inputs.
    Includes key generation options + corpus summary so resume only reuses
    manifest state when run inputs are compatible."
-  [env {:keys [conn] :as _db-info} qa-opts]
-  (let [corpus (qa-corpus-snapshot env {:conn conn})
+  [env db-info qa-opts]
+  (let [corpus (qa-corpus-snapshot env db-info)
         payload {:manifest-version QA_MANIFEST_VERSION
                  :options qa-opts
                  :corpus corpus}]

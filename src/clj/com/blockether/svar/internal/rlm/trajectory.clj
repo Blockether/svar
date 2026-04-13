@@ -10,14 +10,10 @@
    [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
-   [datalevin.core :as d]
+   [com.blockether.svar.internal.rlm.db :as rlm-db]
    [taoensso.trove :as trove])
   (:import
    [java.io BufferedWriter FileWriter]))
-
-(defn- entity-order-key
-  [entity]
-  [(:entity/created-at entity) (:entity/id entity)])
 
 (defn list-queries
   "Lists query entities from the database.
@@ -25,34 +21,20 @@
      :status - Filter by status keyword (e.g., :success)
      :limit  - Max results (default: all)
      :min-iterations - Minimum iteration count (default: 0)"
-  [{:keys [conn]} & [{:keys [status limit min-iterations] :or {min-iterations 0}}]]
-  (when conn
-    (let [all (d/q '[:find [(pull ?e [*]) ...]
-                     :where [?e :entity/type :query]]
-                (d/db conn))
-          filtered (->> all
-                     (filter #(>= (or (:query/iterations %) 0) min-iterations))
-                     (filter #(if status (= (:query/status %) status) true))
-                     (sort-by entity-order-key)
-                     reverse)]
-      (if limit (take limit filtered) filtered))))
+  [db-info & [opts]]
+  (when (:datasource db-info)
+    (rlm-db/db-list-queries db-info (or opts {}))))
 
 (defn list-iterations
   "Lists iteration entities for a query via parent-id, sorted by created-at."
-  [{:keys [conn]} query-ref]
-  (when conn
-    (let [db (d/db conn)
-          query-id (cond
-                     (vector? query-ref) (second query-ref)
-                     (uuid? query-ref) query-ref
-                     :else nil)]
-      (when query-id
-        (->> (d/q '[:find [(pull ?e [*]) ...]
-                    :in $ ?parent-id
-                    :where [?e :entity/type :iteration]
-                    [?e :entity/parent-id ?parent-id]]
-               db query-id)
-          (sort-by entity-order-key))))))
+  [db-info query-ref]
+  (when (:datasource db-info)
+    (let [qref (cond
+                 (vector? query-ref) query-ref
+                 (uuid? query-ref) [:entity/id query-ref]
+                 :else nil)]
+      (when qref
+        (rlm-db/db-list-query-iterations db-info qref)))))
 
 (defn score-query
   "Scores a query trajectory for training quality.
@@ -66,8 +48,8 @@
    +2 — Low iteration count relative to budget (efficient strategy)
    -2 — Had consecutive errors > 2 (noisy trace)
    -1 — Very short answer (< 20 chars, likely trivial)"
-  [{:keys [conn] :as db-info} query-ref max-iterations]
-  (when conn
+  [db-info query-ref max-iterations]
+  (when (:datasource db-info)
     (let [iterations (list-iterations db-info query-ref)
           all-code (->> iterations
                      (mapcat (fn [it]
@@ -102,11 +84,11 @@
    - eval-score >= min-eval-score when available (default 0.6)
 
    Returns scored queries sorted by score descending."
-  [{:keys [conn] :as db-info} & [{:keys [min-iterations max-iteration-ratio min-score min-eval-score
-                                         limit max-iterations]
-                                  :or {min-iterations 2 max-iteration-ratio 0.5 min-score 2
-                                       min-eval-score 0.6 limit 1000 max-iterations 50}}]]
-  (when conn
+  [db-info & [{:keys [min-iterations max-iteration-ratio min-score min-eval-score
+                      limit max-iterations]
+               :or {min-iterations 2 max-iteration-ratio 0.5 min-score 2
+                    min-eval-score 0.6 limit 1000 max-iterations 50}}]]
+  (when (:datasource db-info)
     (let [queries (list-queries db-info {:status :success :min-iterations min-iterations})
           hard-filtered (->> queries
                           (filter #(<= (:query/iterations %)
@@ -132,8 +114,8 @@
 
    Returns vector of iteration maps sorted by created-at, each with:
    :code, :results, :thinking, :duration-ms, and optionally :answer."
-  [{:keys [conn] :as db-info} query-ref]
-  (when conn
+  [db-info query-ref]
+  (when (:datasource db-info)
     (let [iterations (list-iterations db-info query-ref)]
       (mapv (fn [it]
               (cond-> {:code (try (edn/read-string (:iteration/code it))
@@ -188,9 +170,9 @@
    - {output-dir}/train.jsonl
    - {output-dir}/val.jsonl
    - {output-dir}/metadata.edn"
-  [{:keys [conn] :as db-info} output-dir & [{:keys [val-split filter-opts shuffle?]
-                                             :or {val-split 0.1 shuffle? true}}]]
-  (when-not conn
+  [db-info output-dir & [{:keys [val-split filter-opts shuffle?]
+                          :or {val-split 0.1 shuffle? true}}]]
+  (when-not (:datasource db-info)
     (throw (ex-info "No database connection" {:type :trajectory/no-conn})))
   (let [queries (filter-queries db-info filter-opts)
         _ (when (empty? queries)
@@ -199,8 +181,8 @@
         ;; Look up conversation (parent of query) for system-prompt
         get-system-prompt (fn [q]
                             (when-let [parent-id (:entity/parent-id q)]
-                              (let [conv (d/pull (d/db conn) '[:conversation/system-prompt] [:entity/id parent-id])]
-                                (:conversation/system-prompt conv))))
+                              (:conversation/system-prompt
+                                (rlm-db/db-get-conversation db-info [:entity/id parent-id]))))
         exports (->> queries
                   (keep (fn [q]
                           (let [qref [:entity/id (:entity/id q)]

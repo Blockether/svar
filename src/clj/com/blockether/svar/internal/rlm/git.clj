@@ -14,7 +14,7 @@
    when a git repo is attached to the env."
   (:require
    [clojure.string :as str]
-   [datalevin.core :as d]
+   [com.blockether.svar.internal.rlm.db :as rlm-db]
    [taoensso.trove :as trove])
   (:import
    [java.io ByteArrayOutputStream File]
@@ -185,33 +185,29 @@
    Returns {:events-stored :people-stored :files-stored :relationships-stored}."
   [db-info commits {:keys [repo-name]}]
   (let [document-id (or repo-name "git")
-        conn (:conn db-info)
         unique-emails (into {}
-                        (comp
-                          (map (juxt :author-email identity))
-                          (distinct))
+                        (comp (map (juxt :author-email identity)) (distinct))
                         commits)
         unique-paths (into #{}
                        (comp (mapcat :file-paths) (distinct))
                        commits)
-
-        person-entities (for [[email _] unique-emails
-                              :let [commit (get unique-emails email)]]
-                          (assoc (author->person-entity commit document-id)
-                            :entity/id (java.util.UUID/randomUUID)))
-        email->id (zipmap (keys unique-emails)
-                    (map :entity/id person-entities))
-
-        file-entities (for [fp unique-paths]
-                        (assoc (file->file-entity fp document-id)
-                          :entity/id (java.util.UUID/randomUUID)))
+        person-entities (mapv (fn [[email commit]]
+                                (assoc (author->person-entity commit document-id)
+                                  :entity/id (java.util.UUID/randomUUID)))
+                          unique-emails)
+        email->id (into {} (map-indexed
+                             (fn [i [email _]] [email (:entity/id (nth person-entities i))])
+                             unique-emails))
+        file-entities (mapv (fn [fp]
+                              (assoc (file->file-entity fp document-id)
+                                :entity/id (java.util.UUID/randomUUID)))
+                        unique-paths)
         path->id (zipmap unique-paths (map :entity/id file-entities))
-
-        event-entities (for [commit commits]
-                         (assoc (commit->entity commit document-id)
-                           :entity/id (java.util.UUID/randomUUID)))
+        event-entities (mapv (fn [commit]
+                               (assoc (commit->entity commit document-id)
+                                 :entity/id (java.util.UUID/randomUUID)))
+                         commits)
         sha->event-id (zipmap (map :sha commits) (map :entity/id event-entities))
-
         relationships
         (concat
           (for [{:keys [sha author-email]} commits
@@ -235,9 +231,11 @@
              :relationship/target-entity-id file-id
              :relationship/description "changed file"
              :relationship/document-id document-id}))]
-
-    (d/transact! conn (vec (concat person-entities file-entities event-entities relationships)))
-
+    ;; Persist all entities + edges via the SQLite store.
+    (doseq [e (concat person-entities file-entities event-entities)]
+      (rlm-db/store-entity! db-info e))
+    (doseq [r relationships]
+      (rlm-db/store-relationship! db-info r))
     {:events-stored (count event-entities)
      :people-stored (count person-entities)
      :files-stored (count file-entities)

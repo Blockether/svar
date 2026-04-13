@@ -12,7 +12,6 @@
    [com.blockether.svar.internal.rlm.git :as rlm-git]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
-   [datalevin.core :as d]
    [sci.addons.future :as sci-future]
    [sci.core :as sci]
    [taoensso.trove :as trove]))
@@ -289,7 +288,7 @@
      (:relationships p) ;; connected entities"
   [db-info]
   (fn fetch-document-content [lookup-ref]
-    (when-let [{:keys [conn] :as db-info} db-info]
+    (when db-info
       (when (and (vector? lookup-ref) (= 2 (count lookup-ref)))
         (let [[attr id] lookup-ref]
           (case attr
@@ -301,10 +300,7 @@
               (or (:page.node/content node) (:page.node/description node) ""))
 
             :document/id
-            (let [nodes (d/q '[:find [(pull ?e [:page.node/content :page.node/page-id]) ...]
-                               :in $ ?doc-id
-                               :where [?e :page.node/document-id ?doc-id]]
-                          (d/db conn) id)
+            (let [nodes (db/db-document-page-nodes-full db-info id)
                   ;; Track access for all pages in document (weight 1.0)
                   page-ids (distinct (keep :page.node/page-id nodes))]
               (doseq [pid page-ids]
@@ -313,7 +309,6 @@
               (db/record-cooccurrences! db-info page-ids)
               (when (seq nodes)
                 (let [full-text (->> nodes
-                                  (sort-by :page.node/page-id)
                                   (keep :page.node/content)
                                   (str/join "\n"))]
                   (chunk-text full-text))))
@@ -703,14 +698,18 @@
 
 (def ^:private ^:const MAX_VAR_INDEX_ROWS 40)
 (def ^:private ^:const MAX_VAR_INDEX_COUNT 1000)
+(def ^:private ^:const MAX_VAR_INDEX_PREVIEW 150)
 
 (defn build-var-index
   "Builds a formatted var index table from user-def'd vars in the SCI context.
    Filters out initial bindings (tools, helpers) using initial-ns-keys.
    Returns nil if no user vars exist.
 
-   Each row shows: name | type | size | doc
-   Doc comes from Clojure docstrings on def."
+   Row format: `name | type | size | doc — preview`
+   - doc    : from the docstring passed to `(def sym \"doc\" val)`
+   - preview: `pr-str` of the value, truncated to MAX_VAR_INDEX_PREVIEW chars.
+              The preview is the quick-glance snapshot; for the full value
+              the agent runs the var in :code and reads <execution_results>."
   ([sci-ctx initial-ns-keys]
    (build-var-index sci-ctx initial-ns-keys nil))
   ([sci-ctx initial-ns-keys sandbox]
@@ -750,9 +749,13 @@
                                             (if (= n MAX_VAR_INDEX_COUNT)
                                               (str MAX_VAR_INDEX_COUNT "+ items")
                                               (str n " items")))
-                                          :else "\u2014")]
+                                          :else "\u2014")
+                                   preview (if (fn? val)
+                                             "\u2014"
+                                             (str-truncate (pr-str val) MAX_VAR_INDEX_PREVIEW))]
                                {:name (str sym) :type type-label :size size
-                                :doc (if doc (str-truncate doc 80) "\u2014")}))))]
+                                :doc (if doc (str-truncate doc 80) "\u2014")
+                                :preview preview}))))]
        (when (seq entries)
          (let [visible (vec (take MAX_VAR_INDEX_ROWS entries))
                omitted (- (count entries) (count visible))
@@ -760,10 +763,11 @@
                max-type (max 4 (apply max (map #(count (:type %)) visible)))
                max-size (max 4 (apply max (map #(count (:size %)) visible)))
                pad (fn [s n] (str s (apply str (repeat (max 0 (- n (count s))) \space))))
-               header (str "  " (pad "name" max-name) " | " (pad "type" max-type) " | " (pad "size" max-size) " | doc")
-               sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+----")
-               rows (map (fn [{:keys [name type size doc]}]
-                           (str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc))
+               header (str "  " (pad "name" max-name) " | " (pad "type" max-type) " | " (pad "size" max-size) " | doc / preview")
+               sep (str "  " (apply str (repeat max-name \-)) "-+-" (apply str (repeat max-type \-)) "-+-" (apply str (repeat max-size \-)) "-+------------------")
+               rows (mapcat (fn [{:keys [name type size doc preview]}]
+                              [(str "  " (pad name max-name) " | " (pad type max-type) " | " (pad size max-size) " | " doc)
+                               (str "  " (pad "" max-name) " | " (pad "" max-type) " | " (pad "" max-size) " | preview: " preview)])
                       visible)
                footer (when (pos? omitted)
                         (str "  ... " omitted " more vars omitted"))]

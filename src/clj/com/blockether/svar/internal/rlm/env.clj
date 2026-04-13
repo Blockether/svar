@@ -127,11 +127,11 @@
    `router` - Required. Router from llm/make-router, pre-built.
    `opts` - Map with:
    - :db - DB spec (required, explicit):
-       nil            — no DB (SCI execution only, no document storage)
-       :temp          — ephemeral temp DB (deleted on dispose)
-       \"path\"         — persistent DB at path (survives sessions)
-       {:path \"path\"} — persistent DB at path
-       {:conn c}      — external Datalevin connection (auto-merges RLM_SCHEMA)
+       nil                — no DB (SCI execution only, no document storage)
+       :temp              — ephemeral temp SQLite DB (deleted on dispose)
+       \"path\"             — persistent SQLite DB at path (survives sessions)
+       {:path \"path\"}     — persistent SQLite DB at path
+       {:datasource ds}   — caller-owned javax.sql.DataSource (NOT closed on dispose)
 
    Returns:
    RLM environment map (component). Pass to register-env-fn!, register-env-def!, ingest-to-env!, query-env!, dispose-env!."

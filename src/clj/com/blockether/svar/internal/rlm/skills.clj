@@ -14,7 +14,7 @@
    [babashka.fs :as fs]
    [clojure.string :as str]
    [clojure.walk :as walk]
-   [datalevin.core :as d]
+   [com.blockether.svar.internal.rlm.db :as rlm-db]
    [taoensso.trove :as trove]
    [yamlstar.core :as yaml]))
 
@@ -357,64 +357,11 @@
 ;; Datalevin Ingestion — skills as searchable documents
 ;; =============================================================================
 
-(defn- skill-changed?
-  "Returns true if the skill's content hash differs from what's stored in Datalevin.
-   Returns true when no stored version exists (new skill)."
-  [conn skill-name new-hash]
-  (let [doc-id (str "skill-" (clojure.core/name skill-name))
-        stored (d/q '[:find ?h .
-                      :in $ ?id
-                      :where [?e :document/id ?id]
-                      [?e :skill/content-hash ?h]]
-                 (d/db conn) doc-id)]
-    (or (nil? stored) (not= stored new-hash))))
-
 (defn ingest-skills!
-  "Ingests skill registry into Datalevin as :document.type/skill documents.
-   Skips skills whose content-hash hasn't changed (change detection).
-   Existing skill documents are upserted (matched by :document/id = \"skill-<name>\").
-   Skills become searchable via search-documents and fetchable via fetch-document-content.
-
-   Params:
-   `db-info`        — map with :conn key (Datalevin connection).
-   `skill-registry` — map from load-skills.
-
-   Returns count of ingested skills (only those that actually changed)."
-  [{:keys [conn]} skill-registry]
-  (when (and conn (seq skill-registry))
-    (let [changed (filterv (fn [[skill-name skill]]
-                             (skill-changed? conn skill-name (:content-hash skill)))
-                    skill-registry)
-          entities (mapv (fn [[skill-name skill]]
-                           (let [n (clojure.core/name skill-name)]
-                             (cond-> {:document/id          (str "skill-" n)
-                                      :document/name        n
-                                      :document/type        :document.type/skill
-                                      :document/title       (or (:description skill) n)
-                                      :document/abstract    (or (:abstract skill) "")
-                                      :document/extension   "md"
-                                      :document/updated-at  (java.util.Date.)
-                                      :document/certainty-alpha 2.0
-                                      :document/certainty-beta  1.0
-                                      :skill/body           (:body skill)
-                                      :skill/source-path    (or (:source-path skill) "")
-                                      :skill/content-hash   (or (:content-hash skill) "")}
-                               (:agent skill)
-                               (assoc :skill/agent-config (pr-str (:agent skill)))
-                               (:requires skill)
-                               (assoc :skill/requires (pr-str (:requires skill)))
-                               (:version skill)
-                               (assoc :skill/version (str (:version skill))))))
-                     changed)]
-      (when (seq entities)
-        (d/transact! conn entities))
-      (trove/log! {:level :info :id ::skills-ingested
-                   :data {:total (count skill-registry)
-                          :changed (count changed)
-                          :skipped (- (count skill-registry) (count changed))
-                          :names (mapv (comp clojure.core/name first) changed)}
-                   :msg "Skills ingested into Datalevin (change-detected)"})
-      (count changed))))
+  "Ingests skill registry into the RLM store as :document.type/skill rows.
+   Skips skills whose content-hash hasn't changed. Returns count ingested."
+  [db-info skill-registry]
+  (rlm-db/ingest-skills! db-info skill-registry))
 
 ;; =============================================================================
 ;; Skill Management — RLM can create/patch/refine/delete skills
@@ -537,11 +484,9 @@
             (let [parent (fs/parent sp)]
               (when (and (fs/exists? parent) (empty? (fs/list-dir parent)))
                 (fs/delete parent)))))
-        ;; Remove from Datalevin
-        (when-let [{:keys [conn]} db-info]
-          (when conn
-            (when-let [eid (d/entid (d/db conn) [:document/id (str "skill-" (clojure.core/name skill-name))])]
-              (d/transact! conn [[:db/retractEntity eid]]))))
+        ;; Remove from the store
+        (when db-info
+          (rlm-db/delete-skill-entity! db-info skill-name))
         ;; Remove from registry
         (swap! skill-registry dissoc skill-name)
         (trove/log! {:level :info :id ::skill-deleted

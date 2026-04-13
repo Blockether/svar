@@ -29,7 +29,6 @@
    [java.time Instant]
    [java.util Date]))
 
-(def RLM_SCHEMA schema/RLM_SCHEMA)
 (def MAX_ITERATIONS schema/MAX_ITERATIONS)
 (def DEFAULT_RECURSION_DEPTH schema/DEFAULT_RECURSION_DEPTH)
 (def ^:dynamic *max-recursion-depth* schema/*max-recursion-depth*)
