@@ -119,7 +119,7 @@
      :extraction-errors N :visual-nodes-scanned N}] (extraction fields only if enabled)"
   ([env documents] (ingest-to-env! env documents {}))
   ([env documents opts]
-   (when-not (:db-info-atom env)
+   (when-not (:db-info env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
    (when-not (schema/valid-documents? documents)
      (anomaly/incorrect! "Invalid documents - must be vector of PageIndex documents"
@@ -191,7 +191,7 @@
   [env {:keys [repo-path repo-name n since since-sha path author]
         :or {n 100}
         :as _opts}]
-  (when-not (:db-info-atom env)
+  (when-not (:db-info env)
     (anomaly/incorrect! "Invalid RLM environment (no DB)"
       {:type :rlm/invalid-env}))
   (when-not repo-path

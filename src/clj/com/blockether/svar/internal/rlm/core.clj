@@ -65,26 +65,25 @@ Pattern: [thing] [action] [reason]. [next step].")
 
    Returns:
    Map with :sci-ctx, :context, :sub-rlm-query-fn, :locals-atom,
-   :db-info-atom, :router."
+   :db-info, :router."
   ([context-data depth-atom router]
    (create-rlm-env context-data depth-atom router {}))
   ([context-data depth-atom router {:keys [db documents]}]
    (when-not router
      (throw (ex-info "Router is required for RLM environment" {:type :rlm/missing-router})))
    (let [db-info (create-rlm-conn db)
-         db-info-atom (when db-info (atom db-info))
-         _ (when (and db-info-atom (seq documents))
+         _ (when (and db-info (seq documents))
              (doseq [doc documents]
-               (db-store-pageindex-document! @db-info-atom doc)))
+               (db-store-pageindex-document! db-info doc)))
          sub-rlm-query-fn (make-routed-sub-rlm-query-fn {} depth-atom router nil nil)
-         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data sub-rlm-query-fn db-info-atom nil nil)]
+         {:keys [sci-ctx sandbox-ns initial-ns-keys]} (create-sci-context context-data sub-rlm-query-fn db-info nil nil)]
      {:sci-ctx sci-ctx :sandbox-ns sandbox-ns :initial-ns-keys initial-ns-keys :context context-data
       :sub-rlm-query-fn sub-rlm-query-fn
-      :db-info-atom db-info-atom
+      :db-info db-info
       :router router})))
 
-(defn dispose-rlm-env! [{:keys [db-info-atom]}]
-  (when db-info-atom (dispose-rlm-conn! @db-info-atom)))
+(defn dispose-rlm-env! [{:keys [db-info]}]
+  (when db-info (dispose-rlm-conn! db-info)))
 
 (defn get-locals
   "Returns {sym → val} of user-defined vars in SCI sandbox (excludes built-ins).
@@ -881,9 +880,9 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
   "Injects previous final-result-N vars into SCI context from Datalevin.
    Final results are now terminal iterations (with non-nil :iteration/answer).
    Returns the list of final results for conversation thread rendering."
-  [sci-ctx db-info-atom conversation-ref]
-  (when db-info-atom
-    (let [results (db-list-final-results @db-info-atom {:conversation-ref conversation-ref})]
+  [sci-ctx db-info conversation-ref]
+  (when db-info
+    (let [results (db-list-final-results db-info {:conversation-ref conversation-ref})]
       (doseq [[idx result] (map-indexed vector results)]
         (let [var-name (str "final-result-" (inc idx))
               answer (:iteration/answer result)
@@ -923,18 +922,16 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                              (long (* 0.6 (router/context-limit effective-model))))
         ;; Check if root provider has native reasoning (thinking tokens)
         has-reasoning? (boolean (provider-has-reasoning? (:router rlm-env)))
-        has-docs? (when-let [db-atom (:db-info-atom rlm-env)]
-                    (when-let [db @db-atom]
-                      (pos? (count (db-list-documents db {:limit 1 :include-toc? false})))))
-        doc-summary (when (and has-docs? (:db-info-atom rlm-env))
-                      (build-document-summary @(:db-info-atom rlm-env)))
+        has-docs? (when-let [db (:db-info rlm-env)]
+                    (pos? (count (db-list-documents db {:limit 1 :include-toc? false}))))
+        doc-summary (when (and has-docs? (:db-info rlm-env))
+                      (build-document-summary (:db-info rlm-env)))
         ;; Git repos are read from Datalevin on each iteration (NOT from an
         ;; atom) so persistent conversations resume with attached repos
         ;; intact. Empty list elides the GIT REPO block entirely from the
         ;; system prompt.
-        git-repos (when-let [db-atom (:db-info-atom rlm-env)]
-                    (when-let [db @db-atom]
-                      (rlm-db/db-list-repos db)))
+        git-repos (when-let [db (:db-info rlm-env)]
+                    (rlm-db/db-list-repos db))
         system-prompt (build-system-prompt {:output-spec output-spec
                                             :custom-docs custom-docs
                                             :has-documents? has-docs?
@@ -962,7 +959,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                               ;; Include original multimodal messages (images etc.) as additional context
                              user-messages))
         ;; Store initial messages if history tracking is enabled
-        db-info (when-let [atom (:db-info-atom rlm-env)] @atom)
+        db-info (:db-info rlm-env)
         ;; Cost tracking: accumulate token usage across all iterations
         usage-atom (atom {:input-tokens 0 :output-tokens 0 :reasoning-tokens 0 :cached-tokens 0})
         accumulate-usage! (fn [api-usage]
@@ -1015,7 +1012,7 @@ Answer → 'final' when done. Explain only if non-obvious. No boilerplate.
                               idx))))
         ;; Keep final-result rehydration for backwards-compatible SCI access.
         prev-final-results (rehydrate-final-results! (:sci-ctx rlm-env)
-                             (:db-info-atom rlm-env)
+                             (:db-info rlm-env)
                              (:conversation-ref rlm-env))
         ;; Rehydration mutates SCI vars; mark var-index as stale.
         _ (swap! var-index-atom update :current-revision inc)

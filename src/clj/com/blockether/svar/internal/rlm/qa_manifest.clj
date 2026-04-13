@@ -189,7 +189,7 @@
 (defn qa-manifest-path
   "Returns qa-manifest.edn path for a persistent env, or nil for ephemeral envs."
   [env]
-  (when-let [path (:path @(:db-info-atom env))]
+  (when-let [path (:path (:db-info env))]
     (str path "/qa-manifest.edn")))
 
 (defn read-qa-manifest

@@ -77,11 +77,11 @@
 
   (it "creates database by default"
     (with-test-env* {} (fn [env]
-                         (expect (some? (:db-info-atom env))))))
+                         (expect (some? (:db-info env))))))
 
   (it "can disable database with :db nil"
     (with-test-env* {} {:db nil} (fn [env]
-                                   (expect (nil? (:db-info-atom env)))))))
+                                   (expect (nil? (:db-info env)))))))
 
 (defdescribe get-locals-test
   (it "returns empty map initially"
@@ -230,7 +230,7 @@
       (try
         (let [env (sut/create-env router {:db dir :conversation {:name "telegram:12345"}})
               conv-ref (:conversation-ref env)
-              db-info @(:db-info-atom env)
+              db-info (:db-info env)
               conv (rlm-db/db-get-conversation db-info conv-ref)]
           (try
             (expect (vector? conv-ref))
@@ -271,13 +271,41 @@
         (finally
           (fs/delete-tree dir)))))
 
+  (it "dispose-env! on one shared-DB env keeps siblings alive (shared conn not closed)"
+    ;; Regression: Datalevin's d/get-conn pools connections per-path, so two envs
+    ;; on the same :db path share one Connection. If dispose-env! closed the
+    ;; persistent conn, the surviving sibling would be unusable. Persistent mode
+    ;; must leave the conn open (owned? = false).
+    (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
+                                    :models [{:name "gpt-4o"}]}])
+          dir (str (fs/create-temp-dir {:prefix "rlm-shared-dispose-"}))]
+      (try
+        (let [env-a (sut/create-env router {:db dir :conversation {:name "chat:alice"}})
+              env-b (sut/create-env router {:db dir :conversation {:name "chat:bob"}})
+              db-info-b (:db-info env-b)]
+          (try
+            ;; Dispose env-a; env-b must still be able to write/read.
+            (sut/dispose-env! env-a)
+            (let [q-ref (rlm-db/store-query! db-info-b
+                          {:conversation-ref (:conversation-ref env-b)
+                           :text "sibling-survives?" :status :success})
+                  queries (rlm-db/db-list-conversation-queries db-info-b
+                            (:conversation-ref env-b))]
+              (expect (vector? q-ref))
+              (expect (= 1 (count queries)))
+              (expect (= "sibling-survives?" (:query/text (first queries)))))
+            (finally
+              (sut/dispose-env! env-b))))
+        (finally
+          (fs/delete-tree dir)))))
+
   (it "restore-var returns the latest persisted value for a defined var"
     (let [router (llm/make-router [{:id :test :api-key "test" :base-url "http://localhost"
                                     :models [{:name "gpt-4o"}]}])
           dir (str (fs/create-temp-dir {:prefix "rlm-restore-"}))]
       (try
         (let [env-a (sut/create-env router {:db dir})
-              db-info @(:db-info-atom env-a)
+              db-info (:db-info env-a)
               query-ref (rlm-db/store-query! db-info {:conversation-ref (:conversation-ref env-a)
                                                       :text "q1" :status :success})]
           (rlm-db/store-iteration! db-info
@@ -303,7 +331,7 @@
           dir (str (fs/create-temp-dir {:prefix "rlm-restore-partial-"}))]
       (try
         (let [env-a (sut/create-env router {:db dir})
-              db-info @(:db-info-atom env-a)
+              db-info (:db-info env-a)
               query-ref (rlm-db/store-query! db-info {:conversation-ref (:conversation-ref env-a)
                                                       :text "q1" :status :success})]
           (rlm-db/store-iteration! db-info
@@ -331,7 +359,7 @@
       (try
         (let [env (sut/create-env router {:db dir})]
           (try
-            (let [db-info @(:db-info-atom env)
+            (let [db-info (:db-info env)
                   conv-ref (:conversation-ref env)
                   q1 (rlm-db/store-query! db-info {:conversation-ref conv-ref :text "q1" :status :success})
                   _ (rlm-db/store-iteration! db-info {:query-ref q1
@@ -343,7 +371,7 @@
                                                       :executions [{:code "(def latest 42)" :result "ignored"}]
                                                       :vars [{:name "latest" :value 42 :code "(def latest 42)"}]
                                                       :thinking "" :duration-ms 0})
-                  restore-var-fn (rlm-tools/make-restore-var-fn (:db-info-atom env) (atom conv-ref))]
+                  restore-var-fn (rlm-tools/make-restore-var-fn (:db-info env) conv-ref)]
               (expect (= [1 2 3] (restore-var-fn 'anomalies)))
               (expect (throws? clojure.lang.ExceptionInfo
                         #(restore-var-fn 'anomalies {:max-scan-queries 1}))))
@@ -390,9 +418,9 @@
                                                 :api-usage nil
                                                 :duration-ms 321})]
           (sut/query-env! env [(llm/user "What next?")] {:max-iterations 1 :refine? false})
-          (let [query-ref [:entity/id (-> (rlm-db/db-list-conversation-queries @(:db-info-atom env) (:conversation-ref env))
+          (let [query-ref [:entity/id (-> (rlm-db/db-list-conversation-queries (:db-info env) (:conversation-ref env))
                                         last :entity/id)]
-                iteration (last (rlm-db/db-list-query-iterations @(:db-info-atom env) query-ref))]
+                iteration (last (rlm-db/db-list-query-iterations (:db-info env) query-ref))]
             (expect (= 321 (:iteration/duration-ms iteration)))))
         (finally
           (sut/dispose-env! env)))))
@@ -404,7 +432,7 @@
           captured (atom nil)]
       (try
         (let [env-a (sut/create-env router {:db dir})
-              db-info @(:db-info-atom env-a)
+              db-info (:db-info env-a)
               query-ref (rlm-db/store-query! db-info {:conversation-ref (:conversation-ref env-a)
                                                       :text "Find anomalies" :status :success :answer [1 2 3]})]
           (rlm-db/store-iteration! db-info
@@ -2046,27 +2074,27 @@
           env (sut/create-env router {:db dir})]
       (try
         (sut/ingest-to-env! env [(make-test-single-page-document)])
-        (let [revision (rlm-db/get-corpus-revision @(:db-info-atom env))
+        (let [revision (rlm-db/get-corpus-revision (:db-info env))
               cached {:revision revision
                       :document-count 1
                       :toc-count 0
                       :node-count 2
                       :content-hash "sha256:cached"}]
           (swap! (:qa-corpus-atom env) assoc :snapshot-cache {:revision revision :snapshot cached})
-          (expect (= cached (#'sut/qa-corpus-snapshot env @(:db-info-atom env))))
+          (expect (= cached (#'sut/qa-corpus-snapshot env (:db-info env))))
           (expect (= 1 (:hits (sut/qa-corpus-snapshot-stats env))))
 
           ;; Any ingest mutation should invalidate cache immediately.
           (sut/ingest-to-env! env [(make-test-single-page-document)])
           (expect (nil? (:snapshot-cache @(:qa-corpus-atom env))))
-          (expect (> (rlm-db/get-corpus-revision @(:db-info-atom env)) revision))
+          (expect (> (rlm-db/get-corpus-revision (:db-info env)) revision))
 
           ;; First call after invalidation is a miss and records digest timing.
-          (#'sut/qa-corpus-snapshot env @(:db-info-atom env))
+          (#'sut/qa-corpus-snapshot env (:db-info env))
           (let [{:keys [misses last-digest-ms last-revision]} (sut/qa-corpus-snapshot-stats env)]
             (expect (= 1 misses))
             (expect (number? last-digest-ms))
-            (expect (= (rlm-db/get-corpus-revision @(:db-info-atom env)) last-revision))))
+            (expect (= (rlm-db/get-corpus-revision (:db-info env)) last-revision))))
         (finally
           (sut/dispose-env! env)
           (fs/delete-tree dir))))))

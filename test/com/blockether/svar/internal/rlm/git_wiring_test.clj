@@ -88,7 +88,7 @@
 (defn- attached-repo-names
   "Read attached :repo entity names from the env's DB. No atoms involved."
   [env]
-  (set (map :repo/name (rlm-db/db-list-repos @(:db-info-atom env)))))
+  (set (map :repo/name (rlm-db/db-list-repos (:db-info env)))))
 
 (defdescribe ingest-git-test
   (describe "sut/ingest-git!"
@@ -104,7 +104,7 @@
             (expect (pos? (:people-stored result)))
             (expect (some? (:head result)))
             (expect (contains? (attached-repo-names env) "svar"))
-            (let [repo-meta (rlm-db/db-get-repo-by-name @(:db-info-atom env) "svar")]
+            (let [repo-meta (rlm-db/db-get-repo-by-name (:db-info env) "svar")]
               (expect (some? repo-meta))
               (expect (string? (:repo/path repo-meta)))
               (expect (string? (:repo/head-sha repo-meta)))
@@ -132,7 +132,7 @@
           (sut/ingest-git! env {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 5})
           (sut/ingest-git! env {:repo-path SVAR_REPO_ROOT :repo-name "svar" :n 10})
           (expect (= #{"svar"} (attached-repo-names env)))
-          (let [repo-meta (rlm-db/db-get-repo-by-name @(:db-info-atom env) "svar")]
+          (let [repo-meta (rlm-db/db-get-repo-by-name (:db-info env) "svar")]
             (expect (= 10 (:repo/commits-ingested repo-meta))))
           (finally (sut/dispose-env! env)))))))
 

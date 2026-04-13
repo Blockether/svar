@@ -35,7 +35,7 @@
   (when (and iteration-loop-fn
           (seq skills-loaded)
           (:skill-registry-atom rlm-env)
-          (:db-info-atom rlm-env))
+          (:db-info rlm-env))
     (let [status (:status sub-result)
           confidence (get-in sub-result [:result :confidence])
           needs-refine? (or (some? status)                              ;; failed
@@ -94,7 +94,7 @@
                   body-patch (get parsed "body-patch")]
               ;; Apply abstract refinement
               (when new-abstract
-                (skill-manage-fn (:db-info-atom rlm-env) skill-registry-atom
+                (skill-manage-fn (:db-info rlm-env) skill-registry-atom
                   :refine {:name skill-name :abstract new-abstract})
                 (trove/log! {:level :info :id ::skill-auto-refined-abstract
                              :data {:skill skill-name
@@ -104,7 +104,7 @@
                              :msg "Skill abstract auto-refined"}))
               ;; Apply body patch if provided
               (when (and (map? body-patch) (get body-patch "old") (get body-patch "new"))
-                (skill-manage-fn (:db-info-atom rlm-env) skill-registry-atom
+                (skill-manage-fn (:db-info rlm-env) skill-registry-atom
                   :patch {:name skill-name
                           :old (get body-patch "old")
                           :new (get body-patch "new")})
@@ -132,7 +132,7 @@
    `iteration-loop-fn` — rlm.core/iteration-loop, injected by caller to avoid
                           a cyclic require (core → routing → sub → core).
    `rlm-env`  — parent RLM env (from create-env). Must have :sci-ctx, :router,
-                 :db-info-atom.
+                 :db-info.
    `prompt`   — string, the user query for the sub-RLM.
    `opts`     — map:
      :system-prompt   — string, prepended as system message. Typically skill

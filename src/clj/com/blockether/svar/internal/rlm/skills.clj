@@ -478,11 +478,11 @@
              {:name :kw}
 
    Params:
-   `db-info-atom`    — atom with Datalevin db-info.
+   `db-info`         — Datalevin db-info map (can be nil).
    `skill-registry`  — atom with current skill registry map.
    `action`          — keyword (:create :patch :refine :delete).
    `opts`            — action-specific opts map."
-  [db-info-atom skill-registry action opts]
+  [db-info skill-registry action opts]
   (case action
     :create
     (let [{:keys [name body]} opts
@@ -495,8 +495,8 @@
       ;; Update registry
       (swap! skill-registry assoc (:name skill-def) (assoc skill-def :source-path path))
       ;; Ingest into Datalevin
-      (when-let [db @db-info-atom]
-        (ingest-skills! db {(:name skill-def) skill-def}))
+      (when db-info
+        (ingest-skills! db-info {(:name skill-def) skill-def}))
       {:created (:name skill-def) :path path})
 
     :patch
@@ -508,8 +508,8 @@
             updated-skill (assoc skill :body updated-body)
             path (save-skill! updated-skill)]
         (swap! skill-registry assoc skill-name (assoc updated-skill :source-path path))
-        (when-let [db @db-info-atom]
-          (ingest-skills! db {skill-name updated-skill}))
+        (when db-info
+          (ingest-skills! db-info {skill-name updated-skill}))
         {:patched skill-name :path path}))
 
     :refine
@@ -522,8 +522,8 @@
                       description (assoc :description description))
             path (save-skill! updated)]
         (swap! skill-registry assoc skill-name (assoc updated :source-path path))
-        (when-let [db @db-info-atom]
-          (ingest-skills! db {skill-name updated}))
+        (when db-info
+          (ingest-skills! db-info {skill-name updated}))
         {:refined skill-name :path path}))
 
     :delete
@@ -538,7 +538,7 @@
               (when (and (fs/exists? parent) (empty? (fs/list-dir parent)))
                 (fs/delete parent)))))
         ;; Remove from Datalevin
-        (when-let [{:keys [conn]} @db-info-atom]
+        (when-let [{:keys [conn]} db-info]
           (when conn
             (when-let [eid (d/entid (d/db conn) [:document/id (str "skill-" (clojure.core/name skill-name))])]
               (d/transact! conn [[:db/retractEntity eid]]))))

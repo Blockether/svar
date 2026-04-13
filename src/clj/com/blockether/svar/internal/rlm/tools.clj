@@ -242,11 +242,11 @@
    Returns:
      :in omitted → {:pages [...] :toc [...] :entities [...]}
      :in set     → vector of results for that target"
-  [db-info-atom]
+  [db-info]
   (fn search-documents
     ([query] (search-documents query {}))
     ([query {:keys [in top-k document-id type] :or {top-k 10}}]
-     (if-let [db-info @db-info-atom]
+     (if db-info
        (let [do-pages #(let [results (db-search-page-nodes db-info query
                                        (cond-> {:top-k top-k}
                                          document-id (assoc :document-id document-id)
@@ -287,9 +287,9 @@
      (def p (fetch-document-content [:entity/id \"e1\"]))
      (:entity p)      ;; entity map
      (:relationships p) ;; connected entities"
-  [db-info-atom]
+  [db-info]
   (fn fetch-document-content [lookup-ref]
-    (when-let [{:keys [conn] :as db-info} @db-info-atom]
+    (when-let [{:keys [conn] :as db-info} db-info]
       (when (and (vector? lookup-ref) (= 2 (count lookup-ref)))
         (let [[attr id] lookup-ref]
           (case attr
@@ -375,13 +375,13 @@
 
 (defn make-session-history-fn
   "Creates session-history for browsing prior query summaries in a conversation."
-  [db-info-atom conversation-ref-atom]
+  [db-info conversation-ref]
   (fn session-history
     ([]
      (session-history nil))
     ([n]
-     (if-let [db-info @db-info-atom]
-       (let [history (db/db-query-history db-info @conversation-ref-atom)
+     (if db-info
+       (let [history (db/db-query-history db-info conversation-ref)
              selected (if (some? n) (take-last (max 0 (long n)) history) history)]
          (mapv #(select-keys % [:query-pos :query-id :text :answer-preview :status :iterations :key-vars :created-at])
            selected))
@@ -399,36 +399,36 @@
 
 (defn make-session-code-fn
   "Creates session-code for browsing prior query code blocks."
-  [db-info-atom conversation-ref-atom]
+  [db-info conversation-ref]
   (fn session-code
     ([query-selector]
-     (if-let [db-info @db-info-atom]
-       (if-let [query-ref (resolve-query-ref db-info @conversation-ref-atom query-selector)]
+     (if db-info
+       (if-let [query-ref (resolve-query-ref db-info conversation-ref query-selector)]
          (db/db-query-code db-info query-ref)
          [])
        []))))
 
 (defn make-session-results-fn
   "Creates session-results for browsing prior query results and restorable vars."
-  [db-info-atom conversation-ref-atom]
+  [db-info conversation-ref]
   (fn session-results
     ([query-selector]
-     (if-let [db-info @db-info-atom]
-       (if-let [query-ref (resolve-query-ref db-info @conversation-ref-atom query-selector)]
+     (if db-info
+       (if-let [query-ref (resolve-query-ref db-info conversation-ref query-selector)]
          (db/db-query-results db-info query-ref)
          [])
        []))))
 
 (defn make-restore-var-fn
   "Creates restore-var for fetching the latest persisted data var from prior iterations."
-  [db-info-atom conversation-ref-atom]
+  [db-info conversation-ref]
   (fn restore-var
     ([sym]
      (restore-var sym {}))
     ([sym opts]
-     (if-let [db-info @db-info-atom]
+     (if db-info
        (let [sym (if (symbol? sym) sym (symbol (str sym)))
-             registry (db/db-latest-var-registry db-info @conversation-ref-atom
+             registry (db/db-latest-var-registry db-info conversation-ref
                         (select-keys (or opts {}) [:max-scan-queries]))]
          (if-let [{:keys [value]} (get registry sym)]
            value
@@ -479,12 +479,12 @@
    Params:
    `context-data` - The data context to analyze
    `sub-rlm-query-fn` - Function for simple LLM text queries
-   `db-info-atom` - Atom with database info (can be nil)
-   `conversation-ref-atom` - Atom with active conversation lookup ref (can be nil)
+   `db-info` - Database info map (can be nil)
+   `conversation-ref` - Active conversation lookup ref (can be nil)
    `custom-bindings` - Map of symbol->value for custom bindings (can be nil)"
-  [context-data sub-rlm-query-fn db-info-atom conversation-ref-atom custom-bindings]
-  (let [restore-var-fn (when (and db-info-atom conversation-ref-atom @db-info-atom @conversation-ref-atom)
-                         (make-restore-var-fn db-info-atom conversation-ref-atom))
+  [context-data sub-rlm-query-fn db-info conversation-ref custom-bindings]
+  (let [restore-var-fn (when (and db-info conversation-ref)
+                         (make-restore-var-fn db-info conversation-ref))
         base-bindings {'context context-data
                        'sub-rlm-query sub-rlm-query-fn
                        'spec spec/spec
@@ -493,30 +493,30 @@
                        'parse-date parse-date 'date-before? date-before? 'date-after? date-after?
                        'days-between days-between 'date-plus-days date-plus-days
                        'date-minus-days date-minus-days 'date-format date-format 'today-str today-str}
-        db-bindings (when db-info-atom
+        db-bindings (when db-info
                       (cond->
                        {;; Unified document tools
-                        'search-documents (make-search-documents-fn db-info-atom)
-                        'fetch-document-content (make-fetch-document-content-fn db-info-atom)
+                        'search-documents (make-search-documents-fn db-info)
+                        'fetch-document-content (make-fetch-document-content-fn db-info)
                         'find-related (fn find-related
-                                        ([entity-id] (when-let [db @db-info-atom] (db/find-related db entity-id)))
-                                        ([entity-id opts] (when-let [db @db-info-atom] (db/find-related db entity-id opts))))
+                                        ([entity-id] (when db-info (db/find-related db-info entity-id)))
+                                        ([entity-id opts] (when db-info (db/find-related db-info entity-id opts))))
                         'search-batch (fn search-batch
-                                        ([queries] (when-let [db @db-info-atom] (db/db-search-batch db queries)))
-                                        ([queries opts] (when-let [db @db-info-atom] (db/db-search-batch db queries opts))))
+                                        ([queries] (when db-info (db/db-search-batch db-info queries)))
+                                        ([queries opts] (when db-info (db/db-search-batch db-info queries opts))))
                         'results->md (fn results->md [results] (db/results->markdown results))
                         'search-entities (fn search-entities
-                                           ([query] (when-let [db @db-info-atom] (db-search-entities db query)))
-                                           ([query opts] (when-let [db @db-info-atom] (db-search-entities db query opts))))
+                                           ([query] (when db-info (db-search-entities db-info query)))
+                                           ([query opts] (when db-info (db-search-entities db-info query opts))))
                         'get-entity (fn get-entity
-                                      [entity-id] (when-let [db @db-info-atom] (db-get-entity db entity-id)))
+                                      [entity-id] (when db-info (db-get-entity db-info entity-id)))
                         'list-relationships (fn list-relationships
-                                              ([entity-id] (when-let [db @db-info-atom] (db-list-relationships db entity-id)))
-                                              ([entity-id opts] (when-let [db @db-info-atom] (db-list-relationships db entity-id opts))))}
-                        (and conversation-ref-atom @db-info-atom @conversation-ref-atom)
-                        (assoc 'session-history (make-session-history-fn db-info-atom conversation-ref-atom)
-                          'session-code (make-session-code-fn db-info-atom conversation-ref-atom)
-                          'session-results (make-session-results-fn db-info-atom conversation-ref-atom))
+                                              ([entity-id] (when db-info (db-list-relationships db-info entity-id)))
+                                              ([entity-id opts] (when db-info (db-list-relationships db-info entity-id opts))))}
+                        (and db-info conversation-ref)
+                        (assoc 'session-history (make-session-history-fn db-info conversation-ref)
+                          'session-code (make-session-code-fn db-info conversation-ref)
+                          'session-results (make-session-results-fn db-info conversation-ref))
                         restore-var-fn
                         (assoc 'restore-var restore-var-fn
                           'restore-vars (make-restore-vars-fn restore-var-fn))))
@@ -524,8 +524,8 @@
         ;; read :repo entities from DB on each call (no atom), open repos
         ;; lazily via `with-repo-for-*`, and error cleanly with
         ;; `:rlm/no-git-repos` when no `ingest-git!` call has landed yet.
-        git-bindings (when db-info-atom
-                       (make-git-sci-bindings db-info-atom))
+        git-bindings (when db-info
+                       (make-git-sci-bindings db-info))
         all-bindings (merge EXTRA_BINDINGS base-bindings db-bindings
                        git-bindings
                        (or custom-bindings {}))
@@ -799,9 +799,8 @@
    * N repos → absolute path required (:rlm/no-repo-for-path :reason
      :relative-path otherwise); picks the repo whose `:repo/path` prefix
      matches the absolute path."
-  [db-info-atom ^String path f]
-  (let [db @db-info-atom
-        repos (when db (db/db-list-repos db))]
+  [db-info ^String path f]
+  (let [repos (when db-info (db/db-list-repos db-info))]
     (cond
       (empty? repos)
       (throw (ex-info "No git repositories attached. Call rlm/ingest-git! first."
@@ -875,9 +874,8 @@
    * 1 repo  → use it
    * N repos → iterate; first presence-match wins. Ref names like \"HEAD\"
      are ambiguous in multi-repo and throw :rlm/ambiguous-ref."
-  [db-info-atom ^String sha f]
-  (let [db @db-info-atom
-        repos (when db (db/db-list-repos db))]
+  [db-info ^String sha f]
+  (let [repos (when db-info (db/db-list-repos db-info))]
     (cond
       (empty? repos)
       (throw (ex-info "No git repositories attached. Call rlm/ingest-git! first."
@@ -916,56 +914,56 @@
                       :attached (mapv :repo/name repos)}))))))))
 
 (defn make-git-sci-bindings
-  "Return the map of git-* SCI symbol → fn for a given `db-info-atom`.
+  "Return the map of git-* SCI symbol → fn for a given `db-info`.
    Bindings are always present in the sandbox once the env has a DB; they
    error cleanly (`:rlm/no-git-repos`) when no `:repo` entity has been
    ingested yet. All JGit-backed tools open + close Repository instances
    per call via `with-repo-for-*`."
-  [db-info-atom]
+  [db-info]
   {'git-search-commits
    (fn git-search-commits
      ([] (git-search-commits {}))
      ([opts]
-      (when-let [db @db-info-atom]
-        (db/db-search-commits db opts))))
+      (when db-info
+        (db/db-search-commits db-info opts))))
 
    'git-commit-history
    (fn git-commit-history
      ([] (git-commit-history {}))
      ([opts]
-      (when-let [db @db-info-atom]
-        (db/db-search-commits db opts))))
+      (when db-info
+        (db/db-search-commits db-info opts))))
 
    'git-commits-by-ticket
    (fn git-commits-by-ticket
      [ticket-ref]
-     (when-let [db @db-info-atom]
-       (db/db-search-commits db {:ticket ticket-ref})))
+     (when db-info
+       (db/db-search-commits db-info {:ticket ticket-ref})))
 
    'git-commit-parents
    (fn git-commit-parents
      [sha]
-     (when-let [db @db-info-atom]
-       (let [commit (db/db-commit-by-sha db sha)]
+     (when db-info
+       (let [commit (db/db-commit-by-sha db-info sha)]
          (vec (:commit/parents commit)))))
 
    'git-file-history
    (fn git-file-history
      ([path] (git-file-history path {}))
      ([path opts]
-      (with-repo-for-path db-info-atom path
+      (with-repo-for-path db-info path
         (fn [repo rel] (rlm-git/file-history repo rel opts)))))
 
    'git-blame
    (fn git-blame
      [path from to]
-     (with-repo-for-path db-info-atom path
+     (with-repo-for-path db-info path
        (fn [repo rel] (rlm-git/blame repo rel from to))))
 
    'git-commit-diff
    (fn git-commit-diff
      [sha]
-     (with-repo-for-sha db-info-atom sha
+     (with-repo-for-sha db-info sha
        (fn [repo] (rlm-git/commit-diff repo sha))))})
 
 ;; =============================================================================

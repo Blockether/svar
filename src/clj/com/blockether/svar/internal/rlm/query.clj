@@ -68,7 +68,7 @@
                 verify?             false
                 plan?               false
                 debug?              false}} opts]
-    (when-not (:db-info-atom env)
+    (when-not (:db-info env)
       (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
     (when-not (and (vector? messages) (seq messages))
       (anomaly/incorrect! "messages must be a non-empty vector of message maps, e.g. [(llm/user \"...\")]"
@@ -90,7 +90,7 @@
           rlm-router             (:router env)
           root-model             (or (when rlm-router (rlm-routing/resolve-root-model rlm-router)) model)
           depth-atom             (atom 0)
-          db-info-atom           (:db-info-atom env)
+          db-info                (:db-info env)
           cheap-sub-rlm-fn       (rlm-routing/make-routed-sub-rlm-query-fn
                                    {:optimize :cost} depth-atom rlm-router
                                    (:skill-registry-atom env) (atom env)
@@ -129,7 +129,7 @@
                                    'sub-rlm-query-batch (fn [items]
                                                           (rlm-batch/sub-rlm-query-batch cheap-sub-rlm-fn items))
                                    'skill-manage        (fn [action o]
-                                                          (rlm-skills/skill-manage db-info-atom (:skill-registry-atom env) action o))}
+                                                          (rlm-skills/skill-manage db-info (:skill-registry-atom env) action o))}
           sci-ctx                (:sci-ctx env)
           tool-registry-atom     (:tool-registry-atom env)
           query-ctx              {:hooks hooks :iteration-atom current-iteration-atom}
@@ -151,7 +151,7 @@
        :query-str              query-str
        :rlm-router             rlm-router
        :root-model             root-model
-       :db-info-atom           db-info-atom
+       :db-info                db-info
        :custom-docs            custom-docs
        :claims-atom            claims-atom
        :current-iteration-atom current-iteration-atom
@@ -185,9 +185,8 @@
    Returns iteration-result, query-ref, cost atoms, and merge-cost! fn."
   [{:keys [rlm-router rlm-env query-str messages spec max-iterations
            max-context-tokens custom-docs cite-docs system-prompt
-           current-iteration-atom hooks cancel-atom plan? db-info-atom]}]
-  (let [db-info          @db-info-atom
-        query-ref        (rlm-db/store-query! db-info
+           current-iteration-atom hooks cancel-atom plan? db-info]}]
+  (let [query-ref        (rlm-db/store-query! db-info
                            {:conversation-ref (:conversation-ref rlm-env)
                             :text             query-str
                             :messages         messages
@@ -242,13 +241,13 @@
   "Cross-model verify when confidence is :low.
    Returns {:answer ... :eval-scores ... :refinement-count ...}."
   [{:keys [rlm-router root-model spec max-refinements threshold query-str
-           db-info-atom merge-cost!]}
+           db-info merge-cost!]}
    iter-answer confidence]
   (let [answer-value (:result iter-answer iter-answer)
         refine?      (= confidence :low)]
     (if refine?
       (let [answer-as-str    (rlm-core/answer-str iter-answer)
-            conn             (:conn @db-info-atom)
+            conn             (:conn db-info)
             stored-docs      (when conn
                                (let [docs (d/q '[:find [(pull ?e [*]) ...]
                                                  :where [?e :document/id _]]
@@ -329,19 +328,19 @@
 
 (defn- update-q-values!
   "Applies Q-value reward updates for cited/uncited pages."
-  [{:keys [db-info-atom query-start-time max-iterations-atom]}
+  [{:keys [db-info query-start-time max-iterations-atom]}
    {:keys [sources eval-scores confidence iterations max-iterations status]}]
   (try
     (if status
       ;; failure path - low reward for all accessed pages
-      (let [accessed (rlm-db/pages-accessed-since @db-info-atom query-start-time)]
+      (let [accessed (rlm-db/pages-accessed-since db-info query-start-time)]
         (when (seq accessed)
-          (rlm-db/finalize-q-updates! @db-info-atom accessed Q_REWARD_FAILURE)))
+          (rlm-db/finalize-q-updates! db-info accessed Q_REWARD_FAILURE)))
       ;; success path - differentiate cited vs uncited
-      (let [accessed         (rlm-db/pages-accessed-since @db-info-atom query-start-time)
+      (let [accessed         (rlm-db/pages-accessed-since db-info query-start-time)
             cited-source-ids (set (or sources []))
-            cited-page-ids   (when (and (seq cited-source-ids) (:conn @db-info-atom))
-                               (let [conn (:conn @db-info-atom)]
+            cited-page-ids   (when (and (seq cited-source-ids) (:conn db-info))
+                               (let [conn (:conn db-info)]
                                  (set (d/q '[:find  [?pid ...]
                                              :in    $ [?sid ...]
                                              :where (or [?e :page.node/id ?sid]
@@ -354,11 +353,11 @@
         (when (seq accessed)
           (if (seq cited-page-ids)
             (do
-              (rlm-db/finalize-q-updates! @db-info-atom cited-page-ids high-reward)
+              (rlm-db/finalize-q-updates! db-info cited-page-ids high-reward)
               (let [uncited (set/difference accessed (or cited-page-ids #{}))]
                 (when (seq uncited)
-                  (rlm-db/finalize-q-updates! @db-info-atom uncited Q_REWARD_UNCITED))))
-            (rlm-db/finalize-q-updates! @db-info-atom accessed Q_REWARD_UNCITED)))))
+                  (rlm-db/finalize-q-updates! db-info uncited Q_REWARD_UNCITED))))
+            (rlm-db/finalize-q-updates! db-info accessed Q_REWARD_UNCITED)))))
     (catch Exception e
       (trove/log! {:level :debug :data {:error (ex-message e)}
                    :msg   "Q-value update failed (non-fatal)"}))))
@@ -369,7 +368,7 @@
 
 (defn- finalize-query-result
   "Persists claims, updates DB query record, emits debug log, builds result map."
-  [{:keys [db-info-atom verify? claims-atom]}
+  [{:keys [db-info verify? claims-atom]}
    {:keys [query-ref start-time iterations status status-id trace locals
            answer raw-answer final-answer eval-scores refinement-count
            confidence sources reasoning total-tokens-atom total-cost-atom]}]
@@ -380,7 +379,7 @@
         (rlm-core/rlm-debug! {:status status :iterations iterations :duration-ms duration-ms}
           "RLM query-env! finished (max iterations)")
         (try
-          (rlm-db/update-query! @db-info-atom query-ref
+          (rlm-db/update-query! db-info query-ref
             {:answer      (:result answer answer)
              :iterations  iterations
              :duration-ms duration-ms
@@ -402,8 +401,7 @@
       ;; success path
       (do
         (when (and verify? (seq @claims-atom))
-          (let [db-info  @db-info-atom
-                conn     (:conn db-info)
+          (let [conn     (:conn db-info)
                 query-id (util/uuid)]
             (doseq [claim @claims-atom]
               (try
@@ -419,7 +417,7 @@
                               :answer-preview   (rlm-db/str-truncate (pr-str final-answer) 200)}
           "RLM query-env! finished (success)")
         (try
-          (rlm-db/update-query! @db-info-atom query-ref
+          (rlm-db/update-query! db-info query-ref
             {:answer      final-answer
              :iterations  iterations
              :duration-ms duration-ms
@@ -507,7 +505,7 @@
    (let [ctx (prepare-query-context env messages opts)
          {:keys [max-recursion-depth eval-timeout-ms concurrency
                  debug? query-str root-model max-iterations verify?
-                 plan? db-info-atom max-iterations-atom
+                 plan? db-info max-iterations-atom
                  query-start-time env-id]} ctx
          merged-concurrency (merge schema/DEFAULT_CONCURRENCY concurrency)]
      (binding [schema/*rlm-ctx*               {:rlm-env-id env-id :rlm-type :main
@@ -545,7 +543,7 @@
              ;; failure - update Q with low reward, no refinement
              (do
                (update-q-values!
-                 {:db-info-atom        db-info-atom
+                 {:db-info        db-info
                   :query-start-time    query-start-time
                   :max-iterations-atom max-iterations-atom}
                  {:sources    sources :eval-scores nil :confidence confidence
@@ -578,7 +576,7 @@
                            eval-scores
                            refinement-count]} refine-result]
                (update-q-values!
-                 {:db-info-atom        db-info-atom
+                 {:db-info        db-info
                   :query-start-time    query-start-time
                   :max-iterations-atom max-iterations-atom}
                  {:sources    sources :eval-scores eval-scores :confidence confidence

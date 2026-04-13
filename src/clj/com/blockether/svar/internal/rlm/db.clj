@@ -146,15 +146,23 @@
              {:type :rlm/invalid-db-spec :db-spec db-spec}))))
 
 (defn dispose-rlm-conn!
-  "Closes the Datalevin connection. Deletes temp DB files.
-   External and persistent connections are closed but not deleted."
+  "Releases resources for an RLM Datalevin connection.
+
+   Only closes the Datalevin conn when :owned? is true (:temp mode). Persistent
+   and external conns are LEFT OPEN: Datalevin's `d/get-conn` returns the same
+   Connection object for a given path process-wide, so multiple envs on the
+   same :db path share one conn. Closing here would break every sibling env
+   that's still live. The conn is released on JVM shutdown.
+
+   Temp DB directories are deleted on dispose."
   [db-info]
   (when db-info
-    (let [{:keys [conn path mode]} db-info]
-      (try
-        (d/close conn)
-        (catch Exception e
-          (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to close RLM connection"})))
+    (let [{:keys [conn path mode owned?]} db-info]
+      (when owned?
+        (try
+          (d/close conn)
+          (catch Exception e
+            (trove/log! {:level :warn :data {:error (ex-message e)} :msg "Failed to close RLM connection"}))))
       (when (and (= :temp mode) path (fs/exists? path))
         (try
           (fs/delete-tree path)

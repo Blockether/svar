@@ -7,7 +7,7 @@
    Atom layout (5 standalone + db-info):
      :depth-atom         — concurrent hot path, must be standalone
      :tool-registry-atom — 10+ access sites, independent lifecycle
-     :db-info-atom       — existing DB conn, untouched
+     :db-info            — existing DB conn plain value (never mutated)
      :var-index-atom     — {:cache nil :revision -1} (was two atoms)
      :qa-corpus-atom     — {:snapshot-cache nil :stats {...}} (was two atoms)
      :state-atom         — {:custom-bindings {} :custom-docs []
@@ -52,9 +52,9 @@
 ;; =============================================================================
 
 (defn db-info
-  "Current db-info map for env (deref of :db-info-atom). Nil-safe."
+  "Current db-info map for env. Nil-safe."
   [env]
-  (when-let [a (:db-info-atom env)] @a))
+  (:db-info env))
 
 (defn tools
   "Current tool registry map {sym → tool-def}. Nil-safe."
@@ -147,7 +147,6 @@
         ;; visible to the pipeline.
         tool-registry-atom (atom {})
         db-info (rlm-db/create-rlm-conn db)
-        db-info-atom (when db-info (atom db-info))
         ;; Grouped: var-index cache + revision counters (was two separate atoms)
         ;; :index = built index, :revision = rev at build, :current-revision = live counter
         var-index-atom (atom {:index nil :revision -1 :current-revision 0})
@@ -158,8 +157,8 @@
                                       :last-revision 0}})
         skill-registry-map (rlm-skills/load-skills {})
         ;; Ingest skills into Datalevin as :skill documents (searchable)
-        _ (when db-info-atom
-            (rlm-skills/ingest-skills! @db-info-atom skill-registry-map))
+        _ (when db-info
+            (rlm-skills/ingest-skills! db-info skill-registry-map))
         ;; Pooled: low-traffic mutable state grouped into one atom
         state-atom (atom {:custom-bindings {}
                           :custom-docs []
@@ -195,18 +194,15 @@
                               :system-prompt system-prompt
                               :name conversation-name}))
         {:keys [sci-ctx sandbox-ns initial-ns-keys]}
-        (rlm-tools/create-sci-context nil cheap-sub-rlm-query-fn db-info-atom
-          ;; conversation-ref-atom: tools.clj reads this to scope DB queries.
-          ;; We pass a stable atom; conversation-ref lives in state-atom too
-          ;; but tools needs the atom identity for close-over semantics.
-          (atom conversation-ref)
+        (rlm-tools/create-sci-context nil cheap-sub-rlm-query-fn db-info
+          conversation-ref
           (:custom-bindings @state-atom))
         env {:env-id env-id
              :conversation-ref conversation-ref
              ;; Grouped atoms (new layout)
              :depth-atom depth-atom
              :tool-registry-atom tool-registry-atom
-             :db-info-atom db-info-atom
+             :db-info db-info
              :var-index-atom var-index-atom
              :qa-corpus-atom qa-corpus-atom
              :state-atom state-atom
@@ -241,8 +237,8 @@
    Params:
    `env` - RLM environment from create-env."
   [env]
-  (when-let [db-info-atom (:db-info-atom env)]
-    (rlm-db/dispose-rlm-conn! @db-info-atom)))
+  (when-let [db-info (:db-info env)]
+    (rlm-db/dispose-rlm-conn! db-info)))
 
 ;; =============================================================================
 ;; register-env-fn!

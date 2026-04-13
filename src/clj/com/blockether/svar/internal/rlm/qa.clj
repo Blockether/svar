@@ -466,7 +466,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
                             debug? false
                             parallel 3
                             k-candidates 1}}]
-   (when-not (:db-info-atom env)
+   (when-not (:db-info env)
      (anomaly/incorrect! "Invalid RLM environment" {:type :rlm/invalid-env}))
 
    (let [start-time (System/nanoTime)
@@ -474,7 +474,7 @@ Each verification must include: question-index, grounded, non-trivial, self-cont
          rlm-router (:router env)
          effective-model (or model (:default-model config))
          effective-selection-model (or selection-model effective-model)
-         db-info @(:db-info-atom env)
+         db-info (:db-info env)
           ;; Select 1.5x passages for filtering headroom
          passage-count (int (Math/ceil (* target-count 1.5)))
          qa-run-opts {:count target-count
