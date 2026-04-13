@@ -23,7 +23,7 @@
 <div align="center">
 <h3>
 
-[Rationale](#rationale) • [Functionalities](#functionalities) • [Quick Start](#quick-start) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference) • [RLM](#rlm--recursive-language-model)
+[Rationale](#rationale) • [Functionalities](#functionalities) • [Quick Start](#quick-start) • [Usage](#usage) • [Spec DSL](#spec-dsl-reference)
 
 </h3>
 </div>
@@ -57,17 +57,6 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 | [**<code>str&#8209;>data&#8209;with&#8209;spec</code>**](#parsing--validation) | Parse JSON string with spec validation and type coercion. |
 | [**<code>data&#8209;>str</code>**](#data-str--str-data) | Serialize Clojure data to JSON string. |
 | [**<code>validate&#8209;data</code>**](#parsing--validation) | Validate parsed data against a spec. |
-| [**<code>create&#8209;env</code>**](#rlm--recursive-language-model) | Create an RLM environment for processing large contexts via iterative code execution. |
-| [**<code>ingest&#8209;to&#8209;env!</code>**](#rlm--recursive-language-model) | Ingest documents into an RLM environment for querying. |
-| [**<code>query&#8209;env!</code>**](#rlm--recursive-language-model) | Run a query using iterative code execution in a sandboxed SCI environment. |
-| [**<code>dispose&#8209;env!</code>**](#rlm--recursive-language-model) | Dispose an RLM environment and clean up resources. |
-| [**<code>register&#8209;env&#8209;fn!</code>**](#sandbox-extensibility) | Register a custom function in the RLM's SCI sandbox. |
-| [**<code>register&#8209;env&#8209;def!</code>**](#sandbox-extensibility) | Register a constant in the RLM's SCI sandbox. |
-| [**<code>query&#8209;env&#8209;qa!</code>**](#qa-generation-query-env-qa) | Generate question-answer pairs from ingested documents. |
-| [**<code>index!</code>**](#rlm--recursive-language-model) | Index a document file (PDF, MD, TXT) and save structured data as EDN + PNG files. |
-| [**<code>load&#8209;index</code>**](#rlm--recursive-language-model) | Load an indexed document from a .pageindex directory. |
-| [**<code>pprint&#8209;trace</code>**](#debugging-rlm-traces) | Pretty-print an RLM trace to stdout (also returns the string). |
-| [**<code>print&#8209;trace</code>**](#debugging-rlm-traces) | Alias for <code>pprint&#8209;trace</code>. |
 
 ## Quick Start
 
@@ -788,151 +777,6 @@ Serialize Clojure data to/from LLM-compatible strings:
 (svar/str->data "{\"name\": \"John\", \"age\": 42}")
 ;; => {:value {:name "John", :age 42}, :warnings []}
 ```
-
-## RLM — Recursive Language Model
-
-RLM enables an LLM to iteratively write and execute Clojure code to examine, filter, and process large contexts that exceed token limits. The LLM writes code that runs in a sandboxed SCI environment, inspects results, and decides whether to continue iterating or return a final answer.
-
-```clojure
-(comment
-  ;; 1. Create environment
-  (def env (svar/create-env router {:db "/tmp/my-rlm"}))
-
-  ;; 2. Ingest documents (PageIndex format)
-  (svar/ingest-to-env! env documents)
-
-  ;; 3. Query
-  (svar/query-env! env [(svar/user "What are the key compliance requirements?")])
-
-  ;; 4. Dispose when done
-  (svar/dispose-env! env))
-```
-
-### Sandbox Extensibility
-
-Inject custom functions and constants into the RLM's sandboxed SCI environment. The LLM sees the doc-strings in its system prompt and can call them during code execution.
-
-```clojure
-(comment
-  ;; Register a function the LLM can call
-  (svar/register-env-fn! env 'fetch-weather
-    (fn [city] {:temp 22 :condition "sunny"})
-    "(fetch-weather city) - Returns weather data for a city")
-
-  ;; Register a constant
-  (svar/register-env-def! env 'MAX_RETRIES 3
-    "MAX_RETRIES - Maximum retry attempts")
-
-  ;; Both return the env for chaining
-  (-> env
-      (svar/register-env-fn! 'lookup-user
-        (fn [id] {:name "Alice" :role "admin"})
-        "(lookup-user id) - Looks up user by ID")
-      (svar/register-env-def! 'API_VERSION "v2"
-        "API_VERSION - Current API version")))
-```
-
-### Advanced Query Options
-
-```clojure
-(comment
-  (svar/query-env! env [(svar/user "Summarize the contract terms")]
-    {:spec my-output-spec          ;; structured output (parsed with spec)
-     :context {:extra "data"}      ;; additional data context
-     :model "gpt-4o"               ;; override default model
-      :max-iterations 30            ;; max code iterations (default: 50)
-      :max-refinements 2            ;; max refine loops (default: 1)
-      :threshold 0.85               ;; min eval score 0.0-1.0 (default: 0.8)
-      :refine? true                 ;; enable self-critique refinement (default: true)
-     :plan? true                   ;; LLM outlines a strategy before executing code (default: false)
-     :verify? true                 ;; CoVe fact-checking: LLM cites sources, verified post-query (default: false)
-     :max-context-tokens 8000      ;; token budget for context window
-     :debug? true}))               ;; verbose iteration logging (default: false)
-```
-
-### Planning Phase
-
-When `:plan? true`, the LLM first generates a 3–5 step strategy for answering the query before
-writing any code. The plan is injected as `<plan>...</plan>` context into the code-execution loop,
-keeping iterations focused and reducing wasted exploration.
-
-```clojure
-(comment
-  ;; For complex multi-document queries, planning reduces iteration count
-  (svar/query-env! env [(svar/user "Compare the financial obligations across all agreements")]
-    {:plan? true}))
-```
-
-### Claim Verification (CoVe)
-
-When `:verify? true`, the LLM gets `(cite! claim source)` and `(cite-page! claim page-num)` 
-functions during execution. After the answer is produced, SVAR cross-checks every cited claim against 
-its source material. The result includes a `:verified-claims` vector.
-
-```clojure
-(comment
-  (let [result (svar/query-env! env [(svar/user "What penalties apply for late payment?")]
-                 {:verify? true})]
-    (:verified-claims result)
-    ;; => [{:claim "Late fee of 1.5% per month" :source "doc-1" :verified? true} ...]
-    ))
-```
-
-### Search Functions
-
-The LLM has access to text-based search across all ingested documents. Searches are case-insensitive
-substring matches over content, titles, names, and descriptions.
-
-| Function | Searches over |
-|---|---|
-| `(search-page-nodes query)` | Page node content and descriptions |
-| `(search-toc-entries query)` | TOC entry titles and descriptions |
-| `(search-entities query)` | Entity names and descriptions |
-| `(search-history n)` | Recent conversation messages |
-
-### Debugging RLM Traces
-
-Every `query-env!` result includes a `:trace` vector. Pretty-print it for debugging:
-
-```clojure
-(comment
-  (let [result (svar/query-env! env [(svar/user "Find all parties in the agreement")])]
-    ;; Pretty-print trace to stdout (also returns the string)
-    (svar/pprint-trace (:trace result))
-
-    ;; With truncation options
-    (svar/pprint-trace (:trace result)
-      {:max-response-length 500   ;; truncate LLM response text
-       :max-code-length 300       ;; truncate code blocks
-       :max-result-length 200     ;; truncate execution results
-       :show-stdout? true})       ;; show stdout from code execution
-
-    ;; Capture as string without printing
-    (let [trace-str (with-out-str (svar/pprint-trace (:trace result)))]
-      ;; use trace-str for logging, etc.
-      )))
-```
-
-### Q&A Generation (`query-env-qa!`)
-
-Generate question-answer pairs from ingested documents. The LLM iteratively explores the corpus using search functions, then produces diverse, grounded Q&A pairs with source provenance.
-
-```clojure
-(comment
-  ;; Generate 10 Q&A pairs (default settings)
-  (svar/query-env-qa! env)
-
-  ;; Customized generation
-  (svar/query-env-qa! env
-    {:count 20                                       ;; target number of Q&A pairs
-     :difficulty #{:easy :medium :hard}               ;; difficulty mix
-     :categories #{:factual :inferential :comparative} ;; question types
-     :model "gpt-4o"                                  ;; override model
-     :verify? true                                     ;; cross-check via refinement
-     :debug? true}))                                  ;; verbose logging
-```
-
-Returns `{:questions [{:question "..." :answer "..." :source-document "..." :source-page N :difficulty :medium :category :factual} ...] :trace [...] :iterations N :duration-ms N}`.
 
 ## Further reading
 

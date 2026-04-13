@@ -17,8 +17,6 @@ test-ff: target/classes
 		com.blockether.svar.internal.config-test \
 		com.blockether.svar.spec-test \
 		com.blockether.svar.core-test \
-		com.blockether.svar.rlm.pageindex-test \
-		com.blockether.svar.rlm-test \
 	; do \
 		echo "\n=== Testing $$ns ==="; \
 		clojure -M:test -n $$ns || exit 1; \

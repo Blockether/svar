@@ -1287,8 +1287,8 @@
    3. Spec field defaults (nil :many → [], missing keys → nil)
 
    Does NOT apply ::key-ns namespacing — data keys are expected to already
-   be in their final form. Designed for RLM answers where SCI produces Clojure
-   data that needs type normalization but not JSON parsing or key restructuring.
+   be in their final form. Designed for pre-parsed Clojure data that needs
+   type normalization but not JSON parsing or key restructuring.
 
    Params:
    `data` - Clojure data (map, vector, or primitive) to coerce.

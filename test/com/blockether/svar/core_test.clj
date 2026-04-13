@@ -1135,15 +1135,15 @@
   []
   (some? (System/getenv "BLOCKETHER_LLM_API_KEY")))
 
-(defdescribe blockether-one-claude-opus-test
-  (describe "ask! with claude-opus-4-6 via Blockether One"
-    (it "parses structured JSON from Claude Opus 4.6"
+(defdescribe blockether-one-glm-test
+  (describe "ask! with glm-5.1 via Blockether One"
+    (it "parses structured JSON from GLM 5.1"
       (when (blockether-one-enabled?)
         (let [router (svar/make-router [{:id :blockether-integration
                                          :api-key (System/getenv "BLOCKETHER_LLM_API_KEY")
                                          :base-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
                                                      "https://llm.blockether.com/v1")
-                                         :models [{:name "claude-opus-4-6"}]}])
+                                         :models [{:name "glm-5.1"}]}])
               person-spec (svar/spec
                             (svar/field svar/NAME :name
                               svar/TYPE svar/TYPE_STRING
@@ -1156,7 +1156,7 @@
               result (svar/ask! router {:spec person-spec
                                         :messages [(svar/system "Extract person data from the text.")
                                                    (svar/user "Alexander is 18 years old.")]
-                                        :model "claude-opus-4-6"})]
+                                        :model "glm-5.1"})]
           ;; ask! returns {:result <data> :tokens :cost :duration-ms}
           (expect (map? result))
           (expect (some? (:result result)))

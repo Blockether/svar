@@ -1,9 +1,6 @@
 (ns com.blockether.svar.internal.llm
   "LLM client layer: HTTP transport, message construction, and all LLM interaction
-   functions (ask!, abstract!, eval!, refine!, models!, sample!).
-
-   Extracted from svar.core to break the cyclic dependency between core and rlm.
-   rlm.clj requires this namespace directly instead of svar.core."
+   functions (ask!, abstract!, eval!, refine!, models!, sample!)."
   (:require
    [babashka.http-client :as http]
    [charred.api :as json]
@@ -65,11 +62,9 @@
    Uses shared-http-executor so blocked HTTP calls cost almost nothing and
    don't pin OS threads.
 
-   HTTP/1.1 PIN — DO NOT CHANGE WITHOUT TESTING OCR PIPELINE.
-   :version :http1.1 is load-bearing for local GLM-OCR via LM Studio and for
-   some remote providers that choke on HTTP/2 trailers. Regression surface:
-   pageindex/vision.clj :ocr extraction strategy. If you need HTTP/2 for a
-   specific call, build a second client — do NOT flip this default."
+   HTTP/1.1 PIN — some remote providers and local LLM servers (LM Studio,
+   Ollama) choke on HTTP/2 trailers. If you need HTTP/2 for a specific call,
+   build a second client — do NOT flip this default."
   (delay
     (http/client (assoc http/default-client-opts
                    :executor @shared-http-executor
@@ -523,7 +518,6 @@
                                                        :llm-request {:model model :base-url base-url}})
               api-key-error (assoc :api-key-error api-key-error))))))))
 
-;; PUBLIC — rlm.clj accesses this directly
 (defn chat-completion
   "Calls the LLM API (OpenAI compatible) with the given messages.
 

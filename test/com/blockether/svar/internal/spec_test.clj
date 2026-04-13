@@ -965,11 +965,11 @@
         (expect (= "ok" (:summary parsed)))))))
 
 ;; =============================================================================
-;; coerce-data-with-spec — Clojure data coercion (for RLM/SCI answers)
+;; coerce-data-with-spec — Clojure data coercion (pre-parsed Clojure data)
 ;; =============================================================================
 
 (def ^:private verification-result-spec
-  "Spec mimicking VERIFICATION_RESULT_SPEC in rlm.clj for testing coercion."
+  "Spec fixture for testing coercion of pre-parsed Clojure data."
   (sut/spec
     :verification
     {::sut/key-ns "verification"}

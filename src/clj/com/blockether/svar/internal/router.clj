@@ -108,12 +108,9 @@
 ;;   MiniMax:     https://platform.minimax.io/docs/guides/pricing-paygo
 (def KNOWN_PROVIDER_MODELS
   {:blockether
-   {"claude-opus-4-6"           {:pricing {:input 5.00  :output 25.00} :context 1000000}
-    "claude-sonnet-4-6"         {:pricing {:input 3.00  :output 15.00} :context 200000}
-    "claude-haiku-4-5"          {:pricing {:input 1.00  :output 5.00}  :context 200000}
-    "gemini-2.5-pro"            {:pricing {:input 1.25  :output 10.00} :context 2000000}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 100000}
-    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 100000}
+   {"gemini-2.5-pro"            {:pricing {:input 1.25  :output 10.00} :context 2000000}
+    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
+    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}
     "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
     "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "gpt-4.1"                   {:pricing {:input 2.00  :output 8.00}  :context 1000000}
