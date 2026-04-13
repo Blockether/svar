@@ -83,8 +83,8 @@
    "gemini-2.0-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision}}
 
    ;; ── Zhipu / ZAI ─────────────────────────────────────────────────────────
-   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}}
+   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
+   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
    "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
 
