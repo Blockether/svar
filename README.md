@@ -39,7 +39,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 | Category | Functions | Description |
 |----------|-----------|-------------|
 | [**Router**](#router) | `make-router`, `router-stats`, `reset-budget!`, `reset-provider!` | Multi-provider routing with circuit breakers, cost budgets, automatic fallback. The entry point to the library. |
-| [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Token counting + cost estimation via JTokkit. |
+| [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Supports [streaming](#streaming) via `:on-chunk`. Token counting + cost estimation via JTokkit. |
 | [**Spec DSL**](#spec-dsl-reference) | `spec`, `field`, `spec->prompt`, `validate-data` | Define output shapes: types, enums, refs, optional fields, namespaced keys, fixed-size vectors. |
 | [**Parsing**](#parsing--validation) | `str->data`, `str->data-with-spec`, `data->str` | Schemaless and spec-validated JSON↔Clojure. Handles malformed JSON out of the box. |
 | [**Refinement**](#summarization-abstract) | `abstract!`, `eval!`, `refine!`, `sample!` | Chain of Density summarization, LLM self-evaluation, iterative refinement, test data generation. |
@@ -235,15 +235,14 @@ Returns `{:result <data> :tokens {:input N :output N :total N} :cost {:input-cos
 SVAR works with any text-producing LLM because parsing happens post-step. The SAP parser handles malformed JSON out of the box:
 
 ```clojure
-;; Clean JSON
+;; Spec-validated parsing — handles clean and malformed JSON
 (svar/str->data-with-spec "{\"name\": \"John Smith\", \"age\": 42}" person-spec)
 ;; => {:name "John Smith", :age 42}
 
-;; Malformed: unquoted keys, trailing commas
 (svar/str->data-with-spec "{name: \"John Smith\", age: 42,}" person-spec)
 ;; => {:name "John Smith", :age 42}
 
-;; Schemaless parsing — no spec needed, returns {:value <data>, :warnings [...]}
+;; Schemaless parsing — no spec needed
 (svar/str->data "{\"city\": \"Paris\", \"population\": 2161000}")
 ;; => {:value {:city "Paris", :population 2161000}, :warnings []}
 
@@ -255,7 +254,6 @@ SVAR works with any text-producing LLM because parsing happens post-step. The SA
 (svar/validate-data person-spec {:name "John Smith" :age 42})
 ;; => {:valid? true}
 
-;; Missing required field detected
 (svar/validate-data person-spec {:name "John Smith"})
 ;; => {:valid? false, :errors [{:error :missing-required-field, :field :age, :path "age"}]}
 ```
@@ -770,55 +768,49 @@ This is especially useful when multiple specs share field names like `:type` or 
 ;; => {:page.node/type "heading", :page.node/content "Introduction"}
 ```
 
-### Lower-Level Utilities
+### Streaming
 
-#### `spec->prompt`
+Pass `:on-chunk` to `ask!` to enable SSE streaming. The callback fires with partially-parsed results as they arrive, then a final call with `:done? true` including token counts and cost:
 
-Generates the LLM prompt text from a spec definition — this is what `ask!` sends to the LLM alongside your messages. Understanding the generated prompts helps you design better specs.
-
-**Simple spec** — required/optional fields, types:
-
-```clojure lazytest/skip=true
-(println (svar/spec->prompt contact-spec))
-;; Answer in JSON using this schema:
-;; {
-;;   // Full name (required)
-;;   name: string,
-;;   // Phone number if available (optional)
-;;   phone: string or null,
-;; }
+```clojure
+(comment
+  ;; Stream structured output — callback receives progressive partial results
+  (svar/ask! router
+    {:spec person-spec
+     :messages [(svar/system "Extract person info.")
+                (svar/user "John Smith is a 42-year-old engineer.")]
+     :model "gpt-4o"
+     :on-chunk (fn [{:keys [result reasoning tokens cost done?]}]
+                (if done?
+                  (println "Final:" result "cost:" (:total-cost cost))
+                  (println "Partial:" result)))}))
 ```
 
-**Enums** — allowed values with descriptions are listed inline so the LLM knows exactly what to produce:
+Callback shape:
 
-```clojure lazytest/skip=true
-(println (svar/spec->prompt sentiment-spec))
-;; Answer in JSON using this schema:
-;; {
-;;   // Sentiment classification (required)
-;;   //   - "negative": Unfavorable or critical tone
-;;   //   - "neutral": Balanced or factual tone
-;;   //   - "positive": Favorable or optimistic tone
-;;   sentiment: "negative" or "neutral" or "positive",
-;;   // Confidence score from 0.0 to 1.0 (required)
-;;   confidence: float,
-;; }
+| Key | While streaming | Final (`:done? true`) |
+|-----|----------------|----------------------|
+| `:result` | Best-effort partial parse | Fully validated + coerced |
+| `:reasoning` | Accumulated reasoning text | Full reasoning |
+| `:tokens` | `nil` | `{:input N :output N :reasoning N :total N}` |
+| `:cost` | `nil` | `{:input-cost N :output-cost N :total-cost N}` |
+| `:done?` | `false` | `true` |
+
+Streaming works with all routing options — `:optimize`, provider pinning, fallback:
+
+```clojure
+(comment
+  (svar/ask! router
+    {:spec person-spec
+     :messages [(svar/user "...")]
+     :routing {:optimize :cost}
+     :on-chunk (fn [{:keys [result done?]}]
+                (when done? (println result)))}))
 ```
 
-**Collections** — `CARDINALITY_MANY` becomes `type[]` array syntax:
+### `spec->prompt`
 
-```clojure lazytest/skip=true
-(println (svar/spec->prompt article-spec))
-;; Answer in JSON using this schema:
-;; {
-;;   // Article title (required)
-;;   title: string,
-;;   // List of tags (required)
-;;   tags: string[],
-;; }
-```
-
-**Refs** — nested specs are defined first, then referenced by name. `CARDINALITY_MANY` refs become `RefName[]`:
+`ask!` auto-generates the LLM prompt from your spec. You can inspect what gets sent:
 
 ```clojure lazytest/skip=true
 (println (svar/spec->prompt company-spec))
@@ -838,20 +830,6 @@ Generates the LLM prompt text from a spec definition — this is what `ask!` sen
 ;;   // Branch office addresses (required)
 ;;   branches: Address[],
 ;; }
-```
-
-#### `data->str` / `str->data`
-
-Serialize Clojure data to/from LLM-compatible strings:
-
-```clojure
-;; Serialize
-(svar/data->str {:name "John" :age 42})
-;; => "{\"name\":\"John\",\"age\":42}"
-
-;; Parse (schemaless — no spec needed, returns {:value <data>, :warnings [...]})
-(svar/str->data "{\"name\": \"John\", \"age\": 42}")
-;; => {:value {:name "John", :age 42}, :warnings []}
 ```
 
 ## Further reading

@@ -364,11 +364,11 @@
         _ (trove/log! {:level :info :id ::llm-request
                        :data {:model model
                               :url chat-url
-                              :msg-count (count messages)
+                              :api-msg-count (count messages)
                               :input-tokens input-tokens
                               :timeout-ms timeout-ms
                               :max-tokens (:max_tokens extra-body)}
-                       :msg "LLM request"})]
+                       :msg "HTTP request to LLM API (includes spec/format msg from ask!)"})]
     (try
       (with-retry
         (fn []
@@ -477,7 +477,8 @@
                           (on-delta {:content-delta content-delta
                                      :reasoning-delta reasoning-delta
                                      :content-acc (str content-acc)
-                                     :reasoning-acc (str reasoning-acc)}))))))
+                                     :reasoning-acc (str reasoning-acc)
+                                     :api-usage api-usage}))))))
                 (recur))))
           {:content (let [s (str content-acc)] (when-not (str/blank? s) s))
            :reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
@@ -503,8 +504,8 @@
         delta-fn     (if anthropic? extract-anthropic-stream-delta extract-stream-delta)]
     (try
       (http-post-stream! chat-url request-body headers timeout-ms delta-fn
-        (fn [{:keys [content-acc reasoning-acc]}]
-          (on-chunk {:content content-acc :reasoning reasoning-acc :done? false})))
+        (fn [{:keys [content-acc reasoning-acc api-usage]}]
+          (on-chunk {:content content-acc :reasoning reasoning-acc :api-usage api-usage :done? false})))
       (catch Exception e
         (let [ex-data-map (ex-data e)
               response-body (let [b (:body ex-data-map)]
@@ -842,16 +843,25 @@
           ;; API call — streaming if :on-chunk provided
         on-chunk (:on-chunk opts)
         streaming-on-chunk (when on-chunk
-                             (fn [{:keys [content reasoning]}]
-                               (when-let [partial-map (jsonish/parse-partial content)]
-                                 (let [coerced (try (spec/str->data-with-spec
-                                                      (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map))]
-                                   (on-chunk {:result coerced
-                                              :reasoning reasoning
-                                              :tokens nil
-                                              :cost nil
-                                              :done? false})))))
+                             (fn [{:keys [content reasoning api-usage]}]
+                               (let [tokens (when api-usage
+                                              {:input (:prompt_tokens api-usage)
+                                               :output (:completion_tokens api-usage)
+                                               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
+                                               :total (:total_tokens api-usage)})
+                                     cost (when api-usage
+                                            (router/estimate-cost model
+                                              (or (:prompt_tokens api-usage) 0)
+                                              (or (:completion_tokens api-usage) 0)))]
+                                 (when-let [partial-map (jsonish/parse-partial content)]
+                                   (let [coerced (try (spec/str->data-with-spec
+                                                        (json/write-json-str partial-map) spec)
+                                                      (catch Exception _ partial-map))]
+                                     (on-chunk {:result coerced
+                                                :reasoning reasoning
+                                                :tokens tokens
+                                                :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
+                                                :done? false}))))))
         extra-body (:extra-body opts)
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
