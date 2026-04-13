@@ -4,38 +4,16 @@
         com.blockether/anomaly    {:mvn/version "1.0.1"}
         ;; HTTP client
         org.babashka/http-client  {:mvn/version "0.4.23"}
-        ;; Filesystem utilities
-        babashka/fs               {:mvn/version "0.5.32"}
         ;; JSON parsing
         com.cnuernber/charred     {:mvn/version "1.038"}
         ;; Structured logging
         com.taoensso/trove        {:mvn/version "1.1.0"}
         ;; Token counting (OpenAI compatible)
         com.knuddels/jtokkit      {:mvn/version "1.1.0"}
-        ;; SCI - Small Clojure Interpreter (for RLM sandbox)
-        org.babashka/sci          {:mvn/version "0.12.51"}
-        ;; Fast EDN - drop-in replacement for clojure.edn (~6x faster)
-        io.github.tonsky/fast-edn {:mvn/version "1.1.3"}
-        ;; Datalevin - embedded Datalog database (being phased out → SQLite)
-        datalevin/datalevin       {:mvn/version "0.10.7"}
-        ;; SQLite - replacing Datalevin as primary RLM store
-        org.xerial/sqlite-jdbc    {:mvn/version "3.46.1.3"}
-        ;; next.jdbc - JDBC wrapper for SQLite access
-        com.github.seancorfield/next.jdbc  {:mvn/version "1.3.939"}
-        ;; HoneySQL - SQL as Clojure data
-        com.github.seancorfield/honeysql   {:mvn/version "2.6.1203"}
-        ;; PDFBox - PDF processing (for pageindex)
-        org.apache.pdfbox/pdfbox  {:mvn/version "3.0.7"}
-        ;; Core.async - for parallel processing (for pageindex)
+        ;; Core.async - parallel LLM calls (llm batching)
         org.clojure/core.async    {:mvn/version "1.9.865"}
-        ;; zprint - Clojure code/data pretty printer (for RLM sandbox)
-        zprint/zprint             {:mvn/version "1.3.0"}
-        ;; lazytest - testing framework (also exposed in RLM SCI sandbox)
-        io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}
-        ;; JGit - pure-JVM git library (no shell-out) for RLM git ingestion
-        org.eclipse.jgit/org.eclipse.jgit {:mvn/version "6.10.0.202406032230-r"}
-        ;; yamlstar - pure Clojure YAML 1.2 loader for SKILL.md frontmatter parsing
-        org.yamlstar/yamlstar             {:mvn/version "0.1.3"}}
+        ;; lazytest - testing framework
+        io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}
 
  :aliases
  {:dev {:extra-paths ["test"]
@@ -58,8 +36,4 @@
   :deploy {:extra-deps {slipset/deps-deploy {:mvn/version "0.2.2"}}
            :exec-fn deps-deploy.deps-deploy/deploy
            :exec-args {:installer :remote
-                       :artifact "target/svar.jar"}}
-
-  :bench {:extra-paths ["bench"]
-          :jvm-opts ["-Xmx8g"]
-          :main-opts ["-m" "com.blockether.svar.bench.runner"]}}}
+                       :artifact "target/svar.jar"}}}}
