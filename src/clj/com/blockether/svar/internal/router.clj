@@ -645,9 +645,8 @@
                             (catch Exception e
                               (if (router-transient-error? router e)
                                 (do (trove/log! {:level :warn
-                                                 :data {:provider pid :status (:status (ex-data e))
-                                                        :error (ex-message e)}
-                                                 :msg "Provider transient error"})
+                                                 :msg (str "⚠ RETRY  provider=" (name pid)
+                                                        "  error=" (ex-message e))})
                                     (cb-record-failure! router pid
                                       (= 429 (:status (ex-data e))))
                                     (when-let [on-chunk (:on-chunk prefs)]

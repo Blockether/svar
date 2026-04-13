@@ -362,13 +362,10 @@
         headers      (make-llm-headers api-style api-key)
         extract-fn   (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
         _ (trove/log! {:level :info :id ::llm-request
-                       :data {:model model
-                              :url chat-url
-                              :api-msg-count (count messages)
-                              :input-tokens input-tokens
-                              :timeout-ms timeout-ms
-                              :max-tokens (:max_tokens extra-body)}
-                       :msg "HTTP request to LLM API (includes spec/format msg from ask!)"})]
+                       :msg (str "→ HTTP  model=" model
+                              "  tokens=" input-tokens
+                              "  max-out=" (:max_tokens extra-body)
+                              "  timeout=" timeout-ms "ms")})]
     (try
       (with-retry
         (fn []
@@ -869,14 +866,12 @@
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
                                                               (chat-completion messages model api-key chat-url retry-opts))
         _ (trove/log! {:level :info :id ::llm-response
-                       :data {:model model
-                              :duration-ms duration-ms
-                              :content-len (count (str content))
-                              :has-reasoning (boolean (seq reasoning))
-                              :input-tokens (:prompt_tokens api-usage)
-                              :output-tokens (:completion_tokens api-usage)
-                              :reasoning-tokens (get-in api-usage [:completion_tokens_details :reasoning_tokens])}
-                       :msg "LLM response"})
+                       :msg (str "← HTTP  model=" model
+                              "  " duration-ms "ms"
+                              "  in=" (:prompt_tokens api-usage)
+                              "  out=" (:completion_tokens api-usage)
+                              (when (seq reasoning) "  reasoning=true")
+                              "  len=" (count (str content)))})
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
         token-stats (router/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}
