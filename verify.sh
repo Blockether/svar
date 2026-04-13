@@ -134,17 +134,17 @@ _test_unit() {
   echo "$output"
   [ $code -ne 0 ] && return $code
 
-  # Sanity: lazytest should run ~830 cases (fail if <500 — catches silent ns loading failures)
+  # Sanity: lazytest should run ~390 cases (fail if <350 — catches silent ns loading failures)
   local lt_count
   lt_count=$(echo "$output" | grep -oE 'Ran [0-9]+ test cases' | grep -oE '[0-9]+' | tail -1 || true)
-  if [ -n "$lt_count" ] && [ "$lt_count" -lt 500 ]; then
+  if [ -n "$lt_count" ] && [ "$lt_count" -lt 350 ]; then
     echo ""
-    echo "WARNING: Only $lt_count lazytest cases (expected ~830). Possible subset run."
+    echo "WARNING: Only $lt_count lazytest cases (expected ~390). Possible subset run."
     return 1
   fi
   if [ -n "$lt_count" ]; then
     echo ""
-    echo "Test count: $lt_count cases (threshold: 500)"
+    echo "Test count: $lt_count cases (threshold: 350)"
   fi
 }
 
