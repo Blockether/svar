@@ -7,6 +7,212 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.2.0] - 2026-04-14
+
+### Changed
+- feat: add reasoning-params to glm-5.1 and glm-5-turbo — default medium, RLM overrides dynamically
+- feat: add *log-context* for log correlation — callers can bind {:query-id :iteration} to prefix all HTTP logs
+- fix: demote SAP warnings to :debug — ExtractedFromMarkdown noise
+- feat: compact logs for SAP warnings, HTTP retries, errors — single-line with symbols
+- feat: compact single-line LLM logs — → HTTP model=X tokens=N and ← HTTP model=X 150ms in=N out=N
+- feat: add Streaming section to README, consolidate parsing sections, fix streaming on-chunk paren issue + nil-result suppression, pass tokens/cost in streaming chunks
+- feat: add Router section to README, consolidate Functionalities table, rename cb-* opts to failure-threshold/recovery-ms, remove RECOMMENDATIONS.md
+- chore: strip RLM from RECOMMENDATIONS.md, lower verify.sh test floor to 350
+- chore: remove target, .omc, PLAN.md — RLM cleanup
+- refactor!: excise RLM, PageIndex, git ingestion, bench, paren-repair — moved to ../vis
+- wip(rlm): production cutover to SQLite — Datalevin gone from src/
+- feat(rlm): SQLite store foundation — DDL, FTS5, entity/conv/query/iter ops
+- refactor(rlm): kill :db-info-atom — 37 sites, ZERO mutations, pure ceremony
+- refactor(rlm): encapsulate env atom access behind rlm-env/* accessor fns
+- refactor(rlm): eliminate sub → core cyclic dep via parameter injection
+- fix: HTTP client shutdown hook + kill requiring-resolve hacks in sub.clj
+- fix(router): refresh pricing data (2026-04-12 audit)
+- refactor(rlm): Phase 4 — extract rlm/env.clj + atom grouping (12 → 7)
+- feat(rlm): Phase 7 + 8 + named conversations + PLAN update
+- refactor(rlm): Phase 5 — extract query.clj + configurable .svar dir + user recs
+- fix(rlm): Phase 6 — atomic CAS in with-depth-tracking (race condition)
+- refactor(rlm): Phase 3 — extract QA pipeline to rlm/qa.clj + rlm/qa_manifest.clj
+- refactor(rlm): Phase 0-2 — core.clj compaction, trace + PageIndex extraction, QA rename
+- feat(rlm): skill change detection, reference files, body auto-patch
+- feat(rlm): async skill auto-refine + depth guard on skill loading
+- feat(rlm): skills-as-documents + skill-manage SCI tool
+- feat(rlm): parallel batch + public hooks/tools API
+- feat(rlm): skills system, sub-rlm-query, concurrency primitives
+- refactor(rlm): hook system v3 — eliminate dynamic vars, namespaced status/error ids, extract rlm/data.clj
+- Continuation
+- feat(rlm): cancel-query! + :on-iteration callback for query control
+- refactor(rlm): persist git :repo attachments in Datalevin, drop env atoms
+- feat(rlm): wire git runtime via JGit, multi-repo aware, git- prefixed SCI tools
+- feat(rlm): adaptive eval-timeout, rel-query SCI tools, enum guard
+- feat(rlm): persist vars as child entities, thread llm-opts through CoVe, fix duration tracking
+- fix(rlm): fix re-find bug, nil-guard make-chat-url, stabilize integration tests
+- fix(rlm): restore-var binds in SCI sandbox, cleanup dead params and nil consistency
+- feat(rlm): add conversation restore tools
+- chore: update test fixture manifest
+- fix(test): update caveman assertion to match current prompt
+- fix(test): guard streaming tests behind integration-tests-enabled?
+- feat(rlm): add git commit ingestion pipeline
+- Add mandatory clj-paren-repair for Clojure delimiter errors
+- chore: ultra-caveman CLAUDE.md communication style rules
+- refactor(rlm): split caveman output — iterations terse, final answer normal English
+- chore: update test fixture manifest
+- refactor(rlm): update tests, docs, and bench for explicit :db spec
+- refactor(rlm): wire explicit :db spec through create-env and create-rlm-env
+- refactor(rlm): add explicit db-spec API to create-rlm-conn
+- chore: remove CRITICISM.md
+- Engage Caveman!
+- fix(rlm): gate SCI execution and validation on Clojure language only
+- fix(rlm): skip edamame validation for non-Clojure final answers
+- chore: checkpoint rlm hardening and workspace updates
+- perf(rlm): cache QA corpus snapshot for manifest fingerprinting
+- fix(rlm): harden QA manifest resume fingerprinting and persistence
+- feat(router): add minimax-m2.7, gemma4:31b, qwen3.5:397b to blockether
+- refactor(rlm): simplify get-locals to sci/eval-form + reduce-kv
+- feat(rlm): RL Q-values, co-occurrence edges, certainty normalization, QA resume, SCI isolation
+- fix(bench): restore test form in failure reports, safe string embedding
+- fix(bench): fix 7 unbalanced test forms in 4clojure dataset, bb script debug
+- refactor(rlm): split parse-clojure-syntax into composable check functions
+- fix(rlm): bare list detection in parse-clojure-syntax, bb timeout 60s, PROBLEMS.md
+- fix(vitality): lazy certainty decay as pure computation, no DB writes per query
+- fix(vitality): wire Bayesian certainty into page vitality scoring
+- feat(vitality): Bayesian certainty per document (Beta distribution)
+- fix(vitality): merge spreading activation with find-related, fix canonical sibling traversal
+- test: memory system tests (batch search, BFS, canonical-id, spreading activation)
+- feat(vitality): spreading activation across connected pages
+- fix: PageIndex ID collision, QA batch retry, actionable error messages
+- feat: auto-translate non-English content to English at ingest + query
+- fix(test): sanitize_code_test quality improvements
+- fix(test): remove redundant 'user namespace from sanitize_code_test
+- fix(test): sanitize_code_test SCI namespace isolation
+- fix(bench): reset circuit breaker between tasks to prevent cascading failures
+- feat: search-documents-batch! + results->markdown renderer
+- refactor: migrate all query-env! callers to messages vector
+- feat(entity): multimodal query-env!, canonical-id linking, BFS graph traversal
+- feat(entity): unified entity model with closed type enums
+- feat(bench): add median/p90/p99/std-dev stats and --compare command
+- docs(rlm): add deref-with-timeout hint to system prompt
+- feat(rlm): add SCI futures addon (future, pmap, promise, delay, deliver)
+- feat(rlm): rename SCI default ns from 'user to 'sandbox
+- feat(rlm): proper SCI stdout capture, functions in var index, docstring hint
+- feat(rlm): edamame syntax validation for code blocks and final answers
+- fix(bench): revert to inline substitution, trim RLM prompt, REPL hint
+- feat(bench): separate PI prompt, update qwen context to 128K
+- feat(bench): PI local support via router, improved strip-code-fence, qwen 9b model
+- feat(vitality): ACT-R memory decay with type-aware metabolic rates
+- feat(rlm): API-style dispatch, LM Studio provider, sandbox fixes, bench hardening
+- feat: OCR extraction strategy, Anthropic API support, HTTP/1.1 fix, LM Studio provider
+- fix(rlm): allow resolve/ns-resolve in SCI (read-only, needed for doc injection)
+- fix(rlm): remove Object/Thread/Class from SCI imports, proper :deny list
+- fix(rlm): restore clojure.java.process require (linter stripped it)
+- feat(rlm): add BigInteger + BigDecimal to SCI classes and imports
+- feat(rlm): execute code blocks BEFORE accepting final (self-test gate)
+- fix(rlm): auto-repair final answer parens before storing
+- feat(rlm): "NEVER guess, ALWAYS test" rule in system prompt
+- feat(rlm): reject untested finals + mandatory self-test in 4clojure
+- fix(rlm): validate-final uses keyword case, not name conversion
+- fix(llm,vision): cap vision max_tokens at 15K, merge caller extra-body
+- fix(rlm): validate-final handles keyword and string answer-type/language
+- feat(rlm): lazytest in SCI + fix validate-final enum handling
+- fix(rlm): generic NPE hint instead of misleading method-on-nil assumption
+- feat(rlm): specialized error hints with context extraction
+- feat(rlm): conditional error hints in feedback, not system prompt
+- fix(rlm): trim system prompt 1748 -> 667 tokens
+- feat(bench): 4clojure self-test workflow + query-opts passthrough
+- fix(rlm): reject final answers with bare % args outside #()
+- fix(rlm): remove all SCI :deny restrictions
+- fix(rlm): allow require/import/ns in SCI, add vector/LazySeq/nil hints
+- refactor(rlm): remove str-* and set-* helpers, use namespace aliases
+- refactor(rlm): remove 119 redundant SAFE_BINDINGS, SCI has them built-in
+- feat(rlm): add abs, parse-long, parse-double, parse-boolean, parse-uuid, infinite?, NaN? to SCI
+- fix(bench): increase task timeout 5min -> 10min, fix misleading label
+- feat(rlm): transducer hint in COMMON ERRORS system prompt
+- fix(rlm): reject final answers containing __ placeholder
+- feat(rlm): validators for all FINAL_SPEC languages
+- feat(rlm): FINAL_SPEC answer-type + language fields for typed validation
+- refactor(rlm): move final answer validation to spec-level validator
+- feat(rlm): validate final answers that contain code before accepting
+- refactor(rlm): use sci/copy-ns for standard namespaces in SCI
+- docs: add SCI sandbox and benchmark sections to CLAUDE.md
+- fix(rlm): drop real clojure.pprint from SCI - pure zprint backed
+- feat(rlm): clojure.pprint/pprint backed by zprint, keep print-table/cl-format
+- feat(rlm): real clojure.pprint in SCI + more error hints in system prompt
+- feat(rlm): expose more zprint fns in SCI (czprint, set-options!, zprint-file-str)
+- fix(rlm): manually bind zprint fns instead of ns->sci-map
+- feat(rlm): add pprint and pp aliases for zprint.core in SCI
+- feat(rlm): alias clojure.edn -> fast-edn, clojure.pprint -> zprint in SCI
+- feat(rlm): swap pprint for zprint, clojure.edn for fast-edn in SCI
+- feat(rlm): add clojure.edn + clojure.pprint to SCI namespaces
+- fix(bench): denormalize trajectory EDN - inline conversation, strip db refs
+- refactor(rlm): align SCI :imports with Clojure/Babashka defaults
+- feat(rlm): system prompt - each code[] entry must be complete expression
+- fix(rlm): coalesce fragment code blocks before execution
+- refactor(rlm): use SCI :imports for bare class names instead of duplicate :classes
+- fix(rlm): bare class aliases in SCI (Character, Math, String, etc.)
+- fix(rlm): restore DEBUGGING section in system prompt
+- feat(rlm): COMMON ERRORS section in system prompt with actionable fixes
+- fix(deps): downgrade datalevin 0.10.7 -> 0.10.3
+- feat(rlm): pre-exec lint for nested #() + system prompt hints
+- fix(bench): 4clojure prompt hints - nested #(), quoted lists, inline expr
+- feat(rlm): add (sh) shell tool via clojure.java.process
+- fix(rlm): lower realize-value limit to 100 elements
+- fix(rlm): shared HTTP client, virtual threads, PersistentQueue, bounded lazy-seq, JSON/walk namespaces
+- test(pageindex): remove broken output-dir validation test
+- feat(rlm): paren-repair module for auto-fixing LLM delimiter errors
+- refactor(bench): reorganize bench layout - common, benches/ subdir, trajectory EDN persistence
+- feat(rlm): parallel per-page indexing + --force flag
+- refactor(rlm)!: split build-index :path into extract + finalize phases
+- refactor(vision): split fidelity prompt — copy text, keep detecting visuals
+- Fixes
+- test(pageindex): update filter tests for vision-layer filtering invariant
+- feat(bench): trajectory collection, runtime hints, provider+model routing fix
+- feat(rlm): system prompt improvements - data literals, SCI-as-REPL, style rules
+- refactor(rlm): consolidate document tools into search-documents + fetch-content
+- chore: remove legacy and backward-compat code
+- chore(gitignore): bench-logs, bench/trajectories, schema-therapy pageindex variants
+- rename: P-add! → fetch-content
+- refactor(rlm)!: token-efficient system prompt + discoverable tool docs
+- refactor(trajectory): build and store system-prompt at create-env time
+- fix(trajectory): store system-prompt once, skip if already set
+- fix(trajectory): store system-prompt on conversation at iteration-loop time
+- fix(trajectory): resolve Datalevin entity refs, JSONL export working
+- refactor(trajectory)!: rewrite trajectory.clj for query-based hierarchy
+- refactor(trajectory)!: hierarchical schema — conversation → query → iteration
+- feat(trajectory): add :iteration/final field for terminal answer
+- refactor(trajectory): separate code/results fields, remove status
+- fix(trajectory): sanitize executions for EDN serialization
+- refactor(trajectory)!: iteration snapshots instead of sequential messages
+- fix(trajectory): store messages on error/empty paths, include next-optimize
+- fix(trajectory): reconstruct-conversation uses stored ITERATION_SPEC content
+- fix(rlm): store ITERATION_SPEC JSON as assistant message content
+- feat(rlm): persist iteration messages + executions for trajectory fine-tuning
+- refactor(logging): merge ask-routed + chat-completion into llm-request/llm-response
+- feat(logging): comprehensive LLM call chain logging
+- refactor(rlm): proper types — enum next-optimize, nested ref final
+- refactor(rlm)!: remove carry mechanism, enforce docstrings
+- feat(rlm): improve system prompt — llm-query for coding tasks, general workflow
+- feat(rlm): expand SCI sandbox with common Java classes
+- fix(verify): reduce false positives in secret scan regex
+- feat(rlm): LLM-driven model selection via :next-optimize in iteration spec
+- refactor!: migrate ALL LLM functions to :routing API
+- refactor!: migrate all ask! callers to :routing opts
+- fix!: remove legacy ask! API, fix reasoning detection, add routing validation
+- refactor(router): move router-stats, reset-budget!, reset-provider! to router.clj
+- refactor!: delete defaults.clj, merge everything into router.clj
+- refactor(router): add env-keys to KNOWN_PROVIDERS, simplify bench runner
+- feat(llm): add :routing opts to ask!, RLM uses auto params
+- refactor(router): create router.clj — single source of truth for routing
+- fix(rlm): derive max_tokens from model context window (25%)
+- fix(llm): merge reasoning-params into ask! extra-body
+- refactor(rlm)!: replace routed-chat-completion with ask! in iteration loop
+- feat(bench)!: overhaul benchmark suite — 4clojure, HumanEval, Pi agent, multi-provider
+- chore: suppress unused-var warnings, clean up formatting
+- feat(bench): add coding suites and EDNL run aggregation
+- fix: streaming robustness, sci/intern, budget accuracy, done signal
+- feat!: router-first API, RLM cleanup, SSE streaming
+- fix: show errors in progress line when non-zero
+- fix: prefix unused errors binding in print-progress
+
+
 ### Added
 
 **Hook system v3** — per-tool `:before`/`:after`/`:wrap` chains and a global lifecycle `:hooks` map, both wired through `register-env-fn!` and `query-env!`. Policy (deny / transform / recover) lives in per-tool chains; observation (logging / metrics / UI streaming) lives in global hooks. See `rlm.tools/normalize-hooks` / `execute-tool` / `wrap-tool-for-sci` for the full engine.
@@ -118,7 +324,8 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.2.0...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
+[v0.2.0]: https://github.com/Blockether/svar/releases/tag/v0.2.0
