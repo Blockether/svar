@@ -14,9 +14,6 @@
     <a href="https://github.com/Blockether/svar/blob/main/LICENSE">
       <img src="https://img.shields.io/badge/license-Apache%202.0-green" alt="License - Apache 2.0">
     </a>
-    <a href="https://blockether.github.io/svar/latest/">
-      <img src="https://img.shields.io/badge/allure-report-blue" alt="Allure Report">
-    </a>
   </h2>
 </div>
 

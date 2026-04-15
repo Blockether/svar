@@ -24,16 +24,12 @@
    When bound, all HTTP logs include this context."
   nil)
 
-(defn- log-ctx
-  "Prepends *log-context* prefix to a log message when bound."
-  [msg]
+(defn- log-data
+  "Merges optional log context into structured log data."
+  [data]
   (if-let [ctx *log-context*]
-    (let [parts (keep identity
-                  [(when-let [q (:query-id ctx)] (str "q=" q))
-                   (when-let [i (:iteration ctx)] (str "i=" i))])
-          prefix (when (seq parts) (str "[" (str/join " " parts) "] "))]
-      (str prefix msg))
-    msg))
+    (merge (select-keys ctx [:query-id :iteration]) data)
+    data))
 
 ;; =============================================================================
 ;; HTTP Utilities
@@ -268,10 +264,12 @@
          (:success result) (:success result)
          (:retry result) (do
                            (trove/log! {:level :warn :id ::http-retry
-                                        :msg (log-ctx (str "↻ RETRY  attempt=" attempt
-                                                       "  reason=" (name (:reason result))
-                                                       "  delay=" (long delay-ms) "ms"
-                                                       "  error=" (ex-message (:error result))))})
+                                        :data (log-data {:attempt attempt
+                                                         :reason (:reason result)
+                                                         :delay-ms (long delay-ms)
+                                                         :status (:status result)
+                                                         :error (ex-message (:error result))})
+                                        :msg "retrying transient HTTP failure"})
                            (Thread/sleep (long delay-ms))
                            (recur (inc attempt)
                              (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
@@ -381,11 +379,12 @@
         chat-url     (make-chat-url base-url api-style)
         headers      (make-llm-headers api-style api-key)
         extract-fn   (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
-        _ (trove/log! {:level :info :id ::llm-request
-                       :msg (log-ctx (str "→ HTTP  model=" model
-                                      "  tokens=" input-tokens
-                                      "  max-out=" (:max_tokens extra-body)
-                                      "  timeout=" timeout-ms "ms"))})]
+        _ (trove/log! {:level :info
+                       :data (log-data {:model model
+                                        :input-tokens input-tokens
+                                        :max-output-tokens (:max_tokens extra-body)
+                                        :timeout-ms timeout-ms})
+                       :msg "HTTP request dispatched"})]
     (try
       (with-retry
         (fn []
@@ -395,8 +394,11 @@
             (catch clojure.lang.ExceptionInfo e
               (when-let [body (:body (ex-data e))]
                 (trove/log! {:level :warn :id ::llm-error-body
-                             :msg (str "✘ HTTP  status=" (:status (ex-data e))
-                                    "  body=" (if (string? body) (subs body 0 (min 200 (count body))) (str body)))}))
+                             :data (log-data {:status (:status (ex-data e))
+                                              :body-snippet (if (string? body)
+                                                              (subs body 0 (min 200 (count body)))
+                                                              (str body))})
+                             :msg "captured upstream error body snippet"}))
               (throw e))))
         retry-opts)
       (catch Exception e
@@ -415,9 +417,10 @@
                               (ex-message e))]
           (when api-key-error
             (trove/log! {:level :error :id ::api-key-error
-                         :msg (str "✘ API KEY  " api-key-error
-                                "  key-len=" (count api-key)
-                                "  prefix=" (when api-key (subs api-key 0 (min 8 (count api-key)))))}))
+                         :data (log-data {:api-key-error api-key-error
+                                          :api-key-length (count api-key)
+                                          :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))})
+                         :msg "detected API key configuration failure"}))
           (anomaly/fault! error-message
             (cond-> (merge (ex-data e) {:type :svar.core/http-error
                                         :llm-request sanitized-request})
@@ -870,7 +873,7 @@
                                  (when-let [partial-map (jsonish/parse-partial content)]
                                    (let [coerced (try (spec/str->data-with-spec
                                                         (json/write-json-str partial-map) spec)
-                                                      (catch Exception _ partial-map))]
+                                                   (catch Exception _ partial-map))]
                                      (on-chunk {:result coerced
                                                 :reasoning reasoning
                                                 :tokens tokens
@@ -882,13 +885,14 @@
                      extra-body (assoc :extra-body extra-body))
         [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
                                                               (chat-completion messages model api-key chat-url retry-opts))
-        _ (trove/log! {:level :info :id ::llm-response
-                       :msg (log-ctx (str "← HTTP  model=" model
-                                      "  " duration-ms "ms"
-                                      "  in=" (:prompt_tokens api-usage)
-                                      "  out=" (:completion_tokens api-usage)
-                                      (when (seq reasoning) "  reasoning=true")
-                                      "  len=" (count (str content))))})
+        _ (trove/log! {:level :info
+                       :data (log-data {:model model
+                                        :duration-ms duration-ms
+                                        :input-tokens (:prompt_tokens api-usage)
+                                        :output-tokens (:completion_tokens api-usage)
+                                        :reasoning? (boolean (seq reasoning))
+                                        :content-length (count (str content))})
+                       :msg "HTTP response received"})
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
         token-stats (router/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}
@@ -1385,8 +1389,8 @@
   "Routed eval! — provider fallback + rate limiting."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                    :else {:strategy :root})]
+                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                :else {:strategy :root})]
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]

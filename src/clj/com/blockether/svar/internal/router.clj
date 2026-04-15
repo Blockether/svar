@@ -434,10 +434,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -449,7 +449,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -642,20 +642,22 @@
               start-ms (router-now-ms router)]
           (swap! tried conj pid)
           (let [result (try (f provider model-map)
-                            (catch Exception e
-                              (if (router-transient-error? router e)
-                                (do (trove/log! {:level :warn
-                                                 :msg (str "⚠ RETRY  provider=" (name pid)
-                                                        "  error=" (ex-message e))})
-                                    (cb-record-failure! router pid
-                                      (= 429 (:status (ex-data e))))
-                                    (when-let [on-chunk (:on-chunk prefs)]
-                                      (on-chunk {:reset? true
-                                                 :reason :provider-fallback
-                                                 :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                                 :new-provider nil}))
-                                    ::transient-error)
-                                (throw e))))]
+                         (catch Exception e
+                           (if (router-transient-error? router e)
+                             (do (trove/log! {:level :warn
+                                              :id ::provider-retry
+                                              :data {:provider-id pid
+                                                     :error (ex-message e)}
+                                              :msg "retrying with fallback provider"})
+                               (cb-record-failure! router pid
+                                 (= 429 (:status (ex-data e))))
+                               (when-let [on-chunk (:on-chunk prefs)]
+                                 (on-chunk {:reset? true
+                                            :reason :provider-fallback
+                                            :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                            :new-provider nil}))
+                               ::transient-error)
+                             (throw e))))]
             (if (= result ::transient-error)
               (recur (inc attempts))
               (let [token-count (or (get-in result [:api-usage :total_tokens])

@@ -42,28 +42,16 @@ jobs:
       - name: Compile Java sources
         run: clojure -T:build compile-java
 
-      - name: Clean Allure results
-        run: rm -rf allure-results allure-report
-
-      - name: Run tests with Allure reporter
+      - name: Run tests
         id: tests
         env:
-          LAZYTEST_ALLURE_GENERATE_REPORT: "false"
           BLOCKETHER_LLM_API_KEY: ${{ secrets.BLOCKETHER_LLM_API_KEY }}
           BLOCKETHER_LLM_API_BASE_URL: ${{ secrets.BLOCKETHER_LLM_API_BASE_URL }}
           BLOCKETHER_LLM_DEFAULT_MODEL: ${{ secrets.BLOCKETHER_LLM_DEFAULT_MODEL || 'gpt-4o' }}
           BLOCKETHER_OPENAI_API_KEY: ${{ secrets.BLOCKETHER_OPENAI_API_KEY }}
           BLOCKETHER_OPENAI_BASE_URL: ${{ secrets.BLOCKETHER_OPENAI_BASE_URL }}
-        run: clojure -M:test --output nested --output com.blockether.svar.allure-reporter/allure
+        run: clojure -M:test
         continue-on-error: true
-
-      - name: Upload Allure results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: allure-results
-          path: allure-results/
-          retention-days: 7
 
       - name: Fail if tests failed
         if: steps.tests.outcome == 'failure'

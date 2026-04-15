@@ -11,13 +11,10 @@
         ;; Token counting (OpenAI compatible)
         com.knuddels/jtokkit      {:mvn/version "1.1.0"}
         ;; Core.async - parallel LLM calls (llm batching)
-        org.clojure/core.async    {:mvn/version "1.9.865"}
-        ;; lazytest - testing framework
-        io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}
+        org.clojure/core.async    {:mvn/version "1.9.865"}}
 
  :aliases
- {:dev {:extra-paths ["test"]
-        :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}}
+ {:dev {:extra-paths ["test"]}
 
   :test {:extra-paths ["test"]
          :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}
@@ -26,9 +23,6 @@
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.13"}
                  slipset/deps-deploy {:mvn/version "0.2.2"}}
           :ns-default build}
-
-  :allure {:extra-paths ["test"]
-           :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}}
 
   :antq {:deps {com.github.liquidz/antq {:mvn/version "RELEASE"}}
          :main-opts ["-m" "antq.core"]}

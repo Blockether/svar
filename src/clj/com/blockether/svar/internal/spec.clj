@@ -829,7 +829,10 @@
         unused (filter (fn [[_ _ count]] (= count 0)) all-refs)]
     ;; Warn about unused refs
     (doseq [[name _ _] unused]
-      (trove/log! {:level :warn :msg (str "Unused ref in spec: " name)}))
+      (trove/log! {:level :warn
+                   :id ::unused-spec-ref
+                   :data {:ref-name name}
+                   :msg "detected unused ref in spec definition"}))
     {:hoisted (mapv (fn [[name spec _]] [name spec]) hoisted)
      :inlined (mapv (fn [[name spec _]] [name spec]) inlined)}))
 
@@ -1215,7 +1218,9 @@
              :key-ns-map key-ns-map :warnings warnings}))]
     (when (seq warnings)
       (trove/log! {:level :debug :id ::sap-warnings
-                   :msg (str "⚠ SAP  " (count warnings) " warning(s): " (str/join ", " warnings))}))
+                   :data {:warnings-count (count warnings)
+                          :warnings warnings}
+                   :msg "spec-aware parse completed with warnings"}))
     (trove/log! {:level :debug :data {:duration-ms duration-ms
                                       :warnings-count (count warnings)
                                       :key-remaps (count key-mapping)
