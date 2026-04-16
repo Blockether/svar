@@ -333,14 +333,14 @@
       (expect (= {::sut/name :org.division/name ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Valid"}
                 (sut/field ::sut/name :org.division/name ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Valid")))))
 
-  (describe "invalid descriptions"
-    (it "throws on description with brackets"
-      (expect (throws? clojure.lang.ExceptionInfo
-                #(sut/field ::sut/name :x ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Name [required]"))))
+  (describe "descriptions with special characters"
+    (it "allows description with brackets"
+      (expect (= "Name [required]"
+                (::sut/description (sut/field ::sut/name :x ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Name [required]")))))
 
-    (it "throws on description with equals sign"
-      (expect (throws? clojure.lang.ExceptionInfo
-                #(sut/field ::sut/name :x ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Type=value")))))
+    (it "allows description with equals sign"
+      (expect (= "Type=value"
+                (::sut/description (sut/field ::sut/name :x ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Type=value"))))))
 
   (describe "missing required options"
     (it "throws when name is missing"

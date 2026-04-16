@@ -170,10 +170,6 @@
   "Valid field cardinalities using Datomic-style namespaced keywords."
   #{:spec.cardinality/one :spec.cardinality/many})
 
-(def ^:private RESERVED_CHARS
-  "Characters reserved for spec text format syntax."
-  #{\[ \] \; \= \|})
-
 (def ^:private VALUES_RESERVED_CHARS
   "Characters reserved for values in spec text format syntax.
    Includes comma (separator) and colon (value:description delimiter)."
@@ -231,18 +227,6 @@
           {:type :svar.spec/invalid-target :option ::target :value the-target}))))
   nil)
 
-(defn- validate-description
-  "Validates that a description doesn't contain reserved syntax characters.
-   Throws ex-info if invalid characters are found."
-  [description]
-  (let [invalid-chars (filter RESERVED_CHARS description)]
-    (when (seq invalid-chars)
-      (anomaly/incorrect! "Description contains reserved characters"
-        {:type :svar.spec/reserved-chars-in-description
-         :description description
-         :invalid-chars (set invalid-chars)
-         :reserved-chars RESERVED_CHARS}))))
-
 (defn- validate-enum-value
   "Validates that an enum value doesn't contain reserved syntax characters.
    Throws ex-info if invalid characters are found."
@@ -278,8 +262,7 @@
   (doseq [[value desc] v]
     (when (nil? desc)
       (anomaly/incorrect! "Every enum value must have a description"
-        {:type :svar.spec/missing-enum-description :value value :description desc}))
-    (validate-description desc))
+        {:type :svar.spec/missing-enum-description :value value :description desc})))
   v)
 
 (defn field
@@ -321,7 +304,6 @@
       the-target ::target the-humanize? ::humanize?
       :or {the-required true the-humanize? false}}]
   (validate-field-options the-name the-type the-cardinality the-description the-target)
-  (validate-description the-description)
   (cond-> {::name the-name
            ::type the-type
            ::cardinality the-cardinality
