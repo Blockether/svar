@@ -720,9 +720,7 @@
     (router/with-provider-fallback router (:prefs resolved)
       (fn [provider model-map]
         (let [ctx (or (:context model-map) 8192)
-              auto-params (cond-> {:max_tokens (long (* 0.25 ctx))}
-                            (seq (:reasoning-params model-map))
-                            (merge (:reasoning-params model-map)))]
+              auto-params {:max_tokens (long (* 0.25 ctx))}]
           (chat-completion messages (:name model-map)
             (:api-key provider)
             (:base-url provider)
@@ -752,17 +750,18 @@
        :provider - keyword, override specific provider
        :model - string, override specific model
        :on-transient-error - :hybrid (default), :auto-route-cross-providers,
-                             :fallback-model-in-the-same-provider, :fail"
+                             :fallback-model-in-the-same-provider, :fail
+     :extra-body - Map merged into the API request body. Use this to pass
+       provider-specific params (e.g. {:reasoning_effort \"low\"} for OpenAI
+       o-series, {:temperature 0.3}, {:top_p 0.9}). Caller controls reasoning
+       effort entirely via this key — no auto-injection from router metadata."
   [router opts]
   (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
     (router/with-provider-fallback
       router (:prefs resolved)
       (fn [provider model-map]
         (let [ctx (or (:context model-map) 8192)
-              auto-params (cond-> {:max_tokens (long (* 0.25 ctx))}
-                            (seq (:reasoning-params model-map))
-                            (merge (:reasoning-params model-map)))
-              ;; Caller's :extra-body overrides auto-params (e.g. lower max_tokens for vision).
+              auto-params {:max_tokens (long (* 0.25 ctx))}
               merged-body (merge auto-params (:extra-body opts))]
           (ask!* router
             (assoc opts

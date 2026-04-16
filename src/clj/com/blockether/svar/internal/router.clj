@@ -64,10 +64,10 @@
    "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision}}
 
    ;; ── OpenAI Reasoning ────────────────────────────────────────────────────
-   "o3"                        {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
-   "o3-pro"                    {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning-params {:reasoning_effort "high"}}
-   "o3-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
-   "o4-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
+   "o3"                        {:intelligence :frontier :speed :slow   :capabilities #{:chat}}
+   "o3-pro"                    {:intelligence :frontier :speed :slow   :capabilities #{:chat}}
+   "o3-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
+   "o4-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
 
    ;; ── Anthropic Claude 4.x ────────────────────────────────────────────────
    "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision}}
@@ -83,8 +83,8 @@
    "gemini-2.0-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision}}
 
    ;; ── Zhipu / ZAI ─────────────────────────────────────────────────────────
-   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
-   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}
+   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
+   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}}
    "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
 
@@ -92,7 +92,7 @@
    "deepseek-v3"               {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "deepseek-v3.2"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "deepseek-chat"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "deepseek-reasoner"         {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning-params {:reasoning_effort "medium"}}})
+   "deepseek-reasoner"         {:intelligence :frontier :speed :slow   :capabilities #{:chat}}})
 
 ;; =============================================================================
 ;; Provider-scoped model availability, pricing, and context limits
@@ -237,12 +237,10 @@
       (re-find #"mini|haiku|flash|lite|small|nano" m)
       {:intelligence :medium :speed :fast
        :capabilities (cond-> #{:chat}
-                       (re-find #"vision|claude|gemini|gpt-4o|glm.*v|pixtral" m) (conj :vision))
-       :reasoning-params (when (re-find #"^o[1-9]|^o3|^o4" m) {:reasoning_effort "medium"})}
+                       (re-find #"vision|claude|gemini|gpt-4o|glm.*v|pixtral" m) (conj :vision))}
 
       (re-find #"^o[1-9]|^o3-|^o4-|reasoner|thinking" m)
-      {:intelligence :frontier :speed :slow :capabilities #{:chat}
-       :reasoning-params {:reasoning_effort "medium"}}
+      {:intelligence :frontier :speed :slow :capabilities #{:chat}}
 
       (re-find #"opus|frontier" m)
       {:intelligence :frontier :speed :slow
@@ -635,6 +633,7 @@
 (defn with-provider-fallback [router prefs f]
   (budget-check! router)
   (let [tried (atom #{})
+        fallback-trace (atom [])
         max-wait-ms (:max-wait-ms router)]
     (loop [attempts 0]
       (if-let [[provider model-map] (select-and-claim! router prefs)]
@@ -649,6 +648,11 @@
                                               :data {:provider-id pid
                                                      :error (ex-message e)}
                                               :msg "retrying with fallback provider"})
+                               (swap! fallback-trace conj
+                                 {:provider-id pid
+                                  :model (:name model-map)
+                                  :error (ex-message e)
+                                  :status (:status (ex-data e))})
                                (cb-record-failure! router pid
                                  (= 429 (:status (ex-data e))))
                                (when-let [on-chunk (:on-chunk prefs)]
@@ -663,15 +667,17 @@
               (let [token-count (or (get-in result [:api-usage :total_tokens])
                                   (get-in result [:tokens :total])
                                   0)
-                    latency-ms (- (router-now-ms router) start-ms)]
+                    latency-ms (- (router-now-ms router) start-ms)
+                    trace @fallback-trace]
                 (record-tokens! router pid token-count)
                 (cb-record-success! router pid)
                 (record-cumulative! router pid token-count latency-ms)
                 (budget-record! router pid (:name model-map) (or (:api-usage result) {:prompt_tokens 0 :completion_tokens 0}))
-                (assoc result
-                  :routed/provider-id pid
-                  :routed/model (:name model-map)
-                  :routed/base-url (:base-url provider))))))
+                (cond-> (assoc result
+                          :routed/provider-id pid
+                          :routed/model (:name model-map)
+                          :routed/base-url (:base-url provider))
+                  (seq trace) (assoc :routed/fallback-trace trace))))))
         (let [earliest (earliest-available router prefs)]
           (if (and earliest (< attempts 3))
             (let [wait-ms (min (- earliest (router-now-ms router)) max-wait-ms)]
@@ -682,7 +688,8 @@
               (recur (inc attempts)))
             (throw (ex-info "All providers exhausted"
                      {:type :svar.llm/all-providers-exhausted
-                      :prefs prefs :tried @tried}))))))))
+                      :prefs prefs :tried @tried
+                      :fallback-trace @fallback-trace}))))))))
 
 ;; =============================================================================
 ;; Router creation
