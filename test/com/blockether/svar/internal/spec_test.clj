@@ -741,11 +741,12 @@
 ;; =============================================================================
 
 (defdescribe bare-array-wrapping-test
-  "Tests for auto-wrapping bare arrays when spec expects object with single array field.
-   LLMs often return `[...]` when asked for a list, even when spec defines `{nodes: [...]}`."
+  "Tests for bare array handling when spec has single array field.
+   Single :many specs pass through bare arrays as-is. Multi-field specs
+   still merge/unwrap as before."
 
   (describe "spec with single cardinality-many field"
-    (it "wraps bare array in the expected field name"
+    (it "passes bare array through as-is (no wrapping)"
       (let [spec-def (sut/spec
                        (sut/field ::sut/name :nodes
                          ::sut/type :spec.type/string
@@ -754,9 +755,9 @@
             ;; LLM returns bare array instead of {nodes: [...]}
             llm-response "[\"a\", \"b\", \"c\"]"
             parsed (sut/str->data-with-spec llm-response spec-def)]
-        (expect (= {:nodes ["a" "b" "c"]} parsed))))
+        (expect (= ["a" "b" "c"] parsed))))
 
-    (it "works with complex objects in array"
+    (it "passes through complex objects in array with defaults applied"
       (let [item-spec (sut/spec :Item
                         (sut/field ::sut/name :id ::sut/type :spec.type/int ::sut/cardinality :spec.cardinality/one ::sut/description "ID")
                         (sut/field ::sut/name :name ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Name"))
@@ -768,7 +769,7 @@
                          ::sut/description "List of items"))
             llm-response "[{\"id\": 1, \"name\": \"first\"}, {\"id\": 2, \"name\": \"second\"}]"
             parsed (sut/str->data-with-spec llm-response spec-def)]
-        (expect (= {:items [{:id 1 :name "first"} {:id 2 :name "second"}]} parsed)))))
+        (expect (= [{:id 1 :name "first"} {:id 2 :name "second"}] parsed)))))
 
   (describe "spec with multiple fields - no wrapping"
     (it "returns bare array as-is when spec has multiple fields"
@@ -1029,10 +1030,10 @@
         (expect (not (contains? (first (:verifications result)) :verification/verdict))))))
 
   (describe "array normalization"
-    (it "wraps bare vector when spec has single :many field"
+    (it "passes bare vector through as-is for single :many field"
       (let [data ["Q1" "Q2" "Q3"]
             result (sut/coerce-data-with-spec data questions-spec)]
-        (expect (= {:questions ["Q1" "Q2" "Q3"]} result))))
+        (expect (= ["Q1" "Q2" "Q3"] result))))
     (it "passes through map unchanged"
       (let [data {:questions ["Q1" "Q2"]}
             result (sut/coerce-data-with-spec data questions-spec)]

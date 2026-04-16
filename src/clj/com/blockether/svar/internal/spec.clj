@@ -1052,13 +1052,11 @@
     result
     (let [fields (::fields spec-def)]
       (cond
-        ;; Case 1: Spec has single :many field, got bare array → wrap it
+        ;; Case 1: Spec has single :many field, got bare array → pass through as-is
+        ;; The caller already has the correct shape — no wrapping needed.
         (and (= 1 (count fields))
           (= :spec.cardinality/many (::cardinality (first fields))))
-        (let [field-name (::name (first fields))]
-          (trove/log! {:level :debug :data {:field field-name}
-                       :msg "Auto-wrapping bare array in spec field"})
-          {field-name result})
+        result
 
         ;; Case 2: Spec expects a map, got single-element array [{...}] → unwrap
         (and (spec-expects-map? spec-def)
@@ -1100,8 +1098,25 @@
    Returns:
    Data with missing/null fields filled with spec-appropriate defaults."
   [data spec-def key-ns]
-  (if-not (map? data)
+  (cond
+    ;; Bare vector + single :many field → apply defaults to each ref element
+    (and (vector? data)
+      (= 1 (count (::fields spec-def)))
+      (= :spec.cardinality/many (::cardinality (first (::fields spec-def)))))
+    (let [field (first (::fields spec-def))]
+      (if (= :spec.type/ref (::type field))
+        (let [ref-registry (build-ref-registry spec-def)
+              ref-spec (get ref-registry (::target field))
+              ref-key-ns (some-> ref-spec ::key-ns)]
+          (if ref-spec
+            (mapv #(apply-spec-field-defaults % ref-spec ref-key-ns) data)
+            data))
+        data))
+
+    (not (map? data))
     data
+
+    :else
     (let [fields (::fields spec-def)
           ref-registry (build-ref-registry spec-def)]
       (reduce
@@ -1234,8 +1249,24 @@
    Used by coerce-data-with-spec where we explicitly do NOT want namespacing,
    even for nested ref specs that have ::key-ns configured."
   [data spec-def]
-  (if-not (map? data)
+  (cond
+    ;; Bare vector + single :many field → apply defaults to each ref element
+    (and (vector? data)
+      (= 1 (count (::fields spec-def)))
+      (= :spec.cardinality/many (::cardinality (first (::fields spec-def)))))
+    (let [field (first (::fields spec-def))]
+      (if (= :spec.type/ref (::type field))
+        (let [ref-registry (build-ref-registry spec-def)
+              ref-spec (get ref-registry (::target field))]
+          (if ref-spec
+            (mapv #(apply-field-defaults-no-ns % ref-spec) data)
+            data))
+        data))
+
+    (not (map? data))
     data
+
+    :else
     (let [fields (::fields spec-def)
           ref-registry (build-ref-registry spec-def)]
       (reduce
