@@ -474,35 +474,39 @@
                                 (cond-> (dissoc ed :body)
                                   body-str (assoc :body body-str))
                                 (ex-cause e))))))
-        input-stream (:body response)]
+        input-stream (:body response)
+        content-acc (StringBuilder.)
+        reasoning-acc (StringBuilder.)
+        usage-atom (atom nil)]
     (try
       (with-open [reader (BufferedReader. (InputStreamReader. input-stream "UTF-8"))]
-        (let [content-acc (StringBuilder.)
-              reasoning-acc (StringBuilder.)
-              usage-atom (atom nil)]
-          (loop []
-            (let [line (.readLine reader)]
-              (when (some? line)
-                (when (str/starts-with? line "data: ")
-                  (let [data-str (subs line 6)]
-                    (when-let [chunk (parse-sse-data data-str)]
-                      (let [{:keys [content-delta reasoning-delta api-usage]} (delta-fn chunk)]
-                        (when content-delta (.append content-acc content-delta))
-                        (when reasoning-delta (.append reasoning-acc reasoning-delta))
-                        (when api-usage (reset! usage-atom api-usage))
-                        (when on-delta
-                          (on-delta {:content-delta content-delta
-                                     :reasoning-delta reasoning-delta
-                                     :content-acc (str content-acc)
-                                     :reasoning-acc (str reasoning-acc)
-                                     :api-usage api-usage}))))))
-                (recur))))
-          {:content (let [s (str content-acc)] (when-not (str/blank? s) s))
-           :reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
-           :api-usage @usage-atom}))
+        (loop []
+          (let [line (.readLine reader)]
+            (when (some? line)
+              (when (str/starts-with? line "data: ")
+                (let [data-str (subs line 6)]
+                  (when-let [chunk (parse-sse-data data-str)]
+                    (let [{:keys [content-delta reasoning-delta api-usage]} (delta-fn chunk)]
+                      (when content-delta (.append content-acc content-delta))
+                      (when reasoning-delta (.append reasoning-acc reasoning-delta))
+                      (when api-usage (reset! usage-atom api-usage))
+                      (when on-delta
+                        (on-delta {:content-delta content-delta
+                                   :reasoning-delta reasoning-delta
+                                   :content-acc (str content-acc)
+                                   :reasoning-acc (str reasoning-acc)
+                                   :api-usage api-usage}))))))
+              (recur))))
+        {:content (let [s (str content-acc)] (when-not (str/blank? s) s))
+         :reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
+         :api-usage @usage-atom})
       (catch Exception e
-        (throw (ex-info "Stream connection error"
-                 {:type :svar.core/http-error :stream? true :url url}
+        (throw (ex-info (str "Stream connection error: " (ex-message e))
+                 {:type :svar.core/http-error :stream? true :url url
+                  :cause-class (.getName (class e))
+                  :content-acc-len (.length content-acc)
+                  :reasoning-acc-len (.length reasoning-acc)
+                  :partial-content (when (pos? (.length content-acc)) (str content-acc))}
                  e))))))
 
 (defn- chat-completion-streaming
@@ -534,7 +538,9 @@
           (anomaly/fault! error-message
             (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
                                                        :llm-request {:model model :base-url base-url}})
-              api-key-error (assoc :api-key-error api-key-error))))))))
+              api-key-error (assoc :api-key-error api-key-error)
+              true          (assoc :cause-class (some-> (ex-cause e) class .getName)
+                              :original-message (some-> (ex-cause e) ex-message)))))))))
 
 (defn chat-completion
   "Calls the LLM API (OpenAI compatible) with the given messages.
