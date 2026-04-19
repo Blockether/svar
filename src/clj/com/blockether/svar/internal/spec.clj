@@ -240,30 +240,56 @@
          :reserved-chars VALUES_RESERVED_CHARS}))))
 
 (defn- process-values
-  "Processes :values option - MUST be a map with value->description pairs.
-   Vectors are NOT allowed - every enum value must have a description.
-   Validates that values and descriptions don't contain reserved characters."
+  "Processes :values option — accepts two shapes:
+
+   1. Map `{\"value\" \"description\"}` — every enum value gets its own
+      human-readable description. `spec->prompt` renders a comment block
+      with `//   - \"value\": description` on each line. Use this when
+      the value names aren't self-explanatory (domain-specific codes,
+      non-obvious abbreviations, etc).
+
+   2. Vector `[\"value1\" \"value2\" …]` — values-only shorthand for enums
+      whose names already carry their meaning (e.g. `high`/`medium`/`low`
+      confidence, `cost`/`speed`/`intelligence` model classes,
+      `mustache-text`/`mustache-markdown` answer types). `spec->prompt`
+      skips the per-value comment block entirely and only emits the
+      inline `\"a\" or \"b\" or \"c\"` type union. Saves tokens in the
+      system prompt without touching the validator.
+
+   Both shapes enforce the same reserved-character rules on each value."
   [v]
-  (when (vector? v)
-    (anomaly/incorrect! "::values must be a map with descriptions, not a vector. Every enum value requires a description."
-      {:type :svar.spec/values-not-map
-       :values v
-       :expected-format {"value1" "Description of value1"
-                         "value2" "Description of value2"}}))
-  (when-not (map? v)
-    (anomaly/incorrect! "::values must be a map with value->description pairs"
+  (cond
+    (vector? v)
+    (do
+      (when (empty? v)
+        (anomaly/incorrect! "::values vector must be non-empty"
+          {:type :svar.spec/empty-values :values v}))
+      (doseq [value v]
+        (when-not (string? value)
+          (anomaly/incorrect! "Every enum value in a ::values vector must be a string"
+            {:type :svar.spec/invalid-enum-value :value value :value-type (type value)}))
+        (validate-enum-value value))
+      v)
+
+    (map? v)
+    (do
+      (doseq [k (keys v)]
+        (validate-enum-value k))
+      (doseq [[value desc] v]
+        (when (nil? desc)
+          (anomaly/incorrect! "Every enum value must have a description (or pass values as a vector to skip descriptions)"
+            {:type :svar.spec/missing-enum-description :value value :description desc})))
+      v)
+
+    :else
+    (anomaly/incorrect! "::values must be a map {value desc} or a vector [value ...]"
       {:type :svar.spec/invalid-values
        :values v
-       :value-type (type v)}))
-  ;; Validate all keys (enum values)
-  (doseq [k (keys v)]
-    (validate-enum-value k))
-  ;; Validate all descriptions - every value MUST have a description
-  (doseq [[value desc] v]
-    (when (nil? desc)
-      (anomaly/incorrect! "Every enum value must have a description"
-        {:type :svar.spec/missing-enum-description :value value :description desc})))
-  v)
+       :value-type (type v)
+       :expected-formats
+       {:with-descriptions {"value1" "Description of value1"
+                            "value2" "Description of value2"}
+        :values-only       ["value1" "value2"]}})))
 
 (defn field
   "Defines a spec field with namespaced keyword options.
@@ -287,9 +313,16 @@
      - :spec.cardinality/many - Vector of values
    `::description` - String, required. Human-readable description (no reserved chars).
    `::required` - Boolean, optional. false if field can be nil (default: true).
-   `::values` - Map, optional. Enum constraint with value->description pairs.
-     Every enum value MUST have a description explaining its meaning.
-     Example: {\"admin\" \"Full system access\" \"user\" \"Standard access\"}
+    `::values` - Map OR vector, optional. Enum constraint.
+      - Map form `{value desc}` — every enum value has a description.
+        `spec->prompt` emits `//   - \"value\": description` per entry.
+        Use when value names aren't self-explanatory.
+        Example: {\"admin\" \"Full system access\" \"user\" \"Standard access\"}
+      - Vector form `[value ...]` — values-only shorthand.
+        `spec->prompt` skips the per-value comment block and only emits
+        the inline `\"a\" or \"b\"` type union. Use for obvious enums
+        like `[\"high\" \"medium\" \"low\"]` to save tokens in the system
+        prompt; the validator treats both forms identically.
    `::target` - Keyword or vector of keywords, optional. Required when ::type is :spec.type/ref.
        Single keyword for simple ref, vector for union types (e.g., [:Heading :Paragraph :Image]).
     `::humanize?` - Boolean, optional. When true, marks this field for humanization
@@ -465,6 +498,23 @@
    :string "string"
    :double "float"})  ; double maps to float in BAML
 
+(defn- enum-values
+  "Extract the plain seq of enum values regardless of whether `::values` was
+   supplied as a `{value desc}` map or a `[value ...]` vector.
+
+   Returns nil when no enum constraint is present, so callers can keep
+   using a single truthy check to branch."
+  [values]
+  (cond
+    (map? values)        (keys values)
+    (sequential? values) values
+    :else                nil))
+
+(defn- enum-values-set
+  "Set view of enum values — used by the validator for membership checks."
+  [values]
+  (some-> (enum-values values) set))
+
 (defn- field->baml-type
   "Converts a field definition to BAML type string.
    
@@ -495,9 +545,11 @@
 
         ;; Base type conversion
         base-type (cond
-                    ;; Enum - use union of literal values
+                    ;; Enum - use union of literal values. Works for both
+                    ;; `{val desc}` maps and `[val ...]` vectors thanks to
+                    ;; `enum-values`.
                     values
-                    (->> (keys values)
+                    (->> (enum-values values)
                       sort
                       (map #(str "\\\"" % "\\\""))
                       (str/join " or "))
@@ -611,16 +663,27 @@
 
 (defn- render-enum-values-comment
   "Renders enum values with their descriptions as a comment block.
-   
+
+   For `{value desc}` maps, emits one `//   - \"value\": description` line
+   per entry (preserves the original per-value doc behaviour).
+
+   For `[value ...]` vectors, returns an empty string — the inline
+   `\"a\" or \"b\"` type union already carries everything the LLM needs
+   and the per-value comments would just burn tokens.
+
    Params:
-   `values` - Map. Enum values with descriptions {\"value\" \"description\"}.
+   `values` - Map or vector. Enum values.
    `indent` - String. Indentation prefix.
-   
+
    Returns:
-   String. Comment block with enum values and descriptions, or empty string if no values."
+   String. Comment block with enum values and descriptions, or empty string
+   when values is empty, a vector, or nil."
   [values indent]
-  (if (empty? values)
-    ""
+  (cond
+    (or (nil? values) (empty? values)) ""
+    ;; Values-only shorthand — no per-value comment block
+    (sequential? values) ""
+    :else
     (let [sorted-values (sort-by first values)
           value-lines (map (fn [[v desc]]
                              (str indent "//   - \"" v "\": " desc))
@@ -1532,16 +1595,22 @@
 
 (defn- check-enum
   "Checks if a value is one of the allowed enum values.
-   For cardinality many, checks all items in the vector."
+
+   `allowed-values` may be either a `{value desc}` map (classic shape) or
+   a `[value ...]` vector (values-only shorthand). Internally we reduce
+   both to a set so membership is O(1) either way.
+
+   For cardinality many, checks every item in the vector."
   [value allowed-values cardinality]
-  (cond
-    (nil? value) true
-    (nil? allowed-values) true
-    (= cardinality :spec.cardinality/many)
-    (and (vector? value)
-      (every? #(contains? allowed-values %) value))
-    :else
-    (contains? allowed-values value)))
+  (let [allowed-set (enum-values-set allowed-values)]
+    (cond
+      (nil? value) true
+      (nil? allowed-set) true
+      (= cardinality :spec.cardinality/many)
+      (and (vector? value)
+        (every? allowed-set value))
+      :else
+      (boolean (allowed-set value)))))
 
 (defn- nested-in-array?
   "Checks if a path is nested inside an array container.
@@ -1666,7 +1735,7 @@
                                     :field field-name
                                     :path path-str
                                     :value value
-                                    :allowed-values (keys allowed-values)}))))
+                                    :allowed-values (vec (enum-values allowed-values))}))))
           ;; Recurse into TYPE_REF fields
           (let [ref-registry (build-ref-registry the-spec)
                 ref-errors (validate-ref-items data fields ref-registry)]

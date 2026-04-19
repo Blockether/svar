@@ -7,13 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.2] - 2026-04-19
+
+### Added
+- **`::values` vector shorthand** — enum fields can now declare values as a
+  plain vector `[\"high\" \"medium\" \"low\"]` instead of a `{value desc}`
+  map. `spec->prompt` emits the inline `\"a\" or \"b\"` type union but
+  skips the per-value comment block — meaningful savings on system
+  prompts that declare self-explanatory enums (`confidence`, `model
+  class`, `answer-type`, etc.). The validator treats both shapes
+  identically. Back-compatible: existing `{value desc}` maps keep
+  emitting per-value docs unchanged.
+
 ## [v0.3.1] - 2026-04-19
 
 ### Changed
 - test: expand live :zai-coding reasoning coverage (quick/balanced/deep + preserved)
 - feat: abstract reasoning-depth API + per-style translation
 - release: update version files for v0.3.0, bump to next dev version
-
 
 ## [v0.3.0] - 2026-04-17
 

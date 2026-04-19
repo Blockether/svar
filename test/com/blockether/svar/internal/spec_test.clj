@@ -225,15 +225,38 @@
         (expect (not (:valid? (sut/validate-data s {:age "thirty"})))))))
 
   (describe "enum validation"
-    (it "validates correct enum value"
+    (it "validates correct enum value (map form)"
       (let [s (sut/spec (sut/field ::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Role"
                           ::sut/values {"admin" "Full access" "user" "Standard access"}))]
         (expect (= {:valid? true} (sut/validate-data s {:role "admin"})))))
 
-    (it "returns invalid for wrong enum value"
+    (it "returns invalid for wrong enum value (map form)"
       (let [s (sut/spec (sut/field ::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Role"
                           ::sut/values {"admin" "Full access" "user" "Standard access"}))]
-        (expect (not (:valid? (sut/validate-data s {:role "guest"})))))))
+        (expect (not (:valid? (sut/validate-data s {:role "guest"}))))))
+
+    (it "validates correct enum value (vector form)"
+      (let [s (sut/spec (sut/field ::sut/name :confidence ::sut/type :spec.type/string
+                          ::sut/cardinality :spec.cardinality/one ::sut/description "Confidence"
+                          ::sut/values ["high" "medium" "low"]))]
+        (expect (= {:valid? true} (sut/validate-data s {:confidence "high"})))
+        (expect (= {:valid? true} (sut/validate-data s {:confidence "medium"})))))
+
+    (it "returns invalid for wrong enum value (vector form)"
+      (let [s (sut/spec (sut/field ::sut/name :confidence ::sut/type :spec.type/string
+                          ::sut/cardinality :spec.cardinality/one ::sut/description "Confidence"
+                          ::sut/values ["high" "medium" "low"]))
+            result (sut/validate-data s {:confidence "maybe"})]
+        (expect (not (:valid? result)))
+        (expect (= ["high" "medium" "low"]
+                  (:allowed-values (first (:errors result)))))))
+
+    (it "vector-form enum validates cardinality many"
+      (let [s (sut/spec (sut/field ::sut/name :tags ::sut/type :spec.type/string
+                          ::sut/cardinality :spec.cardinality/many ::sut/description "Tags"
+                          ::sut/values ["red" "green" "blue"]))]
+        (expect (:valid? (sut/validate-data s {:tags ["red" "green"]})))
+        (expect (not (:valid? (sut/validate-data s {:tags ["red" "purple"]})))))))
 
   (describe "cardinality many"
     (it "validates vector of correct type"
@@ -280,7 +303,49 @@
     (let [s (sut/spec (sut/field ::sut/name :bbox ::sut/type :spec.type/int-v-4 ::sut/cardinality :spec.cardinality/one ::sut/description "Bounding box"))
           result (sut/spec->prompt s)]
       (expect (str/includes? result "bbox: int[4],"))
-      (expect (str/includes? result "(exactly 4 elements)")))))
+      (expect (str/includes? result "(exactly 4 elements)"))))
+
+  (describe "values-only enum shorthand (vector form)"
+    (it "emits an inline type union with every value"
+      ;; BAML output escapes the JSON quotes so each value appears as
+      ;; \"value\" in the rendered prompt string.
+      (let [s (sut/spec (sut/field ::sut/name :confidence ::sut/type :spec.type/string
+                          ::sut/cardinality :spec.cardinality/one ::sut/description "Confidence"
+                          ::sut/values ["high" "medium" "low"]))
+            result (sut/spec->prompt s)]
+        (expect (str/includes? result "\\\"high\\\""))
+        (expect (str/includes? result "\\\"medium\\\""))
+        (expect (str/includes? result "\\\"low\\\""))
+        (expect (str/includes? result "or"))))
+
+    (it "does NOT emit per-value comment lines"
+      ;; This is the whole point of the shorthand — no wasted tokens on
+      ;; self-explanatory enums.
+      (let [s (sut/spec (sut/field ::sut/name :confidence ::sut/type :spec.type/string
+                          ::sut/cardinality :spec.cardinality/one ::sut/description "Confidence"
+                          ::sut/values ["high" "medium" "low"]))
+            result (sut/spec->prompt s)]
+        (expect (not (str/includes? result "//   - \"high\":")))
+        (expect (not (str/includes? result "//   - \"medium\":")))
+        (expect (not (str/includes? result "//   - \"low\":")))))
+
+    (it "map form still emits per-value descriptions (back-compat)"
+      (let [s (sut/spec (sut/field ::sut/name :role ::sut/type :spec.type/string
+                          ::sut/cardinality :spec.cardinality/one ::sut/description "Role"
+                          ::sut/values {"admin" "Full access" "user" "Standard access"}))
+            result (sut/spec->prompt s)]
+        (expect (str/includes? result "//   - \"admin\": Full access"))
+        (expect (str/includes? result "//   - \"user\": Standard access"))))
+
+    (it "vector form produces a shorter prompt than map form for the same values"
+      (let [s-map    (sut/spec (sut/field ::sut/name :level ::sut/type :spec.type/string
+                                 ::sut/cardinality :spec.cardinality/one ::sut/description "Level"
+                                 ::sut/values {"a" "Value a" "b" "Value b" "c" "Value c"}))
+            s-vec    (sut/spec (sut/field ::sut/name :level ::sut/type :spec.type/string
+                                 ::sut/cardinality :spec.cardinality/one ::sut/description "Level"
+                                 ::sut/values ["a" "b" "c"]))]
+        (expect (< (count (sut/spec->prompt s-vec))
+                  (count (sut/spec->prompt s-map))))))))
 
 (defdescribe field-test
   "Tests for field definition function"
@@ -299,16 +364,37 @@
                 {::sut/name :nick ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Nickname" ::sut/union #{::sut/nil}}))))
 
   (describe "enum values"
-    (it "creates field with enum values map"
+    (it "creates field with enum values map (value -> description)"
       (expect (= (sut/field ::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Role"
                    ::sut/values {"admin" "Full access" "user" "Standard access"})
                 {::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one ::sut/description "Role"
                  ::sut/values {"admin" "Full access" "user" "Standard access"}})))
 
-    (it "throws when values is a vector instead of map"
+    (it "creates field with enum values VECTOR (values-only shorthand)"
+      ;; New in 0.3.2: a plain vector is the values-only shorthand.
+      ;; `spec->prompt` skips the per-value comment block; validator
+      ;; treats it exactly like the map form.
+      (expect (= (sut/field ::sut/name :confidence ::sut/type :spec.type/string
+                   ::sut/cardinality :spec.cardinality/one ::sut/description "Confidence"
+                   ::sut/values ["high" "medium" "low"])
+                {::sut/name :confidence ::sut/type :spec.type/string
+                 ::sut/cardinality :spec.cardinality/one ::sut/description "Confidence"
+                 ::sut/values ["high" "medium" "low"]})))
+
+    (it "throws when values is an empty vector"
       (expect (throws? clojure.lang.ExceptionInfo
                 #(sut/field ::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one
-                   ::sut/description "Role" ::sut/values ["admin" "user"]))))
+                   ::sut/description "Role" ::sut/values []))))
+
+    (it "throws when values vector contains non-string entries"
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(sut/field ::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one
+                   ::sut/description "Role" ::sut/values ["admin" 42]))))
+
+    (it "throws when values is neither a map nor a vector"
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(sut/field ::sut/name :role ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/one
+                   ::sut/description "Role" ::sut/values #{"admin" "user"}))))
 
     (it "throws when values map has nil description"
       (expect (throws? clojure.lang.ExceptionInfo
