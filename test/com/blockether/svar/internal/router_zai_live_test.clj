@@ -122,19 +122,71 @@
           (expect (= :zai-coding (:routed/provider-id result)))
           (expect (some? (get-in result [:result :answer]))))))))
 
+(defdescribe zai-coding-reasoning-levels-test
+  "Each `:reasoning` level reaches the Coding Plan endpoint and returns a
+   usable response. The abstract level translation to z.ai's binary thinking
+   shape is covered by the unit tests in `router_reasoning_test.clj`; here
+   we verify the round-trip works against real GLM-4.7."
+
+  (describe ":reasoning :quick on :zai-coding"
+    (it "translates to `thinking:{type:\"disabled\"}` and succeeds"
+      (when (zai-coding-enabled?)
+        (let [r (zai-coding-router ["glm-4.7"])
+              result (svar/ask! r
+                       {:spec answer-spec
+                        :messages [(svar/user "Reply with the word 'fast'.")]
+                        :reasoning :quick})]
+          (expect (= "glm-4.7" (:routed/model result)))
+          (expect (some? (get-in result [:result :answer])))))))
+
+  (describe ":reasoning :balanced on :zai-coding"
+    (it "translates to `thinking:{type:\"enabled\"}` and succeeds"
+      (when (zai-coding-enabled?)
+        (let [r (zai-coding-router ["glm-4.7"])
+              result (svar/ask! r
+                       {:spec answer-spec
+                        :messages [(svar/user "Reply with the word 'thought'.")]
+                        :reasoning :balanced})]
+          (expect (= "glm-4.7" (:routed/model result)))
+          (expect (some? (get-in result [:result :answer])))))))
+
+  (describe ":reasoning :deep on :zai-coding"
+    (it "translates to `thinking:{type:\"enabled\"}` — same wire shape as :balanced"
+      ;; Z.ai's binary thinking switch means :balanced and :deep collapse to
+      ;; the same wire shape. Both should succeed and produce an answer.
+      (when (zai-coding-enabled?)
+        (let [r (zai-coding-router ["glm-4.7"])
+              result (svar/ask! r
+                       {:spec answer-spec
+                        :messages [(svar/user "Reply with the word 'deep'.")]
+                        :reasoning :deep})]
+          (expect (= "glm-4.7" (:routed/model result)))
+          (expect (some? (get-in result [:result :answer]))))))))
+
 (defdescribe zai-coding-preserved-thinking-test
   (describe ":preserved-thinking? explicit on :zai-coding"
     ;; Coding Plan has preserved thinking ON by default server-side, so
     ;; explicitly setting `:preserved-thinking? true` should be a harmless
     ;; no-op from the server's perspective (the wire carries clear_thinking
     ;; :false but the server was already going to preserve anyway).
-    (it "succeeds — server accepts explicit clear_thinking:false"
+    (it "`:deep` + preserved succeeds — clear_thinking:false accepted"
       (when (zai-coding-enabled?)
         (let [r (zai-coding-router ["glm-4.7"])
               result (svar/ask! r
                        {:spec answer-spec
                         :messages [(svar/user "Reply with the word 'coded'.")]
                         :reasoning :deep
+                        :preserved-thinking? true})]
+          (expect (= "glm-4.7" (:routed/model result)))
+          (expect (some? (get-in result [:result :answer]))))))
+
+    (it "`:quick` + preserved succeeds — thinking disabled but flag still accepted"
+      (when (zai-coding-enabled?)
+        (let [r (zai-coding-router ["glm-4.7"])
+              result (svar/ask! r
+                       {:spec answer-spec
+                        :messages [(svar/user "Reply with the word 'quick'.")]
+                        :reasoning :quick
                         :preserved-thinking? true})]
           (expect (= "glm-4.7" (:routed/model result)))
           (expect (some? (get-in result [:result :answer]))))))))
