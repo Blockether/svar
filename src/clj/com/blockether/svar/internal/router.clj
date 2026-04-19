@@ -50,49 +50,153 @@
 ;; =============================================================================
 
 (def KNOWN_MODEL_METADATA
+  "Per-model static metadata. `:reasoning?` flags a model whose provider
+   accepts a reasoning-depth parameter. `:reasoning-style` (optional) pins the
+   wire shape to emit — see `REASONING_LEVELS` keys. When omitted, the style
+   is inferred from the provider's `:api-style` (`:anthropic` → anthropic
+   thinking, everything else → openai-effort)."
   {;; ── OpenAI GPT-4o ────────────────────────────────────────────────────────
    "gpt-4o"                    {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
 
    ;; ── OpenAI GPT-4.1 ──────────────────────────────────────────────────────
    "gpt-4.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
 
-   ;; ── OpenAI GPT-5 ────────────────────────────────────────────────────────
-   "gpt-5"                     {:intelligence :frontier :speed :medium :capabilities #{:chat :vision}}
-   "gpt-5-mini"                {:intelligence :high     :speed :fast   :capabilities #{:chat :vision}}
-   "gpt-5.1"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision}}
-   "gpt-5.2"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision}}
-   "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision}}
+   ;; ── OpenAI GPT-5 (reasoning-capable, reasoning_effort) ──────────────────
+   "gpt-5"                     {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5-mini"                {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.1"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.2"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
 
-   ;; ── OpenAI Reasoning ────────────────────────────────────────────────────
-   "o3"                        {:intelligence :frontier :speed :slow   :capabilities #{:chat}}
-   "o3-pro"                    {:intelligence :frontier :speed :slow   :capabilities #{:chat}}
-   "o3-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "o4-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
+   ;; ── OpenAI Reasoning (o-series, reasoning_effort) ───────────────────────
+   "o3"                        {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
+   "o3-pro"                    {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
+   "o3-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
+   "o4-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
 
-   ;; ── Anthropic Claude 4.x ────────────────────────────────────────────────
-   "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision}}
-   "claude-opus-4-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision}}
-   "claude-sonnet-4-6"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
-   "claude-sonnet-4-5"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
-   "claude-sonnet-4-20250514"  {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
-   "claude-haiku-4-5"          {:intelligence :medium   :speed :fast   :capabilities #{:chat :vision}}
+   ;; ── Anthropic Claude 4.x (extended thinking, budget_tokens) ─────────────
+   "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-opus-4-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4-6"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4-5"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4-20250514"  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-haiku-4-5"          {:intelligence :medium   :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
 
-   ;; ── Google Gemini ────────────────────────────────────────────────────────
-   "gemini-2.5-pro"            {:intelligence :frontier :speed :medium :capabilities #{:chat :vision}}
-   "gemini-2.5-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision}}
+   ;; ── Google Gemini 2.5 (reasoning_effort via OpenAI-compat gateway) ──────
+   "gemini-2.5-pro"            {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gemini-2.5-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gemini-2.0-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision}}
 
-   ;; ── Zhipu / ZAI ─────────────────────────────────────────────────────────
-   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}}
-   "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
+   ;; ── Zhipu / ZAI (GLM-4.6+ binary thinking: `thinking: {type: enabled}`) ─
+   ;; Z.ai's chat/completions endpoint is OpenAI-compatible for everything
+   ;; EXCEPT reasoning — it uses a binary `thinking` object at the top level.
+   ;; Streaming delta surfaces reasoning_content (already handled).
+   "glm-4.6"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
+   "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
+   "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
+   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
+   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
 
-   ;; ── DeepSeek ─────────────────────────────────────────────────────────────
+   ;; ── DeepSeek (reasoning_effort on reasoner only) ────────────────────────
    "deepseek-v3"               {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "deepseek-v3.2"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
    "deepseek-chat"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "deepseek-reasoner"         {:intelligence :frontier :speed :slow   :capabilities #{:chat}}})
+   "deepseek-reasoner"         {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}})
+
+;; =============================================================================
+;; Reasoning-depth translation (abstract → provider-specific)
+;; =============================================================================
+
+(def REASONING_LEVELS
+  "Abstract reasoning levels translated per reasoning-style.
+   Vocabulary is intentionally provider-neutral — callers pass :quick|:balanced|:deep
+   and svar picks the right on-the-wire shape for the selected model.
+
+   Sub-key semantics:
+     `:openai-effort`      → flat top-level `:reasoning_effort` string.
+                             Used by GPT-5.x, o-series, Gemini 2.5 via OpenAI gateway,
+                             DeepSeek Reasoner, and most OpenAI-compatible reasoners.
+     `:anthropic-thinking` → nested `:thinking {:type \"enabled\" :budget_tokens N}`.
+                             Budget magnitudes fit within 200k-context Claude 4.x
+                             max_tokens windows; tune if you hit ceilings.
+     `:zai-thinking`       → binary `:thinking {:type \"enabled\"|\"disabled\"}` on
+                             Z.ai / GLM-4.6+. No budget_tokens — thinking is on/off.
+                             `:quick` disables, `:balanced`/`:deep` enable.
+                             See also `:preserved-thinking?` below for the
+                             `clear_thinking: false` flag that keeps reasoning
+                             across assistant turns."
+  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled"}
+   :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"}
+   :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"}})
+
+(defn normalize-reasoning-level
+  "Coerce any accepted spelling to a canonical :quick|:balanced|:deep keyword.
+   Accepts:
+     - :quick / :balanced / :deep (keywords, case-insensitive)
+     - \"quick\" / \"balanced\" / \"deep\" (strings, case-insensitive)
+     - OpenAI-style aliases :low→:quick, :medium→:balanced, :high→:deep
+       (so `:reasoning_effort` migrations don't break).
+   Returns nil for unknown input."
+  [v]
+  (let [raw (cond
+              (keyword? v) (name v)
+              (string? v)  v
+              :else        nil)
+        s (when raw (str/lower-case (str/trim raw)))]
+    (case s
+      ("quick" "low")       :quick
+      ("balanced" "medium") :balanced
+      ("deep" "high")       :deep
+      nil)))
+
+(defn- infer-reasoning-style
+  "Pick a reasoning-style for a model that lacks an explicit `:reasoning-style`.
+   Conservative fallback so unknown reasoning-capable models still produce
+   *something* sensible:
+     - `:api-style :anthropic` → `:anthropic-thinking`
+     - everything else          → `:openai-effort` (most gateways accept it)"
+  [api-style model-map]
+  (or (:reasoning-style model-map)
+    (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
+
+(defn reasoning-extra-body
+  "Translates an abstract reasoning level into provider-specific extra-body.
+   Returns nil when:
+     - `level` is nil / unknown
+     - the selected model is not flagged `:reasoning?`
+     - the reasoning-style has no mapping in REASONING_LEVELS.
+
+   Dispatches on the model's `:reasoning-style` first (explicit pin), falling
+   back to inference from `api-style` when the model doesn't declare one.
+
+   Callers pass the returned map through merge into their extra-body; silent
+   nil keeps non-reasoning models untouched.
+
+   Four-arity form takes an opts map:
+     `:preserved-thinking?` — Z.ai-only. Emits `clear_thinking: false` inside
+        the `:thinking` block, asking the server to retain reasoning_content
+        from previous assistant turns (Preserved Thinking, GLM-5 / GLM-4.7).
+        Callers using this MUST echo the complete, unmodified reasoning_content
+        back to the API in subsequent assistant turns, otherwise cache hit
+        rates and model quality degrade. No-op on non-z.ai reasoning styles
+        and on the Coding Plan endpoint (which has preserved thinking on
+        server-side by default, but setting the flag explicitly is harmless)."
+  ([api-style model-map level]
+   (reasoning-extra-body api-style model-map level nil))
+  ([api-style model-map level {:keys [preserved-thinking?]}]
+   (when-let [norm (normalize-reasoning-level level)]
+     (when (:reasoning? model-map)
+       (let [style  (infer-reasoning-style api-style model-map)
+             mapped (get-in REASONING_LEVELS [norm style])]
+         (when mapped
+           (case style
+             :openai-effort      {:reasoning_effort mapped}
+             :anthropic-thinking {:thinking {:type "enabled" :budget_tokens mapped}}
+             :zai-thinking       {:thinking (cond-> {:type mapped}
+                                              ;; `clear_thinking: false` = keep reasoning_content
+                                              ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
+                                              preserved-thinking? (assoc :clear_thinking false))}
+             nil)))))))
 
 ;; =============================================================================
 ;; Provider-scoped model availability, pricing, and context limits
@@ -150,13 +254,30 @@
     "claude-haiku-4-5"          {:pricing {:input 1.00  :output 5.00}  :context 200000}}
 
    :zai
-   {"glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
+   ;; Direct z.ai API — per-token billing. Pricing from z.ai dashboard
+   ;; (docs.z.ai/guides/pricing). Keep in sync with :zai-coding below.
+   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
+    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}
+    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
+    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
     "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
-    "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}
+    "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
+
+   :zai-coding
+   ;; Z.ai Coding Plan — subscription-billed ($3/$15/$30 per month tiers),
+   ;; but overage is metered per-token at the rates below. We keep the same
+   ;; rates as :zai so budget accounting stays honest when a subscription is
+   ;; exceeded. Preserved thinking (`clear_thinking: false`) is ON by default
+   ;; server-side on this endpoint — `:preserved-thinking?` on ask! is a
+   ;; no-op here (the server already does it). GLM-4.7 is the recommended
+   ;; model on this plan per z.ai docs.
+   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
+    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}}
+    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
+    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}}
 
    :openrouter
    {"gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
@@ -515,10 +636,26 @@
 
 (defn- preference-sort-key
   "Returns a sort key fn for a single preference keyword.
-   Lower values = better (for sort-by ascending)."
+   Lower values = better (for sort-by ascending).
+
+   `:cost` dispatches on what's actually available on the model map:
+     1. `:pricing {:input N :output M}` (USD per 1M tokens, attached to every
+        known model by `normalize-provider`) → sorted by `(+ input output)`.
+        The real-pricing path — this is what production decisions use.
+     2. legacy/test-only `:cost :low|:medium|:high` tag → scaled to match so
+        existing synthetic test fixtures still work (low=0.1, medium=1, high=10).
+     3. neither → `Double/POSITIVE_INFINITY` so unpriced models sort last and
+        the router prefers any priced model over an unknown one."
   [pref]
   (case pref
-    :cost         (fn [m] (get COST_ORDER (:cost m) 0))
+    :cost         (fn [m]
+                    (let [p (:pricing m)
+                          tag (:cost m)]
+                      (cond
+                        p   (+ (double (or (:input p) 0.0))
+                              (double (or (:output p) 0.0)))
+                        tag (case tag :low 0.1 :medium 1.0 :high 10.0 0.0)
+                        :else Double/POSITIVE_INFINITY)))
     :intelligence (fn [m] (- (get INTELLIGENCE_ORDER (:intelligence m) 0)))
     :speed        (fn [m] (- (get SPEED_ORDER (:speed m) 0)))
     nil))
@@ -531,36 +668,74 @@
    Precedence:
      1. :force-model  — exact model name, honored across all strategies.
      2. :strategy :root with no force — provider's root (first) model.
-     3. :prefer / :capabilities — filtered & sorted candidate selection."
+     3. :prefer / :capabilities / :require-reasoning? — filtered & sorted selection.
+
+   Filters applied (in order):
+     - `:capabilities` — model's `:capabilities` set must be a superset.
+     - `:require-reasoning?` — only `:reasoning? true` models survive. Set
+        automatically by `resolve-routing` when caller supplies a `:reasoning`
+        level. Ensures `{:routing {:optimize :cost} :reasoning :deep}` picks
+        the cheapest *reasoning-capable* model, not silently drops the depth.
+     - `:exclude-model` — skip a named model (used for post-failure retry)."
   [provider prefs]
-  (cond
-    ;; Explicit force-model wins regardless of strategy.
-    (:force-model prefs)
-    (first (filter #(= (:name %) (:force-model prefs)) (:models provider)))
+  (let [require-reasoning? (:require-reasoning? prefs)
+        reasoning-ok? (fn [m] (if require-reasoning? (:reasoning? m) true))]
+    (cond
+      ;; Explicit force-model wins regardless of strategy. But `:require-reasoning?`
+      ;; still filters — forcing a non-reasoning model while asking for reasoning
+      ;; is a contradiction, so return nil rather than silently dropping the
+      ;; reasoning requirement.
+      (:force-model prefs)
+      (let [m (first (filter #(= (:name %) (:force-model prefs)) (:models provider)))]
+        (when (and m (reasoning-ok? m)) m))
 
-    (= (:strategy prefs) :root)
-    (let [root-name (:root provider)]
-      (first (filter #(= (:name %) root-name) (:models provider))))
+      (= (:strategy prefs) :root)
+      (let [root-name (:root provider)
+            m (first (filter #(= (:name %) root-name) (:models provider)))]
+        (when (and m (reasoning-ok? m)) m))
 
-    :else
-    (let [required-caps (or (:capabilities prefs) #{})
-          exclude (:exclude-model prefs)
-          candidates (->> (:models provider)
-                       (filter #(every? (:capabilities %) required-caps))
-                       (filter #(if exclude (not= (:name %) exclude) true)))]
-      (when (seq candidates)
-        (let [prefer (:prefer prefs)
-              prefs-vec (cond
-                          (vector? prefer) prefer
-                          (keyword? prefer) [prefer]
-                          :else nil)]
-          (if (seq prefs-vec)
-            (let [key-fns (keep preference-sort-key prefs-vec)]
-              (first (sort-by (fn [m] (mapv #(% m) key-fns)) candidates)))
-            (first candidates)))))))
+      :else
+      (let [required-caps (or (:capabilities prefs) #{})
+            exclude (:exclude-model prefs)
+            candidates (->> (:models provider)
+                         (filter #(every? (:capabilities %) required-caps))
+                         (filter reasoning-ok?)
+                         (filter #(if exclude (not= (:name %) exclude) true)))]
+        (when (seq candidates)
+          (let [prefer (:prefer prefs)
+                prefs-vec (cond
+                            (vector? prefer) prefer
+                            (keyword? prefer) [prefer]
+                            :else nil)]
+            (if (seq prefs-vec)
+              (let [key-fns (keep preference-sort-key prefs-vec)]
+                (first (sort-by (fn [m] (mapv #(% m) key-fns)) candidates)))
+              (first candidates))))))))
+
+(defn- candidate-sort-key
+  "Composite sort key for cross-provider candidate selection: `[model-score
+   provider-priority]`. Model-score comes from the same `:prefer` sort keys
+   `resolve-model` used within a provider, so `(:optimize :intelligence)` now
+   picks the frontier-tier model across the whole fleet before falling back
+   to provider priority as a tiebreaker.
+
+   Returns `[[] priority]` when no `:prefer` is set — priority-only ordering,
+   which preserves the historical `:strategy :root` / force-model semantics."
+  [prefs]
+  (let [prefer (:prefer prefs)
+        prefs-vec (cond (vector? prefer) prefer
+                        (keyword? prefer) [prefer]
+                        :else nil)
+        key-fns (keep preference-sort-key prefs-vec)
+        model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))]
+    (fn [[p m]] [(model-score m) (:priority p 0)])))
 
 (defn select-provider
-  "Returns [provider model-map] or nil. Read-only."
+  "Returns [provider model-map] or nil. Read-only.
+
+   Cross-provider ranking: models are scored by `:prefer` first, provider
+   priority second. So `:optimize :intelligence` picks the frontier model
+   across the whole fleet; ties are broken by provider vector order."
   [router prefs]
   (let [{:keys [providers state]} router
         current-state @state
@@ -568,12 +743,14 @@
                      (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
                      (filter (fn [[p _]] (provider-available? router p (get current-state (:id p) {})))))]
     (when (seq candidates)
-      (first (sort-by (fn [[p _]] (:priority p 0)) candidates)))))
+      (first (sort-by (candidate-sort-key prefs) candidates)))))
 
 (defn- select-and-claim!
-  "Atomically selects best provider and claims a request slot."
+  "Atomically selects best provider and claims a request slot.
+   Uses the same cross-provider composite sort as `select-provider`."
   [router prefs]
-  (let [{:keys [providers state]} router]
+  (let [{:keys [providers state]} router
+        sort-key (candidate-sort-key prefs)]
     (loop []
       (let [current @state
             ts (router-now-ms router)
@@ -581,7 +758,7 @@
                          (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
                          (filter (fn [[p _]] (provider-available? router p (get current (:id p) {})))))]
         (when (seq candidates)
-          (let [[provider model-map] (first (sort-by (fn [[p _]] (:priority p 0)) candidates))
+          (let [[provider model-map] (first (sort-by sort-key candidates))
                 pid (:id provider)
                 new-state (update-in current [pid :requests]
                             (fn [r] (conj (router-prune-window router (or r [])) ts)))]
@@ -763,39 +940,48 @@
 (defn resolve-routing
   "Resolves :routing opts to prefs for with-provider-fallback.
    Returns {:prefs prefs-map :error-strategy kw}.
-   Throws on invalid provider/model combinations."
+   Throws on invalid provider/model combinations.
+
+   `:reasoning` in the routing opts (abstract level — :quick/:balanced/:deep
+   or strings/aliases) implies `:require-reasoning? true` in prefs, which
+   filters model selection to `:reasoning? true` models in `resolve-model`.
+   This makes `{:optimize :cost :reasoning :deep}` pick the cheapest
+   *reasoning-capable* model rather than silently dropping `:deep` when the
+   cost-cheapest model happens to be non-reasoning."
   [router routing-opts]
-  (let [{:keys [optimize provider model on-transient-error]} routing-opts
+  (let [{:keys [optimize provider model on-transient-error reasoning]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
-        prefs (cond
-                ;; Exact provider + model override
-                (and provider model)
-                (let [p (first (filter #(= (:id %) provider) (:providers router)))]
-                  (when-not p
-                    (throw (ex-info (str "Unknown provider: " provider)
-                             {:type :svar/routing-resolution-failed
-                              :provider provider
-                              :available (mapv :id (:providers router))})))
-                  (when-not (some #(= (:name %) model) (:models p))
-                    (throw (ex-info (str "Model " model " not found in provider " provider)
-                             {:type :svar/routing-resolution-failed
-                              :provider provider :model model
-                              :available (mapv :name (:models p))})))
-                  {:strategy :root :force-provider provider :force-model model})
-                ;; Provider override + optimize
-                provider
-                {:strategy :root :force-provider provider
-                 :prefer (or optimize :cost)}
-                ;; Model override — find in any provider
-                model
-                {:strategy :root :force-model model}
-                ;; Optimize across all
-                optimize
-                {:prefer optimize}
-                ;; Default — first model of first provider
-                :else
-                {:strategy :root})]
+        base-prefs (cond
+                     ;; Exact provider + model override
+                     (and provider model)
+                     (let [p (first (filter #(= (:id %) provider) (:providers router)))]
+                       (when-not p
+                         (throw (ex-info (str "Unknown provider: " provider)
+                                  {:type :svar/routing-resolution-failed
+                                   :provider provider
+                                   :available (mapv :id (:providers router))})))
+                       (when-not (some #(= (:name %) model) (:models p))
+                         (throw (ex-info (str "Model " model " not found in provider " provider)
+                                  {:type :svar/routing-resolution-failed
+                                   :provider provider :model model
+                                   :available (mapv :name (:models p))})))
+                       {:strategy :root :force-provider provider :force-model model})
+                     ;; Provider override + optimize
+                     provider
+                     {:strategy :root :force-provider provider
+                      :prefer (or optimize :cost)}
+                     ;; Model override — find in any provider
+                     model
+                     {:strategy :root :force-model model}
+                     ;; Optimize across all
+                     optimize
+                     {:prefer optimize}
+                     ;; Default — first model of first provider
+                     :else
+                     {:strategy :root})
+        prefs (cond-> base-prefs
+                reasoning (assoc :require-reasoning? true))]
     {:prefs prefs
      :error-strategy error-strategy}))
 

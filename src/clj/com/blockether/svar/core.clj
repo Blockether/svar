@@ -43,6 +43,7 @@
    [com.blockether.svar.internal.guard :as guard]
    [com.blockether.svar.internal.humanize :as humanize]
    [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]))
 
 ;; =============================================================================
@@ -53,6 +54,26 @@
 (def router-stats "Returns cumulative + windowed stats for the router." llm/router-stats)
 (def reset-budget! "Resets the router's token/cost budget counters to zero." llm/reset-budget!)
 (def reset-provider! "Manually resets a provider's circuit breaker to :closed." llm/reset-provider!)
+
+;; =============================================================================
+;; Reasoning depth (abstract, provider-agnostic)
+;; =============================================================================
+
+(def REASONING_LEVELS
+  "Abstract reasoning depths translated per provider api-style.
+   See `com.blockether.svar.internal.router/REASONING_LEVELS`."
+  router/REASONING_LEVELS)
+
+(def normalize-reasoning-level
+  "Coerce any accepted spelling to canonical :quick|:balanced|:deep.
+   Also accepts :low/:medium/:high aliases for OpenAI-style migrations."
+  router/normalize-reasoning-level)
+
+(def reasoning-extra-body
+  "Translate abstract level → provider-specific extra-body map (or nil).
+   Returns nil for non-reasoning models; callers can merge the result into
+   their own extra-body."
+  router/reasoning-extra-body)
 
 ;; =============================================================================
 ;; Spec DSL

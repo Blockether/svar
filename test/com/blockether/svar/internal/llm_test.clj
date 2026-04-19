@@ -37,10 +37,12 @@
       (expect (= "tiny" (selected-model (make-router) {:prefer :cost})))))
 
   (describe "prefer :intelligence"
-    (it "selects most intelligent model from highest-priority provider"
-      ;; provider-a has big (high), provider-b has genius (frontier)
-      ;; but provider-a has higher priority so big wins
-      (expect (= "big" (selected-model (make-router) {:prefer :intelligence})))))
+    (it "selects the most intelligent model across the whole fleet"
+      ;; Cross-provider ranking: provider-b's `genius` (:frontier) outranks
+      ;; provider-a's `big` (:high) even though provider-a has higher priority.
+      ;; Priority is a tiebreaker WITHIN the same model tier, not a dominant
+      ;; sort key. See `candidate-sort-key` in router.clj.
+      (expect (= "genius" (selected-model (make-router) {:prefer :intelligence})))))
 
   (describe "prefer :speed"
     (it "selects fastest model"
@@ -52,9 +54,9 @@
       (expect (= "tiny" (selected-model (make-router) {:prefer [:cost :speed]})))))
 
   (describe "[:intelligence :cost]"
-    (it "smartest first from highest-priority provider"
-      ;; provider-a's big (high) wins over provider-b's genius (frontier) due to priority
-      (expect (= "big" (selected-model (make-router) {:prefer [:intelligence :cost]})))))
+    (it "smartest across the fleet, cheapest as tiebreaker within tier"
+      ;; :frontier beats :high regardless of provider priority.
+      (expect (= "genius" (selected-model (make-router) {:prefer [:intelligence :cost]})))))
 
   (describe "[:speed :intelligence]"
     (it "fastest first, smartest as tiebreaker"
@@ -82,9 +84,10 @@
     (it "cheapest with vision is medium"
       (expect (= "medium" (selected-model (make-router) {:prefer :cost :capabilities #{:vision}}))))
 
-    (it "smartest with vision from highest-priority provider"
-      ;; provider-a has medium (medium) and big (high) with vision → big wins
-      (expect (= "big" (selected-model (make-router) {:prefer :intelligence :capabilities #{:vision}})))))
+    (it "smartest vision-capable model across the fleet"
+      ;; `genius` (frontier + vision) in provider-b beats `big` (high + vision)
+      ;; in provider-a despite priority ordering.
+      (expect (= "genius" (selected-model (make-router) {:prefer :intelligence :capabilities #{:vision}})))))
 
   (describe "vector prefer with capabilities"
     (it "[:cost :speed] with vision"

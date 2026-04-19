@@ -165,10 +165,43 @@
         base-url
         (str base-url "/chat/completions")))))
 
+(def ^:private ANTHROPIC_THINKING_OUTPUT_RESERVE
+  "Tokens reserved for the visible response above Anthropic's thinking budget.
+   Anthropic's API rejects requests where `max_tokens <= thinking.budget_tokens`
+   because max_tokens counts thinking + output as one pool. We keep a small
+   margin so the model can always produce at least a short visible answer
+   even when the caller forgets to raise max_tokens for deep thinking."
+  1024)
+
+(defn- clamp-anthropic-thinking-max-tokens
+  "When `:thinking` is enabled, ensures `max_tokens` leaves room for a visible
+   response on top of the thinking budget. Silent-but-logged upgrade; keeps
+   thinking enabled rather than failing the request.
+
+   Does nothing when thinking is absent or already sized correctly."
+  [body]
+  (let [thinking        (:thinking body)
+        enabled?        (and (map? thinking) (= "enabled" (:type thinking)))
+        budget          (when enabled? (long (or (:budget_tokens thinking) 0)))
+        current-max     (long (or (:max_tokens body) 0))
+        required-min    (when enabled? (+ budget ANTHROPIC_THINKING_OUTPUT_RESERVE))]
+    (if (and enabled? (pos? budget) (< current-max required-min))
+      (do (trove/log! {:level :warn :id ::thinking-max-tokens-clamp
+                       :data {:budget-tokens budget
+                              :requested-max current-max
+                              :clamped-max required-min}
+                       :msg (str "Clamping :max_tokens to " required-min
+                              " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
+                              " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
+        (assoc body :max_tokens required-min))
+      body)))
+
 (defn- build-anthropic-request-body
   "Builds request body in Anthropic Messages API format.
    Extracts system messages to top-level :system field.
-   Ensures :max_tokens is always present (required by Anthropic)."
+   Ensures :max_tokens is always present (required by Anthropic) and that it
+   leaves room for visible output above `:thinking.budget_tokens` when
+   extended thinking is enabled."
   [messages model extra-body]
   (let [system-msgs (filter #(= "system" (:role %)) messages)
         non-system  (vec (remove #(= "system" (:role %)) messages))
@@ -178,9 +211,10 @@
         body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
                       system-text (assoc :system system-text)
                       (seq extra-body) (merge (dissoc extra-body :stream_options)))]
-    ;; Re-assert system after merge so extra-body can't clobber it
-    (cond-> body
-      system-text (assoc :system system-text))))
+    ;; Re-assert system after merge so extra-body can't clobber it,
+    ;; then apply the thinking-aware max_tokens clamp.
+    (-> (cond-> body system-text (assoc :system system-text))
+      clamp-anthropic-thinking-max-tokens)))
 
 (defn- extract-anthropic-response-data
   "Extracts content, reasoning, and usage from an Anthropic Messages API response.
@@ -718,19 +752,57 @@
   "Resets a provider's circuit breaker. Delegates to router/reset-provider!."
   router/reset-provider!)
 
+(defn- routing-opts-with-reasoning
+  "Merges `:reasoning` from top-level opts into `:routing` so the router's
+   `resolve-routing` can translate it into a `:require-reasoning?` selection
+   filter. Returns the `:routing` map (possibly augmented). Called by every
+   routed entrypoint before `resolve-routing`."
+  [opts]
+  (cond-> (or (:routing opts) {})
+    (:reasoning opts) (assoc :reasoning (:reasoning opts))))
+
+(defn- inject-routed-params
+  "Injects router-chosen `[provider model-map]` + caller opts into the opts map
+   destined for a `*!*` primitive. Centralises the reasoning translation so
+   every routed entrypoint gets the same treatment:
+
+   - `:model`, `:api-key`, `:base-url`, `:api-style`, `:provider-id` come from
+     the selected provider/model.
+   - `:extra-body` is built from (max_tokens auto-params) < (auto reasoning) <
+     (caller extra-body). The abstract `:reasoning :quick|:balanced|:deep` opt
+     is translated per the model's api-style; non-reasoning models ignore it.
+   - `:reasoning` and `:preserved-thinking?` are consumed here and removed
+     downstream (they're svar-level opts, not provider params). Callers who
+     set explicit reasoning keys inside `:extra-body` keep those overrides."
+  [opts provider model-map]
+  (let [ctx (or (:context model-map) 8192)
+        auto-params {:max_tokens (long (* 0.25 ctx))}
+        reasoning-params (router/reasoning-extra-body
+                           (:api-style provider) model-map (:reasoning opts)
+                           {:preserved-thinking? (:preserved-thinking? opts)})
+        merged-body (merge auto-params reasoning-params (:extra-body opts))]
+    (-> opts
+      (dissoc :reasoning :preserved-thinking?)
+      (assoc
+        :model (:name model-map)
+        :api-key (:api-key provider)
+        :base-url (:base-url provider)
+        :api-style (:api-style provider)
+        :provider-id (:id provider)
+        :extra-body merged-body))))
+
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
-   opts may include :routing and :on-chunk."
+   opts may include :routing, :on-chunk, :reasoning, :extra-body."
   [router messages opts]
-  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback router (:prefs resolved)
       (fn [provider model-map]
-        (let [ctx (or (:context model-map) 8192)
-              auto-params {:max_tokens (long (* 0.25 ctx))}]
+        (let [{:keys [extra-body api-style]} (inject-routed-params opts provider model-map)]
           (chat-completion messages (:name model-map)
             (:api-key provider)
             (:base-url provider)
-            (cond-> {:extra-body auto-params :api-style (:api-style provider)}
+            (cond-> {:extra-body extra-body :api-style api-style}
               (:on-chunk opts)
               (assoc :on-chunk (:on-chunk opts)))))))))
 
@@ -757,26 +829,31 @@
        :model - string, override specific model
        :on-transient-error - :hybrid (default), :auto-route-cross-providers,
                              :fallback-model-in-the-same-provider, :fail
+     :reasoning - Abstract reasoning depth: :quick, :balanced, or :deep
+       (strings + OpenAI-style :low/:medium/:high aliases also accepted).
+       Automatically translated per the selected model's api-style:
+         OpenAI/GPT-5/o-series → `{:reasoning_effort \"low|medium|high\"}`
+         Anthropic Claude 4.x  → `{:thinking {:type \"enabled\" :budget_tokens N}}`
+         Z.ai GLM-4.6+         → `{:thinking {:type \"enabled\"|\"disabled\"}}`
+       Models without `:reasoning?` in their metadata ignore this silently.
+       Anything set in `:extra-body` wins over this automatic translation.
+     :preserved-thinking? - Z.ai-only. When true AND the selected model uses
+       `:reasoning-style :zai-thinking`, emits `clear_thinking: false` so
+       reasoning_content is preserved across assistant turns (Preserved
+       Thinking on GLM-5 / GLM-4.7). Callers MUST echo the unmodified
+       reasoning_content back in subsequent assistant turns or quality and
+       cache hit rates degrade. No-op on non-z.ai styles. The Coding Plan
+       endpoint (`:zai-coding`) has preserved thinking ON by default
+       server-side — setting this flag is harmless there.
      :extra-body - Map merged into the API request body. Use this to pass
-       provider-specific params (e.g. {:reasoning_effort \"low\"} for OpenAI
-       o-series, {:temperature 0.3}, {:top_p 0.9}). Caller controls reasoning
-       effort entirely via this key — no auto-injection from router metadata."
+       provider-specific params (e.g. {:temperature 0.3}, {:top_p 0.9}) or
+       to override reasoning params with explicit wire-shape overrides."
   [router opts]
-  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
       router (:prefs resolved)
       (fn [provider model-map]
-        (let [ctx (or (:context model-map) 8192)
-              auto-params {:max_tokens (long (* 0.25 ctx))}
-              merged-body (merge auto-params (:extra-body opts))]
-          (ask!* router
-            (assoc opts
-              :model (:name model-map)
-              :api-key (:api-key provider)
-              :base-url (:base-url provider)
-              :api-style (:api-style provider)
-              :provider-id (:id provider)
-              :extra-body merged-body)))))))
+        (ask!* router (inject-routed-params opts provider model-map))))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
@@ -939,19 +1016,14 @@
 ;; =============================================================================
 
 (defn abstract!
-  "Routed abstract! — provider fallback + rate limiting."
+  "Routed abstract! — provider fallback + rate limiting.
+   Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
-  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
       router (:prefs resolved)
       (fn [provider model-map]
-        (abstract!* router
-          (assoc opts
-            :model (:name model-map)
-            :api-key (:api-key provider)
-            :base-url (:base-url provider)
-            :api-style (:api-style provider)
-            :provider-id (:id provider)))))))
+        (abstract!* router (inject-routed-params opts provider model-map))))))
 
 (def ^:private DEFAULT_ITERATIONS
   "Default number of Chain of Density iterations."
@@ -1109,7 +1181,7 @@
                     (build-cod-first-iteration-objective target-length special-instructions)
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary accumulated-entities)
-        ask-resp (ask!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id])
+        ask-resp (ask!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id :extra-body])
                                  {:spec (build-cod-spec)
                                   :messages [(system objective)
                                              (user task)]}))
@@ -1127,7 +1199,7 @@
                  (nil? (:summary result))
                  (assoc :summary previous-summary))
         eval-resp (when eval?
-                    (eval!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id])
+                    (eval!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id :extra-body])
                                      {:task (str "Summarize the following text:\n\n" source-text)
                                       :output (:summary result)
                                       :criteria COD_EVAL_CRITERIA})))
@@ -1212,7 +1284,7 @@
         [result duration-ms] (util/with-elapsed
                                (if (and refine? (seq cod-iterations))
                                  (let [final-summary (:summary (last cod-iterations))
-                                       refine-result (refine!* router (merge (select-keys resolved [:model :api-key :base-url :provider-id])
+                                       refine-result (refine!* router (merge (select-keys resolved [:model :api-key :base-url :api-style :provider-id :extra-body])
                                                                         {:spec (build-cod-refinement-spec)
                                                                          :messages [(system (str "You are verifying and refining a summary for faithfulness. "
                                                                                               "Every claim in the summary must be grounded in the source text. "
@@ -1391,7 +1463,8 @@
     (assoc criteria-scores :overall (:overall-score eval-result))))
 
 (defn eval!
-  "Routed eval! — provider fallback + rate limiting."
+  "Routed eval! — provider fallback + rate limiting.
+   Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
                 (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
@@ -1399,13 +1472,7 @@
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
-        (eval!* router
-          (assoc opts
-            :model (:name model-map)
-            :api-key (:api-key provider)
-            :base-url (:base-url provider)
-            :api-style (:api-style provider)
-            :provider-id (:id provider)))))))
+        (eval!* router (inject-routed-params opts provider model-map))))))
 
 (defn eval!*
   "Low-level eval — calls ask!* directly without routing. Use eval! instead."
@@ -1426,12 +1493,12 @@
         eval-task (build-eval-task effective-task output context)
         [{:keys [result tokens cost]} duration-ms]
         (util/with-elapsed
-          (ask!* router (merge (select-keys {:model model
-                                             :api-key api-key
-                                             :base-url base-url
-                                             :api-style api-style
-                                             :provider-id provider-id}
-                                 [:model :api-key :base-url :api-style :provider-id])
+          (ask!* router (merge {:model model
+                                :api-key api-key
+                                :base-url base-url
+                                :api-style api-style
+                                :provider-id provider-id}
+                          (select-keys opts [:extra-body])
                           {:spec eval-spec
                            :messages [(system objective)
                                       (user eval-task)]})))
@@ -2152,12 +2219,12 @@
                 window-size 3
                 criteria EVAL_CRITERIA}}]
   (let [{:keys [model api-key base-url api-style provider-id]} (resolve-opts router opts)
-        llm-opts (select-keys {:model model
-                               :api-key api-key
-                               :base-url base-url
-                               :api-style api-style
-                               :provider-id provider-id}
-                   [:model :api-key :base-url :api-style :provider-id])
+        llm-opts (merge {:model model
+                         :api-key api-key
+                         :base-url base-url
+                         :api-style api-style
+                         :provider-id provider-id}
+                   (select-keys opts [:extra-body]))
          ;; Extract objective/task from messages for internal decompose/verify/eval pipeline
         original-objective (or (->> messages (filter #(= "system" (:role %))) first :content) "")
         original-task (or (->> messages (filter #(= "user" (:role %))) first :content) "")
@@ -2282,19 +2349,14 @@
       "Maintain what was good and fix the identified issues.")))
 
 (defn sample!
-  "Routed sample! — provider fallback + rate limiting."
+  "Routed sample! — provider fallback + rate limiting.
+   Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
-  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
       router (:prefs resolved)
       (fn [provider model-map]
-        (sample!* router
-          (assoc opts
-            :model (:name model-map)
-            :api-key (:api-key provider)
-            :base-url (:base-url provider)
-            :api-style (:api-style provider)
-            :provider-id (:id provider)))))))
+        (sample!* router (inject-routed-params opts provider model-map))))))
 
 (defn sample!*
   "Low-level sample — generates test data without routing. Use sample! instead."
@@ -2387,16 +2449,11 @@
 ;; =============================================================================
 
 (defn refine!
-  "Routed refine — iterative refinement with provider fallback and rate limiting."
+  "Routed refine — iterative refinement with provider fallback and rate limiting.
+   Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
-  (let [resolved (router/resolve-routing router (or (:routing opts) {}))]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
       router (:prefs resolved)
       (fn [provider model-map]
-        (refine!* router
-          (assoc opts
-            :model (:name model-map)
-            :api-key (:api-key provider)
-            :base-url (:base-url provider)
-            :api-style (:api-style provider)
-            :provider-id (:id provider)))))))
+        (refine!* router (inject-routed-params opts provider model-map))))))

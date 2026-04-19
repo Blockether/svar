@@ -26,8 +26,8 @@
     (it "returns 200000 for claude-sonnet-4-6"
       (expect (= 200000 (sut/context-limit "claude-sonnet-4-6"))))
 
-    (it "returns 2000000 for gemini-2.5-pro"
-      (expect (= 2000000 (sut/context-limit "gemini-2.5-pro")))))
+    (it "returns 1000000 for claude-opus-4-6"
+      (expect (= 1000000 (sut/context-limit "claude-opus-4-6")))))
 
   (describe "unknown models"
     (it "returns default for unknown model"
