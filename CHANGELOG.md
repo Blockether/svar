@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.1] - 2026-04-19
+
+### Changed
+- test: expand live :zai-coding reasoning coverage (quick/balanced/deep + preserved)
+- feat: abstract reasoning-depth API + per-style translation
+- release: update version files for v0.3.0, bump to next dev version
+
+
 ## [v0.3.0] - 2026-04-17
 
 ### Changed
@@ -335,9 +343,10 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.3.1...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
 [v0.2.0]: https://github.com/Blockether/svar/releases/tag/v0.2.0
 [v0.3.0]: https://github.com/Blockether/svar/releases/tag/v0.3.0
+[v0.3.1]: https://github.com/Blockether/svar/releases/tag/v0.3.1
