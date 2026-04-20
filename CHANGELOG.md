@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.5] - 2026-04-20
+
+### Changed
+- feat: full EDN/Clojure fence support + deeply nested keyword parsing
+- release: update version files for v0.3.4, bump to next dev version
+
+
 ## [v0.3.4] - 2026-04-20
 
 ### Changed
@@ -375,7 +382,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.3.5...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -385,3 +392,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.3.2]: https://github.com/Blockether/svar/releases/tag/v0.3.2
 [v0.3.3]: https://github.com/Blockether/svar/releases/tag/v0.3.3
 [v0.3.4]: https://github.com/Blockether/svar/releases/tag/v0.3.4
+[v0.3.5]: https://github.com/Blockether/svar/releases/tag/v0.3.5

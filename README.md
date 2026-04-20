@@ -48,7 +48,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 
 ```clojure
 ;; deps.edn
-{:deps {'com.blockether/svar {:mvn/version "0.3.4"}}}
+{:deps {'com.blockether/svar {:mvn/version "0.3.5"}}}
 ```
 
 ```clojure
