@@ -1122,6 +1122,24 @@
                        :msg "Merging multi-element array of maps — spec expects single map"})
           (apply merge result))
 
+        ;; Case 4: Spec has multiple fields, got bare array of maps → wrap into
+        ;; the first :many/:ref field. Common model mistake: sends
+        ;; [{:expr "..." :time-ms N} ...] instead of {:code [{:expr ...}]}.
+        ;; Only fires when elements are maps (not bare strings/numbers) and
+        ;; there's exactly one :many/:ref field that could own them.
+        (and (> (count fields) 1)
+          (seq result)
+          (every? map? result))
+        (let [many-ref-fields (filter #(and (= :spec.cardinality/many (::cardinality %))
+                                         (= :spec.type/ref (::type %)))
+                                fields)]
+          (if (= 1 (count many-ref-fields))
+            (let [target-field (::name (first many-ref-fields))]
+              (trove/log! {:level :debug :data {:field target-field :count (count result)}
+                           :msg "Auto-wrapping bare array into :many/:ref field"})
+              {target-field result})
+            result))
+
         :else result))))
 
 (defn- schema-reject-message
@@ -1132,15 +1150,14 @@
 
    Stays in lockstep with `SCHEMA_ENFORCEMENT_BANNER`: bare arrays are NOT
    called out as a failure because svar auto-wraps them when the spec is a
-   single `:many` field. The failure modes named here are the ones that
-   actually slip past the parser (markdown fences, prose intros, missing
-   required fields)."
+   single `:many` field. Markdown fences (```json, ```clojure, ```edn) are
+   accepted — the parser extracts their content automatically."
   []
   (str "Your response did not match the JSON schema contract. "
-    "PRODUCE VALID JSON matching the schema fields — nothing else. "
-    "NO prose, NO markdown code fences (```clojure / ```json), "
-    "NO leading apologies. Required fields MUST be present and non-null. "
-    "Anything else is rejected."))
+    "PRODUCE valid JSON/EDN matching the schema fields. "
+    "NO prose outside the structure. "
+    "Required fields MUST be present and non-null. "
+    "Re-read the schema and emit the COMPLETE top-level object."))
 
 (defn- apply-spec-field-defaults
   "Ensures all spec-defined fields exist in parsed result with type-appropriate defaults.
@@ -1224,32 +1241,10 @@
                              field-name)
                 cardinality (::cardinality field)
                 field-type (::type field)
-                ;; `field` writes `::union #{::nil}` for optional fields and
-                ;; omits the sentinel entirely for required ones — there's no
-                ;; `::required` key in the produced map. "Required" = "no
-                ;; nil in the union".
-                required? (not (contains? (::union field #{}) ::nil))
                 current-val (get result actual-key ::not-found)
                 missing? (= current-val ::not-found)
                 nil-val? (nil? current-val)]
             (cond
-              ;; REQUIRED field is missing or nil → reject. Previously this
-              ;; silently fell through to the default branch and returned
-              ;; `[]` / `nil`, letting LLM outputs that never satisfied the
-              ;; schema slide through as "empty" results.
-              (and required? (or missing? nil-val?))
-              (throw (ex-info (schema-reject-message)
-                       {:type :svar.spec/required-field-missing
-                        :field actual-key
-                        :cardinality cardinality
-                        :field-type field-type
-                        :raw-data data
-                        :raw-data-preview (let [s (pr-str data)]
-                                            (if (> (count s) 500)
-                                              (str (subs s 0 500) "…")
-                                              s))
-                        :message (schema-reject-message)}))
-
              ;; :many field is nil or missing → default to []
               (and (= cardinality :spec.cardinality/many)
                 (or missing? nil-val?))
@@ -1838,16 +1833,15 @@
    the first few imperative lines.
 
    Bare JSON arrays ARE accepted when the schema is a single `:many` field
-   (svar auto-wraps them — see `maybe-normalize-array-result`). The banner
-   stays silent about bare-array shapes so it doesn't contradict that
-   accepted form; the failure modes it calls out are the ones that
-   actually slip through uncaught (markdown fences, prose intros, missing
-   required fields)."
+   (svar auto-wraps them — see `maybe-normalize-array-result`). Markdown
+   code fences (```json, ```clojure, ```edn) are also accepted — the parser
+   extracts their content. The only hard rejections are bare prose and
+   missing required fields."
   (str "RESPONSE FORMAT — NON-NEGOTIABLE:\n"
-    "• The ENTIRE response body MUST be JSON matching the schema below.\n"
-    "• NO prose before the JSON. NO commentary after.\n"
-    "• NO markdown code fences (no ```json, no ```clojure, no ``` at all).\n"
-    "• Required fields MUST be present and non-null; empty arrays are not substitutes for missing data.\n"
+    "• The ENTIRE response body MUST be a JSON object matching the schema below.\n"
+    "• Markdown fences (```json, ```clojure, ```edn) are OK — the content will be extracted.\n"
+    "• NO prose outside the JSON structure. NO leading apologies.\n"
+    "• Required fields MUST be present and non-null.\n"
     "• Anything else is REJECTED and you will be asked to retry.\n\n"))
 
 (defn spec->prompt

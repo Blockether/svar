@@ -282,7 +282,7 @@
   (it "generates BAML-style prompt"
     (let [s (sut/spec (sut/field ::sut/name :x ::sut/type :spec.type/int ::sut/cardinality :spec.cardinality/one ::sut/description "X"))
           result (sut/spec->prompt s)]
-      (expect (str/includes? result "Answer in JSON using this schema:"))
+      (expect (str/includes? result "RESPONSE FORMAT"))
       (expect (str/includes? result "// X (required)"))
       (expect (str/includes? result "x: int,"))))
 
@@ -480,7 +480,7 @@
             llm-response "{\"name\": \"Alice\", \"age\": 30}"
             parsed (:value (sut/str->data llm-response))
             validation (sut/validate-data s parsed)]
-        (expect (str/includes? prompt "Answer in JSON using this schema:"))
+        (expect (str/includes? prompt "RESPONSE FORMAT"))
         (expect (= {:name "Alice" :age 30} parsed))
         (expect (= {:valid? true} validation)))))
 
@@ -858,14 +858,14 @@
         (expect (= [{:id 1 :name "first"} {:id 2 :name "second"}] parsed)))))
 
   (describe "spec with multiple fields - no wrapping"
-    (it "returns bare array as-is when spec has multiple fields"
+    (it "rejects bare array of strings when spec has multiple fields"
       (let [spec-def (sut/spec
                        (sut/field ::sut/name :items ::sut/type :spec.type/string ::sut/cardinality :spec.cardinality/many ::sut/description "Items")
                        (sut/field ::sut/name :count ::sut/type :spec.type/int ::sut/cardinality :spec.cardinality/one ::sut/description "Count"))
-            llm-response "[\"a\", \"b\"]"
-            parsed (sut/str->data-with-spec llm-response spec-def)]
-        ;; Should NOT wrap because spec has multiple fields
-        (expect (= ["a" "b"] parsed)))))
+            llm-response "[\"a\", \"b\"]"]
+        ;; Bare string array + multi-field spec = structural mismatch → rejection
+        (expect (throws? clojure.lang.ExceptionInfo
+                  #(sut/str->data-with-spec llm-response spec-def))))))
 
   (describe "multi-element array of maps merged when spec expects map"
     (it "merges split objects into single map"
@@ -1038,10 +1038,9 @@
         (expect (= 5 (:count parsed))))))
 
   (describe "non-map result passthrough"
-    (it "returns plain text unchanged when LLM produces no JSON"
-      (let [parsed (sut/str->data-with-spec "I cannot find entities." cod-spec)]
-                  ;; SAP returns the raw string — field defaults don't apply to non-maps
-        (expect (string? parsed)))))
+    (it "rejects plain text when LLM produces no JSON"
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(sut/str->data-with-spec "I cannot find entities." cod-spec)))))
 
   (describe "markdown-wrapped JSON"
     (it "applies defaults after extracting from markdown"
