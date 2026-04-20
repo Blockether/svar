@@ -972,9 +972,36 @@
                                         :duration-ms duration-ms
                                         :input-tokens (:prompt_tokens api-usage)
                                         :output-tokens (:completion_tokens api-usage)
-                                        :reasoning? (boolean (seq reasoning))
-                                        :content-length (count (str content))})
+                                        ;; nil distinguishes "no field in response" from
+                                        ;; "field present but empty" — crucial for triaging
+                                        ;; provider quirks where content is omitted entirely
+                                        ;; versus returned as an empty string.
+                                        :reasoning-length (when reasoning (count reasoning))
+                                        :content-length   (when content (count content))
+                                        :content-preview  (when content
+                                                            (subs content 0 (min 200 (count content))))})
                        :msg "HTTP response received"})
+          ;; Some providers (notably reasoning-capable models) return HTTP 200
+          ;; with a non-empty `reasoning_content` but an empty or nil `content`
+          ;; field — usually because the output budget was consumed by reasoning
+          ;; or the spec could not be satisfied for the given input. Letting this
+          ;; propagate into `jsonish/parse-json` leaks a parser-internal
+          ;; "Input cannot be nil or empty" IllegalArgumentException to callers.
+          ;; Instead surface a typed, prompt-quality error with the model's
+          ;; reasoning attached, so RLM loops can feed an actionable message back
+          ;; to the model and persist the reasoning for triage.
+        _ (when (str/blank? content)
+            (throw (ex-info
+                     (str "The model produced reasoning but no structured JSON output. "
+                       "This usually means the response budget was consumed by reasoning, "
+                       "the spec could not be satisfied for the given input, or the task "
+                       "is ambiguous. Retry by emitting a minimal valid JSON matching the "
+                       "iteration spec; if the task is ambiguous, clarify intent or shrink "
+                       "context.")
+                     {:type      :svar.llm/empty-content
+                      :model     model
+                      :reasoning reasoning
+                      :api-usage api-usage})))
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
         token-stats (router/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}

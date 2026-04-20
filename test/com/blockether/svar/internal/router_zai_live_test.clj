@@ -4,8 +4,9 @@
    (`https://api.z.ai/api/coding/paas/v4`).
 
    Gated on Z.ai-direct env vars (NOT Blockether's proxy):
-     - `ZAI_API_KEY`         → runs `:zai` tests
-     - `ZAI_CODING_API_KEY`  → runs `:zai-coding` tests (falls back to ZAI_API_KEY)
+     - `ZAI_API_KEY`              → runs `:zai` tests
+     - `ZAI_CODING_PLAN_API_KEY`  → runs `:zai-coding` tests
+         Fallback chain: ZAI_CODING_PLAN_API_KEY → Z_AI_CODING_API_KEY → ZAI_API_KEY.
 
    Without those keys every `it` passes vacuously. With them we verify:
      - `normalize-provider` attaches Z.ai pricing to each GLM model
@@ -29,7 +30,13 @@
 ;; =============================================================================
 
 (defn- zai-key []           (System/getenv "ZAI_API_KEY"))
-(defn- zai-coding-key []    (or (System/getenv "ZAI_CODING_API_KEY")
+;; Renamed from ZAI_CODING_API_KEY → ZAI_CODING_PLAN_API_KEY to clearly
+;; identify the Z.ai Coding Plan subscription (the coding endpoint).
+;; Additional alias Z_AI_CODING_API_KEY is accepted for environments that
+;; use the hyphenated-looking style. The legacy ZAI_API_KEY fallback stays
+;; so a single Z.ai key keeps working for both endpoints in local dev.
+(defn- zai-coding-key []    (or (System/getenv "ZAI_CODING_PLAN_API_KEY")
+                              (System/getenv "Z_AI_CODING_API_KEY")
                               (System/getenv "ZAI_API_KEY")))
 
 (defn- zai-enabled?         [] (some? (zai-key)))
