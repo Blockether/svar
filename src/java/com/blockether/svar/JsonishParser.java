@@ -123,10 +123,18 @@ public class JsonishParser {
     }
     
     /**
-     * Extracts JSON from markdown code blocks.
+     * Extracts content from markdown code blocks.
+     *
+     * Accepts any language tag — json, clojure, edn, python, or untagged.
+     * Previously only matched ``` or ```json; ```clojure and ```edn fences
+     * (common from reasoning models that write EDN responses) were falling
+     * through to the string fallback and being returned verbatim.
      */
     private String extractFromMarkdown(String input) {
-        Pattern pattern = Pattern.compile("```(?:json)?\\s*\\n(.+?)\\n```", Pattern.DOTALL);
+        Pattern pattern = Pattern.compile(
+            "```(?:[a-zA-Z0-9]*)?\\s*\\n(.+?)\\n[ \\t]*```",
+            Pattern.DOTALL
+        );
         Matcher matcher = pattern.matcher(input);
         if (matcher.find()) {
             warnings.add("Extracted JSON from markdown code block");
@@ -200,10 +208,36 @@ public class JsonishParser {
             return parseNull();
         } else if (c == '-' || Character.isDigit(c)) {
             return parseNumber();
+        } else if (c == ':') {
+            // EDN/Clojure keyword value — e.g. :quick, :balanced, :deep.
+            // Strip the leading colon and return the name as a plain string
+            // so spec keyword-field coercion can normalize it downstream.
+            return parseEdnKeywordValue();
         } else {
             // Try to parse as unquoted string
             return parseUnquotedString();
         }
+    }
+
+    /**
+     * Parses a Clojure/EDN keyword used as a VALUE — e.g. :quick, :deep.
+     * Strips the leading colon and returns the name as a plain string.
+     * The spec's keyword-field coercion layer will then turn "quick" → :quick.
+     */
+    private String parseEdnKeywordValue() {
+        pos++; // consume ':'
+        StringBuilder sb = new StringBuilder();
+        while (pos < length) {
+            char c = input.charAt(pos);
+            if (c == ',' || c == '}' || c == ']' || Character.isWhitespace(c)) {
+                break;
+            }
+            sb.append(c);
+            pos++;
+        }
+        String name = sb.toString();
+        warnings.add("EDN keyword value: stripped leading ':' from :" + name);
+        return name;
     }
     
     /**
@@ -224,17 +258,34 @@ public class JsonishParser {
         while (pos < length) {
             skipWhitespaceAndComments();
             
-            // Parse key
+            // Parse key — three shapes accepted:
+            //   "key": value     → quoted JSON key
+            //   key: value       → unquoted JSON key
+            //   :key value       → EDN/Clojure keyword key (colon is prefix,
+            //                      NOT the key-value separator)
             String key;
+            boolean ednKeyword = false;
             if (input.charAt(pos) == '"') {
                 key = parseQuotedString();
+            } else if (input.charAt(pos) == ':') {
+                // EDN keyword key: skip the leading ':' then read the name.
+                // The ':' is NOT the JSON key-value separator here — the
+                // value follows after optional whitespace with no colon.
+                pos++;  // consume ':'
+                key = parseUnquotedKey();
+                ednKeyword = true;
+                warnings.add("EDN keyword key: stripped leading ':' from :" + key);
             } else {
                 key = parseUnquotedKey();
                 warnings.add("Unquoted key: " + key);
             }
             
             skipWhitespaceAndComments();
-            expect(':');
+            // Only expect ':' as separator for JSON-style keys.
+            // EDN keyword keys (:foo bar) have NO explicit separator.
+            if (!ednKeyword) {
+                expect(':');
+            }
             skipWhitespaceAndComments();
             
             // Parse value
@@ -244,7 +295,11 @@ public class JsonishParser {
             skipWhitespaceAndComments();
             
             if (pos >= length) {
-                throw new RuntimeException("Unexpected end of input in object");
+                // Truncated / incomplete — return what we have so far.
+                // The completion path handles this gracefully; the basic
+                // path now does too for lenient "end" support.
+                warnings.add("Truncated object: missing closing '}'");
+                break;
             }
             
             char c = input.charAt(pos);
@@ -260,6 +315,13 @@ public class JsonishParser {
             } else if (c == '}') {
                 pos++;
                 break;
+            } else if (c == ':' || c == '"') {
+                // EDN implicit comma: the next entry starts directly with
+                // the next keyword key (:key) or quoted key without a
+                // separating comma. Allow it — same "missing comma" leniency
+                // the parser applies elsewhere.
+                warnings.add("Missing comma between object entries (EDN style)");
+                // Don't advance pos — the next loop iteration will parse the key
             } else {
                 throw new RuntimeException("Expected ',' or '}' but got '" + c + "' at position " + pos);
             }
@@ -291,7 +353,9 @@ public class JsonishParser {
             skipWhitespaceAndComments();
             
             if (pos >= length) {
-                throw new RuntimeException("Unexpected end of input in array");
+                // Truncated / incomplete — return what we have so far.
+                warnings.add("Truncated array: missing closing ']'");
+                break;
             }
             
             char c = input.charAt(pos);
@@ -307,6 +371,13 @@ public class JsonishParser {
             } else if (c == ']') {
                 pos++;
                 break;
+            } else if (c == '{' || c == '[' || c == '"' || c == ':' ||
+                       c == '-' || Character.isDigit(c)) {
+                // EDN implicit comma: next element starts directly without
+                // a separating comma. Common in EDN arrays like
+                // [{:expr "x" :time-ms 10} {:expr "y" :time-ms 20}].
+                warnings.add("Missing comma between array elements (EDN style)");
+                // Don't advance pos — next loop iteration parses the element
             } else {
                 throw new RuntimeException("Expected ',' or ']' but got '" + c + "' at position " + pos);
             }
@@ -364,11 +435,13 @@ public class JsonishParser {
     }
     
     /**
-     * Parses an unquoted key (stops at :).
+     * Parses an unquoted key (stops at : or whitespace).
+     * Called for JSON-style unquoted keys only. EDN keyword keys (:foo)
+     * are now handled directly in parseObject() / parseObjectWithCompletion()
+     * before this method is called, so the leading ':' is never present here.
      */
     private String parseUnquotedKey() {
         StringBuilder sb = new StringBuilder();
-        
         while (pos < length) {
             char c = input.charAt(pos);
             if (c == ':' || Character.isWhitespace(c)) {
@@ -377,7 +450,6 @@ public class JsonishParser {
             sb.append(c);
             pos++;
         }
-        
         return sb.toString();
     }
     
@@ -580,12 +652,16 @@ public class JsonishParser {
         return null;
     }
     
-    private List<ParseCandidate> tryMarkdownParse(String input) {
+     private List<ParseCandidate> tryMarkdownParse(String input) {
         List<ParseCandidate> candidates = new ArrayList<>();
-        
-        // Pattern for markdown code blocks (with optional language tag)
+
+        // Pattern for markdown code blocks (with optional language tag).
+        // Accepts json, clojure, edn, python, or any other tag — reasoning
+        // models frequently emit ```clojure or ```edn fences instead of
+        // ```json. (?m) makes ^ match start of any line so indented fences
+        // inside prose are also matched.
         Pattern pattern = Pattern.compile(
-            "(?m)^[ \\t]*```([a-zA-Z0-9 ]*)\\s*\\n(.*?)\\n[ \\t]*```",
+            "(?m)^[ \\t]*```([a-zA-Z0-9]*)\\s*\\n(.*?)\\n[ \\t]*```",
             Pattern.DOTALL
         );
         Matcher matcher = pattern.matcher(input);
@@ -740,9 +816,39 @@ public class JsonishParser {
         skipWhitespaceAndComments();
         Object value = parseValue();
         
-        // Calculate score based on number of fixes needed
-        int score = 50 - (warnings.size() * 5);
-        if (score < 10) score = 10;
+        // Score the fixing result:
+        // - A map/array result gets a higher base score (85) so that a valid
+        //   EDN structure like {:code [{...}]} beats the multi-parse
+        //   extraction of the inner [] (which scores 80).
+        // - EDN-style warnings (keyword keys/values, missing commas, truncated)
+        //   are format notes, not real repairs — penalise only 1 point each.
+        //   Real repairs (unquoted strings, trailing commas) penalise 5 each.
+        // - Other types keep the old penalty-based score (50 - N*5, min 10).
+        int score;
+        if (value instanceof java.util.Map || value instanceof java.util.List) {
+            // Count "light" EDN-format warnings vs real repair warnings.
+            // EDN format notes (keyword keys/values, implicit commas,
+            // truncation recovery) are capped at 4 total penalty so that
+            // deeply nested EDN always beats multi-parse sub-extraction (80).
+            int lightPenalty = 0;
+            int heavyPenalty = 0;
+            for (String w : warnings) {
+                if (w.startsWith("Truncated")) {
+                    // Zero — recovery is a feature, not a defect
+                } else if (w.startsWith("EDN keyword") || 
+                           w.startsWith("Missing comma between")) {
+                    lightPenalty += 1;
+                } else {
+                    heavyPenalty += 5;
+                }
+            }
+            // Cap light penalty at 4 so score stays >= 81 (above multi=80)
+            score = 85 - Math.min(lightPenalty, 4) - heavyPenalty;
+            if (score < 10) score = 10;
+        } else {
+            score = 50 - (warnings.size() * 5);
+            if (score < 10) score = 10;
+        }
         
         return new ParseCandidate(
             value,
@@ -791,6 +897,8 @@ public class JsonishParser {
             return parseNull();
         } else if (c == '-' || Character.isDigit(c)) {
             return parseNumber();
+        } else if (c == ':') {
+            return parseEdnKeywordValue();
         } else {
             return parseUnquotedString();
         }
@@ -962,8 +1070,12 @@ public class JsonishParser {
                 break;  // Incomplete - no more input
             }
             
-            // Parse key
+            // Parse key — same three shapes as parseObject():
+            //   "key": value  →  quoted JSON
+            //   key: value    →  unquoted JSON
+            //   :key value    →  EDN keyword (colon is prefix, not separator)
             String key;
+            boolean ednKeyword = false;
             char c = input.charAt(pos);
             if (c == '"') {
                 key = parseQuotedString();
@@ -973,6 +1085,14 @@ public class JsonishParser {
                 pos++;
                 objState = CompletionState.COMPLETE;
                 break;
+            } else if (c == ':') {
+                // EDN keyword key: consume the prefix colon then read name
+                pos++;
+                key = parseUnquotedKey();
+                ednKeyword = true;
+                if (!key.isEmpty()) {
+                    warnings.add("EDN keyword key: stripped leading ':' from :" + key);
+                }
             } else {
                 key = parseUnquotedKey();
                 if (!key.isEmpty()) {
@@ -984,10 +1104,14 @@ public class JsonishParser {
             
             skipWhitespaceAndComments();
             
-            if (pos >= length || input.charAt(pos) != ':') {
-                break;  // Incomplete
+            // EDN keyword keys have no explicit ':' separator.
+            // JSON keys require it; break on missing separator (incomplete input).
+            if (!ednKeyword) {
+                if (pos >= length || input.charAt(pos) != ':') {
+                    break;  // Incomplete
+                }
+                pos++;  // Skip ':'
             }
-            pos++;  // Skip ':'
             
             skipWhitespaceAndComments();
             

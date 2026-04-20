@@ -1124,6 +1124,24 @@
 
         :else result))))
 
+(defn- schema-reject-message
+  "Blunt instruction the caller can feed straight back to the LLM. Tells the
+   model what was wrong and exactly what shape it must produce. Kept short —
+   providers waste tokens re-reading long error messages. Callers should
+   quote this verbatim in the retry prompt so the model learns the contract.
+
+   Stays in lockstep with `SCHEMA_ENFORCEMENT_BANNER`: bare arrays are NOT
+   called out as a failure because svar auto-wraps them when the spec is a
+   single `:many` field. The failure modes named here are the ones that
+   actually slip past the parser (markdown fences, prose intros, missing
+   required fields)."
+  []
+  (str "Your response did not match the JSON schema contract. "
+    "PRODUCE VALID JSON matching the schema fields — nothing else. "
+    "NO prose, NO markdown code fences (```clojure / ```json), "
+    "NO leading apologies. Required fields MUST be present and non-null. "
+    "Anything else is rejected."))
+
 (defn- apply-spec-field-defaults
   "Ensures all spec-defined fields exist in parsed result with type-appropriate defaults.
 
@@ -1132,6 +1150,23 @@
    - :cardinality/many fields that are nil or missing → []
    - :cardinality/one fields that are missing → added with nil value (key presence guaranteed)
    - Recurses into :type/ref fields to apply defaults to nested specs
+
+   STRICT REJECTION (added to close the silent-failure loop):
+
+   1. A non-map input at the top level — e.g. a bare prose string, a markdown
+      code fence, or a bare vector that the parser couldn't coerce into the
+      expected shape — throws `:svar.spec/schema-rejected`. Previously this
+      case silently returned `data` unchanged, so callers received a string
+      where they expected a spec-shaped map and either crashed downstream
+      or, for iteration loops, carried on with an empty `:code` vec and
+      burned budget on retries that looked successful.
+
+   2. REQUIRED fields that are missing or explicitly nil throw
+      `:svar.spec/required-field-missing`. Optional fields still get their
+      defaults (`:many → []`, `:one → nil`).
+
+   Both throws carry the rejection message for the caller to forward to the
+   LLM verbatim, plus the raw data + preview for triage logs.
 
    Must be called AFTER key remapping and namespacing so field names match.
 
@@ -1158,6 +1193,22 @@
             data))
         data))
 
+    ;; Non-map at the top level of a multi-field spec → rejection. This is
+    ;; the markdown-fence / bare-prose / bare-vector-without-single-many-field
+    ;; case. Loudly reject so callers don't carry on with garbage.
+    (and (not (map? data))
+      (seq (::fields spec-def)))
+    (throw (ex-info (schema-reject-message)
+             {:type :svar.spec/schema-rejected
+              :reason :not-a-map
+              :received-type (if (nil? data) :nil (-> data class .getSimpleName))
+              :raw-data data
+              :raw-data-preview (let [s (pr-str data)]
+                                  (if (> (count s) 500)
+                                    (str (subs s 0 500) "…")
+                                    s))
+              :message (schema-reject-message)}))
+
     (not (map? data))
     data
 
@@ -1173,10 +1224,32 @@
                              field-name)
                 cardinality (::cardinality field)
                 field-type (::type field)
+                ;; `field` writes `::union #{::nil}` for optional fields and
+                ;; omits the sentinel entirely for required ones — there's no
+                ;; `::required` key in the produced map. "Required" = "no
+                ;; nil in the union".
+                required? (not (contains? (::union field #{}) ::nil))
                 current-val (get result actual-key ::not-found)
                 missing? (= current-val ::not-found)
                 nil-val? (nil? current-val)]
             (cond
+              ;; REQUIRED field is missing or nil → reject. Previously this
+              ;; silently fell through to the default branch and returned
+              ;; `[]` / `nil`, letting LLM outputs that never satisfied the
+              ;; schema slide through as "empty" results.
+              (and required? (or missing? nil-val?))
+              (throw (ex-info (schema-reject-message)
+                       {:type :svar.spec/required-field-missing
+                        :field actual-key
+                        :cardinality cardinality
+                        :field-type field-type
+                        :raw-data data
+                        :raw-data-preview (let [s (pr-str data)]
+                                            (if (> (count s) 500)
+                                              (str (subs s 0 500) "…")
+                                              s))
+                        :message (schema-reject-message)}))
+
              ;; :many field is nil or missing → default to []
               (and (= cardinality :spec.cardinality/many)
                 (or missing? nil-val?))
@@ -1755,19 +1828,45 @@
 ;; Spec Fields Text Representation - Prompt Generation
 ;; =============================================================================
 
+(def ^:private SCHEMA_ENFORCEMENT_BANNER
+  "Blunt contract shown at the top of every generated schema prompt and
+   echoed back in the rejection error message when the parser refuses a
+   response. Tone is deliberately loud — polite phrasing ('please return
+   JSON') gets ignored by reasoning-capable models that otherwise default
+   to prose + fenced code blocks. Kept short because longer instructions
+   burn input tokens on every call without improving compliance much past
+   the first few imperative lines.
+
+   Bare JSON arrays ARE accepted when the schema is a single `:many` field
+   (svar auto-wraps them — see `maybe-normalize-array-result`). The banner
+   stays silent about bare-array shapes so it doesn't contradict that
+   accepted form; the failure modes it calls out are the ones that
+   actually slip through uncaught (markdown fences, prose intros, missing
+   required fields)."
+  (str "RESPONSE FORMAT — NON-NEGOTIABLE:\n"
+    "• The ENTIRE response body MUST be JSON matching the schema below.\n"
+    "• NO prose before the JSON. NO commentary after.\n"
+    "• NO markdown code fences (no ```json, no ```clojure, no ``` at all).\n"
+    "• Required fields MUST be present and non-null; empty arrays are not substitutes for missing data.\n"
+    "• Anything else is REJECTED and you will be asked to retry.\n\n"))
+
 (defn spec->prompt
   "Converts a spec to a full prompt for LLM with BAML-style schema.
-   
-   Uses simple, direct format without XML tags.
-   
+
+   The generated prompt starts with a blunt enforcement banner
+   (`SCHEMA_ENFORCEMENT_BANNER`) that mirrors the rejection conditions
+   in `apply-spec-field-defaults`. Keeping the contract text and the
+   parser's rejection message in lockstep means: when the parser refuses
+   a response, the LLM re-reads the SAME wording in the retry prompt,
+   which empirically helps reasoning models self-correct faster than
+   paraphrasing the rule.
+
    Params:
    `the-spec` - Map. Spec definition created with `spec`.
-   
+
    Returns:
-   String. Prompt with BAML-style schema.
-   
-   Examples:
-   \"Answer in JSON using this schema:\\n{ field: type, }\""
+   String. Prompt with enforcement banner + BAML-style schema."
   [the-spec]
-  (str "Answer in JSON using this schema:\n"
+  (str SCHEMA_ENFORCEMENT_BANNER
+    "Schema:\n"
     (spec->str the-spec)))
