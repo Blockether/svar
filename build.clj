@@ -47,3 +47,15 @@
   (dd/deploy {:installer :remote
               :artifact jar-file
               :pom-file (b/pom-path {:lib lib :class-dir class-dir})}))
+
+(defn install
+  "Install the built jar into the local Maven repository (~/.m2).
+
+   Downstream projects that pin `{:mvn/version \"<version>\"}` can then
+   pick up this build without going through a remote deploy. Honours the
+   same `VERSION` env var as `jar` / `deploy`."
+  [_]
+  (jar nil)
+  (dd/deploy {:installer :local
+              :artifact jar-file
+              :pom-file (b/pom-path {:lib lib :class-dir class-dir})}))

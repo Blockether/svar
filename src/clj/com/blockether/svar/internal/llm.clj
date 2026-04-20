@@ -116,15 +116,32 @@
     true))
 
 (defn- http-post!
-  "Makes an HTTP POST request with JSON body.
-   Reuses the shared HttpClient to avoid thread/resource leaks."
+  "Makes an HTTP POST request with JSON body. Reuses the shared HttpClient.
+
+   Returns an ENVELOPE map:
+     {:parsed   <parsed JSON body or nil if parse failed>
+      :raw-body <original response body string>
+      :url      <request URL that was hit>
+      :status   <HTTP status code, e.g. 200>}
+
+   Exposing the envelope (instead of just the parsed body) lets downstream
+   error sites include the raw response in ex-data — critical when a
+   provider returns HTTP 200 with a shape we don't understand (reasoning
+   only, partial JSON, undocumented fields) and vanilla `:message :content`
+   extraction loses the evidence."
   [url body headers timeout-ms]
   (let [response (http/post url
                    {:client @shared-http-client
                     :headers headers
                     :body (json/write-json-str body)
-                    :timeout timeout-ms})]
-    (json/read-json (:body response) :key-fn keyword)))
+                    :timeout timeout-ms})
+        raw-body (:body response)
+        parsed   (try (json/read-json raw-body :key-fn keyword)
+                   (catch Exception _ nil))]
+    {:parsed   parsed
+     :raw-body raw-body
+     :url      url
+     :status   (:status response)}))
 
 (defn- http-get!
   "Makes an HTTP GET request with OAuth token.
@@ -217,11 +234,14 @@
       clamp-anthropic-thinking-max-tokens)))
 
 (defn- extract-anthropic-response-data
-  "Extracts content, reasoning, and usage from an Anthropic Messages API response.
-   Normalizes usage keys to OpenAI names (prompt_tokens/completion_tokens)
-   so downstream token counting works unchanged."
-  [response]
-  (let [content-blocks (:content response)
+  "Extracts content, reasoning, and usage from an Anthropic Messages API
+   response envelope (the map returned by `http-post!`).
+   Normalizes usage keys to OpenAI names so downstream token counting works
+   unchanged, and preserves the raw envelope under :http-response for
+   error-site attachment (see `extract-response-data` docstring)."
+  [envelope]
+  (let [response       (:parsed envelope)
+        content-blocks (:content response)
         text-parts     (->> content-blocks
                          (filter #(= "text" (:type %)))
                          (map :text))
@@ -229,11 +249,12 @@
                          (filter #(= "thinking" (:type %)))
                          (map :thinking))
         usage          (:usage response)]
-    {:content   (when (seq text-parts) (str/join "\n" text-parts))
-     :reasoning (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
-     :api-usage (when usage
-                  {:prompt_tokens      (:input_tokens usage)
-                   :completion_tokens  (:output_tokens usage)})}))
+    {:content       (when (seq text-parts) (str/join "\n" text-parts))
+     :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
+     :api-usage     (when usage
+                      {:prompt_tokens     (:input_tokens usage)
+                       :completion_tokens (:output_tokens usage)})
+     :http-response envelope}))
 
 (defn- extract-anthropic-stream-delta
   "Extracts content/reasoning deltas from an Anthropic SSE event chunk."
@@ -314,31 +335,43 @@
 ;; =============================================================================
 
 (defn- extract-response-data
-  "Extracts content, reasoning, and usage data from an OpenAI-compatible API response.
+  "Extracts content, reasoning, and usage data from an OpenAI-compatible
+   response envelope. Accepts the map returned by `http-post!`:
+     {:parsed <parsed-body> :raw-body <string> :url <str> :status <int>}
+
    Handles both OpenAI format (content is string, reasoning_content is string)
-   and Anthropic extended thinking format (content is array of blocks with type thinking/text)."
-  [response]
-  (let [raw-content (get-in response [:choices 0 :message :content])
-        raw-reasoning (get-in response [:choices 0 :message :reasoning_content])]
-    (if (and (sequential? raw-content) (some map? raw-content))
-      ;; Anthropic block format: [{:type "thinking" :thinking "..."} {:type "text" :text "..."}]
-      (let [text-blocks (->> raw-content
-                          (filter #(= "text" (:type %)))
-                          (map :text)
-                          (clojure.string/join "\n"))
-            thinking-blocks (->> raw-content
-                              (filter #(= "thinking" (:type %)))
-                              (map :thinking)
-                              (clojure.string/join "\n")
-                              (clojure.string/trimr))]
-        {:content (when-not (clojure.string/blank? text-blocks) text-blocks)
-         :reasoning (or (when-not (clojure.string/blank? thinking-blocks) thinking-blocks)
-                      raw-reasoning)
-         :api-usage (get-in response [:usage])})
-      ;; Standard OpenAI format
-      {:content raw-content
-       :reasoning raw-reasoning
-       :api-usage (get-in response [:usage])})))
+   and Anthropic extended thinking format (content is array of blocks with
+   type thinking/text).
+
+   Returns: {:content :reasoning :api-usage :http-response},
+   where :http-response is the ORIGINAL envelope preserved so a downstream
+   error site (e.g. the empty-content throw in `ask!*`) can attach the
+   full raw response to its ex-data for triage. Callers that only want the
+   content/reasoning can just destructure the three leaf keys."
+  [envelope]
+  (let [response      (:parsed envelope)
+        raw-content   (get-in response [:choices 0 :message :content])
+        raw-reasoning (get-in response [:choices 0 :message :reasoning_content])
+        base          (if (and (sequential? raw-content) (some map? raw-content))
+                        ;; Anthropic block format mirrored by some OpenAI gateways.
+                        (let [text-blocks (->> raw-content
+                                            (filter #(= "text" (:type %)))
+                                            (map :text)
+                                            (clojure.string/join "\n"))
+                              thinking-blocks (->> raw-content
+                                                (filter #(= "thinking" (:type %)))
+                                                (map :thinking)
+                                                (clojure.string/join "\n")
+                                                (clojure.string/trimr))]
+                          {:content (when-not (clojure.string/blank? text-blocks) text-blocks)
+                           :reasoning (or (when-not (clojure.string/blank? thinking-blocks) thinking-blocks)
+                                        raw-reasoning)
+                           :api-usage (get-in response [:usage])})
+                        ;; Standard OpenAI format.
+                        {:content raw-content
+                         :reasoning raw-reasoning
+                         :api-usage (get-in response [:usage])})]
+    (assoc base :http-response envelope)))
 
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
@@ -423,8 +456,12 @@
       (with-retry
         (fn []
           (try
-            (let [parsed (http-post! chat-url request-body headers timeout-ms)]
-              (extract-fn parsed))
+            ;; `http-post!` returns a full envelope {:parsed :raw-body :url
+            ;; :status}. `extract-fn` knows how to unwrap it and, crucially,
+            ;; re-emit it under :http-response so callers higher up can
+            ;; attach the raw response to error ex-data (see `ask!*`).
+            (let [envelope (http-post! chat-url request-body headers timeout-ms)]
+              (extract-fn envelope))
             (catch clojure.lang.ExceptionInfo e
               (when-let [body (:body (ex-data e))]
                 (trove/log! {:level :warn :id ::llm-error-body
@@ -489,9 +526,17 @@
   (try (slurp is) (catch Exception _ nil)))
 
 (defn- http-post-stream!
-  "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta for each.
-   `headers` - HTTP headers map. `delta-fn` - extracts delta from parsed SSE chunk.
-   Returns {:content str :reasoning str :api-usage map}."
+  "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
+   for each. `headers` - HTTP headers map. `delta-fn` - extracts delta
+   from parsed SSE chunk.
+
+   Returns an envelope:
+     {:content :reasoning :api-usage
+      :http-response {:url :streaming? :status}}
+   Mirrors the shape of non-streaming `extract-response-data` so
+   downstream callers destructure uniformly. There is no `:raw-body` on
+   streaming paths — the SSE chunks are consumed incrementally, so the
+   accumulated `:content` / `:reasoning` are the closest analogues."
   [url body headers timeout-ms delta-fn on-delta]
   (let [response (try
                    (http/post url
@@ -531,9 +576,12 @@
                                    :reasoning-acc (str reasoning-acc)
                                    :api-usage api-usage}))))))
               (recur))))
-        {:content (let [s (str content-acc)] (when-not (str/blank? s) s))
-         :reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
-         :api-usage @usage-atom})
+        {:content       (let [s (str content-acc)] (when-not (str/blank? s) s))
+         :reasoning     (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
+         :api-usage     @usage-atom
+         :http-response {:url        url
+                         :streaming? true
+                         :status     (:status response)}})
       (catch Exception e
         (throw (ex-info (str "Stream connection error: " (ex-message e))
                  {:type :svar.core/http-error :stream? true :url url
@@ -965,8 +1013,8 @@
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      extra-body (assoc :extra-body extra-body))
-        [{:keys [content reasoning api-usage]} duration-ms] (util/with-elapsed
-                                                              (chat-completion messages model api-key chat-url retry-opts))
+        [{:keys [content reasoning api-usage http-response]} duration-ms] (util/with-elapsed
+                                                                            (chat-completion messages model api-key chat-url retry-opts))
         _ (trove/log! {:level :info
                        :data (log-data {:model model
                                         :duration-ms duration-ms
@@ -998,10 +1046,28 @@
                        "is ambiguous. Retry by emitting a minimal valid JSON matching the "
                        "iteration spec; if the task is ambiguous, clarify intent or shrink "
                        "context.")
-                     {:type      :svar.llm/empty-content
-                      :model     model
-                      :reasoning reasoning
-                      :api-usage api-usage})))
+                     ;; ex-data intentionally carries everything a human (or
+                     ;; an automated triage loop) needs to reproduce the call
+                     ;; without having to re-invoke the LLM:
+                     ;;   :chat-url      - where the POST went
+                     ;;   :api-style     - :openai / :anthropic
+                     ;;   :duration-ms   - how long the (successful) HTTP call took
+                     ;;   :api-usage     - token accounting from the provider
+                     ;;   :reasoning     - the provider's reasoning_content (or nil)
+                     ;;   :http-response - {:parsed :raw-body :url :status} for the
+                     ;;                    non-streaming path; {:url :streaming?
+                     ;;                    :status} for streaming. Gives callers
+                     ;;                    access to :choices, :finish_reason,
+                     ;;                    provider-specific thinking fields, and
+                     ;;                    the raw body string when non-streaming.
+                     {:type          :svar.llm/empty-content
+                      :model         model
+                      :chat-url      chat-url
+                      :api-style     api-style
+                      :duration-ms   duration-ms
+                      :reasoning     reasoning
+                      :api-usage     api-usage
+                      :http-response http-response})))
           ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
         token-stats (router/count-and-estimate model messages content
                       (cond-> {:pricing pricing :api-usage api-usage}
