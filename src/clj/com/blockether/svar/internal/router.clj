@@ -1392,3 +1392,41 @@
     (fn [ps]
       (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil)))
   router)
+
+(defn resolve-effective-model
+  "Resolves the effective routed model from the router, optionally applying
+   routing overrides.
+
+   Returns a model descriptor map (or nil when no provider is available):
+   {:name :reasoning? :provider :api-style :pricing :context :intelligence :speed ...}
+
+   `overrides` (optional map):
+     :optimize  — :cost | :speed | :intelligence (translated to :prefer)
+     :provider  — explicit provider id keyword
+     :model     — explicit model name string
+     :reasoning — reasoning level keyword (implies reasoning-capable model)
+
+   (resolve-effective-model router)                                         ;; root model
+   (resolve-effective-model router {:optimize :cost})                       ;; cheapest
+   (resolve-effective-model router {:optimize :intelligence})               ;; frontier
+   (resolve-effective-model router {:provider :openai :model \"gpt-5-mini\"}) ;; exact"
+  ([router]
+   (resolve-effective-model router nil))
+  ([router overrides]
+   (when router
+     (let [routing-opts (select-keys overrides [:optimize :provider :model :reasoning])
+           {:keys [prefs]} (resolve-routing router routing-opts)
+           [provider model-map] (select-provider router prefs)
+           reasoning-level (some-> (:reasoning overrides) normalize-reasoning-level)]
+       (when model-map
+         (cond-> {:name         (:name model-map)
+                  :reasoning?   (boolean (:reasoning? model-map))
+                  :provider     (:id provider)
+                  :api-style    (:api-style provider)
+                  :pricing      (:pricing model-map)
+                  :context      (:context model-map)
+                  :intelligence (:intelligence model-map)
+                  :speed        (:speed model-map)}
+           reasoning-level (assoc :reasoning reasoning-level)))))))
+
+
