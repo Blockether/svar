@@ -999,16 +999,20 @@
                                      cost (when api-usage
                                             (router/estimate-cost model
                                               (or (:prompt_tokens api-usage) 0)
-                                              (or (:completion_tokens api-usage) 0)))]
-                                 (when-let [partial-map (jsonish/parse-partial content)]
-                                   (let [coerced (try (spec/str->data-with-spec
-                                                        (json/write-json-str partial-map) spec)
-                                                   (catch Exception _ partial-map))]
-                                     (on-chunk {:result coerced
-                                                :reasoning reasoning
-                                                :tokens tokens
-                                                :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
-                                                :done? false}))))))
+                                              (or (:completion_tokens api-usage) 0)))
+                                     partial-map (jsonish/parse-partial content)
+                                     coerced (when partial-map
+                                               (try (spec/str->data-with-spec
+                                                      (json/write-json-str partial-map) spec)
+                                                 (catch Exception _ partial-map)))]
+                                 ;; Fire callback when reasoning OR content is available.
+                                 ;; Reasoning streams before content — don't gate on content.
+                                 (when (or coerced (some? reasoning))
+                                   (on-chunk {:result coerced
+                                              :reasoning reasoning
+                                              :tokens tokens
+                                              :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
+                                              :done? false})))))
         extra-body (:extra-body opts)
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
