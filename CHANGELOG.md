@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.9] - 2026-04-25
+
+### Changed
+- fix: update streaming tests for reasoning-first chunks
+- fix: stream reasoning chunks before content arrives
+- release: update version files for v0.3.8, bump to next dev version
+
+
 ## [v0.3.8] - 2026-04-22
 
 ### Changed
@@ -397,7 +405,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.3.8...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.3.9...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -410,3 +418,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.3.5]: https://github.com/Blockether/svar/releases/tag/v0.3.5
 [v0.3.6]: https://github.com/Blockether/svar/releases/tag/v0.3.6
 [v0.3.8]: https://github.com/Blockether/svar/releases/tag/v0.3.8
+[v0.3.9]: https://github.com/Blockether/svar/releases/tag/v0.3.9
