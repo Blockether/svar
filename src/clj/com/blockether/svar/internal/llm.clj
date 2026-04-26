@@ -655,9 +655,9 @@
          messages model api-key base-url opts timeout-ms extra-body api-style)))))
 
 (defn- build-system-prompt
-  "Builds the system prompt with the objective wrapped in XML tags."
+  "Returns the system prompt content as-is. Callers own their own wrapping."
   [objective]
-  (str "<objective>\n" objective "\n</objective>"))
+  objective)
 
 (defn- url? [s] (or (str/starts-with? s "http://") (str/starts-with? s "https://")))
 
