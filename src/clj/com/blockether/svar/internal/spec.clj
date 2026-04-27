@@ -831,30 +831,48 @@
       ;; Anonymous class
       (str "{\n" body "\n}"))))
 
+(defn- count-field-ref-targets
+  "Reduce over the ::ref fields of `fields`, incrementing `counts`
+   once per target. Vector targets (union types) increment each
+   member separately."
+  [counts fields]
+  (reduce (fn [c field-def]
+            (if (= (::type field-def) :spec.type/ref)
+              (let [target  (::target field-def)
+                    targets (if (vector? target) target [target])]
+                (reduce (fn [c t] (update c t (fnil inc 0))) c targets))
+              c))
+    counts
+    fields))
+
 (defn- count-ref-usages
-  "Counts how many times each ref spec is used in the main spec's fields.
-   
-   Handles both single keyword targets and vector targets (union types).
-   For union types, each type in the union is counted separately.
-   
+  "Count how many times each ref spec is referenced across the WHOLE
+   spec graph — both the main spec's fields and every spec in the
+   `ref-registry`. Counting only the main spec misses transitive
+   references like `Group.items: item[]` and falsely classifies
+   `:item` as unused, which `partition-refs-by-usage` then drops
+   from the rendered prompt — leaving the LLM with `items: item[]`
+   and no `item { … }` definition. That's a load-bearing bug:
+   models reliably fall back to positional arrays when the leaf
+   shape is missing.
+
+   Handles both single keyword targets and vector targets (union
+   types). For union types, each type in the union is counted
+   separately.
+
    Params:
    `spec-def` - Map. Main spec definition.
-   `ref-registry` - Map. Registry of spec-name -> spec-def.
-   
-    Returns:
-    Map. Spec-name -> usage count."
-  [spec-def _ref-registry]
-  (let [fields (::fields spec-def)]
-    (reduce (fn [counts field-def]
-              (if (= (::type field-def) :spec.type/ref)
-                (let [target (::target field-def)
-                      ;; Normalize target to a vector for uniform handling
-                      targets (if (vector? target) target [target])]
-                  ;; Increment count for each target in the union
-                  (reduce (fn [c t] (update c t (fnil inc 0))) counts targets))
-                counts))
-      {}
-      fields)))
+   `ref-registry` - Map. Registry of spec-name -> spec-def. Sub-specs
+     contribute their own ref usages so transitive references count.
+
+   Returns:
+   Map. Spec-name -> usage count (≥1 means it WILL be rendered)."
+  [spec-def ref-registry]
+  (let [base-counts (count-field-ref-targets {} (::fields spec-def))]
+    (reduce-kv (fn [counts _spec-name sub-spec-def]
+                 (count-field-ref-targets counts (::fields sub-spec-def)))
+      base-counts
+      ref-registry)))
 
 (defn- partition-refs-by-usage
   "Partitions refs into hoisted (used 2+ times) and inlined (used once).

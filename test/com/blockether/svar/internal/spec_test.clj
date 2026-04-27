@@ -345,7 +345,46 @@
                                  ::sut/cardinality :spec.cardinality/one ::sut/description "Level"
                                  ::sut/values ["a" "b" "c"]))]
         (expect (< (count (sut/spec->prompt s-vec))
-                  (count (sut/spec->prompt s-map))))))))
+                  (count (sut/spec->prompt s-map)))))))
+
+  (describe "transitive ref usage (regression)"
+    ;; Real-world repro from vis: an iteration spec held PLAN_STATE
+    ;; (which referenced PLAN_ITEM) but only PLAN_STATE was listed in
+    ;; the main spec's :refs. Older count-ref-usages walked the main
+    ;; spec's fields ONLY — plan_item ended up with count=0, was
+    ;; partitioned as "unused", and dropped from the rendered prompt.
+    ;; Models then saw `items: plan_item[]` with no plan_item class
+    ;; defined and reliably degraded into positional arrays.
+    (let [item    (sut/spec :item
+                    (sut/field ::sut/name :id ::sut/type :spec.type/int
+                      ::sut/cardinality :spec.cardinality/one
+                      ::sut/required true ::sut/description "Item id")
+                    (sut/field ::sut/name :label ::sut/type :spec.type/string
+                      ::sut/cardinality :spec.cardinality/one
+                      ::sut/required true ::sut/description "Item label"))
+          group   (sut/spec :group {:refs [item]}
+                    (sut/field ::sut/name :name ::sut/type :spec.type/string
+                      ::sut/cardinality :spec.cardinality/one
+                      ::sut/required true ::sut/description "Group name")
+                    (sut/field ::sut/name :items ::sut/type :spec.type/ref
+                      ::sut/target :item ::sut/cardinality :spec.cardinality/many
+                      ::sut/required true ::sut/description "Member items"))
+          top     (sut/spec :top {:refs [group]}
+                    (sut/field ::sut/name :group ::sut/type :spec.type/ref
+                      ::sut/target :group ::sut/cardinality :spec.cardinality/one
+                      ::sut/required true ::sut/description "The group"))
+          rendered (sut/spec->prompt top)]
+
+      (it "emits a class for transitively-referenced refs"
+        ;; The main spec only references :group directly, but :item is
+        ;; reachable via :group.items — it MUST appear as a class.
+        (expect (str/includes? rendered "item {")))
+
+      (it "keeps the field reference to the transitively-used class"
+        (expect (str/includes? rendered "items: item[],")))
+
+      (it "emits a class for the directly-used ref too"
+        (expect (str/includes? rendered "group {"))))))
 
 (defdescribe field-test
   "Tests for field definition function"

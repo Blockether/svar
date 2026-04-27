@@ -7,12 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.3.11] - 2026-04-27
+
+### Fixed
+- spec: count ref usages across the whole spec graph (main spec + every
+  spec in the registry) instead of just the main spec's fields.
+  Transitively-referenced refs (e.g. `Group.items: item[]` when only
+  `:group` is in the main spec's `:refs`) used to be partitioned as
+  "unused" and dropped from the rendered prompt; the LLM saw
+  `items: item[]` with no `item { … }` definition and degraded into
+  positional arrays. Adds a regression test under
+  `spec->prompt-test → transitive ref usage`.
+
 ## [v0.3.10] - 2026-04-26
 
 ### Changed
 - fix: remove <objective> wrapping from system messages
 - release: update version files for v0.3.9, bump to next dev version
-
 
 ## [v0.3.9] - 2026-04-25
 
