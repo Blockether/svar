@@ -239,7 +239,6 @@
         (expect (= "turbo" (:mode (:value result))))
         (expect (= "fast" (:label (:value result)))))))
 
-
   (describe "incomplete / truncated inputs (lenient end)"
     (it "parses map with missing outer closing brace"
       (let [result (sut/parse-json "{:code [{:expr \"foo\" :time-ms 10}]")]
@@ -349,7 +348,7 @@
 
     (it "parses array of deeply nested maps with keyword values at every level"
       (let [result (sut/parse-json
-                    "{:steps [{:action :read :target {:path \"/src/core.clj\" :opts {:encoding :utf8 :follow-links true}}} {:action :write :target {:path \"/out.txt\" :opts {:mode :overwrite :create-parents true}}}]}")]
+                     "{:steps [{:action :read :target {:path \"/src/core.clj\" :opts {:encoding :utf8 :follow-links true}}} {:action :write :target {:path \"/out.txt\" :opts {:mode :overwrite :create-parents true}}}]}")]
         (expect (= "read" (get-in (:value result) [:steps 0 :action])))
         (expect (= "/src/core.clj" (get-in (:value result) [:steps 0 :target :path])))
         (expect (= "utf8" (get-in (:value result) [:steps 0 :target :opts :encoding])))
@@ -358,7 +357,7 @@
 
     (it "parses multi-turn conversation shape with nested arrays of maps"
       (let [result (sut/parse-json
-                    "{:code [{:expr \"(require '[clojure.string :as str])\" :time-ms 10} {:expr \"(str/split \\\"a,b,c\\\" #\\\",\\\")\" :time-ms 50} {:expr \"(def results (map str/upper-case [\\\"hello\\\" \\\"world\\\"]))\" :time-ms 100}] :next {:reasoning :balanced :hints [{:type :perf :msg \"avoid reflection\"}]}}")]
+                     "{:code [{:expr \"(require '[clojure.string :as str])\" :time-ms 10} {:expr \"(str/split \\\"a,b,c\\\" #\\\",\\\")\" :time-ms 50} {:expr \"(def results (map str/upper-case [\\\"hello\\\" \\\"world\\\"]))\" :time-ms 100}] :next {:reasoning :balanced :hints [{:type :perf :msg \"avoid reflection\"}]}}")]
         (expect (= 3 (count (get-in (:value result) [:code]))))
         (expect (= "balanced" (get-in (:value result) [:next :reasoning])))
         (expect (= "perf" (get-in (:value result) [:next :hints 0 :type])))
@@ -366,7 +365,7 @@
 
     (it "parses map where values are heterogeneous: strings, numbers, booleans, keywords, nested maps, arrays"
       (let [result (sut/parse-json
-                    "{:name \"project-x\" :version 3 :stable true :license :mit :deps [{:group \"org.clojure\" :artifact \"clojure\" :version \"1.11.1\"} {:group \"com.blockether\" :artifact \"svar\" :version \"0.3.7\"}] :config {:jvm-opts [\"-Xmx2g\" \"-server\"] :features {:hot-reload true :aot false}}}")]
+                     "{:name \"project-x\" :version 3 :stable true :license :mit :deps [{:group \"org.clojure\" :artifact \"clojure\" :version \"1.11.1\"} {:group \"com.blockether\" :artifact \"svar\" :version \"0.3.7\"}] :config {:jvm-opts [\"-Xmx2g\" \"-server\"] :features {:hot-reload true :aot false}}}")]
         (expect (= "project-x" (:name (:value result))))
         (expect (= 3 (:version (:value result))))
         (expect (= true (:stable (:value result))))
@@ -378,7 +377,7 @@
 
     (it "parses array at top level containing nested EDN maps"
       (let [result (sut/parse-json
-                    "[{:id 1 :children [{:id 11 :leaf true} {:id 12 :children [{:id 121 :leaf true}]}]} {:id 2 :leaf true}]")]
+                     "[{:id 1 :children [{:id 11 :leaf true} {:id 12 :children [{:id 121 :leaf true}]}]} {:id 2 :leaf true}]")]
         (expect (= 2 (count (:value result))))
         (expect (= 1 (get-in (:value result) [0 :id])))
         (expect (= true (get-in (:value result) [0 :children 0 :leaf])))
@@ -387,13 +386,13 @@
 
     (it "parses clojure fence with multi-line EDN (newlines inside fence)"
       (let [input (str "```clojure\n"
-                       "{:code\n"
-                       " [{:expr \"(+ 1 2)\"\n"
-                       "   :time-ms 50}\n"
-                       "  {:expr \"(* 3 4)\"\n"
-                       "   :time-ms 30}]\n"
-                       " :final {:answer \"done\"}}\n"
-                       "```")
+                    "{:code\n"
+                    " [{:expr \"(+ 1 2)\"\n"
+                    "   :time-ms 50}\n"
+                    "  {:expr \"(* 3 4)\"\n"
+                    "   :time-ms 30}]\n"
+                    " :final {:answer \"done\"}}\n"
+                    "```")
             result (sut/parse-json input)]
         (expect (= 2 (count (get-in (:value result) [:code]))))
         (expect (= "(+ 1 2)" (get-in (:value result) [:code 0 :expr])))
@@ -402,7 +401,7 @@
 
     (it "parses EDN with string values containing colons, braces, brackets"
       (let [result (sut/parse-json
-                    "{:expr \"(let [{:keys [a b]} m] (str a \\\":\\\" b))\" :note \"handles {:keys} destructuring [and arrays]\"}")]
+                     "{:expr \"(let [{:keys [a b]} m] (str a \\\":\\\" b))\" :note \"handles {:keys} destructuring [and arrays]\"}")]
         (expect (= "(let [{:keys [a b]} m] (str a \":\" b))"
                   (:expr (:value result))))
         (expect (= "handles {:keys} destructuring [and arrays]"
@@ -410,7 +409,7 @@
 
     (it "parses massive iteration-spec shape: code + next + final all present"
       (let [result (sut/parse-json
-                    "{:code [{:expr \"(def db (connect! {:host \\\"localhost\\\" :port 5432}))\" :time-ms 2000} {:expr \"(query db \\\"SELECT * FROM users LIMIT 10\\\")\" :time-ms 500}] :next {:reasoning :deep :optimize [{:type :cache :ttl 3600} {:type :batch :size 100}]} :final {:answer \"Found 10 users\" :confidence :high :sources [\"db/users\"] :language :en}}")]
+                     "{:code [{:expr \"(def db (connect! {:host \\\"localhost\\\" :port 5432}))\" :time-ms 2000} {:expr \"(query db \\\"SELECT * FROM users LIMIT 10\\\")\" :time-ms 500}] :next {:reasoning :deep :optimize [{:type :cache :ttl 3600} {:type :batch :size 100}]} :final {:answer \"Found 10 users\" :confidence :high :sources [\"db/users\"] :language :en}}")]
         (expect (= 2 (count (get-in (:value result) [:code]))))
         (expect (= 2000 (get-in (:value result) [:code 0 :time-ms])))
         (expect (= "deep" (get-in (:value result) [:next :reasoning])))
@@ -421,7 +420,7 @@
 
     (it "parses truncated mid-string inside deeply nested structure"
       (let [result (sut/parse-json
-                    "{:code [{:expr \"(defn process [items] (reduce (fn [acc x] (update acc :count inc)) {:count 0} items))\" :time-ms 300}] :next {:reasoning :deep :context {:vars [{:name \"process\" :type :fn}] :depth 5")]
+                     "{:code [{:expr \"(defn process [items] (reduce (fn [acc x] (update acc :count inc)) {:count 0} items))\" :time-ms 300}] :next {:reasoning :deep :context {:vars [{:name \"process\" :type :fn}] :depth 5")]
         (expect (map? (:value result)))
         (expect (= 1 (count (get-in (:value result) [:code]))))
         (expect (= 300 (get-in (:value result) [:code 0 :time-ms])))
@@ -436,7 +435,7 @@
 
     (it "parses interleaved JSON + EDN keys in nested structure"
       (let [result (sut/parse-json
-                    "{\"outer\": {:inner-edn [{:x 1 :y 2} {:x 3 :y 4}] :meta {\"created\": \"2024-01-01\" :status :active}}}")]
+                     "{\"outer\": {:inner-edn [{:x 1 :y 2} {:x 3 :y 4}] :meta {\"created\": \"2024-01-01\" :status :active}}}")]
         (expect (= 1 (get-in (:value result) [:outer :inner-edn 0 :x])))
         (expect (= 4 (get-in (:value result) [:outer :inner-edn 1 :y])))
         (expect (= "2024-01-01" (get-in (:value result) [:outer :meta :created])))

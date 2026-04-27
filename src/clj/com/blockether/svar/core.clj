@@ -153,6 +153,10 @@
 (def system "Creates a system message." llm/system)
 (def user "Creates a user message, optionally with images." llm/user)
 (def assistant "Creates an assistant message." llm/assistant)
+(def cached
+  "Wraps text in a cacheable content block. On `:anthropic` api-style emits
+   `cache_control: {type: \"ephemeral\"}`; on other styles the marker is stripped."
+  llm/cached)
 (def ask! "Asks the LLM and returns structured Clojure data with token usage and cost." llm/ask!)
 (def abstract! "Creates a dense, entity-rich summary using Chain of Density prompting." llm/abstract!)
 (def eval! "Evaluates an LLM output using LLM self-evaluation." llm/eval!)

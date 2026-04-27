@@ -137,7 +137,7 @@
                     :timeout timeout-ms})
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                   (catch Exception _ nil))]
+                      (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -182,7 +182,7 @@
         base-url
         (str base-url "/chat/completions")))))
 
-(def ^:private ANTHROPIC_THINKING_OUTPUT_RESERVE
+(def ^:private ^:const ANTHROPIC_THINKING_OUTPUT_RESERVE
   "Tokens reserved for the visible response above Anthropic's thinking budget.
    Anthropic's API rejects requests where `max_tokens <= thinking.budget_tokens`
    because max_tokens counts thinking + output as one pool. We keep a small
@@ -199,9 +199,9 @@
   [body]
   (let [thinking        (:thinking body)
         enabled?        (and (map? thinking) (= "enabled" (:type thinking)))
-        budget          (when enabled? (long (or (:budget_tokens thinking) 0)))
+        budget          (long (if enabled? (or (:budget_tokens thinking) 0) 0))
         current-max     (long (or (:max_tokens body) 0))
-        required-min    (when enabled? (+ budget ANTHROPIC_THINKING_OUTPUT_RESERVE))]
+        required-min    (+ budget (long ANTHROPIC_THINKING_OUTPUT_RESERVE))]
     (if (and enabled? (pos? budget) (< current-max required-min))
       (do (trove/log! {:level :warn :id ::thinking-max-tokens-clamp
                        :data {:budget-tokens budget
@@ -210,27 +210,142 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-        (assoc body :max_tokens required-min))
+          (assoc body :max_tokens required-min))
       body)))
+
+;; =============================================================================
+;; Cache Control + Multi-block Content
+;; =============================================================================
+;;
+;; Prompt caching marker: any content block carrying `:svar/cache true` is
+;; emitted with `cache_control: {type: "ephemeral"}` on the `:anthropic`
+;; api-style. Optional `:svar/cache-ttl :1h` selects Anthropic's 1-hour
+;; tier (requires `extended-cache-ttl-2025-04-11` beta header on the
+;; provider; without it the tier is silently ignored server-side and
+;; behaves as 5min).
+;;
+;; On non-Anthropic styles (OpenAI, Z.ai, gateway-style proxies) the
+;; marker is stripped from the wire body. OpenAI's implicit caching
+;; still kicks in for stable ≥1024-tok prefixes — no client signal
+;; required.
+;;
+;; Up to 4 cache breakpoints per Anthropic call. A `cache_control` on a
+;; block caches everything in the request UP TO and INCLUDING that
+;; block, so order your stable prefix accordingly: caller-system →
+;; spec-prompt → (breakpoint) → dynamic user/assistant turns.
+
+(defn- text-block?
+  "True for an Anthropic-style text block: `{:type \"text\" :text str ...}`."
+  [m]
+  (and (map? m) (= "text" (:type m)) (string? (:text m))))
+
+(defn- normalize-content
+  "Coerces message :content into a vec of canonical content blocks.
+   Accepts string, text-block map, image block, or vec of those.
+   Returns `[]` for nil/empty so downstream walkers can rely on a vec."
+  [content]
+  (cond
+    (nil? content)        []
+    (string? content)     [{:type "text" :text content}]
+    (text-block? content) [content]
+    (and (map? content)
+      (= "image_url" (:type content)))     [content]
+    (vector? content)     (mapv (fn [b]
+                                  (cond
+                                    (string? b)        {:type "text" :text b}
+                                    (and (map? b) (string? (:type b))) b
+                                    :else (throw (ex-info
+                                                   "Content block must be a string or {:type \"...\" ...}"
+                                                   {:type :svar.core/invalid-content-block :got b}))))
+                            content)
+    :else (throw (ex-info "Unsupported :content shape"
+                   {:type :svar.core/invalid-content :got (type content)}))))
+
+(defn- cache-control-for
+  "Returns Anthropic `cache_control` map for a `:svar/cache true` block,
+   or nil. Honors `:svar/cache-ttl :1h` for the 1-hour tier."
+  [block]
+  (when (:svar/cache block)
+    (let [ttl (:svar/cache-ttl block)]
+      (case ttl
+        nil   {:type "ephemeral"}
+        :5min {:type "ephemeral"}
+        :1h   {:type "ephemeral" :ttl "1h"}
+        (throw (ex-info "Unknown :svar/cache-ttl. Expected :5min or :1h."
+                 {:type :svar.core/invalid-cache-ttl :got ttl}))))))
+
+(defn- strip-svar-keys
+  "Drop svar-internal `:svar/*` markers from a content block — used for
+   wire formats that don't speak our markers (OpenAI etc)."
+  [block]
+  (into {} (remove (fn [[k _]] (and (keyword? k) (= "svar" (namespace k))))) block))
+
+(defn- anthropic-block
+  "Translate one canonical block → Anthropic wire shape, attaching
+   `cache_control` when the block was tagged `:svar/cache true`."
+  [block]
+  (let [cc    (cache-control-for block)
+        clean (strip-svar-keys block)]
+    (cond-> clean
+      cc (assoc :cache_control cc))))
+
+(defn- anthropic-content
+  "Walks canonical blocks → Anthropic wire content. Collapses to a bare
+   string when there is exactly ONE plain text block with no cache
+   marker, otherwise emits the array form."
+  [blocks]
+  (let [wire (mapv anthropic-block blocks)]
+    (if (and (= 1 (count wire))
+          (text-block? (first wire))
+          (nil? (:cache_control (first wire))))
+      (-> wire first :text)
+      wire)))
+
+(defn- openai-content
+  "Walks canonical blocks → OpenAI wire content. Cache markers are
+   stripped; OpenAI's implicit caching benefits from a stable prefix
+   without any client signal."
+  [blocks]
+  (let [wire (mapv strip-svar-keys blocks)]
+    (cond
+      (zero? (count wire))                              ""
+      (and (= 1 (count wire)) (text-block? (first wire))) (-> wire first :text)
+      :else                                             wire)))
 
 (defn- build-anthropic-request-body
   "Builds request body in Anthropic Messages API format.
-   Extracts system messages to top-level :system field.
-   Ensures :max_tokens is always present (required by Anthropic) and that it
-   leaves room for visible output above `:thinking.budget_tokens` when
-   extended thinking is enabled."
+
+   Top-level `:system` is emitted as a STRING when no system block
+   carries a cache marker, and as an ARRAY of text blocks (with
+   per-block `cache_control`) otherwise — Anthropic accepts both.
+
+   `:svar/cache true` markers on user/assistant content blocks are
+   translated to `cache_control: {type: \"ephemeral\"}` per block.
+   Anthropic enforces a hard cap of 4 cache breakpoints per call.
+
+   `:max_tokens` is always present (Anthropic requirement) and
+   `clamp-anthropic-thinking-max-tokens` ensures visible output has
+   room above `:thinking.budget_tokens` when extended thinking is on."
   [messages model extra-body]
-  (let [system-msgs (filter #(= "system" (:role %)) messages)
-        non-system  (vec (remove #(= "system" (:role %)) messages))
-        system-text (when (seq system-msgs)
-                      (str/join "\n" (map :content system-msgs)))
+  (let [sys-blocks  (vec (mapcat #(normalize-content (:content %))
+                           (filter #(= "system" (:role %)) messages)))
+        any-cache?  (some :svar/cache sys-blocks)
+        system-wire (cond
+                      (empty? sys-blocks) nil
+                      any-cache?          (mapv anthropic-block sys-blocks)
+                      :else               (str/join "\n" (map :text sys-blocks)))
+        non-system  (->> messages
+                      (remove #(= "system" (:role %)))
+                      (mapv (fn [{:keys [role content]}]
+                              {:role role
+                               :content (anthropic-content (normalize-content content))})))
         max-tokens  (or (:max_tokens extra-body) 4096)
         body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
-                      system-text (assoc :system system-text)
+                      system-wire (assoc :system system-wire)
                       (seq extra-body) (merge (dissoc extra-body :stream_options)))]
     ;; Re-assert system after merge so extra-body can't clobber it,
     ;; then apply the thinking-aware max_tokens clamp.
-    (-> (cond-> body system-text (assoc :system system-text))
+    (-> (cond-> body system-wire (assoc :system system-wire))
       clamp-anthropic-thinking-max-tokens)))
 
 (defn- extract-anthropic-response-data
@@ -252,8 +367,15 @@
     {:content       (when (seq text-parts) (str/join "\n" text-parts))
      :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
      :api-usage     (when usage
-                      {:prompt_tokens     (:input_tokens usage)
-                       :completion_tokens (:output_tokens usage)})
+                      (let [cache-read   (:cache_read_input_tokens usage)
+                            cache-create (:cache_creation_input_tokens usage)]
+                        (cond-> {:prompt_tokens     (:input_tokens usage)
+                                 :completion_tokens (:output_tokens usage)}
+                          (or cache-read cache-create)
+                          (assoc :prompt_tokens_details
+                            (cond-> {}
+                              cache-read   (assoc :cached_tokens cache-read)
+                              cache-create (assoc :cache_creation_tokens cache-create))))))
      :http-response envelope}))
 
 (defn- extract-anthropic-stream-delta
@@ -269,11 +391,23 @@
     "message_delta"
     {:content-delta nil :reasoning-delta nil
      :api-usage (when-let [u (:usage chunk)]
-                  {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)})}
+                  (let [cr (:cache_read_input_tokens u)
+                        cc (:cache_creation_input_tokens u)]
+                    (cond-> {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)}
+                      (or cr cc) (assoc :prompt_tokens_details
+                                   (cond-> {}
+                                     cr (assoc :cached_tokens cr)
+                                     cc (assoc :cache_creation_tokens cc))))))}
     "message_start"
     {:content-delta nil :reasoning-delta nil
      :api-usage (when-let [u (get-in chunk [:message :usage])]
-                  {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)})}
+                  (let [cr (:cache_read_input_tokens u)
+                        cc (:cache_creation_input_tokens u)]
+                    (cond-> {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)}
+                      (or cr cc) (assoc :prompt_tokens_details
+                                   (cond-> {}
+                                     cr (assoc :cached_tokens cr)
+                                     cc (assoc :cache_creation_tokens cc))))))}
     ;; default — ignore other event types
     {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -376,6 +510,11 @@
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
 
+   Multi-block content (`{:type \"text\" :text ...}` arrays, image blocks)
+   passes through unchanged. svar-internal markers like `:svar/cache`
+   are stripped — OpenAI implicit caching benefits from a stable prefix
+   without any client signal.
+
    Params:
    `messages` - Vector. Chat messages.
    `model` - String. Model name.
@@ -384,8 +523,13 @@
   ([messages model]
    (build-request-body messages model nil))
   ([messages model extra-body]
-   (cond-> {:model model :messages messages}
-     (seq extra-body) (merge extra-body))))
+   (let [processed (mapv (fn [{:keys [role content] :as m}]
+                           (-> m
+                             (assoc :content (openai-content (normalize-content content)))
+                             (cond-> (= role "system") (assoc :role "system"))))
+                     messages)]
+     (cond-> {:model model :messages processed}
+       (seq extra-body) (merge extra-body)))))
 
 (defn- sanitize-messages-for-logging
   "Removes base64 image data from messages for safe logging.
@@ -558,7 +702,7 @@
         reasoning-acc (StringBuilder.)
         usage-atom (atom nil)]
     (try
-      (with-open [reader (BufferedReader. (InputStreamReader. input-stream "UTF-8"))]
+      (with-open [reader (BufferedReader. (InputStreamReader. ^java.io.InputStream input-stream "UTF-8"))]
         (loop []
           (let [line (.readLine reader)]
             (when (some? line)
@@ -654,11 +798,6 @@
        (chat-completion-with-retry
          messages model api-key base-url opts timeout-ms extra-body api-style)))))
 
-(defn- build-system-prompt
-  "Returns the system prompt content as-is. Callers own their own wrapping."
-  [objective]
-  objective)
-
 (defn- url? [s] (or (str/starts-with? s "http://") (str/starts-with? s "https://")))
 
 (defn- build-user-content
@@ -704,12 +843,50 @@
      {:svar/type :image :url source}
      {:svar/type :image :base64 source :media-type media-type})))
 
+(defn cached
+  "Wraps text in a cacheable content block.
+
+   On `:anthropic` api-style, emitted as a text block carrying
+   `cache_control: {type: \"ephemeral\"}`. On other api-styles the marker
+   is stripped from the wire — OpenAI's implicit caching reads the same
+   stable prefix without any client signal.
+
+   Anthropic enforces ≤ 4 cache breakpoints per call. A `cache_control`
+   on a block caches everything in the request UP TO and INCLUDING that
+   block, so place cached blocks at the END of your stable prefix
+   (caller-system + spec, before any dynamic user/assistant turns).
+
+   Params:
+   `text` - String. Block content.
+   `opts` - Map, optional:
+     - `:ttl` - `:5min` (default) or `:1h`. The 1-hour tier requires
+       Anthropic's `extended-cache-ttl-2025-04-11` beta header on the
+       provider; without it Anthropic falls back to the 5min tier.
+
+   Returns:
+   Content block map: `{:type \"text\" :text text :svar/cache true}`,
+   plus `:svar/cache-ttl` when set. Use inside `system`/`user`/`assistant`
+   content vectors.
+
+   Example:
+     (svar/system [(svar/cached big-stable-prompt)
+                   live-env-block])
+     ;; Anthropic emits :system as an array, last cached block becomes
+     ;; the cache breakpoint."
+  ([text] (cached text {}))
+  ([text {:keys [ttl]}]
+   (cond-> {:type "text" :text text :svar/cache true}
+     ttl (assoc :svar/cache-ttl ttl))))
+
 (defn system
   "Creates a system message.
-   
+
    Params:
-   `content` - String. System instructions / objective.
-   
+   `content` - String OR vector of content blocks (strings, text-blocks
+               `{:type \"text\" :text str ...}`, or `(cached ...)` blocks).
+               Cache markers are honored on Anthropic api-style and
+               stripped on others.
+
    Returns:
    Message map with :role \"system\"."
   [content]
@@ -717,9 +894,9 @@
 
 (defn user
   "Creates a user message, optionally with images for multimodal models.
-   
+
    Params:
-   `content` - String. The user's message text.
+   `content` - String OR vector of content blocks.
    `images` - Zero or more image maps created with `image`."
   [content & images]
   (if (seq images)
@@ -729,10 +906,10 @@
 
 (defn assistant
   "Creates an assistant message (for few-shot examples or conversation history).
-   
+
    Params:
-   `content` - String. The assistant's response.
-   
+   `content` - String OR vector of content blocks.
+
    Returns:
    Message map with :role \"assistant\"."
   [content]
@@ -823,7 +1000,7 @@
      downstream (they're svar-level opts, not provider params). Callers who
      set explicit reasoning keys inside `:extra-body` keep those overrides."
   [opts provider model-map]
-  (let [ctx (or (:context model-map) 8192)
+  (let [ctx (long (or (:context model-map) 8192))
         auto-params {:max_tokens (long (* 0.25 ctx))}
         reasoning-params (router/reasoning-extra-body
                            (:api-style provider) model-map (:reasoning opts)
@@ -895,7 +1072,14 @@
        server-side — setting this flag is harmless there.
      :extra-body - Map merged into the API request body. Use this to pass
        provider-specific params (e.g. {:temperature 0.3}, {:top_p 0.9}) or
-       to override reasoning params with explicit wire-shape overrides."
+       to override reasoning params with explicit wire-shape overrides.
+     :cache-system? - When true, marks the system message (caller-system +
+       inlined spec-prompt) as a cache breakpoint. On Anthropic this
+       emits `cache_control: {type: \"ephemeral\"}` on the last block of
+       the system message; on other api-styles the marker is stripped
+       (OpenAI implicit caching keys on the same stable prefix without a
+       client signal). For finer control, use `(svar/cached ...)` blocks
+       directly inside system/user/assistant content vectors."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
@@ -958,18 +1142,51 @@
    
    Returns:
    Map with :result, :tokens, :cost, :duration-ms."
-  [router {:keys [spec messages humanizer] :as opts}]
+  [router {:keys [spec messages humanizer cache-system?] :as opts}]
   (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts router opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
-        ;; Process messages: wrap system content with build-system-prompt
-        processed-msgs (mapv (fn [{:keys [role content] :as msg}]
-                               (if (= role "system")
-                                 (assoc msg :content (build-system-prompt content))
-                                 msg))
-                         messages)
-        ;; Append schema prompt as final user message
-        messages (conj processed-msgs {:role "user" :content schema-prompt})
+        ;; Cache-friendly placement: spec-prompt is inlined INTO the
+        ;; system message instead of dangling at the end as the last
+        ;; user message. Reasons:
+        ;;  - The schema is the most stable thing in the entire payload
+        ;;    (one spec per query, identical bytes across iterations).
+        ;;  - On Anthropic, this lets a single `cache_control` breakpoint
+        ;;    on the system block cache caller-system + schema together.
+        ;;  - On OpenAI, putting the schema at the head of a long stable
+        ;;    prefix is what implicit caching needs to fire.
+        ;;  - On every provider, models follow schemas more reliably
+        ;;    when the schema is presented BEFORE any user content,
+        ;;    not buried after a multi-turn transcript.
+        in-msgs   (vec messages)
+        sys-idx   (->> in-msgs
+                    (map-indexed vector)
+                    (some (fn [[i m]] (when (= "system" (:role m)) i))))
+        with-spec (if sys-idx
+                    (update in-msgs sys-idx
+                      (fn [{:keys [content] :as m}]
+                        (assoc m :content
+                          (conj (normalize-content content)
+                            {:type "text" :text schema-prompt}))))
+                    (into [{:role "system"
+                            :content [{:type "text" :text schema-prompt}]}]
+                      in-msgs))
+        ;; `:cache-system? true` flips the `:svar/cache` flag on the LAST
+        ;; block of the system message (now schema-prompt). On Anthropic
+        ;; the whole system message becomes one cache breakpoint covering
+        ;; caller-system + schema. On other styles the marker is stripped.
+        with-cache (if cache-system?
+                     (let [si (->> with-spec
+                                (map-indexed vector)
+                                (some (fn [[i m]] (when (= "system" (:role m)) i))))]
+                       (update with-spec si
+                         (fn [{:keys [content] :as m}]
+                           (let [blocks (normalize-content content)
+                                 last-i (dec (count blocks))]
+                             (assoc m :content
+                               (update blocks last-i assoc :svar/cache true))))))
+                     with-spec)
+        messages with-cache
           ;; Pre-flight context check (also counts input tokens for reuse)
         check-opts (cond-> {:context-limits context-limits}
                      output-reserve (assoc :output-reserve output-reserve))
@@ -1004,7 +1221,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                 (catch Exception _ partial-map)))]
+                                                    (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content — don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -1362,21 +1579,21 @@
         step-fn (partial cod-iteration-step router text target-length resolved special-instructions eval?)
         initial-state {:iterations [] :previous-summary nil :accumulated-entities []
                        :total-tokens {} :total-cost {}}
-        final-state (loop [state initial-state
-                           remaining iterations]
+        final-state (loop [state     initial-state
+                           remaining (long iterations)]
                       (if (zero? remaining)
                         state
                         (let [next-state (step-fn state)
-                              iters (:iterations next-state)]
+                              iters     (:iterations next-state)]
                           (if (and eval? (>= (count iters) 2))
                             (let [prev-score (:score (nth iters (- (count iters) 2)))
                                   curr-score (:score (last iters))]
-                              (if (or (and curr-score (>= curr-score threshold))
+                              (if (or (and curr-score (>= (double curr-score) (double threshold)))
                                     (and prev-score curr-score
-                                      (< (Math/abs (double (- curr-score prev-score))) 0.02)))
+                                      (< (Math/abs (- (double curr-score) (double prev-score))) 0.02)))
                                 next-state
-                                (recur next-state (dec remaining))))
-                            (recur next-state (dec remaining))))))
+                                (recur next-state (unchecked-dec remaining))))
+                            (recur next-state (unchecked-dec remaining))))))
         cod-iterations (:iterations final-state)
         [result duration-ms] (util/with-elapsed
                                (if (and refine? (seq cod-iterations))
@@ -1564,8 +1781,8 @@
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                :else {:strategy :root})]
+                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                    :else {:strategy :root})]
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
@@ -1738,7 +1955,7 @@
       (let [doc (first documents)
             [pages remaining'] (truncate-document-pages (:pages doc) remaining)
             acc' (conj acc (assoc doc :pages pages))]
-        (recur (rest documents) remaining' acc')))))
+        (recur (rest documents) (long remaining') acc')))))
 
 (defn- build-source-documents-block
   [documents]

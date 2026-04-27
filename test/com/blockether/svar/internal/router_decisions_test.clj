@@ -235,7 +235,7 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                                :p2 (success-result 10)))))
+                                 :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -259,13 +259,13 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                                :p2 (success-result 10)))))
+                                 :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                              :p2 (success-result 10))))
+                               :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)
@@ -434,8 +434,8 @@
           _ (advance! clock-atom 11000)]           ;; window elapsed
       ;; Old entries pruned out; p1 should be selectable again
       (expect (= :p1 (:routed/provider-id
-                       (router/with-provider-fallback r {}
-                         (fn [_ _] (success-result 10)))))))))
+                      (router/with-provider-fallback r {}
+                        (fn [_ _] (success-result 10)))))))))
 
 (defdescribe rate-limit-tpm-gate-test
   "`provider-available?` must refuse providers whose in-window summed token
@@ -453,8 +453,8 @@
           _ (seed-tokens! r :p1 [{:ts @clock-atom :n 600}
                                  {:ts @clock-atom :n 500}])]  ;; sum = 1100 >= 1000
       (expect (= :p2 (:routed/provider-id
-                       (router/with-provider-fallback r {}
-                         (fn [_ _] (success-result 10))))))))
+                      (router/with-provider-fallback r {}
+                        (fn [_ _] (success-result 10))))))))
 
   (it "TPM slot frees up after window elapses"
     (let [[clock clock-atom] (mock-clock)
@@ -465,8 +465,8 @@
           _ (seed-tokens! r :p1 [{:ts 0 :n 500}])
           _ (advance! clock-atom 6000)]          ;; past window
       (expect (= :p1 (:routed/provider-id
-                       (router/with-provider-fallback r {}
-                         (fn [_ _] (success-result 10)))))))))
+                      (router/with-provider-fallback r {}
+                        (fn [_ _] (success-result 10)))))))))
 
 (defdescribe select-and-claim-updates-request-window-test
   "`select-and-claim!` MUST atomically append the claim timestamp to the
