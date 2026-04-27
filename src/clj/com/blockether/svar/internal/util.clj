@@ -17,7 +17,7 @@
 
 (defn elapsed-since
   "Returns elapsed milliseconds since the given nanoTime start."
-  [nano-start]
+  ^double [^long nano-start]
   (/ (- (System/nanoTime) nano-start) 1e6))
 
 (defn uuid

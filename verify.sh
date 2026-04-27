@@ -156,6 +156,116 @@ _test_readme() {
   return $code
 }
 
+# GraalVM safety: load every production source file with reflection +
+# boxed-math warnings enabled, count warnings emitted from PROJECT paths
+# (third-party jars excluded). svar ships as a library that downstream
+# projects (vis, ad-hoc consumers) compile under GraalVM native-image,
+# which fails on reflection. This step is a ratchet: counts must not
+# grow beyond `.verification-baseline/graal-warnings.count`. Pass
+# `--strict` to demand zero, or `--update-baseline` to ratchet down.
+GRAAL_STRICT="${GRAAL_STRICT:-false}"
+GRAAL_BASELINE_FILE=".verification-baseline/graal-warnings.count"
+
+_graal_safety() {
+  mkdir -p .verification-baseline
+  local out err
+  out=$(mktemp)
+  err=$(mktemp)
+
+  # Walk every .clj/.cljc under src/clj with the warning flags on.
+  # Errors during load are captured separately so a syntax failure
+  # surfaces clearly instead of pretending to be a clean run.
+  clojure -M -e '
+    (set! *warn-on-reflection* true)
+    (set! *unchecked-math* :warn-on-boxed)
+    (let [root (clojure.java.io/file "src/clj")
+          clj-files (filter (fn [^java.io.File f]
+                              (and (.isFile f)
+                                (let [n (.getName f)]
+                                  (or (.endsWith n ".clj")
+                                    (.endsWith n ".cljc")))))
+                      (file-seq root))]
+      (doseq [^java.io.File f clj-files]
+        (try (load-file (.getPath f))
+          (catch Throwable e
+            (binding [*out* *err*]
+              (println "LOAD-ERROR" (.getPath f) "-" (.getMessage e)))))))' \
+    > "$out" 2> "$err" || true
+
+  # Filter to project paths only — anything from the local svar source
+  # tree on this machine. Exclude warnings emitted from inside jars
+  # we depend on (those are not ours to fix).
+  local project_dir
+  project_dir="$(pwd)"
+  local filtered
+  filtered=$(grep -E "Reflection warning|Boxed math warning" "$err" \
+    | grep -F "$project_dir/src/clj/" \
+    | sort -u)
+  local refl_count boxed_count load_errs total
+  refl_count=$( echo "$filtered" | grep -c "Reflection warning" || true)
+  boxed_count=$(echo "$filtered" | grep -c "Boxed math warning" || true)
+  load_errs=$(  grep -c "^LOAD-ERROR" "$err" || true)
+  total=$((refl_count + boxed_count))
+
+  echo "GraalVM safety walk:"
+  echo "  reflection warnings: $refl_count"
+  echo "  boxed-math warnings: $boxed_count"
+  echo "  total: $total"
+  echo "  load errors: $load_errs"
+  echo ""
+
+  if [ -n "$filtered" ]; then
+    echo "Per-namespace breakdown:"
+    echo "$filtered" \
+      | sed -E "s|.*/src/clj/(.*)\.cljc?:.*|\1|" | tr '/' '.' \
+      | sort | uniq -c | sort -rn | head -20 | sed 's/^/  /'
+    echo ""
+    echo "First 20 offenders:"
+    echo "$filtered" | head -20 | sed 's/^/  /'
+    echo ""
+  fi
+
+  rm -f "$out" "$err"
+
+  if [ "$load_errs" -gt 0 ]; then
+    echo "FAILED: $load_errs file(s) failed to load. Fix the load errors first."
+    return 1
+  fi
+
+  local baseline=0
+  [ -f "$GRAAL_BASELINE_FILE" ] && baseline=$(cat "$GRAAL_BASELINE_FILE")
+
+  if [ "${UPDATE_BASELINE:-false}" = "true" ]; then
+    echo "$total" > "$GRAAL_BASELINE_FILE"
+    echo "Updated baseline: $baseline -> $total"
+    return 0
+  fi
+
+  if [ "$GRAAL_STRICT" = "true" ]; then
+    if [ "$total" -ne 0 ]; then
+      echo "FAILED: --strict requires ZERO warnings, found $total."
+      return 1
+    fi
+    echo "OK: zero warnings (strict mode)."
+    return 0
+  fi
+
+  if [ "$total" -gt "$baseline" ]; then
+    echo "FAILED: warning count grew $baseline -> $total (regression of $((total - baseline)))."
+    echo "Either fix the new warnings or, if intentional, run:"
+    echo "  ./verify.sh --update-baseline"
+    return 1
+  fi
+
+  if [ "$total" -lt "$baseline" ]; then
+    echo "OK: warnings dropped $baseline -> $total. Ratchet down with:"
+    echo "  ./verify.sh --update-baseline"
+    return 0
+  fi
+
+  echo "OK: $total warnings == baseline."
+}
+
 # Secret scan against base branch.
 _secret_scan() {
   local base
@@ -193,6 +303,12 @@ verify_quick() {
   summary
 }
 
+verify_graal() {
+  printf "\n${BOLD}GraalVM safety only${NC}\n\n"
+  step "graal" "GraalVM safety (reflection / boxed math)" _graal_safety || return 1
+  summary
+}
+
 verify_full() {
   printf "\n${BOLD}Full verification${NC}\n\n"
 
@@ -205,16 +321,19 @@ verify_full() {
   # 3. Compile Java sources
   step "compile-java" "Compile Java sources"             make compile-java || return 1
 
-  # 4. Unit tests (with count sanity check)
+  # 4. GraalVM safety (reflection / boxed-math ratchet)
+  step "graal"        "GraalVM safety (reflection / boxed math)" _graal_safety || return 1
+
+  # 5. Unit tests (with count sanity check)
   step "test"         "Unit tests (lazytest)"            _test_unit        || return 1
 
-  # 5. README doctests
+  # 6. README doctests
   step "test-readme"  "README doctests"                  _test_readme      || return 1
 
-  # 6. Git hygiene (conflict markers, trailing whitespace)
+  # 7. Git hygiene (conflict markers, trailing whitespace)
   step "git-check"    "Git hygiene (markers, whitespace)" git diff --check || return 1
 
-  # 7. Secret scan
+  # 8. Secret scan
   step "secrets"      "Secret scan"                      _secret_scan      || return 1
 
   summary
@@ -224,9 +343,21 @@ verify_full() {
 # Entry point
 # =============================================================================
 
-MODE="${1:-full}"
+UPDATE_BASELINE="false"
+MODE="full"
+for arg in "$@"; do
+  case "$arg" in
+    --quick|-q)         MODE="quick" ;;
+    --graal)            MODE="graal" ;;
+    --strict)           GRAAL_STRICT="true" ;;
+    --update-baseline)  UPDATE_BASELINE="true"; MODE="graal" ;;
+    --full|-f)          MODE="full" ;;
+    *)                  ;;
+  esac
+done
 
 case "$MODE" in
-  --quick|-q)   verify_quick ;;
-  --full|-f|*)  verify_full  ;;
+  quick)   verify_quick ;;
+  graal)   verify_graal ;;
+  full|*)  verify_full  ;;
 esac

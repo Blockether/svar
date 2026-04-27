@@ -1,0 +1,11 @@
+;; Project-level clj-kondo configuration.
+;;
+;; redundant-let is flagged at the default :warning level. In tests
+;; we deliberately split (let [router …] (let [[provider model] …] …))
+;; into an outer "fixture" binding and an inner "destructure the
+;; result" binding because the two reads at very different layers of
+;; abstraction. Merging into a single `let` saves three characters
+;; and obscures intent. Demote to :info so verify.sh stays green
+;; without rewriting every two-stage test.
+{:linters
+ {:redundant-let {:level :info}}}

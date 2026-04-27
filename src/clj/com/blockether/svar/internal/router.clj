@@ -302,7 +302,10 @@
   (assoc
     (reduce-kv (fn [acc _pid models]
                  (reduce-kv (fn [macc model-name {:keys [context]}]
-                              (update macc model-name #(max (or % 0) (or context 0))))
+                              (update macc model-name
+                                (fn [existing]
+                                  (max (long (or existing 0))
+                                    (long (or context 0))))))
                    acc models))
       {} KNOWN_PROVIDER_MODELS)
     :default 8192))
@@ -319,8 +322,10 @@
                                 (update macc model-name
                                   (fn [existing]
                                     (if (or (nil? existing)
-                                          (< (+ (:input pricing) (:output pricing))
-                                            (+ (:input existing) (:output existing))))
+                                          (< (+ (double (:input pricing))
+                                               (double (:output pricing)))
+                                            (+ (double (:input existing))
+                                              (double (:output existing)))))
                                       pricing
                                       existing)))))
                    acc models))
@@ -493,24 +498,31 @@
 (def ^:private INTELLIGENCE_ORDER
   {:frontier 4 :high 3 :medium 2 :low 1})
 
-(def ^:private COST_ORDER
-  {:high 3 :medium 2 :low 1})
+;; NOTE: there is intentionally no COST_ORDER — the `:cost` strategy
+;; dispatches on the real `:pricing {:input N :output M}` attached to
+;; every normalized model (and falls back to a `:cost :low|:medium|:high`
+;; tag for legacy/synthetic fixtures). A keyword-rank table would
+;; quietly prefer a `:medium` $5/1M model over a `:high` $0.50/1M
+;; model, which is the opposite of what the strategy promises.
 
 (def ^:private SPEED_ORDER
   {:fast 3 :medium 2 :slow 1})
 
-(defn- router-now-ms [router] ((:clock router)))
+(defn- router-now-ms ^long [router] ((:clock router)))
 
 (defn- router-prune-window
   [router entries]
-  (let [cutoff (- (router-now-ms router) (:window-ms router))]
-    (filterv #(> (if (map? %) (:ts %) %) cutoff) entries)))
+  (let [cutoff (- (router-now-ms router) (long (:window-ms router)))]
+    (filterv (fn [e]
+               (let [^long ts (if (map? e) (:ts e) e)]
+                 (> ts cutoff)))
+      entries)))
 
-(defn- rpm-count [router ps]
+(defn- rpm-count ^long [router ps]
   (count (router-prune-window router (:requests ps []))))
 
-(defn- tpm-count [router ps]
-  (reduce + 0 (map :n (router-prune-window router (:tokens ps [])))))
+(defn- tpm-count ^long [router ps]
+  (long (reduce + 0 (map :n (router-prune-window router (:tokens ps []))))))
 
 ;; =============================================================================
 ;; Circuit Breaker — three-state: :closed → :open → :half-open → :closed
@@ -523,7 +535,7 @@
   (let [state (or (:cb-state ps) :closed)]
     (if (and (= state :open)
           (:cb-open-until ps)
-          (>= (router-now-ms router) (:cb-open-until ps)))
+          (>= (router-now-ms router) (long (:cb-open-until ps))))
       :half-open
       state)))
 
@@ -538,14 +550,14 @@
   "Records a failure. Transitions closed→open after threshold, half-open→open immediately."
   [router provider-id is-rate-limit?]
   (let [now (router-now-ms router)
-        recovery-ms (if is-rate-limit?
-                      (:cooldown-ms router)
-                      (:recovery-ms router))
-        threshold (:failure-threshold router)]
+        recovery-ms (long (if is-rate-limit?
+                            (:cooldown-ms router)
+                            (:recovery-ms router)))
+        threshold (long (:failure-threshold router))]
     (swap! (:state router) update provider-id
       (fn [ps]
         (let [current-state (cb-state router ps)
-              new-failures (inc (or (:cb-failures ps) 0))]
+              new-failures (unchecked-inc (long (or (:cb-failures ps) 0)))]
           (if (or (= current-state :half-open)
                 (>= new-failures threshold))
             (do (trove/log! {:level :warn
@@ -553,10 +565,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-              (assoc ps
-                :cb-state :open
-                :cb-failures new-failures
-                :cb-open-until (+ now recovery-ms)))
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -568,7 +580,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -583,12 +595,12 @@
     (let [{:keys [total-tokens total-cost]} @(:budget-state router)
           max-tokens (:max-tokens budget)
           max-cost (:max-cost budget)]
-      (when (and max-tokens (>= total-tokens max-tokens))
+      (when (and max-tokens (>= (long total-tokens) (long max-tokens)))
         (throw (ex-info "Token budget exhausted"
                  {:type :svar/budget-exhausted
                   :budget budget
                   :spent {:tokens total-tokens :cost total-cost}})))
-      (when (and max-cost (>= total-cost max-cost))
+      (when (and max-cost (>= (double total-cost) (double max-cost)))
         (throw (ex-info "Cost budget exhausted"
                  {:type :svar/budget-exhausted
                   :budget budget
@@ -598,9 +610,9 @@
   "Records token usage and cost against the router's budget."
   [router provider-id model-name api-usage]
   (when (:budget-state router)
-    (let [input-tokens (or (:prompt_tokens api-usage) 0)
-          output-tokens (or (:completion_tokens api-usage) 0)
-          total-tokens (+ input-tokens output-tokens)
+    (let [input-tokens  (long (or (:prompt_tokens api-usage) 0))
+          output-tokens (long (or (:completion_tokens api-usage) 0))
+          total-tokens  (+ input-tokens output-tokens)
           pricing (provider-model-pricing provider-id model-name)
           input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing 5.0)))
           output-cost (* (/ (double output-tokens) 1000000.0) (double (:output pricing 15.0)))
@@ -631,8 +643,8 @@
 
 (defn- provider-available? [router provider ps]
   (and (cb-available? router ps)
-    (< (rpm-count router ps) (:rpm provider Long/MAX_VALUE))
-    (< (tpm-count router ps) (:tpm provider Long/MAX_VALUE))))
+    (< (rpm-count router ps) (long (:rpm provider Long/MAX_VALUE)))
+    (< (tpm-count router ps) (long (:tpm provider Long/MAX_VALUE)))))
 
 (defn- preference-sort-key
   "Returns a sort key fn for a single preference keyword.
@@ -656,8 +668,8 @@
                               (double (or (:output p) 0.0)))
                         tag (case tag :low 0.1 :medium 1.0 :high 10.0 0.0)
                         :else Double/POSITIVE_INFINITY)))
-    :intelligence (fn [m] (- (get INTELLIGENCE_ORDER (:intelligence m) 0)))
-    :speed        (fn [m] (- (get SPEED_ORDER (:speed m) 0)))
+    :intelligence (fn [m] (- (long (get INTELLIGENCE_ORDER (:intelligence m) 0))))
+    :speed        (fn [m] (- (long (get SPEED_ORDER (:speed m) 0))))
     nil))
 
 (defn- resolve-model
@@ -781,8 +793,8 @@
                     requests (sort (mapv #(if (map? %) (:ts %) %)
                                      (router-prune-window router (:requests ps []))))
                     rpm-ready (when (and (seq requests)
-                                      (>= (count requests) (:rpm p Long/MAX_VALUE)))
-                                (+ (long (first requests)) window-ms))
+                                      (>= (count requests) (long (:rpm p Long/MAX_VALUE))))
+                                (+ (long (first requests)) (long window-ms)))
                     times (remove nil? [cb-ready rpm-ready])]
                 (when (seq times) (apply max times)))))
       sort first)))
@@ -803,7 +815,7 @@
           (some-> msg (str/includes? "timed out")))
         (instance? java.net.ConnectException e)
         (instance? java.net.SocketTimeoutException e)
-        (some-> (.getCause e)
+        (some-> (.getCause ^Throwable e)
           ((fn [c] (or (instance? java.net.ConnectException c)
                      (instance? java.net.SocketTimeoutException c)))))))))
 
@@ -818,27 +830,27 @@
               start-ms (router-now-ms router)]
           (swap! tried conj pid)
           (let [result (try (f provider model-map)
-                         (catch Exception e
-                           (if (router-transient-error? router e)
-                             (do (trove/log! {:level :warn
-                                              :id ::provider-retry
-                                              :data {:provider-id pid
-                                                     :error (ex-message e)}
-                                              :msg "retrying with fallback provider"})
-                               (swap! fallback-trace conj
-                                 {:provider-id pid
-                                  :model (:name model-map)
-                                  :error (ex-message e)
-                                  :status (:status (ex-data e))})
-                               (cb-record-failure! router pid
-                                 (= 429 (:status (ex-data e))))
-                               (when-let [on-chunk (:on-chunk prefs)]
-                                 (on-chunk {:reset? true
-                                            :reason :provider-fallback
-                                            :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                            :new-provider nil}))
-                               ::transient-error)
-                             (throw e))))]
+                            (catch Exception e
+                              (if (router-transient-error? router e)
+                                (do (trove/log! {:level :warn
+                                                 :id ::provider-retry
+                                                 :data {:provider-id pid
+                                                        :error (ex-message e)}
+                                                 :msg "retrying with fallback provider"})
+                                    (swap! fallback-trace conj
+                                      {:provider-id pid
+                                       :model (:name model-map)
+                                       :error (ex-message e)
+                                       :status (:status (ex-data e))})
+                                    (cb-record-failure! router pid
+                                      (= 429 (:status (ex-data e))))
+                                    (when-let [on-chunk (:on-chunk prefs)]
+                                      (on-chunk {:reset? true
+                                                 :reason :provider-fallback
+                                                 :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                                 :new-provider nil}))
+                                    ::transient-error)
+                                (throw e))))]
             (if (= result ::transient-error)
               (recur (inc attempts))
               (let [token-count (or (get-in result [:api-usage :total_tokens])
@@ -857,7 +869,7 @@
                   (seq trace) (assoc :routed/fallback-trace trace))))))
         (let [earliest (earliest-available router prefs)]
           (if (and earliest (< attempts 3))
-            (let [wait-ms (min (- earliest (router-now-ms router)) max-wait-ms)]
+            (let [wait-ms (min (- (long earliest) (router-now-ms router)) (long max-wait-ms))]
               (when (pos? wait-ms)
                 (trove/log! {:level :info :data {:wait-ms wait-ms :prefs prefs}
                              :msg "All providers busy, waiting"})
@@ -902,7 +914,7 @@
      (throw (ex-info "make-router requires at least one provider" {:type :svar/no-providers})))
    (let [normalized (vec (map-indexed normalize-provider providers))
          ids (map :id normalized)
-         dupes (keys (filter (fn [[_ n]] (> n 1)) (frequencies ids)))
+         dupes (keys (filter (fn [[_ n]] (> (long n) 1)) (frequencies ids)))
          merged (merge router-default-opts opts)
          budget (:budget opts)
          init-provider-state {:requests [] :tokens []
@@ -1162,7 +1174,7 @@
 
     (vector? content)
     (let [{:keys [texts image-tokens]}
-          (reduce (fn [{:keys [texts image-tokens]} block]
+          (reduce (fn [{:keys [texts ^long image-tokens]} block]
                     (cond
                       (and (map? block) (= "text" (:type block)))
                       {:texts (conj texts (:text block))
@@ -1171,7 +1183,7 @@
                       (and (map? block) (= "image_url" (:type block)))
                       {:texts texts
                        :image-tokens (+ image-tokens
-                                       (estimate-image-block-tokens block))}
+                                       (long (estimate-image-block-tokens block)))}
 
                       :else
                       {:texts texts :image-tokens image-tokens}))
@@ -1359,7 +1371,7 @@
                   cum (or (:cum ps) {})
                   latencies (or (:latencies cum) [])
                   avg-latency (if (seq latencies)
-                                (double (/ (reduce + 0 latencies) (count latencies)))
+                                (/ (double (reduce + 0 latencies)) (long (count latencies)))
                                 0.0)]
               (assoc acc pid
                 {:circuit-breaker (cb-state router ps)
