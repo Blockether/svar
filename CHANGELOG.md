@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.4.0] - 2026-04-28
 
+### Changed
+- release: v0.4.0 — provider-noise hardening (format-retries, json-mode, envelope)
+- release: update version files for v0.3.11, bump to next dev version
+
+
+## [v0.4.0] - 2026-04-28
+
 ### Added
 - `ask!` / `ask!*`: `:format-retries` option (default `0`). When the
   provider returns content that fails schema parsing
