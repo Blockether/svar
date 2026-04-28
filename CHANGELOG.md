@@ -7,16 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-04-28
+
+### Added
+- `ask!` / `ask!*`: `:format-retries` option (default `0`). When the
+  provider returns content that fails schema parsing
+  (`:svar.spec/schema-rejected`, `:svar.spec/required-field-missing`),
+  svar can re-prompt the model with a tiny FORMAT-RETRY turn and try
+  again locally instead of bubbling the failure to the caller. Each
+  attempt is recorded in the result map under `:format-attempts` (only
+  surfaced when retries actually happen) and in the terminal exception's
+  ex-data. Lets agent loops absorb provider-format noise without burning
+  user-visible iteration budget. Configurable via `:format-retry-on`
+  (default set: `#{:svar.spec/schema-rejected :svar.spec/required-field-missing}`;
+  callers can opt in to retrying `:svar.llm/empty-content` too).
+- `ask!` / `ask!*`: `:json-object-mode?` option. When true on `:openai`
+  api-style providers, auto-injects `response_format: {type: "json_object"}`
+  into the request body. Hardens models that historically leak prose into
+  `content` under `:deep` reasoning. Defaults to model metadata: GLM family
+  (`glm-5.1`, `glm-4.7`, `glm-5-turbo`, `glm-4.6`, `glm-4.6v`) is opted in
+  by default across `:zai`, `:zai-coding`, and `:blockether` providers.
+  Caller's explicit `:extra-body :response_format` always wins.
+- `ask!`: `:on-format-error` routing strategy. `:fail` (default) preserves
+  current behavior; `:fallback-provider` treats schema/format-typed errors
+  as transient and tries the next provider/model in the fleet, excluding
+  the offender. The terminal exception (when all providers fail) carries
+  the LAST format error's full envelope plus `:routed/fallback-trace` and
+  `:format-failed`.
+- Schema-rejection and `:svar.llm/empty-content` exceptions now carry the
+  full forensic envelope (`:model`, `:api-style`, `:chat-url`,
+  `:duration-ms`, `:api-usage`, `:reasoning`, `:content`, `:http-response`,
+  `:format-attempts`) verbatim in ex-data — no truncation. Lets callers
+  reproduce / persist / display the failing call without scraping logs.
+
+### Changed
+- Schema enforcement banner (`SCHEMA_ENFORCEMENT_BANNER` rendered into
+  every spec prompt) now explicitly states the top-level value must be a
+  JSON object (not a JSON string) and the first non-whitespace character
+  must be `{`. Reduces the GLM prose-leak rate without auto-injection.
+- All svar primitives that wrap `ask!*` internally (`abstract!`,
+  `abstract!*`, `eval!`, `eval!*`, `refine!`, `refine!*`, `sample!`)
+  now propagate the new options (`:format-retries`, `:format-retry-on`,
+  `:json-object-mode?`, `:on-format-error`, `:cache-system?`,
+  `:extra-body`, `:timeout-ms`, `:check-context?`, `:output-reserve`)
+  through every internal LLM call. Previously these were silently
+  dropped at the `select-keys` boundary inside helpers — e.g.
+  `(svar/abstract! router {:format-retries 2 ...})` would have ignored
+  the retry budget on every CoD iteration. Centralised through a new
+  private `LLM_PASSTHROUGH_KEYS` constant + `llm-passthrough` helper so
+  future svar-level options stay consistent across the public surface.
+
+
 ## [v0.3.11] - 2026-04-27
 
 ### Changed
 - llm: prompt caching, multi-block content, spec-prompt placement
 - verify: add GraalVM safety ratchet, fix existing reflection / boxed-math hits
-- spec: render transitively-referenced refs in BAML prompts
-- release: update version files for v0.3.10, bump to next dev version
-
-
-## [v0.3.11] - 2026-04-27
 
 ### Fixed
 - spec: count ref usages across the whole spec graph (main spec + every
@@ -432,7 +478,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.3.11...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.0...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -448,3 +494,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.3.9]: https://github.com/Blockether/svar/releases/tag/v0.3.9
 [v0.3.10]: https://github.com/Blockether/svar/releases/tag/v0.3.10
 [v0.3.11]: https://github.com/Blockether/svar/releases/tag/v0.3.11
+[v0.4.0]: https://github.com/Blockether/svar/releases/tag/v0.4.0

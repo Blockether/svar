@@ -227,6 +227,78 @@ Under the hood, `spec->prompt` translates the spec into a schema the LLM can fol
 
 Returns `{:result <data> :tokens {:input N :output N :total N} :cost {:input-cost N :output-cost N :total-cost N} :duration-ms N}`.
 
+### Provider-noise hardening (`:format-retries`, `:json-object-mode?`, `:on-format-error`)
+
+Some providers — notably the GLM family (`glm-5.1`, `glm-4.7`, ...) under
+`:reasoning :deep` — occasionally emit a bare prose string in `content`
+instead of the schema-conformant JSON object svar's spec asks for. The
+response looks like `"Looking at the request, I think..."` with the actual
+thinking dumped into `content` past the reasoning channel. svar rejects
+loudly with `:svar.spec/schema-rejected`, but if every rejection bubbles
+up to your agent loop you pay for provider noise out of your iteration
+budget and lose post-mortem signal.
+
+Three opt-in tools absorb the noise inside a single `ask!` call:
+
+```clojure
+(comment
+  (svar/ask! router
+    {:spec my-spec
+     :messages [(svar/user "...")]
+     :model "glm-5.1"
+     :reasoning :deep
+     :format-retries 2                        ;; retry locally on schema-rejected
+     :json-object-mode? true                  ;; auto-on for GLM — explicit override
+     :on-format-error :fallback-provider}))   ;; if model is broken, try next
+```
+
+**`:format-retries N`** — when the provider returns content that fails
+schema parsing, svar appends a tiny FORMAT-RETRY turn (the model's bad
+response + a short corrective instruction) and re-calls the provider up
+to N times. Tokens for the bad attempts are still billed (the provider
+produced them) but the caller sees one logical `ask!` call. Each attempt
+is recorded in `:format-attempts` on success or in the terminal
+exception's ex-data. Streaming (`:on-chunk`) forces retries to 0.
+
+**`:json-object-mode?`** — on `:openai` api-style providers, injects
+`response_format: {type: "json_object"}` into the request body. GLM
+models (`glm-5.1`, `glm-4.7`, `glm-5-turbo`, `glm-4.6`, `glm-4.6v`) are
+opted in by default across `:zai`, `:zai-coding`, and `:blockether`
+providers. Caller's `:extra-body :response_format` always wins; pass
+`:json-object-mode? false` to opt out a flagged model.
+
+**`:on-format-error :fallback-provider`** — if the chosen model fails
+format parsing, treat it as a transient error and try the next provider
+in the fleet, excluding the offender. When all providers fail, svar
+throws the LAST format error's full envelope with `:routed/fallback-trace`
+and `:format-failed` merged into ex-data. Default is `:fail`.
+
+#### Forensic envelope on every error
+
+Any exception thrown from `ask!` carries the full call context in
+`ex-data` — no truncation:
+
+```clojure
+(comment
+  (try (svar/ask! router opts)
+    (catch clojure.lang.ExceptionInfo e
+      (let [d (ex-data e)]
+        (:type d)            ;; :svar.spec/schema-rejected, :svar.llm/empty-content, ...
+        (:model d)           ;; "glm-5.1"
+        (:api-style d)       ;; :openai
+        (:chat-url d)        ;; "https://llm.blockether.com/v1/chat/completions"
+        (:duration-ms d)     ;; 14696.749
+        (:api-usage d)       ;; provider tokens
+        (:reasoning d)       ;; full reasoning_content (or nil)
+        (:content d)         ;; FULL untruncated content of the last attempt
+        (:http-response d)   ;; {:parsed :raw-body :url :status}
+        (:format-attempts d) ;; vec of every attempt with full content/reasoning
+        ))))
+```
+
+Use this to persist the failing call into your DB / display it in a TUI /
+reproduce it without re-invoking the LLM.
+
 ### Parsing & Validation
 
 SVAR works with any text-producing LLM because parsing happens post-step. The SAP parser handles malformed JSON out of the box:

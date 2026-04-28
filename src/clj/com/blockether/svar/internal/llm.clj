@@ -919,11 +919,46 @@
 ;; Config Resolution Helper
 ;; =============================================================================
 
+(def ^:private LLM_PASSTHROUGH_KEYS
+  "Keys that any helper invoking `ask!*` (or `eval!*` / `refine!*`) must
+   forward from caller opts to the inner LLM call. Centralised here so
+   adding a new svar-level option doesn't require chasing every internal
+   `(select-keys ... [...])` site. Includes:
+     - routing-resolved fields (`:model`, `:api-key`, `:base-url`,
+       `:api-style`, `:provider-id`)
+     - LLM tuning (`:extra-body`, `:timeout-ms`, `:check-context?`,
+       `:output-reserve`, `:cache-system?`)
+     - format-noise hardening (`:format-retries`, `:format-retry-on`,
+       `:json-object-mode?`, `:on-format-error`)
+   Used by `abstract!*`, `eval!*`, `refine!*`, `sample!*`, and the CoVe
+   helpers. Without this, calling e.g. `(svar/abstract! router
+   {:format-retries 2 ...})` would silently drop `:format-retries` on the
+   way to the inner `ask!*` call."
+  [:model :api-key :base-url :api-style :provider-id
+   :extra-body :timeout-ms :check-context? :output-reserve :cache-system?
+   :format-retries :format-retry-on :json-object-mode? :on-format-error])
+
+(defn- llm-passthrough
+  "Returns the subset of `opts` that should be forwarded to a nested
+   `ask!*` / `eval!*` / `refine!*` call. Use everywhere a helper builds
+   inner LLM opts so format-retry / json-mode / envelope behaviour is
+   uniform across the public surface."
+  [opts]
+  (select-keys opts LLM_PASSTHROUGH_KEYS))
+
 (defn- resolve-opts
   "Extracts effective values from router + opts.
    Router provides network/tokens defaults. Opts provides per-call overrides.
-   If :provider-id is present, uses provider-scoped pricing/context overlays."
-  [router {:keys [model timeout-ms check-context? output-reserve api-key base-url provider-id api-style]}]
+   If :provider-id is present, uses provider-scoped pricing/context overlays.
+
+   Returns a map carrying both the resolved network/pricing/context values
+   AND the LLM_PASSTHROUGH_KEYS verbatim, so internal helpers can
+   `(merge (llm-passthrough resolved-opts) ...)` and have the new opts
+   propagate without enumerating them at every call site."
+  [router {:keys [model timeout-ms check-context? output-reserve api-key
+                  base-url provider-id api-style extra-body cache-system?
+                  format-retries format-retry-on on-format-error]
+           :as opts}]
   (let [{:keys [network tokens]} router
         default-pricing (or (:pricing tokens) router/MODEL_PRICING)
         default-context-limits (or (:context-limits tokens) router/MODEL_CONTEXT_LIMITS)
@@ -933,17 +968,28 @@
         context-limits (if provider-id
                          (assoc default-context-limits model (router/provider-model-context provider-id model))
                          default-context-limits)]
-    {:model model
-     :timeout-ms (or timeout-ms (:timeout-ms network) router/DEFAULT_TIMEOUT_MS)
-     :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
-     :output-reserve (or output-reserve (:output-reserve tokens))
-     :api-key api-key
-     :base-url base-url
-     :api-style (or api-style :openai)
-     :provider-id provider-id
-     :network network
-     :pricing pricing
-     :context-limits context-limits}))
+    (cond-> {:model model
+             :timeout-ms (or timeout-ms (:timeout-ms network) router/DEFAULT_TIMEOUT_MS)
+             :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
+             :output-reserve (or output-reserve (:output-reserve tokens))
+             :api-key api-key
+             :base-url base-url
+             :api-style (or api-style :openai)
+             :provider-id provider-id
+             :network network
+             :pricing pricing
+             :context-limits context-limits}
+      ;; Caller-provided LLM-shaping options pass through verbatim. We use
+      ;; `some?` for most so we don't fabricate keys when the caller didn't
+      ;; set them. For `:json-object-mode?` we use `contains?` because an
+      ;; explicit `false` opts out a model that's flagged in metadata, and
+      ;; we must distinguish it from "missing" (which inherits the flag).
+      (some? extra-body)                     (assoc :extra-body extra-body)
+      (some? cache-system?)                  (assoc :cache-system? cache-system?)
+      (some? format-retries)                 (assoc :format-retries format-retries)
+      (some? format-retry-on)                (assoc :format-retry-on format-retry-on)
+      (contains? opts :json-object-mode?)    (assoc :json-object-mode? (:json-object-mode? opts))
+      (some? on-format-error)                (assoc :on-format-error on-format-error))))
 
 ;; =============================================================================
 ;; Provider Router (fallback, rate limiting, provider selection)
@@ -978,13 +1024,18 @@
   router/reset-provider!)
 
 (defn- routing-opts-with-reasoning
-  "Merges `:reasoning` from top-level opts into `:routing` so the router's
-   `resolve-routing` can translate it into a `:require-reasoning?` selection
-   filter. Returns the `:routing` map (possibly augmented). Called by every
-   routed entrypoint before `resolve-routing`."
+  "Merges svar-level opts that influence routing/fallback into the `:routing`
+   map so `resolve-routing` can build a complete prefs map:
+     - `:reasoning`         → implies `:require-reasoning? true`
+     - `:on-format-error`   → enables format-error provider fallback
+     - `:format-retry-on`   → customises the format-error type set
+   Returns the augmented `:routing` map. Called by every routed entrypoint
+   before `resolve-routing`."
   [opts]
   (cond-> (or (:routing opts) {})
-    (:reasoning opts) (assoc :reasoning (:reasoning opts))))
+    (:reasoning opts)        (assoc :reasoning (:reasoning opts))
+    (:on-format-error opts)  (assoc :on-format-error (:on-format-error opts))
+    (:format-retry-on opts)  (assoc :format-retry-on (:format-retry-on opts))))
 
 (defn- inject-routed-params
   "Injects router-chosen `[provider model-map]` + caller opts into the opts map
@@ -998,14 +1049,25 @@
      is translated per the model's api-style; non-reasoning models ignore it.
    - `:reasoning` and `:preserved-thinking?` are consumed here and removed
      downstream (they're svar-level opts, not provider params). Callers who
-     set explicit reasoning keys inside `:extra-body` keep those overrides."
+     set explicit reasoning keys inside `:extra-body` keep those overrides.
+   - `:json-object-mode?` is propagated from the routed model's metadata
+     when the caller didn't set it explicitly. Used by `ask!*` to auto-inject
+     `response_format: {type: \"json_object\"}` on `:openai` api-style —
+     hardens prose-leaking models (GLM family historically leaks prose into
+     `content` under `:deep` reasoning)."
   [opts provider model-map]
   (let [ctx (long (or (:context model-map) 8192))
         auto-params {:max_tokens (long (* 0.25 ctx))}
         reasoning-params (router/reasoning-extra-body
                            (:api-style provider) model-map (:reasoning opts)
                            {:preserved-thinking? (:preserved-thinking? opts)})
-        merged-body (merge auto-params reasoning-params (:extra-body opts))]
+        merged-body (merge auto-params reasoning-params (:extra-body opts))
+        ;; Caller's explicit :json-object-mode? (true OR false) wins; otherwise
+        ;; inherit the routed model's metadata flag. `contains?` so explicit
+        ;; `false` opts out of auto-injection even when the model is flagged.
+        json-object-mode? (if (contains? opts :json-object-mode?)
+                            (:json-object-mode? opts)
+                            (:json-object-mode? model-map))]
     (-> opts
       (dissoc :reasoning :preserved-thinking?)
       (assoc
@@ -1014,6 +1076,7 @@
         :base-url (:base-url provider)
         :api-style (:api-style provider)
         :provider-id (:id provider)
+        :json-object-mode? json-object-mode?
         :extra-body merged-body))))
 
 (defn routed-chat-completion
@@ -1079,7 +1142,19 @@
        the system message; on other api-styles the marker is stripped
        (OpenAI implicit caching keys on the same stable prefix without a
        client signal). For finer control, use `(svar/cached ...)` blocks
-       directly inside system/user/assistant content vectors."
+       directly inside system/user/assistant content vectors.
+     :on-format-error - Routing strategy when a provider returns content
+       that fails schema parsing. One of:
+         :fail               (default) — throw with the full forensic envelope.
+         :fallback-provider  — treat the failure as transient and try the
+            next provider/model in the fleet, excluding the offender. The
+            final exception (when all providers fail) is the LAST format
+            error seen, with `:routed/fallback-trace` and `:format-failed`
+            merged into ex-data. Pairs well with `:format-retries N` per
+            provider — retries first absorb prose-leaks locally, fallback
+            kicks in only when the whole model is broken for this spec.
+     :format-retries / :format-retry-on / :json-object-mode? - See `ask!*`.
+       These reach the LLM call via the routed-params pipeline."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
@@ -1121,15 +1196,84 @@
       result
       humanizable-fields)))
 
+;; =============================================================================
+;; Format-retry support — in-process retry on schema-rejected provider output
+;; =============================================================================
+;;
+;; Some providers (notably GLM-5.1 under `:deep` reasoning) emit a bare prose
+;; string in `content` instead of the schema-conformant JSON object. svar
+;; rejects loudly with `:svar.spec/schema-rejected`, but if every rejection
+;; bubbles up to the caller's agent loop (Vis/RLM/etc.), the user pays for
+;; provider noise out of their iteration budget AND loses post-mortem signal.
+;;
+;; `:format-retries` lets `ask!*` absorb that noise locally: catch the
+;; schema-rejection, append a tiny FORMAT-RETRY turn to messages, and re-call
+;; the provider. Tokens are still billed (we cannot avoid the bad attempt's
+;; tokens — the provider already produced them) but the caller sees one
+;; logical `ask!` call, not N visible failed iterations.
+;;
+;; Retries are NOT semantic agent retries. The retry message is a transport
+;; instruction, not feedback to the model's task. Keep it short.
+
+(def ^:private DEFAULT_FORMAT_RETRY_TYPES
+  "Exception `:type`s that trigger an in-process format retry. Default set
+   covers schema-shape failures (bare prose, wrong top-level type, missing
+   required fields). Callers can extend via `:format-retry-on`."
+  #{:svar.spec/schema-rejected
+    :svar.spec/required-field-missing})
+
+(defn- format-retry-prompt
+  "Tiny re-prompt appended after the model's failed assistant response. Kept
+   short — long retry messages waste tokens on every attempt and dilute the
+   instruction. Echoes the parser's exact reason verbatim so the model sees
+   which contract clause it violated."
+  [attempt total reason received-type]
+  (str "FORMAT RETRY (" attempt "/" total ").\n"
+    "Previous response violated the structured-output contract:\n"
+    "  reason: " (name (or reason :unknown)) "\n"
+    "  received-type: " (or received-type "?") "\n\n"
+    "Return ONLY one JSON object matching the schema in the system message.\n"
+    "First non-whitespace character MUST be `{`.\n"
+    "No prose. No markdown commentary. No explanation."))
+
+(defn- append-format-retry-turn
+  "Appends [assistant<previous-bad-content>, user<retry-prompt>] to messages
+   so the model sees its own failed output AND the corrective instruction.
+   Empirically outperforms a bare retry instruction — the model self-diagnoses
+   what it produced."
+  [messages prev-content attempt total reason received-type]
+  (conj (vec messages)
+    {:role "assistant" :content [{:type "text" :text (or prev-content "")}]}
+    {:role "user"      :content [{:type "text"
+                                  :text (format-retry-prompt
+                                          attempt total reason received-type)}]}))
+
+(defn- envelope-data
+  "Forensic envelope merged into every error ex-data thrown from `ask!*`. No
+   truncation — callers (Vis triage, post-mortem tooling) need the full raw
+   value to reproduce / persist / display. If a consumer wants a preview, it
+   can substr `:content` itself; svar must not destroy forensic data here."
+  [{:keys [model api-style chat-url duration-ms api-usage
+           reasoning content http-response provider-id]}]
+  (cond-> {:model         model
+           :api-style     api-style
+           :chat-url      chat-url
+           :duration-ms   duration-ms
+           :api-usage     api-usage
+           :reasoning     reasoning
+           :content       content
+           :http-response http-response}
+    provider-id (assoc :provider-id provider-id)))
+
 (defn ask!*
   "Low-level ask — calls the LLM directly without routing. Use ask! instead.
-   
+
    Includes automatic pre-flight context limit checking. If your input exceeds
    the model's context window, throws a clear error with actionable suggestions
    BEFORE making the API call.
-   
+
    Supports multimodal input via the `user` + `image` helpers.
-   
+
    Params:
    `opts` - Map with keys:
      - :spec - Spec definition, required.
@@ -1139,11 +1283,40 @@
      - :output-reserve - Integer, optional.
      - :check-context? - Boolean, optional.
      - :timeout-ms - Integer, optional.
-   
+     - :format-retries - Integer, optional. Default 0. Number of in-process
+       retries when the provider returns content that fails schema parsing
+       (e.g. bare prose, wrong top-level type, missing required fields).
+       Each retry is a separate HTTP call — tokens are still billed by the
+       provider — but the caller sees one logical `ask!` call rather than
+       multiple visible failures. Disabled when `:on-chunk` is provided
+       (streaming + retries don't compose). See also `:format-retry-on`.
+     - :format-retry-on - Set of exception `:type` keywords that trigger a
+       format retry. Defaults to
+       #{:svar.spec/schema-rejected :svar.spec/required-field-missing}.
+       Callers can opt in to retrying `:svar.llm/empty-content` (provider
+       returned reasoning but no content) by including it in the set.
+     - :json-object-mode? - Boolean, optional. When true AND the selected
+       provider uses `:openai` api-style, auto-injects
+       `response_format: {type: \"json_object\"}` into the request body.
+       Hardens prose-leaking models (GLM family historically leaks prose into
+       `content` under `:deep` reasoning). When unset, `ask!` uses the routed
+       model's metadata (GLM family is opted in by default). When the caller
+       already sets `:response_format` in `:extra-body`, that wins.
+
    Returns:
-   Map with :result, :tokens, :cost, :duration-ms."
+   Map with :result, :tokens, :cost, :duration-ms. When format retries
+   occurred, includes :format-attempts — a vector of per-attempt records
+   carrying the full content, reasoning, api-usage, and rejection reason for
+   each failed attempt before the final success.
+
+   Throws:
+   ex-info with full forensic envelope merged into ex-data: :model,
+   :api-style, :chat-url, :duration-ms, :api-usage, :reasoning, :content,
+   :http-response, plus :format-attempts when retries were exhausted. No
+   truncation — ex-data is the canonical post-mortem record."
   [router {:keys [spec messages humanizer cache-system?] :as opts}]
   (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts router opts)
+        provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
         ;; Cache-friendly placement: spec-prompt is inlined INTO the
@@ -1186,12 +1359,12 @@
                              (assoc m :content
                                (update blocks last-i assoc :svar/cache true))))))
                      with-spec)
-        messages with-cache
+        base-messages with-cache
           ;; Pre-flight context check (also counts input tokens for reuse)
         check-opts (cond-> {:context-limits context-limits}
                      output-reserve (assoc :output-reserve output-reserve))
         context-check (when check-context?
-                        (let [check (router/check-context-limit model messages check-opts)]
+                        (let [check (router/check-context-limit model base-messages check-opts)]
                           (when-not (:ok? check)
                             (anomaly/incorrect! (:error check)
                               {:type :svar.core/context-overflow
@@ -1230,93 +1403,239 @@
                                               :tokens tokens
                                               :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                                               :done? false})))))
-        extra-body (:extra-body opts)
+        ;; `:json-object-mode?` auto-injection — caller's `:extra-body
+        ;; :response_format` always wins. Only triggers on `:openai` api-style;
+        ;; Anthropic ignores response_format entirely so no-op there.
+        caller-extra-body (or (:extra-body opts) {})
+        extra-body (cond-> caller-extra-body
+                     (and (= api-style :openai)
+                       (:json-object-mode? opts)
+                       (not (contains? caller-extra-body :response_format)))
+                     (assoc :response_format {:type "json_object"}))
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
-                     extra-body (assoc :extra-body extra-body))
-        [{:keys [content reasoning api-usage http-response]} duration-ms] (util/with-elapsed
-                                                                            (chat-completion messages model api-key chat-url retry-opts))
-        _ (trove/log! {:level :info
-                       :data (log-data {:model model
-                                        :duration-ms duration-ms
-                                        :input-tokens (:prompt_tokens api-usage)
-                                        :output-tokens (:completion_tokens api-usage)
-                                        ;; nil distinguishes "no field in response" from
-                                        ;; "field present but empty" — crucial for triaging
-                                        ;; provider quirks where content is omitted entirely
-                                        ;; versus returned as an empty string.
-                                        :reasoning-length (when reasoning (count reasoning))
-                                        :content-length   (when content (count content))
-                                        :content-preview  (when content
-                                                            (subs content 0 (min 200 (count content))))})
-                       :msg "HTTP response received"})
-          ;; Some providers (notably reasoning-capable models) return HTTP 200
-          ;; with a non-empty `reasoning_content` but an empty or nil `content`
-          ;; field — usually because the output budget was consumed by reasoning
-          ;; or the spec could not be satisfied for the given input. Letting this
-          ;; propagate into `jsonish/parse-json` leaks a parser-internal
-          ;; "Input cannot be nil or empty" IllegalArgumentException to callers.
-          ;; Instead surface a typed, prompt-quality error with the model's
-          ;; reasoning attached, so RLM loops can feed an actionable message back
-          ;; to the model and persist the reasoning for triage.
-        _ (when (str/blank? content)
-            (throw (ex-info
-                     (str "The model produced reasoning but no structured JSON output. "
-                       "This usually means the response budget was consumed by reasoning, "
-                       "the spec could not be satisfied for the given input, or the task "
-                       "is ambiguous. Retry by emitting a minimal valid JSON matching the "
-                       "iteration spec; if the task is ambiguous, clarify intent or shrink "
-                       "context.")
-                     ;; ex-data intentionally carries everything a human (or
-                     ;; an automated triage loop) needs to reproduce the call
-                     ;; without having to re-invoke the LLM:
-                     ;;   :chat-url      - where the POST went
-                     ;;   :api-style     - :openai / :anthropic
-                     ;;   :duration-ms   - how long the (successful) HTTP call took
-                     ;;   :api-usage     - token accounting from the provider
-                     ;;   :reasoning     - the provider's reasoning_content (or nil)
-                     ;;   :http-response - {:parsed :raw-body :url :status} for the
-                     ;;                    non-streaming path; {:url :streaming?
-                     ;;                    :status} for streaming. Gives callers
-                     ;;                    access to :choices, :finish_reason,
-                     ;;                    provider-specific thinking fields, and
-                     ;;                    the raw body string when non-streaming.
-                     {:type          :svar.llm/empty-content
-                      :model         model
-                      :chat-url      chat-url
-                      :api-style     api-style
-                      :duration-ms   duration-ms
-                      :reasoning     reasoning
-                      :api-usage     api-usage
-                      :http-response http-response})))
-          ;; Token counting — reuse pre-counted input tokens when available, prefer API-reported counts
-        token-stats (router/count-and-estimate model messages content
-                      (cond-> {:pricing pricing :api-usage api-usage}
-                        context-check (assoc :input-tokens (:input-tokens context-check))))
-          ;; Parse response
-        raw-result (spec/str->data-with-spec content spec)
-          ;; Apply spec-driven humanization if humanizer fn provided
-        result (if humanizer
-                 (apply-spec-humanizer raw-result spec humanizer)
-                 raw-result)
-          ;; Fire final done callback with tokens and cost
-        _ (when on-chunk
-            (on-chunk {:result result
-                       :reasoning reasoning
-                       :tokens {:input (:input-tokens token-stats)
-                                :output (:output-tokens token-stats)
-                                :reasoning (:reasoning-tokens token-stats)
-                                :total (:total-tokens token-stats)}
-                       :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
-                       :done? true}))]
-    (cond-> {:result result
-             :tokens {:input (:input-tokens token-stats)
-                      :output (:output-tokens token-stats)
-                      :reasoning (:reasoning-tokens token-stats)
-                      :total (:total-tokens token-stats)}
-             :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
-             :duration-ms duration-ms}
-      reasoning (assoc :reasoning reasoning))))
+                     (seq extra-body) (assoc :extra-body extra-body))
+        ;; Format-retry config. Streaming + retries don't compose (per-attempt
+        ;; partial-parse callbacks would confuse consumers about which attempt
+        ;; the stream belongs to), so retries are forced to 0 in streaming.
+        format-retries (long (or (:format-retries opts) 0))
+        retry-types (or (:format-retry-on opts) DEFAULT_FORMAT_RETRY_TYPES)
+        effective-retries (if streaming-on-chunk 0 format-retries)
+        do-attempt
+        (fn do-attempt [msgs attempt-n]
+          (let [[{:keys [content reasoning api-usage http-response]} attempt-duration-ms]
+                (util/with-elapsed
+                  (chat-completion msgs model api-key chat-url retry-opts))]
+            (trove/log! {:level :info
+                         :data (log-data {:model model
+                                          :duration-ms attempt-duration-ms
+                                          :input-tokens (:prompt_tokens api-usage)
+                                          :output-tokens (:completion_tokens api-usage)
+                                          ;; nil distinguishes "no field in response" from
+                                          ;; "field present but empty" — crucial for triaging
+                                          ;; provider quirks where content is omitted entirely
+                                          ;; versus returned as an empty string.
+                                          :reasoning-length (when reasoning (count reasoning))
+                                          :content-length   (when content (count content))
+                                          :content-preview  (when content
+                                                              (subs content 0 (min 200 (count content))))
+                                          :attempt          attempt-n})
+                         :msg "HTTP response received"})
+            ;; Some providers (notably reasoning-capable models) return HTTP 200
+            ;; with a non-empty `reasoning_content` but an empty or nil `content`
+            ;; field — usually because the output budget was consumed by reasoning
+            ;; or the spec could not be satisfied for the given input. Letting this
+            ;; propagate into `jsonish/parse-json` leaks a parser-internal
+            ;; "Input cannot be nil or empty" IllegalArgumentException to callers.
+            ;; Instead surface a typed, prompt-quality error with the model's
+            ;; reasoning attached, so RLM loops can feed an actionable message back
+            ;; to the model and persist the reasoning for triage. Full envelope,
+            ;; never truncated.
+            (when (str/blank? content)
+              (throw (ex-info
+                       (str "The model produced reasoning but no structured JSON output. "
+                         "This usually means the response budget was consumed by reasoning, "
+                         "the spec could not be satisfied for the given input, or the task "
+                         "is ambiguous. Retry by emitting a minimal valid JSON matching the "
+                         "iteration spec; if the task is ambiguous, clarify intent or shrink "
+                         "context.")
+                       (assoc (envelope-data
+                                {:model model :api-style api-style :chat-url chat-url
+                                 :duration-ms attempt-duration-ms :api-usage api-usage
+                                 :reasoning reasoning :content content
+                                 :http-response http-response :provider-id provider-id})
+                         :type :svar.llm/empty-content
+                         :attempt attempt-n))))
+            {:content       content
+             :reasoning     reasoning
+             :api-usage     api-usage
+             :http-response http-response
+             :duration-ms   attempt-duration-ms}))]
+    (loop [msgs base-messages
+           attempt 0
+           prior-attempts []]
+      ;; Two-step outcome: HTTP first (which may throw `:svar.llm/empty-content`
+      ;; with the envelope ALREADY in ex-data because `do-attempt` populated
+      ;; it), then parse (which throws `:svar.spec/schema-rejected` /
+      ;; `:svar.spec/required-field-missing` from the spec layer — spec has
+      ;; no idea about HTTP, so its ex-data carries no envelope). We capture
+      ;; the HTTP envelope OUTSIDE the parse try/catch so it's available for
+      ;; both branches and merges into the terminal throw regardless of which
+      ;; step failed.
+      (let [http-outcome
+            (try
+              (assoc (do-attempt msgs attempt) :ok? true)
+              (catch clojure.lang.ExceptionInfo e
+                (let [data (ex-data e)
+                      ex-type (:type data)]
+                  {:ok?           false
+                   :ex            e
+                   :ex-type       ex-type
+                   :reason        (:reason data)
+                   :received-type (:received-type data)
+                   :retryable?    (contains? retry-types ex-type)
+                   :content       (:content data)
+                   :reasoning     (:reasoning data)
+                   :api-usage     (:api-usage data)
+                   :http-response (:http-response data)
+                   :duration-ms   (:duration-ms data)})))
+            ;; If HTTP succeeded, attempt the parse. Bind envelope first so
+            ;; it's in scope for both success and parse-failure branches.
+            {:keys [content reasoning api-usage http-response duration-ms]} http-outcome
+            parse-outcome
+            (when (:ok? http-outcome)
+              (try
+                (let [token-stats (router/count-and-estimate model msgs content
+                                    (cond-> {:pricing pricing :api-usage api-usage}
+                                      context-check (assoc :input-tokens (:input-tokens context-check))))]
+                  {:ok? true
+                   :result (spec/str->data-with-spec content spec)
+                   :token-stats token-stats})
+                (catch clojure.lang.ExceptionInfo e
+                  (let [data (ex-data e)
+                        ex-type (:type data)]
+                    {:ok?           false
+                     :ex            e
+                     :ex-type       ex-type
+                     :reason        (:reason data)
+                     :received-type (:received-type data)
+                     :retryable?    (contains? retry-types ex-type)}))))
+            ;; Unify outcome:
+            ;;   - HTTP failed       -> http-outcome
+            ;;   - HTTP ok + parse ok-> parse-outcome merged with envelope
+            ;;   - HTTP ok + parse !ok -> parse-outcome merged with envelope
+            outcome (cond
+                      (not (:ok? http-outcome)) http-outcome
+                      (:ok? parse-outcome)
+                      (assoc parse-outcome
+                        :content content :reasoning reasoning
+                        :api-usage api-usage :http-response http-response
+                        :duration-ms duration-ms)
+                      :else
+                      (assoc parse-outcome
+                        :content content :reasoning reasoning
+                        :api-usage api-usage :http-response http-response
+                        :duration-ms duration-ms))]
+        (cond
+          ;; SUCCESS — parse worked; humanize, fire done callback, return.
+          (:ok? outcome)
+          (let [{:keys [result token-stats]} outcome
+                final-result (if humanizer
+                               (apply-spec-humanizer result spec humanizer)
+                               result)
+                attempt-record {:attempt     attempt
+                                :ok?         true
+                                :duration-ms duration-ms
+                                :api-usage   api-usage
+                                :content     content
+                                :reasoning   reasoning}
+                all-attempts (conj prior-attempts attempt-record)]
+            (when on-chunk
+              (on-chunk {:result final-result
+                         :reasoning reasoning
+                         :tokens {:input (:input-tokens token-stats)
+                                  :output (:output-tokens token-stats)
+                                  :reasoning (:reasoning-tokens token-stats)
+                                  :total (:total-tokens token-stats)}
+                         :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+                         :done? true}))
+            (cond-> {:result final-result
+                     :tokens {:input (:input-tokens token-stats)
+                              :output (:output-tokens token-stats)
+                              :reasoning (:reasoning-tokens token-stats)
+                              :total (:total-tokens token-stats)}
+                     :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+                     :duration-ms duration-ms}
+              reasoning              (assoc :reasoning reasoning)
+              ;; Only surface :format-attempts when retries actually happened.
+              ;; Empty / single-element vec is noise on the happy path.
+              (> (count all-attempts) 1) (assoc :format-attempts all-attempts)))
+
+          ;; RETRYABLE FAILURE with budget remaining — append format-retry turn
+          ;; and recur. Token cost of the bad attempt is already sunk (provider
+          ;; produced + billed it); we record it for forensic accounting.
+          (and (:retryable? outcome)
+            (< attempt effective-retries))
+          (let [{:keys [reason received-type ex-type content reasoning
+                        api-usage http-response duration-ms]} outcome
+                ;; For empty-content the model produced no `content` to echo
+                ;; back. Synthesize a placeholder so the assistant turn isn't
+                ;; literally empty (some providers reject empty assistant
+                ;; messages on the next call).
+                echo-content (if (str/blank? content)
+                               "<no content; reasoning-only response>"
+                               content)
+                attempt-record {:attempt       attempt
+                                :ok?           false
+                                :ex-type       ex-type
+                                :reason        reason
+                                :received-type received-type
+                                :duration-ms   duration-ms
+                                :api-usage     api-usage
+                                :content       content
+                                :reasoning     reasoning
+                                :http-response http-response}]
+            (trove/log! {:level :warn :id ::format-retry
+                         :data (log-data {:model model :attempt attempt
+                                          :max-retries effective-retries
+                                          :reason reason
+                                          :received-type received-type
+                                          :ex-type ex-type
+                                          :content-length (when content (count content))})
+                         :msg "format-retry: parse failed; re-prompting"})
+            (recur (append-format-retry-turn msgs echo-content
+                     (inc attempt) effective-retries
+                     (or reason ex-type) received-type)
+              (inc attempt)
+              (conj prior-attempts attempt-record)))
+
+          ;; TERMINAL FAILURE — either non-retryable type or retries exhausted.
+          ;; Re-throw with full forensic envelope merged into ex-data.
+          :else
+          (let [{:keys [ex ex-type reason received-type content reasoning
+                        api-usage http-response duration-ms]} outcome
+                attempt-record {:attempt       attempt
+                                :ok?           false
+                                :ex-type       ex-type
+                                :reason        reason
+                                :received-type received-type
+                                :duration-ms   duration-ms
+                                :api-usage     api-usage
+                                :content       content
+                                :reasoning     reasoning
+                                :http-response http-response}
+                all-attempts (conj prior-attempts attempt-record)]
+            (throw (ex-info (ex-message ex)
+                     (merge (ex-data ex)
+                       (envelope-data
+                         {:model model :api-style api-style :chat-url chat-url
+                          :duration-ms duration-ms :api-usage api-usage
+                          :reasoning reasoning :content content
+                          :http-response http-response :provider-id provider-id})
+                       {:format-attempts          all-attempts
+                        :format-retries-attempted attempt
+                        :format-retries-allowed   effective-retries})
+                     ex))))))))
 
 ;; =============================================================================
 ;; abstract! - Chain of Density summarization
@@ -1495,7 +1814,7 @@
                     (build-cod-first-iteration-objective target-length special-instructions)
                     (build-cod-subsequent-iteration-objective target-length special-instructions))
         task (build-cod-task source-text previous-summary accumulated-entities)
-        ask-resp (ask!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id :extra-body])
+        ask-resp (ask!* router (merge (llm-passthrough resolved-opts)
                                  {:spec (build-cod-spec)
                                   :messages [(system objective)
                                              (user task)]}))
@@ -1513,7 +1832,7 @@
                  (nil? (:summary result))
                  (assoc :summary previous-summary))
         eval-resp (when eval?
-                    (eval!* router (merge (select-keys resolved-opts [:model :api-key :base-url :api-style :provider-id :extra-body])
+                    (eval!* router (merge (llm-passthrough resolved-opts)
                                      {:task (str "Summarize the following text:\n\n" source-text)
                                       :output (:summary result)
                                       :criteria COD_EVAL_CRITERIA})))
@@ -1598,7 +1917,7 @@
         [result duration-ms] (util/with-elapsed
                                (if (and refine? (seq cod-iterations))
                                  (let [final-summary (:summary (last cod-iterations))
-                                       refine-result (refine!* router (merge (select-keys resolved [:model :api-key :base-url :api-style :provider-id :extra-body])
+                                       refine-result (refine!* router (merge (llm-passthrough resolved)
                                                                         {:spec (build-cod-refinement-spec)
                                                                          :messages [(system (str "You are verifying and refining a summary for faithfulness. "
                                                                                               "Every claim in the summary must be grounded in the source text. "
@@ -1807,12 +2126,11 @@
         eval-task (build-eval-task effective-task output context)
         [{:keys [result tokens cost]} duration-ms]
         (util/with-elapsed
-          (ask!* router (merge {:model model
-                                :api-key api-key
-                                :base-url base-url
-                                :api-style api-style
-                                :provider-id provider-id}
-                          (select-keys opts [:extra-body])
+          (ask!* router (merge (llm-passthrough
+                                 (merge {:model model :api-key api-key
+                                         :base-url base-url :api-style api-style
+                                         :provider-id provider-id}
+                                   (select-keys opts LLM_PASSTHROUGH_KEYS)))
                           {:spec eval-spec
                            :messages [(system objective)
                                       (user eval-task)]})))
@@ -2532,13 +2850,16 @@
                 stop-strategy :both
                 window-size 3
                 criteria EVAL_CRITERIA}}]
-  (let [{:keys [model api-key base-url api-style provider-id]} (resolve-opts router opts)
-        llm-opts (merge {:model model
-                         :api-key api-key
-                         :base-url base-url
-                         :api-style api-style
-                         :provider-id provider-id}
-                   (select-keys opts [:extra-body]))
+  (let [resolved-opts (resolve-opts router opts)
+        {:keys [model api-key base-url api-style provider-id]} resolved-opts
+        llm-opts (merge (llm-passthrough resolved-opts)
+                   ;; Caller's original opts can carry passthrough keys that
+                   ;; resolve-opts didn't see (e.g. when refine!* is invoked
+                   ;; from inside a routed entrypoint that already mapped
+                   ;; them). Last-merge-wins semantics keep caller intent.
+                   (select-keys opts LLM_PASSTHROUGH_KEYS)
+                   {:model model :api-key api-key :base-url base-url
+                    :api-style api-style :provider-id provider-id})
          ;; Extract objective/task from messages for internal decompose/verify/eval pipeline
         original-objective (or (->> messages (filter #(= "system" (:role %))) first :content) "")
         original-task (or (->> messages (filter #(= "user" (:role %))) first :content) "")

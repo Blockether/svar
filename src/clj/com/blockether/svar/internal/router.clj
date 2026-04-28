@@ -211,12 +211,19 @@
 ;;   Z.ai / GLM:  https://bigmodel.cn/pricing
 ;;   MiniMax:     https://platform.minimax.io/docs/guides/pricing-paygo
 (def KNOWN_PROVIDER_MODELS
+  ;; `:json-object-mode?` — flagged on models that benefit from sending
+  ;; OpenAI's `response_format: {type: "json_object"}` automatically. The
+  ;; GLM family is known to leak prose into `content` under `:deep` reasoning
+  ;; without this flag, producing bare strings like `"Looking at..."` where
+  ;; svar expects a JSON object. svar auto-injects on `:openai` api-style
+  ;; only; callers can override via the top-level `:json-object-mode?` opt or
+  ;; by setting `:response_format` directly in `:extra-body`.
   {:blockether
    {"gemini-2.5-pro"            {:pricing {:input 1.25  :output 10.00} :context 2000000}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
-    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}
+    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000  :json-object-mode? true}
     "gpt-4.1"                   {:pricing {:input 2.00  :output 8.00}  :context 1000000}
     "gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
     "gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
@@ -256,11 +263,11 @@
    :zai
    ;; Direct z.ai API — per-token billing. Pricing from z.ai dashboard
    ;; (docs.z.ai/guides/pricing). Keep in sync with :zai-coding below.
-   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}
-    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
-    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}
+   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000  :json-object-mode? true}
+    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
@@ -273,11 +280,11 @@
    ;; server-side on this endpoint — `:preserved-thinking?` on ask! is a
    ;; no-op here (the server already does it). GLM-4.7 is the recommended
    ;; model on this plan per z.ai docs.
-   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000}
-    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000}
-    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000}}
+   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000  :json-object-mode? true}
+    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}}
 
    :openrouter
    {"gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
@@ -759,14 +766,22 @@
 
 (defn- select-and-claim!
   "Atomically selects best provider and claims a request slot.
-   Uses the same cross-provider composite sort as `select-provider`."
+   Uses the same cross-provider composite sort as `select-provider`.
+
+   Honors `:exclude-providers` (a set of provider IDs) in `prefs`. Used by
+   `with-provider-fallback` to route around providers that have already
+   failed format-parse contracts in the current call — since a format
+   failure is provider/model-specific, retrying the same combo is wasted
+   tokens."
   [router prefs]
   (let [{:keys [providers state]} router
-        sort-key (candidate-sort-key prefs)]
+        sort-key (candidate-sort-key prefs)
+        excluded (or (:exclude-providers prefs) #{})]
     (loop []
       (let [current @state
             ts (router-now-ms router)
             candidates (->> providers
+                         (remove #(contains? excluded (:id %)))
                          (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
                          (filter (fn [[p _]] (provider-available? router p (get current (:id p) {})))))]
         (when (seq candidates)
@@ -782,8 +797,10 @@
   (let [{:keys [providers state]} router
         current-state @state
         _ts (router-now-ms router)
-        window-ms (:window-ms router)]
+        window-ms (:window-ms router)
+        excluded (or (:exclude-providers prefs) #{})]
     (->> providers
+      (remove #(contains? excluded (:id %)))
       (filter #(some? (resolve-model % prefs)))
       (keep (fn [p]
               (let [ps (get current-state (:id p) {})
@@ -819,66 +836,140 @@
           ((fn [c] (or (instance? java.net.ConnectException c)
                      (instance? java.net.SocketTimeoutException c)))))))))
 
+(def ^:private DEFAULT_FORMAT_ERROR_TYPES
+  "Exception `:type`s that signal a structured-output schema/format failure
+   by the provider. When `:on-format-error :fallback-provider` is set on a
+   call, `with-provider-fallback` treats these as transient and tries the
+   next provider/model in the fleet (excluding the one that just failed)."
+  #{:svar.spec/schema-rejected
+    :svar.spec/required-field-missing})
+
+(defn- format-error?
+  "Returns true when the exception is a typed schema/format failure that
+   the caller has opted into provider-fallback for via `:on-format-error
+   :fallback-provider` in prefs."
+  [prefs e]
+  (and (= :fallback-provider (:on-format-error prefs))
+    (let [t (:type (ex-data e))
+          retry-set (or (:format-retry-on prefs) DEFAULT_FORMAT_ERROR_TYPES)]
+      (contains? retry-set t))))
+
 (defn with-provider-fallback [router prefs f]
   (budget-check! router)
   (let [tried (atom #{})
+        format-failed (atom #{})
+        ;; Last format-error caught — surfaced verbatim (with envelope) when
+        ;; no remaining providers can take the call. Lets callers see the
+        ;; original `:svar.spec/schema-rejected` ex-data instead of an
+        ;; opaque `:svar.llm/all-providers-exhausted`.
+        last-format-error (atom nil)
         fallback-trace (atom [])
         max-wait-ms (:max-wait-ms router)]
     (loop [attempts 0]
-      (if-let [[provider model-map] (select-and-claim! router prefs)]
-        (let [pid (:id provider)
-              start-ms (router-now-ms router)]
-          (swap! tried conj pid)
-          (let [result (try (f provider model-map)
-                            (catch Exception e
-                              (if (router-transient-error? router e)
-                                (do (trove/log! {:level :warn
-                                                 :id ::provider-retry
-                                                 :data {:provider-id pid
-                                                        :error (ex-message e)}
-                                                 :msg "retrying with fallback provider"})
-                                    (swap! fallback-trace conj
-                                      {:provider-id pid
-                                       :model (:name model-map)
-                                       :error (ex-message e)
-                                       :status (:status (ex-data e))})
-                                    (cb-record-failure! router pid
-                                      (= 429 (:status (ex-data e))))
-                                    (when-let [on-chunk (:on-chunk prefs)]
-                                      (on-chunk {:reset? true
-                                                 :reason :provider-fallback
-                                                 :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                                 :new-provider nil}))
-                                    ::transient-error)
-                                (throw e))))]
-            (if (= result ::transient-error)
-              (recur (inc attempts))
-              (let [token-count (or (get-in result [:api-usage :total_tokens])
-                                  (get-in result [:tokens :total])
-                                  0)
-                    latency-ms (- (router-now-ms router) start-ms)
-                    trace @fallback-trace]
-                (record-tokens! router pid token-count)
-                (cb-record-success! router pid)
-                (record-cumulative! router pid token-count latency-ms)
-                (budget-record! router pid (:name model-map) (or (:api-usage result) {:prompt_tokens 0 :completion_tokens 0}))
-                (cond-> (assoc result
-                          :routed/provider-id pid
-                          :routed/model (:name model-map)
-                          :routed/base-url (:base-url provider))
-                  (seq trace) (assoc :routed/fallback-trace trace))))))
-        (let [earliest (earliest-available router prefs)]
-          (if (and earliest (< attempts 3))
-            (let [wait-ms (min (- (long earliest) (router-now-ms router)) (long max-wait-ms))]
-              (when (pos? wait-ms)
-                (trove/log! {:level :info :data {:wait-ms wait-ms :prefs prefs}
-                             :msg "All providers busy, waiting"})
-                (async/<!! (async/timeout wait-ms)))
-              (recur (inc attempts)))
-            (throw (ex-info "All providers exhausted"
-                     {:type :svar.llm/all-providers-exhausted
-                      :prefs prefs :tried @tried
-                      :fallback-trace @fallback-trace}))))))))
+      ;; Each iteration honors the current set of format-failed providers.
+      ;; Once a provider produces an unrecoverable format error in this call,
+      ;; we exclude it from selection so we don't burn tokens re-trying the
+      ;; same broken combo.
+      (let [iter-prefs (cond-> prefs
+                         (seq @format-failed) (update :exclude-providers
+                                                (fnil into #{}) @format-failed))]
+        (if-let [[provider model-map] (select-and-claim! router iter-prefs)]
+          (let [pid (:id provider)
+                start-ms (router-now-ms router)]
+            (swap! tried conj pid)
+            (let [result (try (f provider model-map)
+                              (catch Exception e
+                                (cond
+                                  (router-transient-error? router e)
+                                  (do (trove/log! {:level :warn
+                                                   :id ::provider-retry
+                                                   :data {:provider-id pid
+                                                          :error (ex-message e)}
+                                                   :msg "retrying with fallback provider"})
+                                      (swap! fallback-trace conj
+                                        {:provider-id pid
+                                         :model (:name model-map)
+                                         :error (ex-message e)
+                                         :status (:status (ex-data e))
+                                         :reason :transient-error})
+                                      (cb-record-failure! router pid
+                                        (= 429 (:status (ex-data e))))
+                                      (when-let [on-chunk (:on-chunk prefs)]
+                                        (on-chunk {:reset? true
+                                                   :reason :provider-fallback
+                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                                   :new-provider nil}))
+                                      ::transient-error)
+
+                                  (format-error? prefs e)
+                                  (do (trove/log! {:level :warn
+                                                   :id ::format-error-fallback
+                                                   :data {:provider-id pid
+                                                          :model (:name model-map)
+                                                          :ex-type (:type (ex-data e))}
+                                                   :msg "format error: trying next provider"})
+                                      (swap! format-failed conj pid)
+                                      (reset! last-format-error e)
+                                      (swap! fallback-trace conj
+                                        {:provider-id pid
+                                         :model (:name model-map)
+                                         :error (ex-message e)
+                                         :ex-type (:type (ex-data e))
+                                         :reason :format-error})
+                                      (when-let [on-chunk (:on-chunk prefs)]
+                                        (on-chunk {:reset? true
+                                                   :reason :format-error-fallback
+                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                                   :new-provider nil}))
+                                      ::format-error)
+
+                                  :else (throw e))))]
+              (cond
+                (or (= result ::transient-error)
+                  (= result ::format-error))
+                (recur (inc attempts))
+
+                :else
+                (let [token-count (or (get-in result [:api-usage :total_tokens])
+                                    (get-in result [:tokens :total])
+                                    0)
+                      latency-ms (- (router-now-ms router) start-ms)
+                      trace @fallback-trace]
+                  (record-tokens! router pid token-count)
+                  (cb-record-success! router pid)
+                  (record-cumulative! router pid token-count latency-ms)
+                  (budget-record! router pid (:name model-map) (or (:api-usage result) {:prompt_tokens 0 :completion_tokens 0}))
+                  (cond-> (assoc result
+                            :routed/provider-id pid
+                            :routed/model (:name model-map)
+                            :routed/base-url (:base-url provider))
+                    (seq trace) (assoc :routed/fallback-trace trace))))))
+          ;; No selectable provider. If we got here AFTER at least one format
+          ;; error and the fleet is now empty (modulo excluded), surface the
+          ;; LAST format error verbatim with envelope + fallback-trace.
+          ;; Otherwise fall through to the existing "all providers exhausted"
+          ;; / wait-and-retry logic.
+          (if (and @last-format-error (seq @format-failed))
+            (let [e @last-format-error]
+              (throw (ex-info (ex-message e)
+                       (merge (ex-data e)
+                         {:routed/fallback-trace @fallback-trace
+                          :tried @tried
+                          :format-failed @format-failed})
+                       e)))
+            (let [earliest (earliest-available router iter-prefs)]
+              (if (and earliest (< attempts 3))
+                (let [wait-ms (min (- (long earliest) (router-now-ms router)) (long max-wait-ms))]
+                  (when (pos? wait-ms)
+                    (trove/log! {:level :info :data {:wait-ms wait-ms :prefs iter-prefs}
+                                 :msg "All providers busy, waiting"})
+                    (async/<!! (async/timeout wait-ms)))
+                  (recur (inc attempts)))
+                (throw (ex-info "All providers exhausted"
+                         {:type :svar.llm/all-providers-exhausted
+                          :prefs iter-prefs :tried @tried
+                          :format-failed @format-failed
+                          :fallback-trace @fallback-trace}))))))))))
 
 ;; =============================================================================
 ;; Router creation
@@ -961,7 +1052,8 @@
    *reasoning-capable* model rather than silently dropping `:deep` when the
    cost-cheapest model happens to be non-reasoning."
   [router routing-opts]
-  (let [{:keys [optimize provider model on-transient-error reasoning]} routing-opts
+  (let [{:keys [optimize provider model on-transient-error reasoning
+                on-format-error format-retry-on]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
         base-prefs (cond
@@ -993,7 +1085,14 @@
                      :else
                      {:strategy :root})
         prefs (cond-> base-prefs
-                reasoning (assoc :require-reasoning? true))]
+                reasoning            (assoc :require-reasoning? true)
+                ;; Format-error fallback opts — honored by
+                ;; `with-provider-fallback`. When `:on-format-error
+                ;; :fallback-provider`, schema/format-typed exceptions are
+                ;; treated as transient and the next provider/model in the
+                ;; fleet (excluding the offender) is tried.
+                on-format-error     (assoc :on-format-error on-format-error)
+                format-retry-on     (assoc :format-retry-on format-retry-on))]
     {:prefs prefs
      :error-strategy error-strategy}))
 

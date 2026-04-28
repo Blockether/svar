@@ -1234,14 +1234,14 @@
     (and (not (map? data))
       (seq (::fields spec-def)))
     (throw (ex-info (schema-reject-message)
+             ;; FULL ENVELOPE — never truncate. Callers (ask!*, Vis triage) need
+             ;; the complete raw value to reproduce / persist / show in TUI.
+             ;; If a consumer wants a preview, they can `(subs (pr-str data) 0 N)`
+             ;; themselves; svar must not destroy forensic data here.
              {:type :svar.spec/schema-rejected
               :reason :not-a-map
               :received-type (if (nil? data) :nil (-> data class .getSimpleName))
               :raw-data data
-              :raw-data-preview (let [s (pr-str data)]
-                                  (if (> (count s) 500)
-                                    (str (subs s 0 500) "…")
-                                    s))
               :message (schema-reject-message)}))
 
     (not (map? data))
@@ -1857,6 +1857,8 @@
    missing required fields."
   (str "RESPONSE FORMAT — NON-NEGOTIABLE:\n"
     "• The ENTIRE response body MUST be a JSON object matching the schema below.\n"
+    "• Top-level value MUST be a JSON object {…}, never a JSON string \"…\".\n"
+    "• First non-whitespace character MUST be `{`.\n"
     "• Markdown fences (```json, ```clojure, ```edn) are OK — the content will be extracted.\n"
     "• NO prose outside the JSON structure. NO leading apologies.\n"
     "• Required fields MUST be present and non-null.\n"
