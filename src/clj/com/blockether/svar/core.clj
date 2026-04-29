@@ -40,6 +40,7 @@
    - DuTy: https://learnprompting.org/docs/advanced/decomposition/duty-distinct-chain-of-thought
    - CoVe: https://learnprompting.org/docs/advanced/self_criticism/chain_of_verification"
   (:require
+   [com.blockether.svar.internal.codes :as codes]
    [com.blockether.svar.internal.guard :as guard]
    [com.blockether.svar.internal.humanize :as humanize]
    [com.blockether.svar.internal.llm :as llm]
@@ -158,6 +159,17 @@
    `cache_control: {type: \"ephemeral\"}`; on other styles the marker is stripped."
   llm/cached)
 (def ask! "Asks the LLM and returns structured Clojure data with token usage and cost." llm/ask!)
+(def ask-code!
+  "Plain-text completion + fenced code-block extraction. Sibling of `ask!`
+   for callers that want raw source (e.g. Clojure) instead of structured
+   JSON. Returns {:result :blocks :raw :reasoning :tokens :cost :duration-ms}.
+   Empty `:result` is a valid success."
+  llm/ask-code!)
+(def extract-code-blocks
+  "Parse fenced code blocks from raw text. Returns vec of
+   {:lang <str-or-nil> :source <str>}. Lenient+: when no fences found,
+   treats the whole input as one untagged block."
+  codes/extract-code-blocks)
 (def abstract! "Creates a dense, entity-rich summary using Chain of Density prompting." llm/abstract!)
 (def eval! "Evaluates an LLM output using LLM self-evaluation." llm/eval!)
 (def refine! "Iteratively refines LLM output using decomposition and verification." llm/refine!)

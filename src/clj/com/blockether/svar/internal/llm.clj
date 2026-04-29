@@ -6,6 +6,7 @@
    [charred.api :as json]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
+   [com.blockether.svar.internal.codes :as codes]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]
@@ -216,6 +217,11 @@
 ;; =============================================================================
 ;; Cache Control + Multi-block Content
 ;; =============================================================================
+;;
+;; Schema placement (see `ask!*`): the full schema body is inlined into the
+;; system message (head, cache-friendly) and a short tail pointer is
+;; appended to the last user message (recency-friendly). Tail pointer sits
+;; past the cache breakpoint so it is billed but never cached.
 ;;
 ;; Prompt caching marker: any content block carrying `:svar/cache true` is
 ;; emitted with `cache_control: {type: "ephemeral"}` on the `:anthropic`
@@ -1143,6 +1149,11 @@
        (OpenAI implicit caching keys on the same stable prefix without a
        client signal). For finer control, use `(svar/cached ...)` blocks
        directly inside system/user/assistant content vectors.
+     :schema-tail-pointer? - Boolean, default true. Appends a short
+       reminder to the last user message that points back to the cached
+       schema in the system message. Restores recency-driven schema
+       adherence after head-inlining the schema body. Pass `false` for
+       head-only mode. See `ask!*` for the full rationale.
      :on-format-error - Routing strategy when a provider returns content
        that fails schema parsing. One of:
          :fail               (default) — throw with the full forensic envelope.
@@ -1161,6 +1172,162 @@
       router (:prefs resolved)
       (fn [provider model-map]
         (ask!* router (inject-routed-params opts provider model-map))))))
+
+;; =============================================================================
+;; ask-code! / ask-code!* - Plain-text completion + fenced code-block extraction
+;; =============================================================================
+;;
+;; Sibling of `ask!` for callers that want raw source (typically Clojure)
+;; instead of a structured JSON envelope. No spec, no schema-prompt inlining,
+;; no JSON-mode tricks. Sends `:messages` verbatim, parses the assistant
+;; response with `codes/extract-code-blocks`, filters by `:lang` (default
+;; "clojure"), and returns the concatenated source.
+;;
+;; Empty `:result` (no matching code blocks) is a VALID success — the caller
+;; decides what to do (semantic retry with reminder, treat as no-op, etc.).
+;; svar throws only on transport-level failures: HTTP errors propagate from
+;; `chat-completion`; `:svar.llm/empty-content` is thrown when the provider
+;; returns no content at all (reasoning-only response). No format-retry loop
+;; here — extraction shape is the caller's contract, not svar's.
+
+(declare ask-code!* envelope-data)
+
+(defn ask-code!
+  "Plain-text completion + fenced code-block extraction. Routed sibling of
+   `ask!`.
+
+   Params: same routing/network/streaming opts as `ask!`, minus `:spec`,
+   `:format-retries`, `:format-retry-on`, `:json-object-mode?`. Adds:
+     :lang - String, default \"clojure\". Selects blocks tagged that lang
+             (case-insensitive) PLUS untagged blocks. Required-with-default;
+             must be a non-blank string (`nil` / `\"\"` rejected).
+
+   Returns:
+   {:result      <concatenated source string of selected blocks>
+    :blocks      [{:lang <str-or-nil> :source <str>} …]
+    :raw         <full assistant text content>
+    :reasoning   <provider reasoning channel, when present>
+    :tokens      {:input :output :reasoning :total}
+    :cost        {:input-cost :output-cost :total-cost}
+    :duration-ms <ms>}
+
+   Empty `:result` is a valid success.
+
+   Throws ex-info on transport-level failure (`:svar.llm/empty-content` when
+   the provider returns no content; HTTP errors from `chat-completion`)."
+  [router opts]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+    (router/with-provider-fallback
+      router (:prefs resolved)
+      (fn [provider model-map]
+        (ask-code!* router (inject-routed-params opts provider model-map))))))
+
+(defn ask-code!*
+  "Low-level ask-code — calls the LLM directly without routing. Use `ask-code!`.
+
+   See `ask-code!` for the full param + return contract."
+  [router {:keys [messages on-chunk] :as opts}]
+  (let [lang (or (:lang opts) "clojure")
+        _ (when-not (and (string? lang) (not (str/blank? lang)))
+            (anomaly/incorrect! ":lang must be a non-blank string"
+              {:type :svar.core/invalid-lang :lang lang}))
+        {:keys [model api-key base-url api-style timeout-ms output-reserve
+                check-context? network pricing context-limits]}
+        (resolve-opts router opts)
+        provider-id (:provider-id opts)
+        chat-url (make-chat-url base-url api-style)
+        in-msgs (vec messages)
+        check-opts (cond-> {:context-limits context-limits}
+                     output-reserve (assoc :output-reserve output-reserve))
+        context-check (when check-context?
+                        (let [check (router/check-context-limit model in-msgs check-opts)]
+                          (when-not (:ok? check)
+                            (anomaly/incorrect! (:error check)
+                              {:type :svar.core/context-overflow
+                               :model model
+                               :input-tokens (:input-tokens check)
+                               :max-input-tokens (:max-input-tokens check)
+                               :overflow (:overflow check)
+                               :utilization (:utilization check)
+                               :suggestion (str "Reduce task content by ~"
+                                             (int (* (double (:overflow check)) 0.75)) " words, "
+                                             "or use a larger context model.")}))
+                          check))
+        streaming-on-chunk (when on-chunk
+                             (fn [{:keys [content reasoning api-usage]}]
+                               (let [tokens (when api-usage
+                                              {:input (:prompt_tokens api-usage)
+                                               :output (:completion_tokens api-usage)
+                                               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
+                                               :total (:total_tokens api-usage)})
+                                     cost (when api-usage
+                                            (router/estimate-cost model
+                                              (or (:prompt_tokens api-usage) 0)
+                                              (or (:completion_tokens api-usage) 0)))
+                                     blocks   (codes/extract-code-blocks content)
+                                     selected (codes/select-blocks blocks lang)
+                                     partial-result (codes/concat-sources selected)]
+                                 (when (or (seq selected) (some? reasoning))
+                                   (on-chunk {:result    partial-result
+                                              :blocks    selected
+                                              :raw       content
+                                              :reasoning reasoning
+                                              :tokens    tokens
+                                              :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
+                                              :done?     false})))))
+        caller-extra-body (or (:extra-body opts) {})
+        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
+                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
+                     (seq caller-extra-body) (assoc :extra-body caller-extra-body))
+        [{:keys [content reasoning api-usage http-response]} duration-ms]
+        (util/with-elapsed
+          (chat-completion in-msgs model api-key chat-url retry-opts))]
+    (trove/log! {:level :info
+                 :data (log-data {:model model
+                                  :duration-ms duration-ms
+                                  :input-tokens (:prompt_tokens api-usage)
+                                  :output-tokens (:completion_tokens api-usage)
+                                  :reasoning-length (when reasoning (count reasoning))
+                                  :content-length   (when content (count content))
+                                  :content-preview  (when content
+                                                      (subs content 0 (min 200 (count content))))})
+                 :msg "ask-code! HTTP response received"})
+    (when (str/blank? content)
+      (throw (ex-info
+               (str "The model produced reasoning but no content. "
+                 "`ask-code!` needs textual content with code fences.")
+               (assoc (envelope-data
+                        {:model model :api-style api-style :chat-url chat-url
+                         :duration-ms duration-ms :api-usage api-usage
+                         :reasoning reasoning :content content
+                         :http-response http-response :provider-id provider-id})
+                 :type :svar.llm/empty-content))))
+    (let [blocks      (codes/extract-code-blocks content)
+          selected    (codes/select-blocks blocks lang)
+          result      (codes/concat-sources selected)
+          token-stats (router/count-and-estimate model in-msgs content
+                        (cond-> {:pricing pricing :api-usage api-usage}
+                          context-check (assoc :input-tokens (:input-tokens context-check))))
+          tokens      {:input     (:input-tokens token-stats)
+                       :output    (:output-tokens token-stats)
+                       :reasoning (:reasoning-tokens token-stats)
+                       :total     (:total-tokens token-stats)}
+          cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
+      (when on-chunk
+        (on-chunk {:result    result
+                   :blocks    selected
+                   :raw       content
+                   :reasoning reasoning
+                   :tokens    tokens
+                   :cost      cost
+                   :done?     true}))
+      (cond-> {:result      result
+               :blocks      selected
+               :raw         content
+               :tokens      tokens
+               :cost        cost
+               :duration-ms duration-ms}
+        reasoning (assoc :reasoning reasoning)))))
 
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
@@ -1221,6 +1388,61 @@
    required fields). Callers can extend via `:format-retry-on`."
   #{:svar.spec/schema-rejected
     :svar.spec/required-field-missing})
+
+;; =============================================================================
+;; Schema tail pointer — recency anchor past the cache breakpoint
+;; =============================================================================
+;;
+;; The full schema-prompt is inlined into the SYSTEM message for cache
+;; friendliness (Anthropic breakpoint covers caller-system + schema in one
+;; cached prefix; OpenAI implicit caching keys on the same stable head).
+;; That placement, taken alone, weakens schema adherence: the model attends
+;; most strongly to the most recent tokens before generation, and a long
+;; multi-turn transcript can dilute a head-anchored schema.
+;;
+;; The tail pointer is a tiny (~30 tok) reminder appended as the LAST text
+;; block of the LAST user message. It does NOT repeat the schema body —
+;; that stays cached at the head — it just points back to it. Sits PAST
+;; any cache breakpoint on Anthropic, so it never bloats the cached prefix
+;; and never burns a breakpoint slot. Tokens billed per call are cheap and
+;; constant.
+;;
+;; Empirically restores recency-driven schema adherence to pre-v0.4.0
+;; levels while keeping the v0.4.0 cache wins. Callers who explicitly want
+;; the head-only placement (e.g. quirky local models that double-emit on
+;; reminders) can opt out with `:schema-tail-pointer? false`.
+
+(def ^:private SCHEMA_TAIL_POINTER
+  "Short schema-pointer text appended as the last block of the last user
+   message. Does not repeat the schema body — points back to the cached
+   schema in the system message. Sits past the cache breakpoint, so it is
+   billed but never cached, never burns a breakpoint slot."
+  (str "Reply with one JSON object matching the schema in the system message.\n"
+    "First non-whitespace character MUST be `{`. "
+    "No prose. No markdown commentary. No explanation."))
+
+(defn- append-schema-tail-pointer
+  "Appends `SCHEMA_TAIL_POINTER` as a trailing text block on the LAST user
+   message. If no user message exists in `messages`, appends a new user
+   message carrying just the pointer (degenerate input — schema-only ask).
+
+   Multimodal content is preserved: the pointer is added as one extra text
+   block alongside any existing text/image blocks in the user content vec."
+  [messages]
+  (let [v (vec messages)
+        last-user-idx (->> v
+                        (map-indexed vector)
+                        (filter (fn [[_ m]] (= "user" (:role m))))
+                        last
+                        first)]
+    (if last-user-idx
+      (update v last-user-idx
+        (fn [{:keys [content] :as m}]
+          (assoc m :content
+            (conj (normalize-content content)
+              {:type "text" :text SCHEMA_TAIL_POINTER}))))
+      (conj v {:role "user"
+               :content [{:type "text" :text SCHEMA_TAIL_POINTER}]}))))
 
 (defn- format-retry-prompt
   "Tiny re-prompt appended after the model's failed assistant response. Kept
@@ -1302,6 +1524,14 @@
        `content` under `:deep` reasoning). When unset, `ask!` uses the routed
        model's metadata (GLM family is opted in by default). When the caller
        already sets `:response_format` in `:extra-body`, that wins.
+     - :schema-tail-pointer? - Boolean, optional. Default true. Appends a
+       short (~30 tok) reminder as the last text block of the last user
+       message that points back to the schema in the system message. Does
+       NOT repeat the schema body — the body stays cached at the head.
+       Restores recency-driven schema adherence after head-inlining the
+       schema for cache friendliness. Pass `false` for head-only mode
+       (rare — mostly for quirky local models that double-emit on
+       reminders, or for benchmarking the placement effect).
 
    Returns:
    Map with :result, :tokens, :cost, :duration-ms. When format retries
@@ -1314,23 +1544,27 @@
    :api-style, :chat-url, :duration-ms, :api-usage, :reasoning, :content,
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation — ex-data is the canonical post-mortem record."
-  [router {:keys [spec messages humanizer cache-system?] :as opts}]
+  [router {:keys [spec messages humanizer cache-system? schema-tail-pointer?] :as opts}]
   (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
-        ;; Cache-friendly placement: spec-prompt is inlined INTO the
-        ;; system message instead of dangling at the end as the last
-        ;; user message. Reasons:
-        ;;  - The schema is the most stable thing in the entire payload
-        ;;    (one spec per query, identical bytes across iterations).
-        ;;  - On Anthropic, this lets a single `cache_control` breakpoint
-        ;;    on the system block cache caller-system + schema together.
-        ;;  - On OpenAI, putting the schema at the head of a long stable
-        ;;    prefix is what implicit caching needs to fire.
-        ;;  - On every provider, models follow schemas more reliably
-        ;;    when the schema is presented BEFORE any user content,
-        ;;    not buried after a multi-turn transcript.
+        ;; Schema placement: full schema body is inlined into the SYSTEM
+        ;; message (head, cache-friendly) AND a tiny tail pointer is
+        ;; appended to the LAST user message (recency-friendly). The
+        ;; pointer does not repeat the schema body — it just points back
+        ;; to the cached schema in system. Trade-off rationale:
+        ;;  - Schema body is the most stable thing in the payload; head
+        ;;    placement lets a single cache_control breakpoint (or OpenAI
+        ;;    implicit caching) cache caller-system + schema together.
+        ;;  - Tail pointer sits past the breakpoint, so it is billed per
+        ;;    call but never cached and never burns a breakpoint slot.
+        ;;  - Recency-bias on schema adherence is restored without losing
+        ;;    cache wins. Pre-v0.4.0 (schema as the only tail content)
+        ;;    had recency but no caching. v0.4.0 (head-only) had caching
+        ;;    but degraded adherence. This is both.
+        ;;  - `:schema-tail-pointer? false` opts out (head-only mode) for
+        ;;    quirky models that double-emit on reminders.
         in-msgs   (vec messages)
         sys-idx   (->> in-msgs
                     (map-indexed vector)
@@ -1359,7 +1593,12 @@
                              (assoc m :content
                                (update blocks last-i assoc :svar/cache true))))))
                      with-spec)
-        base-messages with-cache
+        ;; Tail pointer ON by default — only skipped when caller passes
+        ;; an explicit `false`. `nil`/missing → ON.
+        with-tail (if (false? schema-tail-pointer?)
+                    with-cache
+                    (append-schema-tail-pointer with-cache))
+        base-messages with-tail
           ;; Pre-flight context check (also counts input tokens for reuse)
         check-opts (cond-> {:context-limits context-limits}
                      output-reserve (assoc :output-reserve output-reserve))

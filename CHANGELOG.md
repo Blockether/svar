@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `ask-code!` / `ask-code!*`: plain-text completion + fenced code-block
+  extraction. Sibling of `ask!` for callers that want raw source (e.g.
+  Clojure for an RLM agent loop) instead of a structured JSON envelope.
+  No spec, no schema-prompt inlining, no JSON-mode tricks. Sends
+  `:messages` verbatim, parses the assistant response, filters by
+  `:lang` (default `"clojure"`), and returns the concatenated source.
+  Returns `{:result :blocks :raw :reasoning :tokens :cost :duration-ms}`;
+  empty `:result` (no matching blocks) is a valid success — the caller
+  decides what to do with it. Throws on transport-level failures only
+  (`:svar.llm/empty-content`, HTTP errors).
+- `extract-code-blocks` (re-exported on `svar.core`): pure utility that
+  parses fenced code blocks from a raw text string. Returns a vector of
+  `{:lang <str-or-nil> :source <str>}`. Lenient+: matches
+  ` ```clojure ` / ` ``` ` (untagged) / falls back to treating the entire
+  input as one untagged block when no fence is present. Multi-block aware.
+
 ## [v0.4.0] - 2026-04-28
 
 ### Changed
