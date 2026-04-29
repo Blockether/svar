@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.1] - 2026-04-29
+
+### Changed
+- ask-code!: plain-text completion + fenced code-block extraction
+- Add schema-tail-pointer
+- release: update version files for v0.4.0, bump to next dev version
+
+
 ### Added
 - `ask-code!` / `ask-code!*`: plain-text completion + fenced code-block
   extraction. Sibling of `ask!` for callers that want raw source (e.g.
@@ -509,7 +517,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.1...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -526,3 +534,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.3.10]: https://github.com/Blockether/svar/releases/tag/v0.3.10
 [v0.3.11]: https://github.com/Blockether/svar/releases/tag/v0.3.11
 [v0.4.0]: https://github.com/Blockether/svar/releases/tag/v0.4.0
+[v0.4.1]: https://github.com/Blockether/svar/releases/tag/v0.4.1
