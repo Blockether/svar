@@ -1172,163 +1172,6 @@
       router (:prefs resolved)
       (fn [provider model-map]
         (ask!* router (inject-routed-params opts provider model-map))))))
-
-;; =============================================================================
-;; ask-code! / ask-code!* - Plain-text completion + fenced code-block extraction
-;; =============================================================================
-;;
-;; Sibling of `ask!` for callers that want raw source (typically Clojure)
-;; instead of a structured JSON envelope. No spec, no schema-prompt inlining,
-;; no JSON-mode tricks. Sends `:messages` verbatim, parses the assistant
-;; response with `codes/extract-code-blocks`, filters by `:lang` (default
-;; "clojure"), and returns the concatenated source.
-;;
-;; Empty `:result` (no matching code blocks) is a VALID success — the caller
-;; decides what to do (semantic retry with reminder, treat as no-op, etc.).
-;; svar throws only on transport-level failures: HTTP errors propagate from
-;; `chat-completion`; `:svar.llm/empty-content` is thrown when the provider
-;; returns no content at all (reasoning-only response). No format-retry loop
-;; here — extraction shape is the caller's contract, not svar's.
-
-(declare ask-code!* envelope-data)
-
-(defn ask-code!
-  "Plain-text completion + fenced code-block extraction. Routed sibling of
-   `ask!`.
-
-   Params: same routing/network/streaming opts as `ask!`, minus `:spec`,
-   `:format-retries`, `:format-retry-on`, `:json-object-mode?`. Adds:
-     :lang - String, default \"clojure\". Selects blocks tagged that lang
-             (case-insensitive) PLUS untagged blocks. Required-with-default;
-             must be a non-blank string (`nil` / `\"\"` rejected).
-
-   Returns:
-   {:result      <concatenated source string of selected blocks>
-    :blocks      [{:lang <str-or-nil> :source <str>} …]
-    :raw         <full assistant text content>
-    :reasoning   <provider reasoning channel, when present>
-    :tokens      {:input :output :reasoning :total}
-    :cost        {:input-cost :output-cost :total-cost}
-    :duration-ms <ms>}
-
-   Empty `:result` is a valid success.
-
-   Throws ex-info on transport-level failure (`:svar.llm/empty-content` when
-   the provider returns no content; HTTP errors from `chat-completion`)."
-  [router opts]
-  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
-    (router/with-provider-fallback
-      router (:prefs resolved)
-      (fn [provider model-map]
-        (ask-code!* router (inject-routed-params opts provider model-map))))))
-
-(defn ask-code!*
-  "Low-level ask-code — calls the LLM directly without routing. Use `ask-code!`.
-
-   See `ask-code!` for the full param + return contract."
-  [router {:keys [messages on-chunk] :as opts}]
-  (let [lang (or (:lang opts) "clojure")
-        _ (when-not (and (string? lang) (not (str/blank? lang)))
-            (anomaly/incorrect! ":lang must be a non-blank string"
-              {:type :svar.core/invalid-lang :lang lang}))
-        {:keys [model api-key base-url api-style timeout-ms output-reserve
-                check-context? network pricing context-limits]}
-        (resolve-opts router opts)
-        provider-id (:provider-id opts)
-        chat-url (make-chat-url base-url api-style)
-        in-msgs (vec messages)
-        check-opts (cond-> {:context-limits context-limits}
-                     output-reserve (assoc :output-reserve output-reserve))
-        context-check (when check-context?
-                        (let [check (router/check-context-limit model in-msgs check-opts)]
-                          (when-not (:ok? check)
-                            (anomaly/incorrect! (:error check)
-                              {:type :svar.core/context-overflow
-                               :model model
-                               :input-tokens (:input-tokens check)
-                               :max-input-tokens (:max-input-tokens check)
-                               :overflow (:overflow check)
-                               :utilization (:utilization check)
-                               :suggestion (str "Reduce task content by ~"
-                                             (int (* (double (:overflow check)) 0.75)) " words, "
-                                             "or use a larger context model.")}))
-                          check))
-        streaming-on-chunk (when on-chunk
-                             (fn [{:keys [content reasoning api-usage]}]
-                               (let [tokens (when api-usage
-                                              {:input (:prompt_tokens api-usage)
-                                               :output (:completion_tokens api-usage)
-                                               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
-                                               :total (:total_tokens api-usage)})
-                                     cost (when api-usage
-                                            (router/estimate-cost model
-                                              (or (:prompt_tokens api-usage) 0)
-                                              (or (:completion_tokens api-usage) 0)))
-                                     blocks   (codes/extract-code-blocks content)
-                                     selected (codes/select-blocks blocks lang)
-                                     partial-result (codes/concat-sources selected)]
-                                 (when (or (seq selected) (some? reasoning))
-                                   (on-chunk {:result    partial-result
-                                              :blocks    selected
-                                              :raw       content
-                                              :reasoning reasoning
-                                              :tokens    tokens
-                                              :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
-                                              :done?     false})))))
-        caller-extra-body (or (:extra-body opts) {})
-        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
-                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
-                     (seq caller-extra-body) (assoc :extra-body caller-extra-body))
-        [{:keys [content reasoning api-usage http-response]} duration-ms]
-        (util/with-elapsed
-          (chat-completion in-msgs model api-key chat-url retry-opts))]
-    (trove/log! {:level :info
-                 :data (log-data {:model model
-                                  :duration-ms duration-ms
-                                  :input-tokens (:prompt_tokens api-usage)
-                                  :output-tokens (:completion_tokens api-usage)
-                                  :reasoning-length (when reasoning (count reasoning))
-                                  :content-length   (when content (count content))
-                                  :content-preview  (when content
-                                                      (subs content 0 (min 200 (count content))))})
-                 :msg "ask-code! HTTP response received"})
-    (when (str/blank? content)
-      (throw (ex-info
-               (str "The model produced reasoning but no content. "
-                 "`ask-code!` needs textual content with code fences.")
-               (assoc (envelope-data
-                        {:model model :api-style api-style :chat-url chat-url
-                         :duration-ms duration-ms :api-usage api-usage
-                         :reasoning reasoning :content content
-                         :http-response http-response :provider-id provider-id})
-                 :type :svar.llm/empty-content))))
-    (let [blocks      (codes/extract-code-blocks content)
-          selected    (codes/select-blocks blocks lang)
-          result      (codes/concat-sources selected)
-          token-stats (router/count-and-estimate model in-msgs content
-                        (cond-> {:pricing pricing :api-usage api-usage}
-                          context-check (assoc :input-tokens (:input-tokens context-check))))
-          tokens      {:input     (:input-tokens token-stats)
-                       :output    (:output-tokens token-stats)
-                       :reasoning (:reasoning-tokens token-stats)
-                       :total     (:total-tokens token-stats)}
-          cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
-      (when on-chunk
-        (on-chunk {:result    result
-                   :blocks    selected
-                   :raw       content
-                   :reasoning reasoning
-                   :tokens    tokens
-                   :cost      cost
-                   :done?     true}))
-      (cond-> {:result      result
-               :blocks      selected
-               :raw         content
-               :tokens      tokens
-               :cost        cost
-               :duration-ms duration-ms}
-        reasoning (assoc :reasoning reasoning)))))
-
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
 ;; =============================================================================
@@ -1443,6 +1286,40 @@
               {:type "text" :text SCHEMA_TAIL_POINTER}))))
       (conj v {:role "user"
                :content [{:type "text" :text SCHEMA_TAIL_POINTER}]}))))
+
+(defn- code-tail-pointer-text
+  "Short code-format reminder appended as the last text block of the last
+   user message in `ask-code!*`. Mirrors `SCHEMA_TAIL_POINTER` for the
+   plain-text-with-fenced-code path: nudges the model back to the format
+   contract right before generation, restoring recency-driven adherence on
+   long transcripts. Parameterised by `lang` so the reminder names the
+   tag the caller asked `ask-code!` to extract."
+  [lang]
+  (str "Reply with " lang " source inside ```" lang " … ``` fences. "
+    "Multiple fenced blocks are allowed and will be concatenated in order. "
+    "No prose outside fences. No commentary, no explanation."))
+
+(defn- append-code-tail-pointer
+  "`append-schema-tail-pointer` for the `ask-code!*` path. Appends the
+   `code-tail-pointer-text` as a trailing text block on the LAST user
+   message; synthesises a user message carrying just the pointer when
+   `messages` has none. Multimodal content is preserved."
+  [messages lang]
+  (let [v (vec messages)
+        pointer (code-tail-pointer-text lang)
+        last-user-idx (->> v
+                        (map-indexed vector)
+                        (filter (fn [[_ m]] (= "user" (:role m))))
+                        last
+                        first)]
+    (if last-user-idx
+      (update v last-user-idx
+        (fn [{:keys [content] :as m}]
+          (assoc m :content
+            (conj (normalize-content content)
+              {:type "text" :text pointer}))))
+      (conj v {:role "user"
+               :content [{:type "text" :text pointer}]}))))
 
 (defn- format-retry-prompt
   "Tiny re-prompt appended after the model's failed assistant response. Kept
@@ -1875,6 +1752,177 @@
                         :format-retries-attempted attempt
                         :format-retries-allowed   effective-retries})
                      ex))))))))
+
+;; =============================================================================
+;; ask-code! / ask-code!* - Plain-text completion + fenced code-block extraction
+;; =============================================================================
+;;
+;; Sibling of `ask!` for callers that want raw source (typically Clojure)
+;; instead of a structured JSON envelope. No spec, no schema-prompt inlining,
+;; no JSON-mode tricks. Sends `:messages` verbatim, parses the assistant
+;; response with `codes/extract-code-blocks`, filters by `:lang` (default
+;; "clojure"), and returns the concatenated source.
+;;
+;; Empty `:result` (no matching code blocks) is a VALID success — the caller
+;; decides what to do (semantic retry with reminder, treat as no-op, etc.).
+;; svar throws only on transport-level failures: HTTP errors propagate from
+;; `chat-completion`; `:svar.llm/empty-content` is thrown when the provider
+;; returns no content at all (reasoning-only response). No format-retry loop
+;; here — extraction shape is the caller's contract, not svar's.
+;;
+;; Tail-pointer placement (`:code-tail-pointer?`) mirrors the schema-tail
+;; pointer on `ask!*`: a short code-format reminder is appended as the last
+;; text block of the last user message, default ON, opt-out via
+;; `:code-tail-pointer? false`. Restores recency-driven format adherence on
+;; long transcripts without burning a cache breakpoint.
+
+(defn ask-code!*
+  "Low-level ask-code — calls the LLM directly without routing. Use `ask-code!`.
+
+   See `ask-code!` for the full param + return contract."
+  [router {:keys [messages on-chunk code-tail-pointer?] :as opts}]
+  (let [lang (or (:lang opts) "clojure")
+        _ (when-not (and (string? lang) (not (str/blank? lang)))
+            (anomaly/incorrect! ":lang must be a non-blank string"
+              {:type :svar.core/invalid-lang :lang lang}))
+        {:keys [model api-key base-url api-style timeout-ms output-reserve
+                check-context? network pricing context-limits]}
+        (resolve-opts router opts)
+        provider-id (:provider-id opts)
+        chat-url (make-chat-url base-url api-style)
+        in-msgs (vec messages)
+        ;; Default ON: append the code-format reminder as the LAST text
+        ;; block of the LAST user message. Only literal `false` opts out
+        ;; (nil / missing keep the default), matching ask!*'s semantics.
+        with-tail (if (false? code-tail-pointer?)
+                    in-msgs
+                    (append-code-tail-pointer in-msgs lang))
+        check-opts (cond-> {:context-limits context-limits}
+                     output-reserve (assoc :output-reserve output-reserve))
+        context-check (when check-context?
+                        (let [check (router/check-context-limit model with-tail check-opts)]
+                          (when-not (:ok? check)
+                            (anomaly/incorrect! (:error check)
+                              {:type :svar.core/context-overflow
+                               :model model
+                               :input-tokens (:input-tokens check)
+                               :max-input-tokens (:max-input-tokens check)
+                               :overflow (:overflow check)
+                               :utilization (:utilization check)
+                               :suggestion (str "Reduce task content by ~"
+                                             (int (* (double (:overflow check)) 0.75)) " words, "
+                                             "or use a larger context model.")}))
+                          check))
+        streaming-on-chunk (when on-chunk
+                             (fn [{:keys [content reasoning api-usage]}]
+                               (let [tokens (when api-usage
+                                              {:input (:prompt_tokens api-usage)
+                                               :output (:completion_tokens api-usage)
+                                               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
+                                               :total (:total_tokens api-usage)})
+                                     cost (when api-usage
+                                            (router/estimate-cost model
+                                              (or (:prompt_tokens api-usage) 0)
+                                              (or (:completion_tokens api-usage) 0)))
+                                     blocks   (codes/extract-code-blocks content)
+                                     selected (codes/select-blocks blocks lang)
+                                     partial-result (codes/concat-sources selected)]
+                                 (when (or (seq selected) (some? reasoning))
+                                   (on-chunk {:result    partial-result
+                                              :blocks    selected
+                                              :raw       content
+                                              :reasoning reasoning
+                                              :tokens    tokens
+                                              :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
+                                              :done?     false})))))
+        caller-extra-body (or (:extra-body opts) {})
+        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
+                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
+                     (seq caller-extra-body) (assoc :extra-body caller-extra-body))
+        [{:keys [content reasoning api-usage http-response]} duration-ms]
+        (util/with-elapsed
+          (chat-completion with-tail model api-key chat-url retry-opts))]
+    (trove/log! {:level :info
+                 :data (log-data {:model model
+                                  :duration-ms duration-ms
+                                  :input-tokens (:prompt_tokens api-usage)
+                                  :output-tokens (:completion_tokens api-usage)
+                                  :reasoning-length (when reasoning (count reasoning))
+                                  :content-length   (when content (count content))
+                                  :content-preview  (when content
+                                                      (subs content 0 (min 200 (count content))))})
+                 :msg "ask-code! HTTP response received"})
+    (when (str/blank? content)
+      (throw (ex-info
+               (str "The model produced reasoning but no content. "
+                 "`ask-code!` needs textual content with code fences.")
+               (assoc (envelope-data
+                        {:model model :api-style api-style :chat-url chat-url
+                         :duration-ms duration-ms :api-usage api-usage
+                         :reasoning reasoning :content content
+                         :http-response http-response :provider-id provider-id})
+                 :type :svar.llm/empty-content))))
+    (let [blocks      (codes/extract-code-blocks content)
+          selected    (codes/select-blocks blocks lang)
+          result      (codes/concat-sources selected)
+          token-stats (router/count-and-estimate model with-tail content
+                        (cond-> {:pricing pricing :api-usage api-usage}
+                          context-check (assoc :input-tokens (:input-tokens context-check))))
+          tokens      {:input     (:input-tokens token-stats)
+                       :output    (:output-tokens token-stats)
+                       :reasoning (:reasoning-tokens token-stats)
+                       :total     (:total-tokens token-stats)}
+          cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
+      (when on-chunk
+        (on-chunk {:result    result
+                   :blocks    selected
+                   :raw       content
+                   :reasoning reasoning
+                   :tokens    tokens
+                   :cost      cost
+                   :done?     true}))
+      (cond-> {:result      result
+               :blocks      selected
+               :raw         content
+               :tokens      tokens
+               :cost        cost
+               :duration-ms duration-ms}
+        reasoning (assoc :reasoning reasoning)))))
+
+(defn ask-code!
+  "Plain-text completion + fenced code-block extraction. Routed sibling of
+   `ask!`.
+
+   Params: same routing/network/streaming opts as `ask!`, minus `:spec`,
+   `:format-retries`, `:format-retry-on`, `:json-object-mode?`. Adds:
+     :lang - String, default \"clojure\". Selects blocks tagged that lang
+             (case-insensitive) PLUS untagged blocks. Required-with-default;
+             must be a non-blank string (`nil` / `\"\"` rejected).
+     :code-tail-pointer? - Boolean, default true. Appends a short code-format
+             reminder as the last text block of the last user message,
+             pointing at the format contract (\"reply with `lang` source
+             inside ```lang … ``` fences\"). Restores recency-driven format
+             adherence on long transcripts. Set to `false` to opt out.
+
+   Returns:
+   {:result      <concatenated source string of selected blocks>
+    :blocks      [{:lang <str-or-nil> :source <str>} …]
+    :raw         <full assistant text content>
+    :reasoning   <provider reasoning channel, when present>
+    :tokens      {:input :output :reasoning :total}
+    :cost        {:input-cost :output-cost :total-cost}
+    :duration-ms <ms>}
+
+   Empty `:result` is a valid success.
+
+   Throws ex-info on transport-level failure (`:svar.llm/empty-content` when
+   the provider returns no content; HTTP errors from `chat-completion`)."
+  [router opts]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+    (router/with-provider-fallback
+      router (:prefs resolved)
+      (fn [provider model-map]
+        (ask-code!* router (inject-routed-params opts provider model-map))))))
 
 ;; =============================================================================
 ;; abstract! - Chain of Density summarization

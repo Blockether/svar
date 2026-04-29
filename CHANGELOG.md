@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty `:result` (no matching blocks) is a valid success — the caller
   decides what to do with it. Throws on transport-level failures only
   (`:svar.llm/empty-content`, HTTP errors).
+- `ask-code!` / `ask-code!*`: `:code-tail-pointer?` option (default
+  `true`). Mirrors the `ask!*` schema-tail-pointer feature for the
+  fenced-code path: appends a short, lang-aware reminder as the LAST
+  text block of the LAST user message ("Reply with `lang` source inside
+  ```lang … ``` fences. …"). Restores recency-driven format adherence on
+  long transcripts without burning a cache breakpoint. Set to `false` to
+  opt out (e.g. quirky local models that double-emit on reminders).
 - `extract-code-blocks` (re-exported on `svar.core`): pure utility that
   parses fenced code blocks from a raw text string. Returns a vector of
   `{:lang <str-or-nil> :source <str>}`. Lenient+: matches
