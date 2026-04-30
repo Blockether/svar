@@ -470,6 +470,104 @@
                              (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
          :else (throw (:error result)))))))
 
+(def ^:private content-block-types
+  #{"text" "output_text"})
+
+(def ^:private reasoning-block-types
+  #{"thinking"
+    "reasoning"
+    "reasoning_text"
+    "reasoning_summary"
+    "reasoning_summary_text"})
+
+(defn- content-part-text [part]
+  (cond
+    (string? part)
+    (when-not (str/blank? part) part)
+
+    (map? part)
+    (let [type (:type part)]
+      (cond
+        (content-block-types type)
+        (some-> (or (:text part) (:delta part)) content-part-text)
+
+        (= "message" type)
+        (some-> (:content part) content-part-text)
+
+        (nil? type)
+        (some-> (:text part) content-part-text)
+
+        :else nil))
+
+    (sequential? part)
+    (let [s (->> part (keep content-part-text) (str/join ""))]
+      (when-not (str/blank? s) s))
+
+    :else nil))
+
+(defn- reasoning-part-text [part]
+  (cond
+    (string? part)
+    (when-not (str/blank? part) part)
+
+    (map? part)
+    (let [type (:type part)]
+      (cond
+        (reasoning-block-types type)
+        (or (some-> (:thinking part) reasoning-part-text)
+          (some-> (:summary part) reasoning-part-text)
+          (some-> (:content part) reasoning-part-text)
+          (some-> (or (:text part) (:delta part)) reasoning-part-text))
+
+        (= "message" type)
+        (some-> (:content part) reasoning-part-text)
+
+        (nil? type)
+        (or (some-> (:thinking part) reasoning-part-text)
+          (some-> (:summary part) reasoning-part-text)
+          (some-> (or (:text part) (:delta part)) reasoning-part-text))
+
+        :else nil))
+
+    (sequential? part)
+    (let [s (->> part (keep reasoning-part-text) (str/join ""))]
+      (when-not (str/blank? s) s))
+
+    :else nil))
+
+(defn- content-blocks-text [blocks]
+  (let [s (->> blocks (keep content-part-text) (str/join "\n"))]
+    (when-not (str/blank? s) s)))
+
+(defn- reasoning-blocks-text [blocks]
+  (let [s (->> blocks
+            (filter #(reasoning-block-types (:type %)))
+            (keep reasoning-part-text)
+            (str/join "\n"))]
+    (when-not (str/blank? s) (str/trimr s))))
+
+(defn- response-output-text [response]
+  (->> (:output response)
+    (keep (fn [item]
+            (case (:type item)
+              "message"     (content-blocks-text (:content item))
+              "output_text" (content-part-text item)
+              nil)))
+    (remove str/blank?)
+    (str/join "\n")))
+
+(defn- response-output-reasoning [response]
+  (->> (:output response)
+    (keep (fn [item]
+            (case (:type item)
+              "reasoning" (or (some-> (:content item) reasoning-part-text)
+                            (some-> (:summary item) reasoning-part-text)
+                            (reasoning-part-text item))
+              "message"   (reasoning-blocks-text (:content item))
+              nil)))
+    (remove str/blank?)
+    (str/join "\n\n")))
+
 ;; =============================================================================
 ;; LLM API
 ;; =============================================================================
@@ -479,9 +577,9 @@
    response envelope. Accepts the map returned by `http-post!`:
      {:parsed <parsed-body> :raw-body <string> :url <str> :status <int>}
 
-   Handles both OpenAI format (content is string, reasoning_content is string)
-   and Anthropic extended thinking format (content is array of blocks with
-   type thinking/text).
+   Handles standard chat-completions envelopes, block-array content,
+   and Responses-style `:output` fallbacks some gateways only surface on
+   the terminal payload.
 
    Returns: {:content :reasoning :api-usage :http-response},
    where :http-response is the ORIGINAL envelope preserved so a downstream
@@ -489,29 +587,34 @@
    full raw response to its ex-data for triage. Callers that only want the
    content/reasoning can just destructure the three leaf keys."
   [envelope]
-  (let [response      (:parsed envelope)
-        raw-content   (get-in response [:choices 0 :message :content])
-        raw-reasoning (get-in response [:choices 0 :message :reasoning_content])
-        base          (if (and (sequential? raw-content) (some map? raw-content))
-                        ;; Anthropic block format mirrored by some OpenAI gateways.
-                        (let [text-blocks (->> raw-content
-                                            (filter #(= "text" (:type %)))
-                                            (map :text)
-                                            (clojure.string/join "\n"))
-                              thinking-blocks (->> raw-content
-                                                (filter #(= "thinking" (:type %)))
-                                                (map :thinking)
-                                                (clojure.string/join "\n")
-                                                (clojure.string/trimr))]
-                          {:content (when-not (clojure.string/blank? text-blocks) text-blocks)
-                           :reasoning (or (when-not (clojure.string/blank? thinking-blocks) thinking-blocks)
-                                        raw-reasoning)
-                           :api-usage (get-in response [:usage])})
-                        ;; Standard OpenAI format.
-                        {:content raw-content
-                         :reasoning raw-reasoning
-                         :api-usage (get-in response [:usage])})]
-    (assoc base :http-response envelope)))
+  (let [response           (:parsed envelope)
+        message            (get-in response [:choices 0 :message])
+        raw-content        (:content message)
+        raw-reasoning      (or (:reasoning_content message)
+                             (:reasoning message)
+                             (:reasoning_text message)
+                             (:reasoning_summary message)
+                             (:reasoning response)
+                             (:reasoning_text response)
+                             (:reasoning_summary response))
+        block-content      (when (sequential? raw-content)
+                             (content-blocks-text raw-content))
+        block-reasoning    (when (sequential? raw-content)
+                             (reasoning-blocks-text raw-content))
+        fallback-content   (response-output-text response)
+        fallback-reasoning (response-output-reasoning response)
+        content            (cond
+                             (string? raw-content) raw-content
+                             (not (str/blank? (or block-content ""))) block-content
+                             (not (str/blank? (or fallback-content ""))) fallback-content
+                             :else nil)
+        reasoning          (or (reasoning-part-text raw-reasoning)
+                             block-reasoning
+                             (when-not (str/blank? fallback-reasoning) fallback-reasoning))]
+    {:content       content
+     :reasoning     reasoning
+     :api-usage     (get-in response [:usage])
+     :http-response envelope}))
 
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
@@ -663,12 +766,69 @@
 (defn- extract-stream-delta
   "Extracts content and reasoning deltas from a streaming SSE chunk."
   [chunk]
-  (let [delta (get-in chunk [:choices 0 :delta])
-        raw-content (:content delta)
-        reasoning (or (:reasoning_content delta) (:reasoning delta))]
-    {:content-delta (when (string? raw-content) raw-content)
-     :reasoning-delta (when (string? reasoning) reasoning)
-     :api-usage (:usage chunk)}))
+  (if-let [event-type (:type chunk)]
+    (cond
+      (= "response.output_text.delta" event-type)
+      {:content-delta (content-part-text {:type "output_text" :delta (:delta chunk)})
+       :reasoning-delta nil
+       :content-fallback nil
+       :reasoning-fallback nil
+       :api-usage (:usage chunk)}
+
+      (= "response.output_text.done" event-type)
+      {:content-delta (some-> (:text chunk) content-part-text)
+       :reasoning-delta nil
+       :content-fallback nil
+       :reasoning-fallback nil
+       :api-usage (:usage chunk)}
+
+      (contains? #{"response.reasoning.delta"
+                   "response.reasoning.done"
+                   "response.reasoning_text.delta"
+                   "response.reasoning_text.done"
+                   "response.reasoning_summary.delta"
+                   "response.reasoning_summary.done"
+                   "response.reasoning_summary_text.delta"
+                   "response.reasoning_summary_text.done"}
+        event-type)
+      {:content-delta nil
+       :reasoning-delta (or (some-> (:delta chunk) reasoning-part-text)
+                          (some-> (:text chunk) reasoning-part-text))
+       :content-fallback nil
+       :reasoning-fallback nil
+       :api-usage (:usage chunk)}
+
+      (contains? #{"response.completed" "response.done" "response.incomplete"}
+        event-type)
+      (let [response (:response chunk)]
+        {:content-delta nil
+         :reasoning-delta nil
+         :content-fallback (response-output-text response)
+         :reasoning-fallback (response-output-reasoning response)
+         :api-usage (or (:usage response) (:usage chunk))})
+
+      :else
+      {:content-delta nil
+       :reasoning-delta nil
+       :content-fallback nil
+       :reasoning-fallback nil
+       :api-usage (:usage chunk)})
+    (let [delta       (get-in chunk [:choices 0 :delta])
+          raw-content (:content delta)
+          reasoning   (or (:reasoning_content delta)
+                        (:reasoning delta)
+                        (:reasoning_text delta)
+                        (:reasoning_summary delta))]
+      {:content-delta (cond
+                        (string? raw-content) raw-content
+                        (sequential? raw-content) (content-blocks-text raw-content)
+                        :else nil)
+       :reasoning-delta (or (reasoning-part-text reasoning)
+                          (when (sequential? raw-content)
+                            (reasoning-blocks-text raw-content)))
+       :content-fallback nil
+       :reasoning-fallback nil
+       :api-usage (:usage chunk)})))
 
 (defn- slurp-input-stream
   "Safely reads an InputStream to string. Returns nil on failure."
@@ -715,13 +875,20 @@
               (when (str/starts-with? line "data: ")
                 (let [data-str (subs line 6)]
                   (when-let [chunk (parse-sse-data data-str)]
-                    (let [{:keys [content-delta reasoning-delta api-usage]} (delta-fn chunk)]
-                      (when content-delta (.append content-acc content-delta))
-                      (when reasoning-delta (.append reasoning-acc reasoning-delta))
+                    (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback api-usage]}
+                          (delta-fn chunk)
+                          content-piece   (or content-delta
+                                            (when (zero? (.length content-acc))
+                                              (some-> content-fallback content-part-text)))
+                          reasoning-piece (or reasoning-delta
+                                            (when (zero? (.length reasoning-acc))
+                                              (some-> reasoning-fallback reasoning-part-text)))]
+                      (when content-piece (.append content-acc content-piece))
+                      (when reasoning-piece (.append reasoning-acc reasoning-piece))
                       (when api-usage (reset! usage-atom api-usage))
                       (when on-delta
-                        (on-delta {:content-delta content-delta
-                                   :reasoning-delta reasoning-delta
+                        (on-delta {:content-delta content-piece
+                                   :reasoning-delta reasoning-piece
                                    :content-acc (str content-acc)
                                    :reasoning-acc (str reasoning-acc)
                                    :api-usage api-usage}))))))

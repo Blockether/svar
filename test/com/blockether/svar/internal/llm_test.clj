@@ -1,8 +1,11 @@
 (ns com.blockether.svar.internal.llm-test
   "Tests for router model selection, preferences, and fallback logic."
   (:require
+   [babashka.http-client :as http]
    [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.internal.llm :as sut]))
+   [com.blockether.svar.internal.llm :as sut])
+  (:import
+   (java.io ByteArrayInputStream)))
 
 ;;; ── Test fixtures ──────────────────────────────────────────────────────
 
@@ -109,3 +112,51 @@
 
   (it "nil prefer returns a model"
     (expect (some? (selected-model (make-router) {:prefer nil})))))
+
+(defdescribe response-output-fallback-test
+  (describe "non-stream response fallback"
+    (it "chat-completion extracts content + reasoning from terminal :output payload"
+      (with-redefs-fn {#'sut/http-post! (fn [_url _body _headers _timeout-ms]
+                                          {:parsed {:output [{:type "reasoning"
+                                                              :summary [{:text "plan first"}]}
+                                                             {:type "message"
+                                                              :content [{:type "output_text"
+                                                                         :text "{\"answer\":\"ok\"}"}]}]
+                                                    :usage {:prompt_tokens 11
+                                                            :completion_tokens 7
+                                                            :total_tokens 18}}
+                                           :raw-body "{}"
+                                           :url "https://example.invalid/v1/chat/completions"
+                                           :status 200})}
+        (fn []
+          (let [result (sut/chat-completion [{:role "user" :content "hi"}]
+                         "test-model" "sk-test" "https://example.invalid/v1")]
+            (expect (= "{\"answer\":\"ok\"}" (:content result)))
+            (expect (= "plan first" (:reasoning result)))
+            (expect (= 11 (get-in result [:api-usage :prompt_tokens])))
+            (expect (= 200 (get-in result [:http-response :status]))))))))
+
+  (describe "stream response fallback"
+    (it "http-post-stream! backfills terminal reasoning without duplicating prior content"
+      (let [events (atom [])
+            stream (str
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n"
+                     "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"text\":\"plan first\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"(def x 1)\"}]}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":4,\"total_tokens\":9}}}\n"
+                     "data: [DONE]\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (#'sut/http-post-stream!
+                        "https://example.invalid/v1/chat/completions"
+                        {:model "test-model" :stream true}
+                        {"Authorization" "Bearer sk-test"}
+                        1000
+                        #'sut/extract-stream-delta
+                        #(swap! events conj %))]
+            (expect (= "(def x 1)" (:content result)))
+            (expect (= "plan first" (:reasoning result)))
+            (expect (= 5 (get-in result [:api-usage :prompt_tokens])))
+            (expect (= "(def x 1)" (:content-acc (first @events))))
+            (expect (nil? (:reasoning-delta (first @events))))
+            (expect (= "plan first" (:reasoning-delta (second @events))))
+            (expect (= "(def x 1)" (:content-acc (second @events))))))))))
