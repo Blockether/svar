@@ -178,6 +178,9 @@
       :anthropic (if (str/ends-with? base-url "/messages")
                    base-url
                    (str base-url "/messages"))
+      ;; Responses transport builds its final endpoint from base-url +
+      ;; :responses-path later; keep the provider root unchanged here.
+      :openai-responses base-url
       ;; :openai default
       (if (str/ends-with? base-url "/chat/completions")
         base-url
@@ -568,6 +571,24 @@
     (remove str/blank?)
     (str/join "\n\n")))
 
+(defn- normalize-openai-usage [usage]
+  (when usage
+    (let [input-details  (:input_tokens_details usage)
+          output-details (:output_tokens_details usage)]
+      (if (or (contains? usage :input_tokens)
+            (contains? usage :output_tokens))
+        (cond-> {:prompt_tokens     (:input_tokens usage)
+                 :completion_tokens (:output_tokens usage)
+                 :total_tokens      (:total_tokens usage)}
+          (:cached_tokens input-details)
+          (assoc :prompt_tokens_details
+            {:cached_tokens (:cached_tokens input-details)})
+
+          (:reasoning_tokens output-details)
+          (assoc :completion_tokens_details
+            {:reasoning_tokens (:reasoning_tokens output-details)}))
+        usage))))
+
 ;; =============================================================================
 ;; LLM API
 ;; =============================================================================
@@ -613,8 +634,99 @@
                              (when-not (str/blank? fallback-reasoning) fallback-reasoning))]
     {:content       content
      :reasoning     reasoning
-     :api-usage     (get-in response [:usage])
+     :api-usage     (normalize-openai-usage (get-in response [:usage]))
      :http-response envelope}))
+
+(defn- responses-text-content [content]
+  (cond
+    (string? content)
+    content
+
+    (sequential? content)
+    (->> content
+      (keep (fn [block]
+              (cond
+                (string? block) block
+                (= "text" (:type block)) (:text block)
+                (= "input_text" (:type block)) (:text block)
+                (= "output_text" (:type block)) (:text block)
+                :else nil)))
+      (str/join "\n"))
+
+    :else
+    (str content)))
+
+(defn- responses-content-blocks [role content]
+  (let [text-type (if (= role "assistant") "output_text" "input_text")]
+    (cond
+      (string? content)
+      [{:type text-type :text content}]
+
+      (sequential? content)
+      (->> content
+        (keep (fn [block]
+                (cond
+                  (string? block)
+                  {:type text-type :text block}
+
+                  (contains? #{"text" "input_text" "output_text"} (:type block))
+                  {:type text-type :text (:text block)}
+
+                  (= "image_url" (:type block))
+                  (when-let [url (get-in block [:image_url :url])]
+                    {:type "input_image" :image_url url})
+
+                  :else nil)))
+        vec)
+
+      :else
+      [{:type text-type :text (str content)}])))
+
+(defn- normalize-text-verbosity [v]
+  (let [raw (cond
+              (keyword? v) (name v)
+              (string? v)  v
+              :else        nil)
+        s   (some-> raw str/trim str/lower-case)]
+    (case s
+      ("low" "medium" "high") s
+      nil)))
+
+(defn- response-format->text-format [response-format]
+  (when response-format
+    (case (:type response-format)
+      "json_object" {:type "json_object"}
+      "json_schema" {:type "json_schema"
+                     :name (:name response-format)
+                     :schema (:schema response-format)
+                     :strict (:strict response-format)}
+      nil)))
+
+(defn- build-openai-responses-request-body [messages model extra-body]
+  (let [system-text (->> messages
+                      (filter #(= "system" (:role %)))
+                      (map (comp responses-text-content :content))
+                      (remove str/blank?)
+                      (str/join "\n\n"))
+        input       (->> messages
+                      (remove #(= "system" (:role %)))
+                      (mapv (fn [{:keys [role content]}]
+                              {:role    (if (= role "assistant") "assistant" "user")
+                               :content (responses-content-blocks role content)})))
+        effort      (:reasoning_effort extra-body)
+        text-format (or (get-in extra-body [:text :format])
+                      (response-format->text-format (:response_format extra-body)))
+        text-verbosity (or (normalize-text-verbosity (:verbosity extra-body))
+                         (normalize-text-verbosity (get-in extra-body [:text :verbosity])))
+        base-extra  (dissoc extra-body :reasoning_effort :response_format :verbosity)
+        base-text   (or (:text base-extra) {})
+        base-text   (cond-> base-text text-verbosity (assoc :verbosity text-verbosity))]
+    (cond-> {:model model
+             :input input}
+      (not (str/blank? system-text)) (assoc :instructions system-text)
+      effort (assoc :reasoning (merge (:reasoning base-extra) {:effort effort}))
+      text-format (assoc :text (assoc base-text :format text-format))
+      (seq base-extra) (merge (cond-> base-extra text-format (dissoc :text))))))
 
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
@@ -687,6 +799,90 @@
             (when (re-find pattern response-body)
               message))
       API_KEY_ERROR_PATTERNS)))
+
+(declare extract-stream-delta http-post-stream!)
+
+(defn responses-url
+  "Builds an OpenAI Responses-style endpoint URL.
+
+   `responses-path` defaults to `/responses`. Handles callers that pass a
+   root base URL OR a chat-completions URL that needs path translation."
+  ([base-url] (responses-url base-url "/responses"))
+  ([base-url responses-path]
+   (let [base       (or (some-> base-url str str/trim not-empty) "")
+         path       (str (when-not (str/starts-with? responses-path "/") "/")
+                      responses-path)
+         normalized (-> base
+                      (str/replace #"/+$" "")
+                      (str/replace #"/chat/completions$" ""))
+         parent     (when-let [[_ p] (re-matches #"(.+)/[^/]+" path)] p)]
+     (cond
+       (str/blank? normalized) path
+       (str/ends-with? normalized path) normalized
+       (and parent (not= parent "/") (str/ends-with? normalized parent))
+       (str normalized (subs path (count parent)))
+       :else (str normalized path)))))
+
+(defn openai-responses-completion
+  "Low-level OpenAI Responses transport.
+
+   Caller owns request-body construction. svar handles URL resolution,
+   HTTP POST, SSE accumulation, response extraction, reasoning fallback,
+   and normalized return shape.
+
+   Params:
+   `request-body` - Map. Responses API request body.
+   `opts` - Map:
+     - :api-key         - Bearer token.
+     - :base-url        - Provider base URL.
+     - :responses-path  - Endpoint path, default `/responses`.
+     - :headers         - Extra headers merged over the default auth headers.
+     - :timeout-ms      - Request timeout.
+     - :on-chunk        - Optional streaming callback.
+
+   Returns same normalized shape as `chat-completion`:
+   {:content :reasoning :api-usage :http-response}"
+  [request-body {:keys [api-key base-url responses-path headers timeout-ms on-chunk]
+                 :or   {responses-path "/responses"
+                        timeout-ms router/DEFAULT_TIMEOUT_MS}}]
+  (let [url           (responses-url base-url responses-path)
+        model         (:model request-body)
+        request-body  (cond-> request-body on-chunk (assoc :stream true))
+        http-headers  (merge {"Authorization" (str "Bearer " api-key)
+                              "Content-Type"  "application/json"}
+                        (when on-chunk {"Accept" "text/event-stream"})
+                        headers)
+        llm-request   {:model model :base-url base-url :responses-path responses-path}]
+    (trove/log! {:level :info
+                 :data (log-data {:model model
+                                  :url url
+                                  :timeout-ms timeout-ms
+                                  :stream? (boolean on-chunk)})
+                 :msg "responses request dispatched"})
+    (try
+      (if on-chunk
+        (http-post-stream! url request-body http-headers timeout-ms extract-stream-delta
+          (fn [{:keys [content-acc reasoning-acc api-usage]}]
+            (on-chunk {:content content-acc :reasoning reasoning-acc :api-usage api-usage :done? false})))
+        (extract-response-data (http-post! url request-body http-headers timeout-ms)))
+      (catch Exception e
+        (let [ex-data-map   (ex-data e)
+              response-body (when (string? (:body ex-data-map)) (:body ex-data-map))
+              api-key-error (detect-api-key-error response-body)
+              error-message (if api-key-error
+                              (str api-key-error " (Original: " (ex-message e) ")")
+                              (ex-message e))]
+          (when api-key-error
+            (trove/log! {:level :error :id ::api-key-error
+                         :data (log-data {:api-key-error api-key-error
+                                          :api-key-length (count api-key)
+                                          :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))})
+                         :msg "detected API key configuration failure"}))
+          (anomaly/fault! error-message
+            (cond-> (merge (dissoc ex-data-map :body)
+                      {:type :svar.core/http-error
+                       :llm-request llm-request})
+              api-key-error (assoc :api-key-error api-key-error))))))))
 
 (defn- chat-completion-with-retry
   "Calls the LLM API with exponential backoff retry for rate limits."
@@ -773,14 +969,14 @@
        :reasoning-delta nil
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (:usage chunk)}
+       :api-usage (normalize-openai-usage (:usage chunk))}
 
       (= "response.output_text.done" event-type)
       {:content-delta (some-> (:text chunk) content-part-text)
        :reasoning-delta nil
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (:usage chunk)}
+       :api-usage (normalize-openai-usage (:usage chunk))}
 
       (contains? #{"response.reasoning.delta"
                    "response.reasoning.done"
@@ -796,7 +992,7 @@
                           (some-> (:text chunk) reasoning-part-text))
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (:usage chunk)}
+       :api-usage (normalize-openai-usage (:usage chunk))}
 
       (contains? #{"response.completed" "response.done" "response.incomplete"}
         event-type)
@@ -805,14 +1001,14 @@
          :reasoning-delta nil
          :content-fallback (response-output-text response)
          :reasoning-fallback (response-output-reasoning response)
-         :api-usage (or (:usage response) (:usage chunk))})
+         :api-usage (normalize-openai-usage (or (:usage response) (:usage chunk)))})
 
       :else
       {:content-delta nil
        :reasoning-delta nil
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (:usage chunk)})
+       :api-usage (normalize-openai-usage (:usage chunk))})
     (let [delta       (get-in chunk [:choices 0 :delta])
           raw-content (:content delta)
           reasoning   (or (:reasoning_content delta)
@@ -828,7 +1024,7 @@
                             (reasoning-blocks-text raw-content)))
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (:usage chunk)})))
+       :api-usage (normalize-openai-usage (:usage chunk))})))
 
 (defn- slurp-input-stream
   "Safely reads an InputStream to string. Returns nil on failure."
@@ -961,15 +1157,26 @@
   ([messages model api-key base-url]
    (chat-completion messages model api-key base-url {}))
   ([messages model api-key base-url opts]
-   (let [timeout-ms (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
-         extra-body (:extra-body opts)
-         on-chunk   (:on-chunk opts)
-         api-style  (:api-style opts)]
-     (if on-chunk
-       (chat-completion-streaming
-         messages model api-key base-url opts timeout-ms extra-body on-chunk api-style)
-       (chat-completion-with-retry
-         messages model api-key base-url opts timeout-ms extra-body api-style)))))
+   (let [timeout-ms     (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
+         extra-body     (:extra-body opts)
+         on-chunk       (:on-chunk opts)
+         api-style      (:api-style opts)
+         responses-path (:responses-path opts)
+         llm-headers    (:llm-headers opts)]
+     (if (= api-style :openai-responses)
+       (openai-responses-completion
+         (build-openai-responses-request-body messages model extra-body)
+         {:api-key        api-key
+          :base-url       base-url
+          :responses-path (or responses-path "/responses")
+          :headers        llm-headers
+          :timeout-ms     timeout-ms
+          :on-chunk       on-chunk})
+       (if on-chunk
+         (chat-completion-streaming
+           messages model api-key base-url opts timeout-ms extra-body on-chunk api-style)
+         (chat-completion-with-retry
+           messages model api-key base-url opts timeout-ms extra-body api-style))))))
 
 (defn- url? [s] (or (str/starts-with? s "http://") (str/starts-with? s "https://")))
 
@@ -1109,7 +1316,8 @@
    way to the inner `ask!*` call."
   [:model :api-key :base-url :api-style :provider-id
    :extra-body :timeout-ms :check-context? :output-reserve :cache-system?
-   :format-retries :format-retry-on :json-object-mode? :on-format-error])
+   :format-retries :format-retry-on :json-object-mode? :on-format-error
+   :responses-path :llm-headers :verbosity])
 
 (defn- llm-passthrough
   "Returns the subset of `opts` that should be forwarded to a nested
@@ -1130,7 +1338,8 @@
    propagate without enumerating them at every call site."
   [router {:keys [model timeout-ms check-context? output-reserve api-key
                   base-url provider-id api-style extra-body cache-system?
-                  format-retries format-retry-on on-format-error]
+                  format-retries format-retry-on on-format-error
+                  responses-path llm-headers verbosity]
            :as opts}]
   (let [{:keys [network tokens]} router
         default-pricing (or (:pricing tokens) router/MODEL_PRICING)
@@ -1162,7 +1371,10 @@
       (some? format-retries)                 (assoc :format-retries format-retries)
       (some? format-retry-on)                (assoc :format-retry-on format-retry-on)
       (contains? opts :json-object-mode?)    (assoc :json-object-mode? (:json-object-mode? opts))
-      (some? on-format-error)                (assoc :on-format-error on-format-error))))
+      (some? on-format-error)                (assoc :on-format-error on-format-error)
+      (some? responses-path)                 (assoc :responses-path responses-path)
+      (some? llm-headers)                    (assoc :llm-headers llm-headers)
+      (some? verbosity)                      (assoc :verbosity verbosity))))
 
 ;; =============================================================================
 ;; Provider Router (fallback, rate limiting, provider selection)
@@ -1234,7 +1446,8 @@
         reasoning-params (router/reasoning-extra-body
                            (:api-style provider) model-map (:reasoning opts)
                            {:preserved-thinking? (:preserved-thinking? opts)})
-        merged-body (merge auto-params reasoning-params (:extra-body opts))
+        merged-body (cond-> (merge (:extra-body provider) auto-params reasoning-params (:extra-body opts))
+                      (:verbosity opts) (assoc :verbosity (:verbosity opts)))
         ;; Caller's explicit :json-object-mode? (true OR false) wins; otherwise
         ;; inherit the routed model's metadata flag. `contains?` so explicit
         ;; `false` opts out of auto-injection even when the model is flagged.
@@ -1250,7 +1463,11 @@
         :api-style (:api-style provider)
         :provider-id (:id provider)
         :json-object-mode? json-object-mode?
-        :extra-body merged-body))))
+        :extra-body merged-body)
+      (cond-> (some? (:responses-path provider))
+        (assoc :responses-path (:responses-path provider)))
+      (cond-> (some? (:llm-headers provider))
+        (assoc :llm-headers (:llm-headers provider))))))
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
@@ -1259,13 +1476,15 @@
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback router (:prefs resolved)
       (fn [provider model-map]
-        (let [{:keys [extra-body api-style]} (inject-routed-params opts provider model-map)]
+        (let [{:keys [extra-body api-style responses-path llm-headers]}
+              (inject-routed-params opts provider model-map)]
           (chat-completion messages (:name model-map)
             (:api-key provider)
             (:base-url provider)
             (cond-> {:extra-body extra-body :api-style api-style}
-              (:on-chunk opts)
-              (assoc :on-chunk (:on-chunk opts)))))))))
+              (:on-chunk opts)   (assoc :on-chunk (:on-chunk opts))
+              responses-path     (assoc :responses-path responses-path)
+              llm-headers        (assoc :llm-headers llm-headers))))))))
 
 ;; =============================================================================
 ;; ask!* - Low-level structured output (primitive, no routing)
@@ -1589,7 +1808,7 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation — ex-data is the canonical post-mortem record."
   [router {:keys [spec messages humanizer cache-system? schema-tail-pointer?] :as opts}]
-  (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits]} (resolve-opts router opts)
+  (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
@@ -1687,17 +1906,19 @@
                                               :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                                               :done? false})))))
         ;; `:json-object-mode?` auto-injection — caller's `:extra-body
-        ;; :response_format` always wins. Only triggers on `:openai` api-style;
-        ;; Anthropic ignores response_format entirely so no-op there.
+        ;; :response_format` always wins. OpenAI chat-completions and
+        ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
         caller-extra-body (or (:extra-body opts) {})
         extra-body (cond-> caller-extra-body
-                     (and (= api-style :openai)
+                     (and (contains? #{:openai :openai-responses} api-style)
                        (:json-object-mode? opts)
                        (not (contains? caller-extra-body :response_format)))
                      (assoc :response_format {:type "json_object"}))
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
-                     (seq extra-body) (assoc :extra-body extra-body))
+                     (seq extra-body) (assoc :extra-body extra-body)
+                     responses-path (assoc :responses-path responses-path)
+                     llm-headers (assoc :llm-headers llm-headers))
         ;; Format-retry config. Streaming + retries don't compose (per-attempt
         ;; partial-parse callbacks would confuse consumers about which attempt
         ;; the stream belongs to), so retries are forced to 0 in streaming.
@@ -1953,7 +2174,7 @@
             (anomaly/incorrect! ":lang must be a non-blank string"
               {:type :svar.core/invalid-lang :lang lang}))
         {:keys [model api-key base-url api-style timeout-ms output-reserve
-                check-context? network pricing context-limits]}
+                check-context? network pricing context-limits responses-path llm-headers]}
         (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
@@ -2005,7 +2226,9 @@
         caller-extra-body (or (:extra-body opts) {})
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
-                     (seq caller-extra-body) (assoc :extra-body caller-extra-body))
+                     (seq caller-extra-body) (assoc :extra-body caller-extra-body)
+                     responses-path (assoc :responses-path responses-path)
+                     llm-headers (assoc :llm-headers llm-headers))
         [{:keys [content reasoning api-usage http-response]} duration-ms]
         (util/with-elapsed
           (chat-completion with-tail model api-key chat-url retry-opts))]

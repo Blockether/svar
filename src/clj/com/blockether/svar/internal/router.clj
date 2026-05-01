@@ -40,6 +40,12 @@
                  :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
+   :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
+                  :env-keys [] :api-style :openai-responses
+                  :responses-path "/codex/responses"
+                  :extra-body {:store false
+                               :include ["reasoning.encrypted_content"]
+                               :text {:verbosity "low"}}}
    :ollama      {:base-url "http://localhost:11434/v1"            :rpm 1000 :tpm 10000000
                  :env-keys []}
    :lmstudio    {:base-url "http://localhost:1234/v1"             :rpm 1000 :tpm 10000000
@@ -67,6 +73,7 @@
    "gpt-5.1"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.2"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── OpenAI Reasoning (o-series, reasoning_effort) ───────────────────────
    "o3"                        {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
@@ -247,10 +254,19 @@
     ;; gpt-5.2: deprecated — prefer gpt-5.4.
     "gpt-5.2"                   {:pricing {:input 1.75  :output 14.00} :context 200000}
     "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
+    "gpt-5.5"                   {:pricing {:input 5.00  :output 30.00} :context 1050000}
     "o3"                        {:pricing {:input 2.00  :output 8.00}  :context 200000}
     "o3-pro"                    {:pricing {:input 20.00 :output 80.00} :context 200000}
     "o3-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}
     "o4-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}}
+
+   :openai-codex
+   {"gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
+    "gpt-5.1"                   {:pricing {:input 1.00  :output 1.00}  :context 128000}
+    "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
+    ;; Codex product docs mention a 400k context window for GPT-5.5 in Codex.
+    ;; Pricing uses the public API equivalent as a routing / accounting heuristic.
+    "gpt-5.5"                   {:pricing {:input 5.00  :output 30.00} :context 400000}}
 
    :anthropic
    {"claude-opus-4-6"           {:pricing {:input 5.00  :output 25.00} :context 1000000}
@@ -455,15 +471,23 @@
                {:type :svar/unknown-provider :id id})))
     (when (empty? models)
       (throw (ex-info (str "Provider " id " has no models") {:type :svar/no-models :id id})))
-    {:id id
-     :api-key (:api-key provider-map)
-     :base-url base-url
-     :api-style (or (:api-style provider-map) (:api-style known) :openai)
-     :priority idx
-     :rpm rpm
-     :tpm tpm
-     :root root-name
-     :models models}))
+    (cond-> {:id id
+             :api-key (:api-key provider-map)
+             :base-url base-url
+             :api-style (or (:api-style provider-map) (:api-style known) :openai)
+             :priority idx
+             :rpm rpm
+             :tpm tpm
+             :root root-name
+             :models models}
+      (some? (or (:responses-path provider-map) (:responses-path known)))
+      (assoc :responses-path (or (:responses-path provider-map) (:responses-path known)))
+
+      (some? (or (:llm-headers provider-map) (:llm-headers known)))
+      (assoc :llm-headers (or (:llm-headers provider-map) (:llm-headers known)))
+
+      (some? (or (:extra-body provider-map) (:extra-body known)))
+      (assoc :extra-body (merge (:extra-body known) (:extra-body provider-map))))))
 
 ;; =============================================================================
 ;; Context limit lookup

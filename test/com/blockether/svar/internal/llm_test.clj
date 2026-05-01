@@ -3,6 +3,7 @@
   (:require
    [babashka.http-client :as http]
    [lazytest.core :refer [defdescribe describe expect it]]
+   [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.llm :as sut])
   (:import
    (java.io ByteArrayInputStream)))
@@ -113,9 +114,91 @@
   (it "nil prefer returns a model"
     (expect (some? (selected-model (make-router) {:prefer nil})))))
 
+(defdescribe transparent-openai-responses-routing-test
+  (describe "ask! / ask-code! transparency"
+    (it "ask! uses provider-level responses-path, headers, pricing, context, and dynamic verbosity"
+      (let [calls (atom [])
+            router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :llm-headers {"chatgpt-account-id" "acct_123"}
+                       :models [{:name "gpt-5.5"}]}])
+            answer-spec (svar/spec
+                          (svar/field svar/NAME :answer
+                            svar/TYPE svar/TYPE_STRING
+                            svar/CARDINALITY svar/CARDINALITY_ONE
+                            svar/DESCRIPTION "answer"))
+            [provider model] (sut/select-provider router {:strategy :root})]
+        (expect (= :openai-responses (:api-style provider)))
+        (expect (= "/codex/responses" (:responses-path provider)))
+        (expect (= {:input 5.00 :output 30.00} (:pricing model)))
+        (expect (= 400000 (:context model)))
+        (with-redefs-fn {#'sut/http-post! (fn [url body headers _timeout-ms]
+                                            (swap! calls conj {:url url :body body :headers headers})
+                                            {:parsed {:output [{:type "message"
+                                                                :content [{:type "output_text"
+                                                                           :text "{\"answer\":\"ok\"}"}]}]
+                                                      :usage {:input_tokens 10
+                                                              :output_tokens 5
+                                                              :total_tokens 15}}
+                                             :raw-body "{}"
+                                             :url url
+                                             :status 200})}
+          (fn []
+            (let [result (svar/ask! router
+                           {:spec answer-spec
+                            :messages [(svar/system "Return JSON.")
+                                       (svar/user "Reply ok")]
+                            :json-object-mode? true
+                            :verbosity :high})
+                  {:keys [url body headers]} (first @calls)]
+              (expect (= "ok" (get-in result [:result :answer])))
+              (expect (= "https://chatgpt.com/backend-api/codex/responses" url))
+              (expect (= "acct_123" (get headers "chatgpt-account-id")))
+              (expect (= false (:store body)))
+              (expect (= ["reasoning.encrypted_content"] (:include body)))
+              (expect (= "high" (get-in body [:text :verbosity])))
+              (expect (= {:type "json_object"}
+                        (get-in body [:text :format]))))))))
+
+    (it "ask-code! reaches the same transport without caller glue code"
+      (let [calls (atom [])
+            router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :llm-headers {"chatgpt-account-id" "acct_123"}
+                       :models [{:name "gpt-5.5"}]}])]
+        (with-redefs-fn {#'sut/http-post! (fn [url body headers _timeout-ms]
+                                            (swap! calls conj {:url url :body body :headers headers})
+                                            {:parsed {:output [{:type "message"
+                                                                :content [{:type "output_text"
+                                                                           :text "```clojure\n(+ 1 1)\n```"}]}]
+                                                      :usage {:input_tokens 10
+                                                              :output_tokens 5
+                                                              :total_tokens 15}}
+                                             :raw-body "{}"
+                                             :url url
+                                             :status 200})}
+          (fn []
+            (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})
+                  {:keys [url body headers]} (first @calls)]
+              (expect (= "(+ 1 1)" (:result result)))
+              (expect (= "https://chatgpt.com/backend-api/codex/responses" url))
+              (expect (= "acct_123" (get headers "chatgpt-account-id")))
+              (expect (= "low" (get-in body [:text :verbosity]))))))))))
+
 (defdescribe response-output-fallback-test
+  (describe "responses-url"
+    (it "rewrites chat-completions URLs and preserves existing responses URLs"
+      (expect (= "https://example.invalid/v1/responses"
+                (sut/responses-url "https://example.invalid/v1/chat/completions")))
+      (expect (= "https://chatgpt.com/backend-api/codex/responses"
+                (sut/responses-url "https://chatgpt.com/backend-api/codex" "/codex/responses")))
+      (expect (= "https://chatgpt.com/backend-api/codex/responses"
+                (sut/responses-url "https://chatgpt.com/backend-api/codex/responses" "/codex/responses")))))
+
   (describe "non-stream response fallback"
-    (it "chat-completion extracts content + reasoning from terminal :output payload"
+    (it "responses transport extracts content + reasoning from terminal :output payload"
       (with-redefs-fn {#'sut/http-post! (fn [_url _body _headers _timeout-ms]
                                           {:parsed {:output [{:type "reasoning"
                                                               :summary [{:text "plan first"}]}
@@ -126,37 +209,39 @@
                                                             :completion_tokens 7
                                                             :total_tokens 18}}
                                            :raw-body "{}"
-                                           :url "https://example.invalid/v1/chat/completions"
+                                           :url "https://example.invalid/v1/responses"
                                            :status 200})}
         (fn []
-          (let [result (sut/chat-completion [{:role "user" :content "hi"}]
-                         "test-model" "sk-test" "https://example.invalid/v1")]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"})]
             (expect (= "{\"answer\":\"ok\"}" (:content result)))
             (expect (= "plan first" (:reasoning result)))
             (expect (= 11 (get-in result [:api-usage :prompt_tokens])))
             (expect (= 200 (get-in result [:http-response :status]))))))))
 
   (describe "stream response fallback"
-    (it "http-post-stream! backfills terminal reasoning without duplicating prior content"
+    (it "responses transport backfills terminal reasoning without duplicating prior content"
       (let [events (atom [])
             stream (str
-                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n"
-                     "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"text\":\"plan first\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"(def x 1)\"}]}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":4,\"total_tokens\":9}}}\n"
-                     "data: [DONE]\n")]
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n\n"
+                     "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"text\":\"plan first\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"(def x 1)\"}]}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":4,\"total_tokens\":9}}}\n\n"
+                     "data: [DONE]\n\n")]
         (with-redefs [http/post (fn [_url _opts]
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
-          (let [result (#'sut/http-post-stream!
-                        "https://example.invalid/v1/chat/completions"
-                        {:model "test-model" :stream true}
-                        {"Authorization" "Bearer sk-test"}
-                        1000
-                        #'sut/extract-stream-delta
-                        #(swap! events conj %))]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :on-chunk #(swap! events conj %)})]
             (expect (= "(def x 1)" (:content result)))
             (expect (= "plan first" (:reasoning result)))
             (expect (= 5 (get-in result [:api-usage :prompt_tokens])))
-            (expect (= "(def x 1)" (:content-acc (first @events))))
-            (expect (nil? (:reasoning-delta (first @events))))
-            (expect (= "plan first" (:reasoning-delta (second @events))))
-            (expect (= "(def x 1)" (:content-acc (second @events))))))))))
+            (expect (= "(def x 1)" (:content (first @events))))
+            (expect (= "" (:reasoning (first @events))))
+            (expect (= "plan first" (:reasoning (second @events))))
+            (expect (= "(def x 1)" (:content (second @events))))))))))
