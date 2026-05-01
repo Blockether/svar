@@ -25,6 +25,11 @@
   ;; \R[ \t]*```[ \t]*$ closing fence on its own line.
   #"(?ms)^[ \t]*```([A-Za-z0-9_+\-]*)[ \t]*\R(.*?)\R[ \t]*```[ \t]*$")
 
+(defn- normalize-fence-openers [s]
+  ;; Some Responses streams glue first token after lang: ```clojure(answer …).
+  ;; Treat delimiter as if newline followed lang.
+  (str/replace s #"(?m)^([ \t]*```[A-Za-z0-9_+\-]+)(?=[\(\[\{])" "$1\n"))
+
 (defn extract-code-blocks
   "Parse fenced code blocks from `raw` text.
 
@@ -37,7 +42,7 @@
    one block `{:lang nil :source <trimmed-raw>}`. Empty / blank input
    returns `[]`."
   [raw]
-  (let [s (or raw "")
+  (let [s (normalize-fence-openers (or raw ""))
         matches (re-seq FENCE_PATTERN s)
         blocks (mapv (fn [[_ lang body]]
                        {:lang   (when (seq lang) (str/lower-case lang))

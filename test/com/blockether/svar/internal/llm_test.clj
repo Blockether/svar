@@ -133,17 +133,16 @@
         (expect (= "/codex/responses" (:responses-path provider)))
         (expect (= {:input 5.00 :output 30.00} (:pricing model)))
         (expect (= 400000 (:context model)))
-        (with-redefs-fn {#'sut/http-post! (fn [url body headers _timeout-ms]
-                                            (swap! calls conj {:url url :body body :headers headers})
-                                            {:parsed {:output [{:type "message"
-                                                                :content [{:type "output_text"
-                                                                           :text "{\"answer\":\"ok\"}"}]}]
-                                                      :usage {:input_tokens 10
-                                                              :output_tokens 5
-                                                              :total_tokens 15}}
-                                             :raw-body "{}"
-                                             :url url
-                                             :status 200})}
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
+                                                   (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
+                                                   {:content "{\"answer\":\"ok\"}"
+                                                    :reasoning nil
+                                                    :api-usage {:prompt_tokens 10
+                                                                :completion_tokens 5
+                                                                :total_tokens 15}
+                                                    :http-response {:url url
+                                                                    :streaming? true
+                                                                    :status 200}})}
           (fn []
             (let [result (svar/ask! router
                            {:spec answer-spec
@@ -155,6 +154,9 @@
               (expect (= "ok" (get-in result [:result :answer])))
               (expect (= "https://chatgpt.com/backend-api/codex/responses" url))
               (expect (= "acct_123" (get headers "chatgpt-account-id")))
+              (expect (= "text/event-stream" (get headers "Accept")))
+              (expect (= true (:stream body)))
+              (expect (nil? (:max_tokens body)))
               (expect (= false (:store body)))
               (expect (= ["reasoning.encrypted_content"] (:include body)))
               (expect (= "high" (get-in body [:text :verbosity])))
@@ -168,23 +170,25 @@
                        :api-key "sk-test"
                        :llm-headers {"chatgpt-account-id" "acct_123"}
                        :models [{:name "gpt-5.5"}]}])]
-        (with-redefs-fn {#'sut/http-post! (fn [url body headers _timeout-ms]
-                                            (swap! calls conj {:url url :body body :headers headers})
-                                            {:parsed {:output [{:type "message"
-                                                                :content [{:type "output_text"
-                                                                           :text "```clojure\n(+ 1 1)\n```"}]}]
-                                                      :usage {:input_tokens 10
-                                                              :output_tokens 5
-                                                              :total_tokens 15}}
-                                             :raw-body "{}"
-                                             :url url
-                                             :status 200})}
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
+                                                   (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
+                                                   {:content "```clojure\n(+ 1 1)\n```"
+                                                    :reasoning nil
+                                                    :api-usage {:prompt_tokens 10
+                                                                :completion_tokens 5
+                                                                :total_tokens 15}
+                                                    :http-response {:url url
+                                                                    :streaming? true
+                                                                    :status 200}})}
           (fn []
             (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})
                   {:keys [url body headers]} (first @calls)]
               (expect (= "(+ 1 1)" (:result result)))
               (expect (= "https://chatgpt.com/backend-api/codex/responses" url))
               (expect (= "acct_123" (get headers "chatgpt-account-id")))
+              (expect (= "text/event-stream" (get headers "Accept")))
+              (expect (= true (:stream body)))
+              (expect (nil? (:max_tokens body)))
               (expect (= "low" (get-in body [:text :verbosity]))))))))))
 
 (defdescribe response-output-fallback-test
@@ -223,6 +227,23 @@
             (expect (= 200 (get-in result [:http-response :status]))))))))
 
   (describe "stream response fallback"
+    (it "responses transport does not duplicate output_text.done after deltas"
+      (let [stream (str
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"```clojure\\n\"}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(answer \\\"4\\\")\\n```\"}\n\n"
+                     "data: {\"type\":\"response.output_text.done\",\"text\":\"```clojure\\n(answer \\\"4\\\")\\n```\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :responses-path "/codex/responses"})]
+            (expect (= "```clojure\n(answer \"4\")\n```" (:content result)))))))
+
     (it "responses transport backfills terminal reasoning without duplicating prior content"
       (let [events (atom [])
             stream (str

@@ -22,7 +22,11 @@
                      "```clojure\n(def a 1)\n```\nbla\n```clojure\n(def b 2)\n```")]
         (expect (= 2 (count blocks)))
         (expect (= "(def a 1)" (:source (first blocks))))
-        (expect (= "(def b 2)" (:source (second blocks)))))))
+        (expect (= "(def b 2)" (:source (second blocks))))))
+
+    (it "accepts a glued opener where code starts immediately after the lang tag"
+      (let [blocks (sut/extract-code-blocks "```clojure(answer \"4\")\n```")]
+        (expect (= [{:lang "clojure" :source "(answer \"4\")"}] blocks)))))
 
   (describe "untagged fences"
     (it "extracts ``` (no lang) as :lang nil"

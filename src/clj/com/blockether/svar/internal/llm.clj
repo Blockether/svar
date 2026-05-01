@@ -847,23 +847,28 @@
                         timeout-ms router/DEFAULT_TIMEOUT_MS}}]
   (let [url           (responses-url base-url responses-path)
         model         (:model request-body)
-        request-body  (cond-> request-body on-chunk (assoc :stream true))
+        codex?        (= "/codex/responses" responses-path)
+        stream?       (or on-chunk codex?)
+        request-body  (cond-> request-body
+                        codex? (dissoc :max_tokens :max_output_tokens)
+                        stream? (assoc :stream true))
         http-headers  (merge {"Authorization" (str "Bearer " api-key)
                               "Content-Type"  "application/json"}
-                        (when on-chunk {"Accept" "text/event-stream"})
+                        (when stream? {"Accept" "text/event-stream"})
                         headers)
         llm-request   {:model model :base-url base-url :responses-path responses-path}]
     (trove/log! {:level :info
                  :data (log-data {:model model
                                   :url url
                                   :timeout-ms timeout-ms
-                                  :stream? (boolean on-chunk)})
+                                  :stream? (boolean stream?)})
                  :msg "responses request dispatched"})
     (try
-      (if on-chunk
+      (if stream?
         (http-post-stream! url request-body http-headers timeout-ms extract-stream-delta
-          (fn [{:keys [content-acc reasoning-acc api-usage]}]
-            (on-chunk {:content content-acc :reasoning reasoning-acc :api-usage api-usage :done? false})))
+          (when on-chunk
+            (fn [{:keys [content-acc reasoning-acc api-usage]}]
+              (on-chunk {:content content-acc :reasoning reasoning-acc :api-usage api-usage :done? false}))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
       (catch Exception e
         (let [ex-data-map   (ex-data e)
@@ -972,9 +977,9 @@
        :api-usage (normalize-openai-usage (:usage chunk))}
 
       (= "response.output_text.done" event-type)
-      {:content-delta (some-> (:text chunk) content-part-text)
+      {:content-delta nil
        :reasoning-delta nil
-       :content-fallback nil
+       :content-fallback (some-> (:text chunk) content-part-text)
        :reasoning-fallback nil
        :api-usage (normalize-openai-usage (:usage chunk))}
 
@@ -988,10 +993,11 @@
                    "response.reasoning_summary_text.done"}
         event-type)
       {:content-delta nil
-       :reasoning-delta (or (some-> (:delta chunk) reasoning-part-text)
-                          (some-> (:text chunk) reasoning-part-text))
+       :reasoning-delta (when (str/includes? event-type ".delta")
+                          (some-> (:delta chunk) reasoning-part-text))
        :content-fallback nil
-       :reasoning-fallback nil
+       :reasoning-fallback (when (str/includes? event-type ".done")
+                             (some-> (:text chunk) reasoning-part-text))
        :api-usage (normalize-openai-usage (:usage chunk))}
 
       (contains? #{"response.completed" "response.done" "response.incomplete"}
