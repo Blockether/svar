@@ -26,7 +26,21 @@
 
     (it "accepts a glued opener where code starts immediately after the lang tag"
       (let [blocks (sut/extract-code-blocks "```clojure(answer \"4\")\n```")]
-        (expect (= [{:lang "clojure" :source "(answer \"4\")"}] blocks)))))
+        (expect (= [{:lang "clojure" :source "(answer \"4\")"}] blocks))))
+
+    (it "accepts a glued opener without a lang tag"
+      (let [blocks (sut/extract-code-blocks "```(answer \"4\")\n```")]
+        (expect (= [{:lang nil :source "(answer \"4\")"}] blocks))))
+
+    (it "accepts a glued closing fence after the last form"
+      (let [blocks (sut/extract-code-blocks "```clojure\n(answer \"4\")```")]
+        (expect (= [{:lang "clojure" :source "(answer \"4\")"}] blocks))))
+
+    (it "does not swallow an empty fence plus following clojure fence into source"
+      (let [blocks (sut/extract-code-blocks "```clojure\n```\n\n```clojure\n(answer \"4\")\n```")]
+        (expect (= [{:lang "clojure" :source ""}
+                    {:lang "clojure" :source "(answer \"4\")"}]
+                  blocks)))))
 
   (describe "untagged fences"
     (it "extracts ``` (no lang) as :lang nil"
@@ -49,6 +63,13 @@
     (it "trims surrounding whitespace in the fallback path"
       (let [blocks (sut/extract-code-blocks "\n\n  (+ 1 2)  \n\n")]
         (expect (= "(+ 1 2)" (:source (first blocks)))))))
+
+  (describe "malformed fences"
+    (it "returns [] instead of leaking raw fence markers"
+      (expect (= [] (sut/extract-code-blocks "```\n\n```clojure"))))
+
+    (it "returns [] for an unclosed fence instead of falling back to raw markdown"
+      (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)")))))
 
   (describe "empty input"
     (it "returns [] for nil"
@@ -106,6 +127,11 @@
 
   (it "returns empty string for []"
     (expect (= "" (sut/concat-sources []))))
+
+  (it "skips blank sources"
+    (expect (= "(def x 1)"
+              (sut/concat-sources [{:lang "clojure" :source ""}
+                                   {:lang "clojure" :source "(def x 1)"}]))))
 
   (it "returns the single source verbatim for one block"
     (expect (= "(def x 1)"

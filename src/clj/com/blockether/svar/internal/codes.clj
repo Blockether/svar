@@ -22,13 +22,19 @@
   ;; ([A-Za-z0-9_+\-]*) optional language tag (clojure, bash, c++, etc).
   ;; [ \t]*\R         optional trailing spaces + line terminator.
   ;; (.*?)            lazy body — capture group 2.
-  ;; \R[ \t]*```[ \t]*$ closing fence on its own line.
-  #"(?ms)^[ \t]*```([A-Za-z0-9_+\-]*)[ \t]*\R(.*?)\R[ \t]*```[ \t]*$")
+  ;; (?:\R)?          optional separator before closer; allows empty body.
+  ;; ^[ \t]*```[ \t]*$ closing fence on its own line.
+  #"(?ms)^[ \t]*```([A-Za-z0-9_+\-]*)[ \t]*\R(.*?)(?:\R)?^[ \t]*```[ \t]*$")
 
 (defn- normalize-fence-openers [s]
-  ;; Some Responses streams glue first token after lang: ```clojure(answer …).
-  ;; Treat delimiter as if newline followed lang.
-  (str/replace s #"(?m)^([ \t]*```[A-Za-z0-9_+\-]+)(?=[\(\[\{])" "$1\n"))
+  ;; Streams can glue first token after fence: ```clojure(answer …).
+  ;; Treat delimiter as if newline followed tag.
+  (str/replace s #"(?m)^([ \t]*```(?:[A-Za-z0-9_+\-]+)?)(?=[\(\[\{])" "$1\n"))
+
+(defn- normalize-fence-closers [s]
+  ;; Models can glue closing fence after last form: (answer …)```.
+  ;; Keep body, move fence to own line.
+  (str/replace s #"(?m)([^\r\n`])([ \t]*`{3,}[ \t]*)$" "$1\n$2"))
 
 (defn extract-code-blocks
   "Parse fenced code blocks from `raw` text.
@@ -42,7 +48,9 @@
    one block `{:lang nil :source <trimmed-raw>}`. Empty / blank input
    returns `[]`."
   [raw]
-  (let [s (normalize-fence-openers (or raw ""))
+  (let [s (-> (or raw "")
+            normalize-fence-openers
+            normalize-fence-closers)
         matches (re-seq FENCE_PATTERN s)
         blocks (mapv (fn [[_ lang body]]
                        {:lang   (when (seq lang) (str/lower-case lang))
@@ -51,9 +59,10 @@
     (if (seq blocks)
       blocks
       (let [trimmed (str/trim s)]
-        (if (str/blank? trimmed)
-          []
-          [{:lang nil :source trimmed}])))))
+        (cond
+          (str/blank? trimmed) []
+          (str/includes? trimmed "```") []
+          :else [{:lang nil :source trimmed}])))))
 
 (defn select-blocks
   "Filter `blocks` to those whose `:lang` matches `lang` (case-insensitive)
@@ -70,6 +79,8 @@
       blocks)))
 
 (defn concat-sources
-  "Concatenate `:source` of each block, joined by a blank line."
+  "Concatenate non-blank `:source` values, joined by a blank line."
   [blocks]
-  (str/join "\n\n" (map :source blocks)))
+  (str/join "\n\n" (keep (fn [{:keys [source]}]
+                           (when-not (str/blank? source) source))
+                     blocks)))

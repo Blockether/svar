@@ -189,7 +189,23 @@
               (expect (= "text/event-stream" (get headers "Accept")))
               (expect (= true (:stream body)))
               (expect (nil? (:max_tokens body)))
-              (expect (= "low" (get-in body [:text :verbosity]))))))))))
+              (expect (= "low" (get-in body [:text :verbosity]))))))))
+
+    (it "ask-code! extracts malformed streamed fences without leaking markers"
+      (let [router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :models [{:name "gpt-5.5"}]}])
+            stream (str
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"```clojure\\n```\\n\\n\"}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"```clojure\\n(answer \\\"4\\\")```\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})]
+            (expect (= "(answer \"4\")" (:result result)))
+            (expect (not (re-find #"```" (:result result))))))))))
 
 (defdescribe response-output-fallback-test
   (describe "responses-url"
