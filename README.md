@@ -37,6 +37,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 |----------|-----------|-------------|
 | [**Router**](#router) | `make-router`, `router-stats`, `reset-budget!`, `reset-provider!` | Multi-provider routing with circuit breakers, cost budgets, automatic fallback. The entry point to the library. |
 | [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Supports [streaming](#streaming) via `:on-chunk`. Token counting + cost estimation via JTokkit. |
+| [**Code Output**](#code-output-ask-code) | `ask-code!`, `extract-code-blocks` | Plain-text completion + fenced code-block extraction. Filters by `:lang`, keeps untagged fences, concatenates matching blocks, exposes raw text + parsed blocks. Supports [streaming](#streaming) via `:on-chunk`. |
 | [**Spec DSL**](#spec-dsl-reference) | `spec`, `field`, `spec->prompt`, `validate-data` | Define output shapes: types, enums, refs, optional fields, namespaced keys, fixed-size vectors. |
 | [**Parsing**](#parsing--validation) | `str->data`, `str->data-with-spec`, `data->str` | Schemaless and spec-validated JSON↔Clojure. Handles malformed JSON out of the box. |
 | [**Refinement**](#summarization-abstract) | `abstract!`, `eval!`, `refine!`, `sample!` | Chain of Density summarization, LLM self-evaluation, iterative refinement, test data generation. |
@@ -226,6 +227,69 @@ Under the hood, `spec->prompt` translates the spec into a schema the LLM can fol
 ```
 
 Returns `{:result <data> :tokens {:input N :output N :total N} :cost {:input-cost N :output-cost N :total-cost N} :duration-ms N}`.
+
+### Code Output (`ask-code!`)
+
+Use `ask-code!` when you want source text, not JSON. svar asks for plain text, extracts fenced code blocks, filters by `:lang`, keeps untagged fences as matches for any language, and concatenates the selected blocks into `:result`.
+
+```clojure
+(svar/extract-code-blocks "Before\n```clojure\n(+ 1 1)\n```\nAfter")
+;; => [{:lang "clojure", :source "(+ 1 1)"}]
+
+(svar/extract-code-blocks "(println \"no fence\")")
+;; => [{:lang nil, :source "(println \"no fence\")"}]
+```
+
+```clojure
+(comment
+  (def code-result
+    (svar/ask-code! router
+      {:messages [(svar/system "Reply with Clojure code only.")
+                  (svar/user "Write a function `square`.")]
+       :model "gpt-4o"
+       :lang "clojure"}))
+
+  (:result code-result)
+  ;; => "(defn square [x] (* x x))"
+
+  (:blocks code-result)
+  ;; => [{:lang "clojure", :source "(defn square [x] (* x x))"}]
+  )
+```
+
+Returns `{:result <source> :blocks [{:lang <str-or-nil> :source <str>} ...] :raw <full-assistant-text> :reasoning <provider-reasoning-when-present> :tokens {:input N :output N :reasoning N :total N} :cost {:input-cost N :output-cost N :total-cost N} :duration-ms N}`.
+
+`ask-code!` accepts the same routing, reasoning, verbosity, network, and streaming controls as `ask!`, minus the structured-output-only knobs (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`).
+
+### Reasoning depth and output verbosity
+
+Two knobs, different jobs:
+
+- `:reasoning` = how hard the model thinks before answering. Use `:quick`, `:balanced`, or `:deep`.
+- `:verbosity` = how verbose the visible answer should be. Use `:low`, `:medium`, or `:high`.
+
+They are independent. Example: `:reasoning :deep` + `:verbosity :low` means think hard, answer briefly.
+
+```clojure
+(comment
+  (svar/ask! router
+    {:spec person-spec
+     :messages [(svar/system "Extract person info.")
+                (svar/user "John Smith is a 42-year-old engineer.")]
+     :model "gpt-5.5"
+     :reasoning :deep
+     :verbosity :low}))
+
+(comment
+  (svar/ask-code! router
+    {:messages [(svar/user "Write a compact Clojure fn that squares a number.")]
+     :model "gpt-5.5"
+     :lang "clojure"
+     :reasoning :balanced
+     :verbosity :low}))
+```
+
+`:reasoning` is provider-agnostic — svar translates it to the right wire shape for the selected model. `:verbosity` is honored on providers that expose a visible-output verbosity control (notably OpenAI Responses-style endpoints such as `:openai-codex`) and ignored elsewhere.
 
 ### Provider-noise hardening (`:format-retries`, `:json-object-mode?`, `:on-format-error`)
 
