@@ -215,6 +215,21 @@
             (expect (= "(answer \"4\")" (:result (last @events))))
             (expect (= true (:done? (last @events))))))))
 
+    (it "ask-code! rejects complete-looking code when stream lacks terminal marker"
+      (let [router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :models [{:name "gpt-5.5"}]}])
+            stream "data: {\"type\":\"response.output_text.delta\",\"delta\":\"```clojure\\n(answer \\\"4\\\")\\n```\"}\n\n"]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (try
+            (svar/ask-code! router {:messages [(svar/user "Return code")]})
+            (expect false)
+            (catch clojure.lang.ExceptionInfo e
+              (expect (= :svar.core/stream-truncated (:type (ex-data e)))))))))
+
     (it "ask-code! does not expose empty fences as executable blocks"
       (let [router (svar/make-router
                      [{:id :openai-codex

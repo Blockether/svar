@@ -417,6 +417,8 @@
                                    (cond-> {}
                                      cr (assoc :cached_tokens cr)
                                      cc (assoc :cache_creation_tokens cc))))))}
+    "message_stop"
+    {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
     ;; default — ignore other event types
     {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -823,6 +825,13 @@
        (str normalized (subs path (count parent)))
        :else (str normalized path)))))
 
+(def ^:private stream-finalization-error-types
+  #{:svar.core/stream-incomplete
+    :svar.core/stream-truncated})
+
+(defn- stream-finalization-error? [e]
+  (contains? stream-finalization-error-types (:type (ex-data e))))
+
 (defn openai-responses-completion
   "Low-level OpenAI Responses transport.
 
@@ -871,23 +880,25 @@
               (on-chunk {:content content-acc :reasoning reasoning-acc :api-usage api-usage :done? false}))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
       (catch Exception e
-        (let [ex-data-map   (ex-data e)
-              response-body (when (string? (:body ex-data-map)) (:body ex-data-map))
-              api-key-error (detect-api-key-error response-body)
-              error-message (if api-key-error
-                              (str api-key-error " (Original: " (ex-message e) ")")
-                              (ex-message e))]
-          (when api-key-error
-            (trove/log! {:level :error :id ::api-key-error
-                         :data (log-data {:api-key-error api-key-error
-                                          :api-key-length (count api-key)
-                                          :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))})
-                         :msg "detected API key configuration failure"}))
-          (anomaly/fault! error-message
-            (cond-> (merge (dissoc ex-data-map :body)
-                      {:type :svar.core/http-error
-                       :llm-request llm-request})
-              api-key-error (assoc :api-key-error api-key-error))))))))
+        (if (stream-finalization-error? e)
+          (throw e)
+          (let [ex-data-map   (ex-data e)
+                response-body (when (string? (:body ex-data-map)) (:body ex-data-map))
+                api-key-error (detect-api-key-error response-body)
+                error-message (if api-key-error
+                                (str api-key-error " (Original: " (ex-message e) ")")
+                                (ex-message e))]
+            (when api-key-error
+              (trove/log! {:level :error :id ::api-key-error
+                           :data (log-data {:api-key-error api-key-error
+                                            :api-key-length (count api-key)
+                                            :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))})
+                           :msg "detected API key configuration failure"}))
+            (anomaly/fault! error-message
+              (cond-> (merge (dissoc ex-data-map :body)
+                        {:type :svar.core/http-error
+                         :llm-request llm-request})
+                api-key-error (assoc :api-key-error api-key-error)))))))))
 
 (defn- chat-completion-with-retry
   "Calls the LLM API with exponential backoff retry for rate limits."
@@ -955,11 +966,16 @@
 ;; SSE Streaming
 ;; =============================================================================
 
+(def ^:private sse-done ::sse-done)
+
 (defn- parse-sse-data
-  "Parses a single SSE data line. Returns parsed JSON map or nil for [DONE]."
+  "Parses a single SSE data line. Returns parsed JSON map, `sse-done`, or nil."
   [^String data-str]
   (let [trimmed (str/trim data-str)]
-    (when-not (or (= trimmed "[DONE]") (str/blank? trimmed))
+    (cond
+      (= trimmed "[DONE]") sse-done
+      (str/blank? trimmed) nil
+      :else
       (try
         (json/read-json trimmed :key-fn keyword)
         (catch Exception _ nil)))))
@@ -1007,7 +1023,11 @@
          :reasoning-delta nil
          :content-fallback (response-output-text response)
          :reasoning-fallback (response-output-reasoning response)
-         :api-usage (normalize-openai-usage (or (:usage response) (:usage chunk)))})
+         :api-usage (normalize-openai-usage (or (:usage response) (:usage chunk)))
+         :terminal? true
+         :incomplete? (= "response.incomplete" event-type)
+         :incomplete-reason (or (get-in response [:incomplete_details :reason])
+                              (get-in response [:incomplete-details :reason]))})
 
       :else
       {:content-delta nil
@@ -1068,23 +1088,34 @@
         input-stream (:body response)
         content-acc (StringBuilder.)
         reasoning-acc (StringBuilder.)
-        usage-atom (atom nil)]
+        usage-atom (atom nil)
+        terminal-seen? (atom false)
+        incomplete-response (atom nil)]
     (try
       (with-open [reader (BufferedReader. (InputStreamReader. ^java.io.InputStream input-stream "UTF-8"))]
         (loop []
           (let [line (.readLine reader)]
             (when (some? line)
               (when (str/starts-with? line "data: ")
-                (let [data-str (subs line 6)]
-                  (when-let [chunk (parse-sse-data data-str)]
-                    (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback api-usage]}
-                          (delta-fn chunk)
+                (let [data-str (subs line 6)
+                      parsed (parse-sse-data data-str)]
+                  (cond
+                    (= sse-done parsed)
+                    (reset! terminal-seen? true)
+
+                    parsed
+                    (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
+                                  api-usage terminal? incomplete? incomplete-reason]}
+                          (delta-fn parsed)
                           content-piece   (or content-delta
                                             (when (zero? (.length content-acc))
                                               (some-> content-fallback content-part-text)))
                           reasoning-piece (or reasoning-delta
                                             (when (zero? (.length reasoning-acc))
                                               (some-> reasoning-fallback reasoning-part-text)))]
+                      (when terminal? (reset! terminal-seen? true))
+                      (when incomplete?
+                        (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
                       (when content-piece (.append content-acc content-piece))
                       (when reasoning-piece (.append reasoning-acc reasoning-piece))
                       (when api-usage (reset! usage-atom api-usage))
@@ -1095,12 +1126,39 @@
                                    :reasoning-acc (str reasoning-acc)
                                    :api-usage api-usage}))))))
               (recur))))
+        (when-let [incomplete @incomplete-response]
+          (throw (ex-info "Stream ended with incomplete response."
+                   {:type :svar.core/stream-incomplete
+                    :stream? true
+                    :url url
+                    :reason (:reason incomplete)
+                    :content-acc-len (.length content-acc)
+                    :reasoning-acc-len (.length reasoning-acc)
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))})))
+        (when-not @terminal-seen?
+          (throw (ex-info "Stream ended before terminal marker."
+                   {:type :svar.core/stream-truncated
+                    :stream? true
+                    :url url
+                    :content-acc-len (.length content-acc)
+                    :reasoning-acc-len (.length reasoning-acc)
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))})))
         {:content       (let [s (str content-acc)] (when-not (str/blank? s) s))
          :reasoning     (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
          :api-usage     @usage-atom
          :http-response {:url        url
                          :streaming? true
                          :status     (:status response)}})
+      (catch clojure.lang.ExceptionInfo e
+        (if (stream-finalization-error? e)
+          (throw e)
+          (throw (ex-info (str "Stream connection error: " (ex-message e))
+                   {:type :svar.core/http-error :stream? true :url url
+                    :cause-class (.getName (class e))
+                    :content-acc-len (.length content-acc)
+                    :reasoning-acc-len (.length reasoning-acc)
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}
+                   e))))
       (catch Exception e
         (throw (ex-info (str "Stream connection error: " (ex-message e))
                  {:type :svar.core/http-error :stream? true :url url
@@ -1129,19 +1187,21 @@
         (fn [{:keys [content-acc reasoning-acc api-usage]}]
           (on-chunk {:content content-acc :reasoning reasoning-acc :api-usage api-usage :done? false})))
       (catch Exception e
-        (let [ex-data-map (ex-data e)
-              response-body (let [b (:body ex-data-map)]
-                              (when (string? b) b))
-              api-key-error (detect-api-key-error response-body)
-              error-message (if api-key-error
-                              (str api-key-error " (Original: " (ex-message e) ")")
-                              (ex-message e))]
-          (anomaly/fault! error-message
-            (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
-                                                       :llm-request {:model model :base-url base-url}})
-              api-key-error (assoc :api-key-error api-key-error)
-              true          (assoc :cause-class (some-> (ex-cause e) class .getName)
-                              :original-message (some-> (ex-cause e) ex-message)))))))))
+        (if (stream-finalization-error? e)
+          (throw e)
+          (let [ex-data-map (ex-data e)
+                response-body (let [b (:body ex-data-map)]
+                                (when (string? b) b))
+                api-key-error (detect-api-key-error response-body)
+                error-message (if api-key-error
+                                (str api-key-error " (Original: " (ex-message e) ")")
+                                (ex-message e))]
+            (anomaly/fault! error-message
+              (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
+                                                         :llm-request {:model model :base-url base-url}})
+                api-key-error (assoc :api-key-error api-key-error)
+                true          (assoc :cause-class (some-> (ex-cause e) class .getName)
+                                :original-message (some-> (ex-cause e) ex-message))))))))))
 
 (defn chat-completion
   "Calls the LLM API (OpenAI compatible) with the given messages.
