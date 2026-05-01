@@ -2220,9 +2220,12 @@
                                               (or (:prompt_tokens api-usage) 0)
                                               (or (:completion_tokens api-usage) 0)))
                                      blocks   (codes/extract-code-blocks content)
-                                     selected (codes/select-blocks blocks lang)
+                                     selected (->> (codes/select-blocks blocks lang)
+                                                (remove #(str/blank? (:source %)))
+                                                vec)
                                      partial-result (codes/concat-sources selected)]
-                                 (when (or (seq selected) (some? reasoning))
+                                 (when (or (not (str/blank? partial-result))
+                                         (not (str/blank? (or reasoning ""))))
                                    (on-chunk {:result    partial-result
                                               :blocks    selected
                                               :raw       content
@@ -2260,7 +2263,9 @@
                          :http-response http-response :provider-id provider-id})
                  :type :svar.llm/empty-content))))
     (let [blocks      (codes/extract-code-blocks content)
-          selected    (codes/select-blocks blocks lang)
+          selected    (->> (codes/select-blocks blocks lang)
+                        (remove #(str/blank? (:source %)))
+                        vec)
           result      (codes/concat-sources selected)
           token-stats (router/count-and-estimate model with-tail content
                         (cond-> {:pricing pricing :api-usage api-usage}

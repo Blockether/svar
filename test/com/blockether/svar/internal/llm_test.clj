@@ -2,6 +2,7 @@
   "Tests for router model selection, preferences, and fallback logic."
   (:require
    [babashka.http-client :as http]
+   [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.llm :as sut])
@@ -203,9 +204,39 @@
         (with-redefs [http/post (fn [_url _opts]
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
-          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})]
+          (let [events (atom [])
+                result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                                               :on-chunk #(swap! events conj %)})]
             (expect (= "(answer \"4\")" (:result result)))
-            (expect (not (re-find #"```" (:result result))))))))))
+            (expect (not (re-find #"```" (:result result))))
+            (expect (every? #(or (:done? %)
+                               (not (str/blank? (:result %))))
+                      @events))
+            (expect (= "(answer \"4\")" (:result (last @events))))
+            (expect (= true (:done? (last @events))))))))
+
+    (it "ask-code! does not expose empty fences as executable blocks"
+      (let [router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :models [{:name "gpt-5.5"}]}])]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url _body _headers _timeout-ms _delta-fn _on-delta]
+                                                   {:content "```clojure\n```"
+                                                    :reasoning nil
+                                                    :api-usage {:prompt_tokens 10
+                                                                :completion_tokens 3
+                                                                :total_tokens 13}
+                                                    :http-response {:url url
+                                                                    :streaming? true
+                                                                    :status 200}})}
+          (fn []
+            (let [events (atom [])
+                  result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                                                 :on-chunk #(swap! events conj %)})]
+              (expect (= "" (:result result)))
+              (expect (= [] (:blocks result)))
+              (expect (= [{:result "" :blocks [] :done? true}]
+                        (mapv #(select-keys % [:result :blocks :done?]) @events))))))))))
 
 (defdescribe response-output-fallback-test
   (describe "responses-url"
