@@ -165,7 +165,7 @@
     :anthropic {"x-api-key" api-key
                 "anthropic-version" "2023-06-01"
                 "Content-Type" "application/json"}
-    ;; :openai and everything else — Bearer token
+    ;; :openai-compatible-chat and everything else — Bearer token
     {"Authorization" (str "Bearer " api-key)
      "Content-Type" "application/json"}))
 
@@ -180,8 +180,8 @@
                    (str base-url "/messages"))
       ;; Responses transport builds its final endpoint from base-url +
       ;; :responses-path later; keep the provider root unchanged here.
-      :openai-responses base-url
-      ;; :openai default
+      :openai-compatible-responses base-url
+      ;; :openai-compatible-chat default
       (if (str/ends-with? base-url "/chat/completions")
         base-url
         (str base-url "/chat/completions")))))
@@ -887,7 +887,7 @@
 (defn- chat-completion-with-retry
   "Calls the LLM API with exponential backoff retry for rate limits."
   [messages model api-key base-url retry-opts timeout-ms extra-body api-style]
-  (let [api-style    (or api-style :openai)
+  (let [api-style    (or api-style :openai-compatible-chat)
         request-body (if (= api-style :anthropic)
                        (build-anthropic-request-body messages model extra-body)
                        (build-request-body messages model extra-body))
@@ -1108,7 +1108,7 @@
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
   [messages model api-key base-url _retry-opts timeout-ms extra-body on-chunk api-style]
-  (let [api-style    (or api-style :openai)
+  (let [api-style    (or api-style :openai-compatible-chat)
         anthropic?   (= api-style :anthropic)
         base-body    (if anthropic?
                        (build-anthropic-request-body messages model extra-body)
@@ -1163,7 +1163,7 @@
          api-style      (:api-style opts)
          responses-path (:responses-path opts)
          llm-headers    (:llm-headers opts)]
-     (if (= api-style :openai-responses)
+     (if (= api-style :openai-compatible-responses)
        (openai-responses-completion
          (build-openai-responses-request-body messages model extra-body)
          {:api-key        api-key
@@ -1356,7 +1356,7 @@
              :output-reserve (or output-reserve (:output-reserve tokens))
              :api-key api-key
              :base-url base-url
-             :api-style (or api-style :openai)
+             :api-style (or api-style :openai-compatible-chat)
              :provider-id provider-id
              :network network
              :pricing pricing
@@ -1437,8 +1437,9 @@
      set explicit reasoning keys inside `:extra-body` keep those overrides.
    - `:json-object-mode?` is propagated from the routed model's metadata
      when the caller didn't set it explicitly. Used by `ask!*` to auto-inject
-     `response_format: {type: \"json_object\"}` on `:openai` api-style —
-     hardens prose-leaking models (GLM family historically leaks prose into
+     `response_format: {type: \"json_object\"}` on
+     `:openai-compatible-chat` api-style — hardens prose-leaking models (GLM
+     family historically leaks prose into
      `content` under `:deep` reasoning)."
   [opts provider model-map]
   (let [ctx (long (or (:context model-map) 8192))
@@ -1781,7 +1782,7 @@
        Callers can opt in to retrying `:svar.llm/empty-content` (provider
        returned reasoning but no content) by including it in the set.
      - :json-object-mode? - Boolean, optional. When true AND the selected
-       provider uses `:openai` api-style, auto-injects
+       provider uses `:openai-compatible-chat` api-style, auto-injects
        `response_format: {type: \"json_object\"}` into the request body.
        Hardens prose-leaking models (GLM family historically leaks prose into
        `content` under `:deep` reasoning). When unset, `ask!` uses the routed
@@ -1910,7 +1911,7 @@
         ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
         caller-extra-body (or (:extra-body opts) {})
         extra-body (cond-> caller-extra-body
-                     (and (contains? #{:openai :openai-responses} api-style)
+                     (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
                        (:json-object-mode? opts)
                        (not (contains? caller-extra-body :response_format)))
                      (assoc :response_format {:type "json_object"}))

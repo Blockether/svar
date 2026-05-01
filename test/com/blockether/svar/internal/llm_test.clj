@@ -129,7 +129,7 @@
                             svar/CARDINALITY svar/CARDINALITY_ONE
                             svar/DESCRIPTION "answer"))
             [provider model] (sut/select-provider router {:strategy :root})]
-        (expect (= :openai-responses (:api-style provider)))
+        (expect (= :openai-compatible-responses (:api-style provider)))
         (expect (= "/codex/responses" (:responses-path provider)))
         (expect (= {:input 5.00 :output 30.00} (:pricing model)))
         (expect (= 400000 (:context model)))

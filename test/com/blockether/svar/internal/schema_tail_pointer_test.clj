@@ -51,7 +51,7 @@
     [{:id :test
       :api-key "sk-test"
       :base-url "https://example.invalid/v1"
-      :api-style :openai
+      :api-style :openai-compatible-chat
       :models [{:name "test-model"}]}]))
 
 (def ^:private answer-spec

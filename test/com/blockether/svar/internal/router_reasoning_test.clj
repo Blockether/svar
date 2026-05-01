@@ -49,22 +49,22 @@
 (defdescribe reasoning-extra-body-test
   "Translator: abstract level → provider wire shape."
 
-  (describe "OpenAI api-style"
+  (describe "OpenAI-compatible chat api-style"
     (it "emits flat :reasoning_effort for reasoning-capable models"
       (let [gpt5 {:name "gpt-5" :reasoning? true}]
         (expect (= {:reasoning_effort "low"}
-                  (router/reasoning-extra-body :openai gpt5 :quick)))
+                  (router/reasoning-extra-body :openai-compatible-chat gpt5 :quick)))
         (expect (= {:reasoning_effort "medium"}
-                  (router/reasoning-extra-body :openai gpt5 :balanced)))
+                  (router/reasoning-extra-body :openai-compatible-chat gpt5 :balanced)))
         (expect (= {:reasoning_effort "high"}
-                  (router/reasoning-extra-body :openai gpt5 :deep)))))
+                  (router/reasoning-extra-body :openai-compatible-chat gpt5 :deep)))))
 
     (it "accepts OpenAI-alias input too"
       (let [o3 {:name "o3" :reasoning? true}]
         (expect (= {:reasoning_effort "low"}
-                  (router/reasoning-extra-body :openai o3 :low)))
+                  (router/reasoning-extra-body :openai-compatible-chat o3 :low)))
         (expect (= {:reasoning_effort "high"}
-                  (router/reasoning-extra-body :openai o3 "HIGH"))))))
+                  (router/reasoning-extra-body :openai-compatible-chat o3 "HIGH"))))))
 
   (describe "Anthropic api-style"
     (it "emits nested :thinking block for reasoning-capable models"
@@ -92,35 +92,35 @@
     (it "emits `{:thinking {:type \"disabled\"}}` for :quick"
       (let [glm {:name "glm-4.6" :reasoning? true :reasoning-style :zai-thinking}]
         (expect (= {:thinking {:type "disabled"}}
-                  (router/reasoning-extra-body :openai glm :quick)))))
+                  (router/reasoning-extra-body :openai-compatible-chat glm :quick)))))
 
     (it "emits `{:thinking {:type \"enabled\"}}` for :balanced and :deep"
       (let [glm {:name "glm-4.6" :reasoning? true :reasoning-style :zai-thinking}]
         (expect (= {:thinking {:type "enabled"}}
-                  (router/reasoning-extra-body :openai glm :balanced)))
+                  (router/reasoning-extra-body :openai-compatible-chat glm :balanced)))
         (expect (= {:thinking {:type "enabled"}}
-                  (router/reasoning-extra-body :openai glm :deep)))))
+                  (router/reasoning-extra-body :openai-compatible-chat glm :deep)))))
 
     (it "balanced and deep collapse to the same shape (no gradation on z.ai)"
       (let [glm {:name "glm-5.1" :reasoning? true :reasoning-style :zai-thinking}]
-        (expect (= (router/reasoning-extra-body :openai glm :balanced)
-                  (router/reasoning-extra-body :openai glm :deep)))))
+        (expect (= (router/reasoning-extra-body :openai-compatible-chat glm :balanced)
+                  (router/reasoning-extra-body :openai-compatible-chat glm :deep)))))
 
     (it "emits no budget_tokens (z.ai has no such concept)"
       (let [glm {:name "glm-4.7" :reasoning? true :reasoning-style :zai-thinking}
-            out (router/reasoning-extra-body :openai glm :deep)]
+            out (router/reasoning-extra-body :openai-compatible-chat glm :deep)]
         (expect (nil? (get-in out [:thinking :budget_tokens]))))))
 
   (describe "Z.ai preserved thinking (clear_thinking: false)"
     (let [glm {:name "glm-4.7" :reasoning? true :reasoning-style :zai-thinking}]
 
       (it "WITHOUT `:preserved-thinking?` → no `clear_thinking` key in body"
-        (let [out (router/reasoning-extra-body :openai glm :deep)]
+        (let [out (router/reasoning-extra-body :openai-compatible-chat glm :deep)]
           (expect (= {:thinking {:type "enabled"}} out))
           (expect (nil? (get-in out [:thinking :clear_thinking])))))
 
       (it "WITH `:preserved-thinking? true` + `:deep` → emits clear_thinking: false"
-        (let [out (router/reasoning-extra-body :openai glm :deep
+        (let [out (router/reasoning-extra-body :openai-compatible-chat glm :deep
                     {:preserved-thinking? true})]
           (expect (= {:thinking {:type "enabled" :clear_thinking false}} out))))
 
@@ -128,20 +128,20 @@
         ;; Edge: caller says \"don't think this turn, but preserve reasoning
         ;; from prior turns\". The abstract level disables thinking; the
         ;; preserved flag still rides along so the server can retain history.
-        (let [out (router/reasoning-extra-body :openai glm :quick
+        (let [out (router/reasoning-extra-body :openai-compatible-chat glm :quick
                     {:preserved-thinking? true})]
           (expect (= {:thinking {:type "disabled" :clear_thinking false}} out))))
 
       (it "`:preserved-thinking? false` → same as omitting it"
-        (let [out-false  (router/reasoning-extra-body :openai glm :deep
+        (let [out-false  (router/reasoning-extra-body :openai-compatible-chat glm :deep
                            {:preserved-thinking? false})
-              out-absent (router/reasoning-extra-body :openai glm :deep)]
+              out-absent (router/reasoning-extra-body :openai-compatible-chat glm :deep)]
           (expect (= out-false out-absent))
           (expect (nil? (get-in out-false [:thinking :clear_thinking])))))
 
       (it "is silently ignored on :openai-effort models"
         (let [gpt5 {:name "gpt-5" :reasoning? true :reasoning-style :openai-effort}
-              out (router/reasoning-extra-body :openai gpt5 :deep
+              out (router/reasoning-extra-body :openai-compatible-chat gpt5 :deep
                     {:preserved-thinking? true})]
           (expect (= {:reasoning_effort "high"} out))
           (expect (nil? (:thinking out)))))
@@ -157,24 +157,24 @@
       (it "`:preserved-thinking?` without `:reasoning` level is a full no-op"
         ;; Don't silently emit clear_thinking with no thinking block — the
         ;; reasoning translator short-circuits when level is nil.
-        (expect (nil? (router/reasoning-extra-body :openai glm nil
+        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat glm nil
                         {:preserved-thinking? true}))))))
 
   (describe "non-reasoning models (silent no-op)"
     (it "returns nil when model lacks :reasoning? flag"
-      (expect (nil? (router/reasoning-extra-body :openai    {:name "gpt-4o"} :deep)))
+      (expect (nil? (router/reasoning-extra-body :openai-compatible-chat    {:name "gpt-4o"} :deep)))
       (expect (nil? (router/reasoning-extra-body :anthropic {:name "claude-haiku-3"} :deep))))
 
     (it "returns nil when :reasoning? is explicitly false"
-      (expect (nil? (router/reasoning-extra-body :openai {:name "gpt-4o" :reasoning? false} :deep)))))
+      (expect (nil? (router/reasoning-extra-body :openai-compatible-chat {:name "gpt-4o" :reasoning? false} :deep)))))
 
   (describe "unknown level (silent no-op)"
     (it "returns nil when level is unknown"
-      (expect (nil? (router/reasoning-extra-body :openai {:name "gpt-5" :reasoning? true} :turbo)))
-      (expect (nil? (router/reasoning-extra-body :openai {:name "gpt-5" :reasoning? true} nil)))))
+      (expect (nil? (router/reasoning-extra-body :openai-compatible-chat {:name "gpt-5" :reasoning? true} :turbo)))
+      (expect (nil? (router/reasoning-extra-body :openai-compatible-chat {:name "gpt-5" :reasoning? true} nil)))))
 
   (describe "api-style fallback"
-    (it "treats unknown api-style as openai (most gateways are openai-compatible)"
+    (it "treats unknown api-style as openai-compatible-chat (most gateways are openai-compatible)"
       (let [model {:name "deepseek-reasoner" :reasoning? true}]
         (expect (= {:reasoning_effort "high"}
                   (router/reasoning-extra-body :custom-gateway model :deep)))
@@ -185,7 +185,7 @@
       ;; A z.ai model behind an OpenAI-compat api-style still emits z.ai thinking.
       (let [glm {:name "glm-4.6" :reasoning? true :reasoning-style :zai-thinking}]
         (expect (= {:thinking {:type "enabled"}}
-                  (router/reasoning-extra-body :openai glm :deep))))
+                  (router/reasoning-extra-body :openai-compatible-chat glm :deep))))
       ;; Even under `:anthropic`, explicit openai-effort wins.
       (let [weird {:name "custom-o3" :reasoning? true :reasoning-style :openai-effort}]
         (expect (= {:reasoning_effort "high"}

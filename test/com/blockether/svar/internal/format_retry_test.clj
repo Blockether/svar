@@ -9,7 +9,7 @@
      - all responses prose → terminal throw with full envelope
      - non-retryable types do not retry
      - streaming forces retries to 0
-     - `:json-object-mode?` injects `response_format` on `:openai` only
+     - `:json-object-mode?` injects `response_format` on `:openai-compatible-chat` only
      - caller `:extra-body :response_format` always wins
      - error envelope is full (no truncation)
 
@@ -54,7 +54,7 @@
     [{:id :test
       :api-key "sk-test"
       :base-url "https://example.invalid/v1"
-      :api-style :openai
+      :api-style :openai-compatible-chat
       :models [{:name "test-model"}]}]))
 
 (def ^:private answer-spec
@@ -128,7 +128,7 @@
               (expect (= :svar.spec/schema-rejected (:type data)))
               ;; Envelope merged in
               (expect (= "test-model" (:model data)))
-              (expect (= :openai (:api-style data)))
+              (expect (= :openai-compatible-chat (:api-style data)))
               (expect (some? (:chat-url data)))
               (expect (some? (:http-response data)))
               ;; Full content preserved (NO truncation — bug report demand)
@@ -216,7 +216,7 @@
 ;; =============================================================================
 
 (defdescribe json-object-mode-injects-response-format-test
-  (describe ":json-object-mode? true with :openai api-style"
+  (describe ":json-object-mode? true with :openai-compatible-chat api-style"
     (it "auto-injects response_format: {type: \"json_object\"} into request body"
       (let [calls (atom [])
             responses [{:content "{\"answer\":\"yes\"}"}]]
@@ -238,7 +238,7 @@
                 [{:id :zai
                   :api-key "sk-test"
                   :base-url "https://example.invalid/v1"
-                  :api-style :openai
+                  :api-style :openai-compatible-chat
                   :models [{:name "glm-5.1"}]}])]
         (with-redefs [llm/chat-completion (mock-chat-completion responses calls)]
           (svar/ask! r
@@ -260,7 +260,7 @@
                 [{:id :zai
                   :api-key "sk-test"
                   :base-url "https://example.invalid/v1"
-                  :api-style :openai
+                  :api-style :openai-compatible-chat
                   :models [{:name "glm-5.1"}]}])]
         (with-redefs [llm/chat-completion (mock-chat-completion responses calls)]
           (svar/ask! r
@@ -318,12 +318,12 @@
                 [{:id :openai
                   :api-key "sk-1"
                   :base-url "https://example.invalid/v1"
-                  :api-style :openai
+                  :api-style :openai-compatible-chat
                   :models [{:name "glm-5.1"}]}
                  {:id :anthropic
                   :api-key "sk-2"
                   :base-url "https://anthropic.invalid/v1"
-                  :api-style :openai ;; force :openai shape so spec parsing path is identical
+                  :api-style :openai-compatible-chat ;; force openai-compatible-chat shape so spec parsing path is identical
                   :models [{:name "claude-haiku-4-5"}]}])]
         (with-redefs [llm/chat-completion
                       (mock-chat-completion-by-model
@@ -349,12 +349,12 @@
                 [{:id :openai
                   :api-key "sk-1"
                   :base-url "https://a.invalid/v1"
-                  :api-style :openai
+                  :api-style :openai-compatible-chat
                   :models [{:name "glm-5.1"}]}
                  {:id :anthropic
                   :api-key "sk-2"
                   :base-url "https://b.invalid/v1"
-                  :api-style :openai
+                  :api-style :openai-compatible-chat
                   :models [{:name "claude-haiku-4-5"}]}])]
         (with-redefs [llm/chat-completion
                       (mock-chat-completion-by-model
@@ -385,12 +385,12 @@
                 [{:id :openai
                   :api-key "sk-1"
                   :base-url "https://a.invalid/v1"
-                  :api-style :openai
+                  :api-style :openai-compatible-chat
                   :models [{:name "glm-5.1"}]}
                  {:id :anthropic
                   :api-key "sk-2"
                   :base-url "https://b.invalid/v1"
-                  :api-style :openai
+                  :api-style :openai-compatible-chat
                   :models [{:name "claude-haiku-4-5"}]}])]
         (with-redefs [llm/chat-completion
                       (mock-chat-completion-by-model

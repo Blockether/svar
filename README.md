@@ -152,6 +152,32 @@ Every `ask!` call accepts `:routing` to control provider/model selection:
 
 ## Usage
 
+### API styles
+
+svar now uses explicit transport names for OpenAI-compatible providers:
+
+- `:openai-compatible-chat` → `/chat/completions`
+- `:openai-compatible-responses` → `/responses`
+- `:anthropic` → `/messages`
+
+Known provider profiles choose the right transport for you. For custom providers, set `:api-style` explicitly:
+
+```clojure
+(comment
+  (def router
+    (svar/make-router
+      [{:id :my-openai-gateway
+        :api-key (System/getenv "MY_GATEWAY_API_KEY")
+        :base-url "https://gateway.example.com/v1"
+        :api-style :openai-compatible-chat
+        :models [{:name "gpt-4o"}]}
+       {:id :my-responses-gateway
+        :api-key (System/getenv "MY_RESPONSES_API_KEY")
+        :base-url "https://gateway.example.com/v1"
+        :api-style :openai-compatible-responses
+        :models [{:name "gpt-5.5"}]}])))
+```
+
 ### Message Helpers
 
 Build message vectors for LLM interactions with `system`, `user`, `assistant`, and `image`:
@@ -324,7 +350,7 @@ produced them) but the caller sees one logical `ask!` call. Each attempt
 is recorded in `:format-attempts` on success or in the terminal
 exception's ex-data. Streaming (`:on-chunk`) forces retries to 0.
 
-**`:json-object-mode?`** — on `:openai` api-style providers, injects
+**`:json-object-mode?`** — on `:openai-compatible-chat` api-style providers, injects
 `response_format: {type: "json_object"}` into the request body. GLM
 models (`glm-5.1`, `glm-4.7`, `glm-5-turbo`, `glm-4.6`, `glm-4.6v`) are
 opted in by default across `:zai`, `:zai-coding`, and `:blockether`
@@ -349,7 +375,7 @@ Any exception thrown from `ask!` carries the full call context in
       (let [d (ex-data e)]
         (:type d)            ;; :svar.spec/schema-rejected, :svar.llm/empty-content, ...
         (:model d)           ;; "glm-5.1"
-        (:api-style d)       ;; :openai
+        (:api-style d)       ;; :openai-compatible-chat
         (:chat-url d)        ;; "https://llm.blockether.com/v1/chat/completions"
         (:duration-ms d)     ;; 14696.749
         (:api-usage d)       ;; provider tokens

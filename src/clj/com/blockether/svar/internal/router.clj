@@ -41,7 +41,7 @@
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
-                  :env-keys [] :api-style :openai-responses
+                  :env-keys [] :api-style :openai-compatible-responses
                   :responses-path "/codex/responses"
                   :extra-body {:store false
                                :include ["reasoning.encrypted_content"]
@@ -222,9 +222,10 @@
   ;; OpenAI's `response_format: {type: "json_object"}` automatically. The
   ;; GLM family is known to leak prose into `content` under `:deep` reasoning
   ;; without this flag, producing bare strings like `"Looking at..."` where
-  ;; svar expects a JSON object. svar auto-injects on `:openai` api-style
-  ;; only; callers can override via the top-level `:json-object-mode?` opt or
-  ;; by setting `:response_format` directly in `:extra-body`.
+  ;; svar expects a JSON object. svar auto-injects on `:openai-compatible-chat`
+  ;; api-style only; callers can override via the top-level
+  ;; `:json-object-mode?` opt or by setting `:response_format` directly in
+  ;; `:extra-body`.
   {:blockether
    {"gemini-2.5-pro"            {:pricing {:input 1.25  :output 10.00} :context 2000000}
     "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
@@ -474,7 +475,7 @@
     (cond-> {:id id
              :api-key (:api-key provider-map)
              :base-url base-url
-             :api-style (or (:api-style provider-map) (:api-style known) :openai)
+             :api-style (or (:api-style provider-map) (:api-style known) :openai-compatible-chat)
              :priority idx
              :rpm rpm
              :tpm tpm
