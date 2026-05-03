@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.2] - 2026-05-03
+
+### Changed
+- Surface cached token usage
+- Max retries for the COD
+- Preserve whitespace-only stream deltas
+- Reject truncated SSE streams
+- Harden ask-code streaming chunks
+- Harden ask-code fence extraction
+- fix(codex): stream responses endpoint
+- Rename OpenAI api-style keys and document transports
+- Document ask-code and verbosity controls
+- Add transparent OpenAI Responses routing and verbosity control
+- Add generic reasoning fallbacks for output-style responses
+- release: update version files for v0.4.1, bump to next dev version
+
+
 ## [v0.4.1] - 2026-04-29
 
 ### Changed
@@ -517,7 +534,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.2...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -535,3 +552,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.3.11]: https://github.com/Blockether/svar/releases/tag/v0.3.11
 [v0.4.0]: https://github.com/Blockether/svar/releases/tag/v0.4.0
 [v0.4.1]: https://github.com/Blockether/svar/releases/tag/v0.4.1
+[v0.4.2]: https://github.com/Blockether/svar/releases/tag/v0.4.2
