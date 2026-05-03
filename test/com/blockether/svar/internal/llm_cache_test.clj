@@ -129,6 +129,29 @@
       (expect (vector? (:content user-msg)))
       (expect (every? #(nil? (:svar/cache %)) (:content user-msg))))))
 
+;;; ── OpenAI usage normalization (cache token surface) ─────────────────
+
+(defdescribe openai-usage-cache-tokens-test
+  (it "preserves Chat Completions prompt_tokens_details.cached_tokens"
+    (let [usage (#'sut/normalize-openai-usage
+                 {:prompt_tokens 100
+                  :completion_tokens 10
+                  :total_tokens 110
+                  :prompt_tokens_details {:cached_tokens 80}})]
+      (expect (= 100 (:prompt_tokens usage)))
+      (expect (= 10 (:completion_tokens usage)))
+      (expect (= 80 (get-in usage [:prompt_tokens_details :cached_tokens])))))
+
+  (it "maps Responses input_tokens_details.cached_tokens to prompt_tokens_details.cached_tokens"
+    (let [usage (#'sut/normalize-openai-usage
+                 {:input_tokens 100
+                  :output_tokens 10
+                  :total_tokens 110
+                  :input_tokens_details {:cached_tokens 80}})]
+      (expect (= 100 (:prompt_tokens usage)))
+      (expect (= 10 (:completion_tokens usage)))
+      (expect (= 80 (get-in usage [:prompt_tokens_details :cached_tokens]))))))
+
 ;;; ── Anthropic usage normalization (cache token surface) ───────────────
 
 (defdescribe anthropic-usage-cache-tokens-test

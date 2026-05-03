@@ -540,6 +540,14 @@
 
     :else nil))
 
+(defn- streaming-reasoning-delta-text
+  "Streaming reasoning delta. Keep exact strings, incl whitespace-only
+   tokens; dropping them glues reasoning words (`pass2`, `passesI`)."
+  [part]
+  (if (string? part)
+    part
+    (reasoning-part-text part)))
+
 (defn- content-blocks-text [blocks]
   (let [s (->> blocks (keep content-part-text) (str/join "\n"))]
     (when-not (str/blank? s) s)))
@@ -1013,7 +1021,7 @@
         event-type)
       {:content-delta nil
        :reasoning-delta (when (str/includes? event-type ".delta")
-                          (some-> (:delta chunk) reasoning-part-text))
+                          (some-> (:delta chunk) streaming-reasoning-delta-text))
        :content-fallback nil
        :reasoning-fallback (when (str/includes? event-type ".done")
                              (some-> (:text chunk) reasoning-part-text))
@@ -1050,7 +1058,7 @@
                         (string? raw-content) raw-content
                         (sequential? raw-content) (content-blocks-text raw-content)
                         :else nil)
-       :reasoning-delta (or (reasoning-part-text reasoning)
+       :reasoning-delta (or (streaming-reasoning-delta-text reasoning)
                           (when (sequential? raw-content)
                             (reasoning-blocks-text raw-content)))
        :content-fallback nil
@@ -1822,6 +1830,25 @@
            :http-response http-response}
     provider-id (assoc :provider-id provider-id)))
 
+(defn- api-usage->tokens
+  [api-usage]
+  (when api-usage
+    (let [cached (get-in api-usage [:prompt_tokens_details :cached_tokens])]
+      (cond-> {:input     (:prompt_tokens api-usage)
+               :output    (:completion_tokens api-usage)
+               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
+               :total     (:total_tokens api-usage)}
+        (some? cached) (assoc :cached cached)))))
+
+(defn- token-stats->tokens
+  [token-stats]
+  (let [cached (:cached-tokens token-stats)]
+    (cond-> {:input     (:input-tokens token-stats)
+             :output    (:output-tokens token-stats)
+             :reasoning (:reasoning-tokens token-stats)
+             :total     (:total-tokens token-stats)}
+      (some? cached) (assoc :cached cached))))
+
 (defn ask!*
   "Low-level ask — calls the LLM directly without routing. Use ask! instead.
 
@@ -1955,11 +1982,7 @@
         on-chunk (:on-chunk opts)
         streaming-on-chunk (when on-chunk
                              (fn [{:keys [content reasoning api-usage]}]
-                               (let [tokens (when api-usage
-                                              {:input (:prompt_tokens api-usage)
-                                               :output (:completion_tokens api-usage)
-                                               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
-                                               :total (:total_tokens api-usage)})
+                               (let [tokens (api-usage->tokens api-usage)
                                      cost (when api-usage
                                             (router/estimate-cost model
                                               (or (:prompt_tokens api-usage) 0)
@@ -2129,17 +2152,11 @@
             (when on-chunk
               (on-chunk {:result final-result
                          :reasoning reasoning
-                         :tokens {:input (:input-tokens token-stats)
-                                  :output (:output-tokens token-stats)
-                                  :reasoning (:reasoning-tokens token-stats)
-                                  :total (:total-tokens token-stats)}
+                         :tokens (token-stats->tokens token-stats)
                          :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
                          :done? true}))
             (cond-> {:result final-result
-                     :tokens {:input (:input-tokens token-stats)
-                              :output (:output-tokens token-stats)
-                              :reasoning (:reasoning-tokens token-stats)
-                              :total (:total-tokens token-stats)}
+                     :tokens (token-stats->tokens token-stats)
                      :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
                      :duration-ms duration-ms}
               reasoning              (assoc :reasoning reasoning)
@@ -2275,11 +2292,7 @@
                           check))
         streaming-on-chunk (when on-chunk
                              (fn [{:keys [content reasoning api-usage]}]
-                               (let [tokens (when api-usage
-                                              {:input (:prompt_tokens api-usage)
-                                               :output (:completion_tokens api-usage)
-                                               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
-                                               :total (:total_tokens api-usage)})
+                               (let [tokens (api-usage->tokens api-usage)
                                      cost (when api-usage
                                             (router/estimate-cost model
                                               (or (:prompt_tokens api-usage) 0)
@@ -2335,10 +2348,7 @@
           token-stats (router/count-and-estimate model with-tail content
                         (cond-> {:pricing pricing :api-usage api-usage}
                           context-check (assoc :input-tokens (:input-tokens context-check))))
-          tokens      {:input     (:input-tokens token-stats)
-                       :output    (:output-tokens token-stats)
-                       :reasoning (:reasoning-tokens token-stats)
-                       :total     (:total-tokens token-stats)}
+          tokens      (token-stats->tokens token-stats)
           cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
       (when on-chunk
         (on-chunk {:result    result
@@ -2376,7 +2386,7 @@
     :blocks      [{:lang <str-or-nil> :source <str>} …]
     :raw         <full assistant text content>
     :reasoning   <provider reasoning channel, when present>
-    :tokens      {:input :output :reasoning :total}
+    :tokens      {:input :output :reasoning :cached :total}
     :cost        {:input-cost :output-cost :total-cost}
     :duration-ms <ms>}
 

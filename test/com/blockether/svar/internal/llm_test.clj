@@ -140,7 +140,8 @@
                                                     :reasoning nil
                                                     :api-usage {:prompt_tokens 10
                                                                 :completion_tokens 5
-                                                                :total_tokens 15}
+                                                                :total_tokens 15
+                                                                :prompt_tokens_details {:cached_tokens 7}}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -153,6 +154,7 @@
                             :verbosity :high})
                   {:keys [url body headers]} (first @calls)]
               (expect (= "ok" (get-in result [:result :answer])))
+              (expect (= 7 (get-in result [:tokens :cached])))
               (expect (= "https://chatgpt.com/backend-api/codex/responses" url))
               (expect (= "acct_123" (get headers "chatgpt-account-id")))
               (expect (= "text/event-stream" (get headers "Accept")))
@@ -177,7 +179,8 @@
                                                     :reasoning nil
                                                     :api-usage {:prompt_tokens 10
                                                                 :completion_tokens 5
-                                                                :total_tokens 15}
+                                                                :total_tokens 15
+                                                                :prompt_tokens_details {:cached_tokens 7}}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -185,6 +188,7 @@
             (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})
                   {:keys [url body headers]} (first @calls)]
               (expect (= "(+ 1 1)" (:result result)))
+              (expect (= 7 (get-in result [:tokens :cached])))
               (expect (= "https://chatgpt.com/backend-api/codex/responses" url))
               (expect (= "acct_123" (get headers "chatgpt-account-id")))
               (expect (= "text/event-stream" (get headers "Accept")))
@@ -230,6 +234,30 @@
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
           (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})]
             (expect (= "(v/cat p {:max-lines 260})" (:result result)))))))
+
+    (it "ask-code! preserves whitespace-only OpenAI-chat reasoning deltas like content deltas"
+      (let [router (svar/make-router
+                     [{:id :zai-coding
+                       :api-key "sk-test"
+                       :base-url "https://example.invalid/v1"
+                       :models [{:name "glm-5.1"}]}])
+            events (atom [])
+            stream (str
+                     "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"passes\"}}]}\n\n"
+                     "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" \"}}]}\n\n"
+                     "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"I continue\"}}]}\n\n"
+                     "data: {\"choices\":[{\"delta\":{\"content\":\"```clojure\\n(+ 1\"}}]}\n\n"
+                     "data: {\"choices\":[{\"delta\":{\"content\":\" \"}}]}\n\n"
+                     "data: {\"choices\":[{\"delta\":{\"content\":\"2)\\n```\"}}]}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                                               :on-chunk #(swap! events conj %)})]
+            (expect (= "(+ 1 2)" (:result result)))
+            (expect (= "passes I continue" (:reasoning result)))
+            (expect (= "passes I continue" (:reasoning (last @events))))))))
 
     (it "ask-code! rejects complete-looking code when stream lacks terminal marker"
       (let [router (svar/make-router
@@ -343,4 +371,28 @@
             (expect (= "(def x 1)" (:content (first @events))))
             (expect (= "" (:reasoning (first @events))))
             (expect (= "plan first" (:reasoning (second @events))))
-            (expect (= "(def x 1)" (:content (second @events))))))))))
+            (expect (= "(def x 1)" (:content (second @events))))))))
+
+    (it "responses transport preserves whitespace-only reasoning deltas like content deltas"
+      (let [events (atom [])
+            stream (str
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"pass\"}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\" \"}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"2\"}\n\n"
+                     "data: {\"type\":\"response.reasoning.delta\",\"delta\":\"passes\"}\n\n"
+                     "data: {\"type\":\"response.reasoning.delta\",\"delta\":\" \"}\n\n"
+                     "data: {\"type\":\"response.reasoning.delta\",\"delta\":\"I continue\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :on-chunk #(swap! events conj %)})]
+            (expect (= "pass 2" (:content result)))
+            (expect (= "passes I continue" (:reasoning result)))
+            (expect (= "pass 2" (:content (last @events))))
+            (expect (= "passes I continue" (:reasoning (last @events))))))))))
