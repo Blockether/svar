@@ -986,7 +986,10 @@
   (if-let [event-type (:type chunk)]
     (cond
       (= "response.output_text.delta" event-type)
-      {:content-delta (content-part-text {:type "output_text" :delta (:delta chunk)})
+      ;; Preserve exact stream deltas. A whitespace-only delta can be
+      ;; semantically required source, e.g. `:max-lines` + ` ` + `260`.
+      ;; Generic text extractors drop blank strings; streaming must not.
+      {:content-delta (:delta chunk)
        :reasoning-delta nil
        :content-fallback nil
        :reasoning-fallback nil
@@ -1042,6 +1045,8 @@
                         (:reasoning_text delta)
                         (:reasoning_summary delta))]
       {:content-delta (cond
+                        ;; Preserve exact string deltas, including a
+                        ;; single-space token between adjacent code tokens.
                         (string? raw-content) raw-content
                         (sequential? raw-content) (content-blocks-text raw-content)
                         :else nil)

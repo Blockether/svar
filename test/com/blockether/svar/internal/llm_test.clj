@@ -215,6 +215,22 @@
             (expect (= "(answer \"4\")" (:result (last @events))))
             (expect (= true (:done? (last @events))))))))
 
+    (it "ask-code! preserves whitespace-only deltas in streamed code"
+      (let [router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :models [{:name "gpt-5.5"}]}])
+            stream (str
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"```clojure\\n(v/cat p {:max-lines\"}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\" \"}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"260})\\n```\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})]
+            (expect (= "(v/cat p {:max-lines 260})" (:result result)))))))
+
     (it "ask-code! rejects complete-looking code when stream lacks terminal marker"
       (let [router (svar/make-router
                      [{:id :openai-codex
