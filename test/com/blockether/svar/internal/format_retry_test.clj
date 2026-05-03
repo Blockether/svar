@@ -492,7 +492,26 @@
           (expect (pos? (count @calls)))
           (doseq [c @calls]
             (let [extra-body (get-in c [:retry-opts :extra-body])]
-              (expect (= {:type "json_object"} (:response_format extra-body))))))))))
+              (expect (= {:type "json_object"} (:response_format extra-body)))))))))
+
+  (describe "default CoD format retries"
+    (it "abstract! absorbs one schema-rejected CoD response by default"
+      (let [calls (atom [])
+            valid-cod "{\"summary\":\"ok\",\"entities\":[{\"entity\":\"X\",\"rationale\":\"r\",\"score\":0.9}]}"
+            responses [{:content "I should summarize Voyager first."}
+                       {:content valid-cod}]]
+        (with-redefs [llm/chat-completion (mock-chat-completion responses calls)]
+          (let [result (svar/abstract! (test-router)
+                         {:text "The text to summarize. Voyager 1 launched in 1977."
+                          :iterations 1
+                          :target-length 30})]
+            (expect (= "ok" (get-in result [:result 0 :summary])))
+            (expect (= 2 (count @calls)))
+            (let [retry-msgs (:messages (second @calls))
+                  last-two (take-last 2 retry-msgs)]
+              (expect (= ["assistant" "user"] (mapv :role last-two)))
+              (expect (re-find #"FORMAT RETRY"
+                        (get-in (second last-two) [:content 0 :text]))))))))))
 
 ;; =============================================================================
 ;; Streaming + retries — retries forced to 0

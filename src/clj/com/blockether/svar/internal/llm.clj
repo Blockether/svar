@@ -2420,6 +2420,10 @@
   "Default target length in words for Chain of Density summaries."
   80)
 
+(def ^:private DEFAULT_COD_FORMAT_RETRIES
+  "Default schema-format retries for Chain of Density iteration calls."
+  2)
+
 (def ^:private COD_ENTITY_CRITERIA
   "Shared XML definition of entity selection criteria.
    Faithful to Adams et al., 2023 — entity types are intentionally open-ended."
@@ -2648,7 +2652,9 @@
                 eval? false
                 refine? false
                 threshold 0.9}}]
-  (let [resolved (resolve-opts router opts)
+  (let [resolved (cond-> (resolve-opts router opts)
+                   (not (contains? opts :format-retries))
+                   (assoc :format-retries DEFAULT_COD_FORMAT_RETRIES))
         step-fn (partial cod-iteration-step router text target-length resolved special-instructions eval?)
         initial-state {:iterations [] :previous-summary nil :accumulated-entities []
                        :total-tokens {} :total-cost {}}
