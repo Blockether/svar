@@ -116,6 +116,38 @@
   (it "nil prefer returns a model"
     (expect (some? (selected-model (make-router) {:prefer nil})))))
 
+(defdescribe provider-models-list-test
+  (it "filters OpenAI Codex /models below GPT-5.3"
+    (let [router (svar/make-router [{:id :openai-codex
+                                     :api-key "sk-test"
+                                     :models [{:name "gpt-5.5"}]}])]
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
+                                         {:data [{:id "gpt-4o"}
+                                                 {:id "gpt-5"}
+                                                 {:id "gpt-5.2-codex"}
+                                                 {:id "gpt-5.3-codex"}
+                                                 {:id "gpt-5.4"}
+                                                 {:id "gpt-5.5"}]})}
+        (fn []
+          (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
+                    (mapv :id (svar/models! router))))))))
+
+  (it "filters GitHub Copilot /models below GPT-5.3 while keeping non-GPT families"
+    (let [router (svar/make-router [{:id :github-copilot
+                                     :api-key "sk-test"
+                                     :models [{:name "gpt-5.4"}]}])]
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
+                                         {:data [{:id "claude-sonnet-4-6"}
+                                                 {:id "gpt-4o"}
+                                                 {:id "gpt-5.1-codex"}
+                                                 {:id "gpt-5.2-codex"}
+                                                 {:id "gpt-5.3-codex"}
+                                                 {:id "gpt-5.4"}
+                                                 {:id "gemini-3-pro-preview"}]})}
+        (fn []
+          (expect (= ["claude-sonnet-4-6" "gpt-5.3-codex" "gpt-5.4" "gemini-3-pro-preview"]
+                    (mapv :id (svar/models! router)))))))))
+
 (defdescribe transparent-openai-responses-routing-test
   (describe "ask! / ask-code! transparency"
     (it "ask! uses provider-level responses-path, headers, pricing, context, and dynamic verbosity"
@@ -473,7 +505,7 @@
             (expect (= "plan first" (:reasoning result)))
             (expect (= 5 (get-in result [:api-usage :prompt_tokens])))
             (expect (= "(def x 1)" (:content (first @events))))
-            (expect (= "" (:reasoning (first @events))))
+            (expect (nil? (:reasoning (first @events))))
             (expect (= "plan first" (:reasoning (second @events))))
             (expect (= "(def x 1)" (:content (second @events))))))))
 
@@ -545,7 +577,7 @@
             (expect (= [{:type "summary_text" :text "plan first"}]
                       (get-in result [:provider-state :reasoning-items 0 :raw-item :summary])))))))
 
-    (it "responses transport surfaces encrypted-only reasoning as unavailable"
+    (it "responses transport stores encrypted-only reasoning only in provider-state"
       (let [events (atom [])
             stream (str
                      "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ciphertext\"}}\n\n"
@@ -561,10 +593,9 @@
                           :base-url "https://example.invalid/v1"
                           :on-chunk #(swap! events conj %)})]
             (expect (= "(def x 1)" (:content result)))
-            (expect (= "[provider returned encrypted reasoning; plaintext reasoning is unavailable]"
-                      (:reasoning result)))
+            (expect (nil? (:reasoning result)))
             (expect (= "ciphertext" (get-in result [:provider-state :reasoning-items 0 :encrypted-content])))
-            (expect (= (:reasoning result) (:reasoning (first @events))))))))
+            (expect (nil? (:reasoning (first @events))))))))
 
     (it "responses transport preserves whitespace-only reasoning deltas like content deltas"
       (let [events (atom [])

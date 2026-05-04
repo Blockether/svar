@@ -271,6 +271,21 @@
     (expect (= {:effort "medium" :summary "detailed"}
               (get-in by-name ["gpt-5.4" :extra-body :reasoning])))))
 
+(it "filters OpenAI Codex GPT models below GPT-5.3"
+  (let [provider (router/normalize-provider 0 {:id :openai-codex
+                                               :api-key "test"
+                                               :models [{:name "gpt-5"}
+                                                        {:name "gpt-5.1"}
+                                                        {:name "gpt-5.2"}
+                                                        {:name "gpt-5.2-codex"}
+                                                        {:name "gpt-5.3-codex"}
+                                                        {:name "gpt-5.4"}
+                                                        {:name "gpt-5.5"}]})]
+    (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
+              (mapv :name (:models provider))))
+    (expect (router/provider-model-visible? :openai-codex "gpt-5.3-codex"))
+    (expect (not (router/provider-model-visible? :openai-codex "gpt-5.2-codex")))))
+
 (defdescribe anthropic-thinking-max-tokens-clamp-test
   "Anthropic's API requires max_tokens > thinking.budget_tokens (thinking +
    output share one pool). When a caller sends thinking but forgets to raise

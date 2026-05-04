@@ -514,9 +514,6 @@
     "reasoning_summary_text"
     "summary_text"})
 
-(def ^:private encrypted-reasoning-placeholder
-  "[provider returned encrypted reasoning; plaintext reasoning is unavailable]")
-
 (defn- content-part-text [part]
   (cond
     (string? part)
@@ -554,8 +551,7 @@
         (or (some-> (:thinking part) reasoning-part-text)
           (some-> (:summary part) reasoning-part-text)
           (some-> (:content part) reasoning-part-text)
-          (some-> (or (:text part) (:delta part)) reasoning-part-text)
-          (when (some? (:encrypted_content part)) encrypted-reasoning-placeholder))
+          (some-> (or (:text part) (:delta part)) reasoning-part-text))
 
         (= "message" type)
         (some-> (:content part) reasoning-part-text)
@@ -563,8 +559,7 @@
         (nil? type)
         (or (some-> (:thinking part) reasoning-part-text)
           (some-> (:summary part) reasoning-part-text)
-          (some-> (or (:text part) (:delta part)) reasoning-part-text)
-          (when (some? (:encrypted_content part)) encrypted-reasoning-placeholder))
+          (some-> (or (:text part) (:delta part)) reasoning-part-text))
 
         :else nil))
 
@@ -573,6 +568,10 @@
       (when-not (str/blank? s) s))
 
     :else nil))
+
+(defn- nonblank-str [s]
+  (when-not (str/blank? (or s ""))
+    s))
 
 (defn- streaming-reasoning-delta-text
   "Streaming reasoning delta. Keep exact strings, incl whitespace-only
@@ -1008,7 +1007,7 @@
         (http-post-stream! url request-body http-headers timeout-ms extract-stream-delta
           (when on-chunk
             (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
-              (on-chunk {:content content-acc :reasoning reasoning-acc
+              (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                          :provider-state provider-state
                          :api-usage api-usage :done? false}))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
@@ -1398,7 +1397,7 @@
     (try
       (http-post-stream! chat-url request-body headers timeout-ms delta-fn
         (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
-          (on-chunk {:content content-acc :reasoning reasoning-acc
+          (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                      :provider-state provider-state
                      :api-usage api-usage :done? false})))
       (catch Exception e
@@ -3932,15 +3931,32 @@
 ;; models! - Fetch available models
 ;; =============================================================================
 
+(defn- provider-model-id [model]
+  (cond
+    (string? model) model
+    (map? model)    (or (:id model) (:name model) (get model "id") (get model "name"))
+    :else           (str model)))
+
+(defn- filter-provider-models [provider-id models]
+  (if provider-id
+    (filterv #(router/provider-model-visible? provider-id (provider-model-id %)) models)
+    (vec models)))
+
 (defn models!
-  "Fetches available models from the LLM API."
+  "Fetches available models from the LLM API. Provider-scoped model exclusions
+   are applied to the returned `/models` list."
   ([router] (models! router {}))
   ([router opts]
-   (let [{:keys [api-key base-url]} (resolve-opts router opts)
+   (let [resolved (resolve-opts router opts)
+         [selected-provider _] (when-not (:base-url resolved)
+                                 (router/select-provider router {:strategy :root}))
+         api-key (or (:api-key resolved) (:api-key selected-provider))
+         base-url (or (:base-url resolved) (:base-url selected-provider))
+         provider-id (or (:provider-id resolved) (:id selected-provider))
          models-url (str base-url "/models")
          body (http-get! models-url api-key)
          models (or (:data body) [])]
-     (vec models))))
+     (filter-provider-models provider-id models))))
 
 ;; =============================================================================
 ;; sample! - Generate test data samples with self-correction

@@ -44,6 +44,7 @@
                     ;; Copilot currently exposes many historical GPT models; keep
                     ;; the GPT family at gpt-5.3+ only. Other families (Claude,
                     ;; Gemini, Grok) stay selectable.
+                    :min-gpt-version [5 3]
                     :exclude-models #{"gpt-4o" "gpt-4.1"
                                       "gpt-5" "gpt-5-mini" "gpt-5.1"
                                       "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
@@ -51,6 +52,12 @@
                     :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
                   :env-keys [] :api-style :openai-compatible-responses
+                  ;; Keep Codex GPT models at gpt-5.3+ only.
+                  :min-gpt-version [5 3]
+                  :exclude-models #{"gpt-4o" "gpt-4.1"
+                                    "gpt-5" "gpt-5-mini" "gpt-5.1"
+                                    "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
+                                    "gpt-5.2" "gpt-5.2-codex"}
                   :responses-path "/codex/responses"
                   :extra-body {:store false
                                :include ["reasoning.encrypted_content"]
@@ -289,6 +296,7 @@
    :openai-codex
    {"gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
     "gpt-5.1"                   {:pricing {:input 1.00  :output 1.00}  :context 128000}
+    "gpt-5.3-codex"             {:pricing {:input 1.00  :output 1.00}  :context 400000}
     "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
     ;; Codex product docs mention a 400k context window for GPT-5.5 in Codex.
     ;; Pricing uses the public API equivalent as a routing / accounting heuristic.
@@ -487,12 +495,32 @@
   (when (and (:name model-map) (not (str/blank? (str (:name model-map)))))
     (infer-model-metadata model-map)))
 
+(defn- parse-gpt-version
+  "Extract comparable GPT version [major minor] from ids such as
+   gpt-4o, gpt-5, gpt-5.2-codex, or gpt-5.4-mini. Non-GPT ids return nil."
+  [model-name]
+  (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
+    [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
+
+(defn- version< [a b]
+  (neg? (compare (vec a) (vec b))))
+
 (defn provider-excluded-model?
   "True when a provider-scoped catalog marks a model unavailable.
-   Provider config may add `:exclude-models` as exact model names."
+   Provider config may add `:exclude-models` as exact model names and/or
+   `:min-gpt-version` such as [5 3] to hide older GPT family models."
   [provider-id model-name]
-  (let [excluded (set (:exclude-models (get KNOWN_PROVIDERS provider-id)))]
-    (contains? excluded model-name)))
+  (let [known (get KNOWN_PROVIDERS provider-id)
+        excluded (set (:exclude-models known))
+        version (parse-gpt-version model-name)
+        min-version (:min-gpt-version known)]
+    (or (contains? excluded model-name)
+      (and version min-version (version< version min-version)))))
+
+(defn provider-model-visible?
+  "True when provider-scoped model filters allow `model-name`."
+  [provider-id model-name]
+  (not (provider-excluded-model? provider-id model-name)))
 
 (defn provider-model-entry
   "Returns provider-scoped entry {:pricing ... :context ...} for a provider/model, or nil."
