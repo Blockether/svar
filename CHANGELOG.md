@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.4] - 2026-05-04
+
+### Changed
+- fix(github-copilot): normalize Claude routing metadata
+- release: update version files for v0.4.3, bump to next dev version
+
+
 ## [v0.4.3] - 2026-05-04
 
 ### Changed
@@ -545,7 +552,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.4...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -565,3 +572,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.1]: https://github.com/Blockether/svar/releases/tag/v0.4.1
 [v0.4.2]: https://github.com/Blockether/svar/releases/tag/v0.4.2
 [v0.4.3]: https://github.com/Blockether/svar/releases/tag/v0.4.3
+[v0.4.4]: https://github.com/Blockether/svar/releases/tag/v0.4.4
