@@ -341,13 +341,13 @@
     "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}}
 
    :github-copilot
-   {"claude-opus-4-7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic}
-    "claude-opus-4-6"           {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :anthropic}
-    "claude-opus-4-5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :anthropic}
-    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic}
-    "claude-sonnet-4-6"         {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :anthropic}
-    "claude-sonnet-4-5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic}
-    "claude-haiku-4-5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic}
+   {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
 
     "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}

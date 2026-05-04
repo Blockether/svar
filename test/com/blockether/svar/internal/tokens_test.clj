@@ -23,8 +23,8 @@
     (it "returns 1000000 for gpt-4.1"
       (expect (= 1000000 (sut/context-limit "gpt-4.1"))))
 
-    (it "returns max provider context for claude-sonnet-4-6"
-      (expect (= 1000000 (sut/context-limit "claude-sonnet-4-6"))))
+    (it "returns Copilot provider context for claude-sonnet-4.6"
+      (expect (= 1000000 (sut/context-limit "claude-sonnet-4.6"))))
 
     (it "returns 1000000 for claude-opus-4-6"
       (expect (= 1000000 (sut/context-limit "claude-opus-4-6")))))

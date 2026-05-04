@@ -137,14 +137,14 @@
                                      :api-key "sk-test"
                                      :models [{:name "gpt-5.4"}]}])]
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
-                                         {:data [{:id "claude-sonnet-4-6"}
+                                         {:data [{:id "claude-sonnet-4.6"}
                                                  {:id "gpt-4o"}
                                                  {:id "gpt-5.1-codex"}
                                                  {:id "gpt-5.3-codex"}
                                                  {:id "gpt-5.4"}
                                                  {:id "gemini-3-pro-preview"}]})}
         (fn []
-          (expect (= ["claude-sonnet-4-6" "gpt-5.3-codex" "gpt-5.4" "gemini-3-pro-preview"]
+          (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gemini-3-pro-preview"]
                     (mapv :id (svar/models! router)))))))))
 
 (defdescribe transparent-openai-responses-routing-test
@@ -275,7 +275,7 @@
             (expect (= "user" (get @seen "X-Initiator")))
             (expect (= "conversation-edits" (get @seen "Openai-Intent")))))))
 
-    (it "GitHub Copilot business chat forces SSE streaming"
+    (it "GitHub Copilot chat forces SSE streaming"
       (let [calls (atom [])
             messages [(svar/user "hi")]]
         (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
@@ -287,12 +287,12 @@
                                                                     :streaming? true
                                                                     :status 200}})}
           (fn []
-            (let [result (sut/chat-completion messages "gpt-4o" "sk-test" "https://proxy.business.githubcopilot.com"
+            (let [result (sut/chat-completion messages "gpt-4o" "sk-test" "https://api.individual.githubcopilot.com"
                            {:provider-id :github-copilot
                             :llm-headers {"User-Agent" "VisCopilot/0.1"}})
                   {:keys [url body headers on-delta]} (first @calls)]
               (expect (= "ok" (:content result)))
-              (expect (= "https://proxy.business.githubcopilot.com/chat/completions" url))
+              (expect (= "https://api.individual.githubcopilot.com/chat/completions" url))
               (expect (= true (:stream body)))
               (expect (ifn? on-delta))
               (expect (= "text/event-stream" (get headers "Accept"))))))))

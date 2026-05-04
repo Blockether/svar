@@ -189,7 +189,7 @@
 (defn- copilot-stream-required? [provider-id base-url]
   (and (= :github-copilot provider-id)
     (string? base-url)
-    (boolean (re-find #"(?i)(proxy|api)\.(business|enterprise)\.githubcopilot\.com" base-url))))
+    (boolean (re-find #"(?i)(proxy|api)\.(individual|business|enterprise)\.githubcopilot\.com" base-url))))
 
 (defn- request-headers [api-style api-key provider-id messages llm-headers]
   (merge (make-llm-headers api-style api-key provider-id)

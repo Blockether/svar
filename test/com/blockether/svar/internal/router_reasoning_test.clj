@@ -255,14 +255,14 @@
 (it "flags GitHub Copilot known models with provider-specific API styles"
   (let [provider (router/normalize-provider 0 {:id :github-copilot
                                                :api-key "test"
-                                               :models [{:name "claude-sonnet-4-6"}
+                                               :models [{:name "claude-sonnet-4.6"}
                                                         {:name "gpt-5.4"}
                                                         {:name "gpt-5.3-codex"}
                                                         {:name "gpt-4o"}]})
         by-name (zipmap (map :name (:models provider)) (:models provider))]
-    (expect (= #{"claude-sonnet-4-6" "gpt-5.4" "gpt-5.3-codex"}
+    (expect (= #{"claude-sonnet-4.6" "gpt-5.4" "gpt-5.3-codex"}
               (set (keys by-name))))
-    (expect (= :anthropic (:api-style (get by-name "claude-sonnet-4-6"))))
+    (expect (= :openai-compatible-chat (:api-style (get by-name "claude-sonnet-4.6"))))
     (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.4"))))
     (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.3-codex"))))
     (expect (nil? (get by-name "gpt-4o")))
