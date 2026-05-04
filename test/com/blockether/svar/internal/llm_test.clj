@@ -579,6 +579,33 @@
             (expect (= [{:type "summary_text" :text "plan first"}]
                       (get-in result [:provider-state :reasoning-items 0 :raw-item :summary])))))))
 
+    (it "responses transport separates multiple streamed reasoning summary parts"
+      (let [events (atom [])
+            stream (str
+                     "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_123\",\"summary\":[]}}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_part.added\",\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**First**\"}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"\\n\\nOne.\"}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_part.added\",\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Second**\"}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"\\n\\nTwo.\"}\n\n"
+                     "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_123\",\"encrypted_content\":\"ciphertext\"}}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :on-chunk #(swap! events conj %)})]
+            (expect (= "**First**\n\nOne.\n\n**Second**\n\nTwo." (:reasoning result)))
+            (expect (= "**First**\n\nOne.\n\n**Second**\n\nTwo."
+                      (get-in result [:provider-state :reasoning-items 0 :summary-text])))
+            (expect (= (:reasoning result) (:reasoning (last @events))))))))
+
     (it "responses transport stores encrypted-only reasoning only in provider-state"
       (let [events (atom [])
             stream (str

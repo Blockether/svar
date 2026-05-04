@@ -85,6 +85,10 @@
           ;; Pointer is present
           (expect (re-find #"fences" tail-text))
           (expect (re-find #"No prose outside fences" tail-text))
+          (expect (re-find #"Opening fence line must contain only" tail-text))
+          (expect (re-find #"Closing fence line must contain only" tail-text))
+          (expect (re-find #"no code on fence line" tail-text))
+          (expect (re-find #"no glued fences" tail-text))
           ;; Original user content preserved
           (expect (re-find #"\(answer \"ok\"\)" tail-text)))))
 

@@ -564,7 +564,10 @@
         :else nil))
 
     (sequential? part)
-    (let [s (->> part (keep reasoning-part-text) (str/join ""))]
+    (let [s (->> part
+              (keep reasoning-part-text)
+              (remove str/blank?)
+              (str/join "\n\n"))]
       (when-not (str/blank? s) s))
 
     :else nil))
@@ -1144,6 +1147,13 @@
        :reasoning-fallback nil
        :api-usage (normalize-openai-usage (:usage chunk))}
 
+      (= "response.reasoning_summary_part.added" event-type)
+      {:content-delta nil
+       :reasoning-delta (when (:svar/reasoning-summary-part-boundary? chunk) "\n\n")
+       :content-fallback nil
+       :reasoning-fallback nil
+       :api-usage (normalize-openai-usage (:usage chunk))}
+
       (contains? #{"response.reasoning.delta"
                    "response.reasoning.done"
                    "response.reasoning_text.delta"
@@ -1238,9 +1248,10 @@
       event)
 
     "response.reasoning_summary_part.added"
-    (do
+    (let [boundary? (seq (:summary @current-reasoning-item))]
       (swap! current-reasoning-item update :summary (fnil conj []) (:part event))
-      event)
+      (cond-> event
+        boundary? (assoc :svar/reasoning-summary-part-boundary? true)))
 
     "response.reasoning_summary_text.delta"
     (do
@@ -1980,8 +1991,11 @@
    long transcripts. Parameterised by `lang` so the reminder names the
    tag the caller asked `ask-code!` to extract."
   [lang]
-  (str "Reply with exactly one " lang " source block inside ```" lang " … ``` fences. "
-    "Do not emit multiple fenced blocks; put all code in the one fenced block and never nest fences. "
+  (str "Reply with exactly one " lang " source block in Markdown fences. "
+    "Opening fence line must contain only ```" lang ". Closing fence line must contain only ```. "
+    "All executable source goes between those two fence lines. "
+    "Fence lines must be on their own lines: no code on fence line, "
+    "no glued fences like ``````" lang " or ``` ```" lang ". "
     "No prose outside fences. No commentary, no explanation."))
 
 (defn- append-code-tail-pointer
