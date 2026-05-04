@@ -47,8 +47,7 @@
                     :min-gpt-version [5 3]
                     :exclude-models #{"gpt-4o" "gpt-4.1"
                                       "gpt-5" "gpt-5-mini" "gpt-5.1"
-                                      "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
-                                      "gpt-5.2" "gpt-5.2-codex"}
+                                      "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
                     :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
                   :env-keys [] :api-style :openai-compatible-responses
@@ -56,8 +55,7 @@
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1"
                                     "gpt-5" "gpt-5-mini" "gpt-5.1"
-                                    "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
-                                    "gpt-5.2" "gpt-5.2-codex"}
+                                    "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
                   :responses-path "/codex/responses"
                   :extra-body {:store false
                                :include ["reasoning.encrypted_content"]
@@ -91,19 +89,11 @@
    "gpt-5.1-codex"             {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.1-codex-mini"        {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.1-codex-max"         {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.2"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.2-codex"             {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.3-codex"             {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.3-codex-spark"       {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.4-mini"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-
-   ;; ── OpenAI Reasoning (o-series, reasoning_effort) ───────────────────────
-   "o3"                        {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
-   "o3-pro"                    {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
-   "o3-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
-   "o4-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── Anthropic Claude 4.x (extended thinking, budget_tokens) ─────────────
    "claude-opus-4-7"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
@@ -247,7 +237,7 @@
 ;;   Anthropic:   https://docs.claude.com/en/docs/about-claude/models/pricing
 ;;   OpenAI:      https://openai.com/api/pricing/
 ;;   Google:      https://ai.google.dev/gemini-api/docs/pricing
-;;   Z.ai / GLM:  https://bigmodel.cn/pricing
+;;   Z.ai / GLM:  https://docs.z.ai/guides/overview/pricing
 ;;   MiniMax:     https://platform.minimax.io/docs/guides/pricing-paygo
 (def KNOWN_PROVIDER_MODELS
   ;; `:json-object-mode?` — flagged on models that benefit from sending
@@ -259,65 +249,79 @@
   ;; `:json-object-mode?` opt or by setting `:response_format` directly in
   ;; `:extra-body`.
   {:blockether
-   {"gemini-2.5-pro"            {:pricing {:input 1.25  :output 10.00} :context 2000000}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000  :json-object-mode? true}
-    "gpt-4.1"                   {:pricing {:input 2.00  :output 8.00}  :context 1000000}
-    "gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
-    "gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
-    "gpt-5-mini"                {:pricing {:input 0.25  :output 2.00}  :context 128000}
-    ;; gpt-5.1 / gpt-5.4: with API key, both cost ~$1/$1 per 1M tokens (flat rate).
-    ;; Without API key (ChatGPT console) the rates are higher. We assume API usage.
-    "gpt-5.1"                   {:pricing {:input 1.00  :output 1.00}  :context 128000}
-    ;; gpt-5.2: deprecated by OpenAI — prefer gpt-5.4. Kept for legacy usage tracking.
-    "gpt-5.2"                   {:pricing {:input 1.75  :output 14.00} :context 200000}
-    "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
-    "o3-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}
+   {"gemini-2.5-pro"            {:pricing {:input 1.25 :cached-input 0.125 :output 10.00
+                                           :input-over-200k 2.50 :cached-input-over-200k 0.25
+                                           :output-over-200k 15.00}
+                                 :context 2000000}
+    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
+    "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
+    "gpt-4.1"                   {:pricing {:input 2.00  :cached-input 0.50  :output 8.00}  :context 1000000}
+    "gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
+    "gpt-5"                     {:pricing {:input 1.25  :cached-input 0.125 :output 10.00} :context 400000}
+    "gpt-5-mini"                {:pricing {:input 0.25  :cached-input 0.025 :output 2.00}  :context 128000}
+    ;; OpenAI public API standard pricing. Cached input is billed separately
+    ;; when provider usage reports cached tokens.
+    "gpt-5.1"                   {:pricing {:input 1.25  :cached-input 0.125 :output 10.00}  :context 128000}
+    "gpt-5.4"                   {:pricing {:input 2.50  :cached-input 0.25  :output 15.00
+                                           :input-over-272k 5.00 :cached-input-over-272k 0.50
+                                           :output-over-272k 22.50}
+                                 :context 1050000}
+    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 128000}
     "minimax-m2.5"              {:pricing {:input 0.50  :output 2.00}  :context 128000}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 128000}}
 
    :openai
-   {"gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
-    "gpt-4.1"                   {:pricing {:input 2.00  :output 8.00}  :context 1000000}
-    "gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
-    "gpt-5-mini"                {:pricing {:input 0.25  :output 2.00}  :context 128000}
-    "gpt-5.1"                   {:pricing {:input 1.00  :output 1.00}  :context 128000}
-    ;; gpt-5.2: deprecated — prefer gpt-5.4.
-    "gpt-5.2"                   {:pricing {:input 1.75  :output 14.00} :context 200000}
-    "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
-    "gpt-5.5"                   {:pricing {:input 5.00  :output 30.00} :context 1050000}
-    "o3"                        {:pricing {:input 2.00  :output 8.00}  :context 200000}
-    "o3-pro"                    {:pricing {:input 20.00 :output 80.00} :context 200000}
-    "o3-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}
-    "o4-mini"                   {:pricing {:input 1.10  :output 4.40}  :context 200000}}
+   {"gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
+    "gpt-4.1"                   {:pricing {:input 2.00  :cached-input 0.50  :output 8.00}  :context 1000000}
+    "gpt-5"                     {:pricing {:input 1.25  :cached-input 0.125 :output 10.00} :context 400000}
+    "gpt-5-mini"                {:pricing {:input 0.25  :cached-input 0.025 :output 2.00}  :context 128000}
+    "gpt-5.1"                   {:pricing {:input 1.25  :cached-input 0.125 :output 10.00}  :context 128000}
+    "gpt-5.4"                   {:pricing {:input 2.50  :cached-input 0.25  :output 15.00
+                                           :input-over-272k 5.00 :cached-input-over-272k 0.50
+                                           :output-over-272k 22.50}
+                                 :context 1050000}
+    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 128000}
+    "gpt-5.5"                   {:pricing {:input 5.00  :cached-input 0.50  :output 30.00
+                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
+                                           :output-over-272k 45.00}
+                                 :context 1050000}}
 
    :openai-codex
-   {"gpt-5"                     {:pricing {:input 1.25  :output 10.00} :context 400000}
-    "gpt-5.1"                   {:pricing {:input 1.00  :output 1.00}  :context 128000}
-    "gpt-5.3-codex"             {:pricing {:input 1.00  :output 1.00}  :context 400000}
-    "gpt-5.4"                   {:pricing {:input 1.00  :output 1.00}  :context 1000000}
-    ;; Codex product docs mention a 400k context window for GPT-5.5 in Codex.
-    ;; Pricing uses the public API equivalent as a routing / accounting heuristic.
-    "gpt-5.5"                   {:pricing {:input 5.00  :output 30.00} :context 400000}}
+   {"gpt-5"                     {:pricing {:input 1.25  :cached-input 0.125 :output 10.00} :context 400000}
+    "gpt-5.1"                   {:pricing {:input 1.25  :cached-input 0.125 :output 10.00}  :context 128000}
+    "gpt-5.3-codex"             {:pricing {:input 1.75  :cached-input 0.175 :output 14.00}  :context 400000}
+    "gpt-5.4"                   {:pricing {:input 2.50  :cached-input 0.25  :output 15.00
+                                           :input-over-272k 5.00 :cached-input-over-272k 0.50
+                                           :output-over-272k 22.50}
+                                 :context 1050000}
+    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 128000}
+    ;; Codex product docs publish credit rates; these USD estimates use the
+    ;; matching public API model rates for routing / accounting heuristics.
+    "gpt-5.5"                   {:pricing {:input 5.00  :cached-input 0.50  :output 30.00
+                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
+                                           :output-over-272k 45.00}
+                                 :context 400000}}
 
    :anthropic
-   {"claude-opus-4-6"           {:pricing {:input 5.00  :output 25.00} :context 1000000}
-    "claude-opus-4-5"           {:pricing {:input 5.00  :output 25.00} :context 200000}
-    "claude-sonnet-4-6"         {:pricing {:input 3.00  :output 15.00} :context 200000}
-    "claude-sonnet-4-5"         {:pricing {:input 3.00  :output 15.00} :context 200000}
-    "claude-sonnet-4-20250514"  {:pricing {:input 3.00  :output 15.00} :context 200000}
-    "claude-haiku-4-5"          {:pricing {:input 1.00  :output 5.00}  :context 200000}}
+   {"claude-opus-4-7"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
+    "claude-opus-4-6"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
+    "claude-opus-4-5"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
+    "claude-sonnet-4"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
+    "claude-sonnet-4-6"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
+    "claude-sonnet-4-5"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
+    "claude-sonnet-4-20250514"  {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
+    "claude-haiku-4-5"          {:pricing {:input 1.00  :cached-input 0.10  :cache-write-5m 1.25  :cache-write-1h 2.00  :output 5.00}  :context 200000}}
 
    :zai
    ;; Direct z.ai API — per-token billing. Pricing from z.ai dashboard
    ;; (docs.z.ai/guides/pricing). Keep in sync with :zai-coding below.
-   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000  :json-object-mode? true}
-    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
+   {"glm-4.6"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
+    "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
@@ -330,11 +334,11 @@
    ;; server-side on this endpoint — `:preserved-thinking?` on ask! is a
    ;; no-op here (the server already does it). GLM-4.7 is the recommended
    ;; model on this plan per z.ai docs.
-   {"glm-4.6"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-4.6v"                  {:pricing {:input 0.30  :output 0.90}  :context 128000  :json-object-mode? true}
-    "glm-4.7"                   {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}}
+   {"glm-4.6"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
+    "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
+    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}}
 
    :github-copilot
    {"claude-opus-4-7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic}
@@ -357,10 +361,6 @@
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
     "gpt-5.1-codex-mini"        {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.2"                   {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.2-codex"             {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
     "gpt-5.3-codex"             {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
     "gpt-5.4"                   {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
@@ -377,9 +377,9 @@
     "grok-code-fast-1"          {:pricing {:input 0.0 :output 0.0} :context 128000}}
 
    :openrouter
-   {"gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
-    "claude-sonnet-4-6"         {:pricing {:input 3.00  :output 15.00} :context 200000}
-    "gemini-2.0-flash"          {:pricing {:input 0.10  :output 0.40}  :context 1000000}}
+   {"gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
+    "claude-sonnet-4-6"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
+    "gemini-2.0-flash"          {:pricing {:input 0.10  :cached-input 0.025 :output 0.40}  :context 1000000}}
 
    :ollama
    {}
@@ -416,15 +416,21 @@
                  (reduce-kv (fn [macc model-name {:keys [pricing]}]
                               (if-not pricing
                                 macc
-                                (update macc model-name
-                                  (fn [existing]
-                                    (if (or (nil? existing)
-                                          (< (+ (double (:input pricing))
-                                               (double (:output pricing)))
-                                            (+ (double (:input existing))
-                                              (double (:output existing)))))
-                                      pricing
-                                      existing)))))
+                                (let [pricing-total (+ (double (:input pricing 0.0))
+                                                      (double (:output pricing 0.0)))]
+                                  ;; Subscription/local providers advertise 0/0
+                                  ;; for routing, but legacy cost utilities need
+                                  ;; public paid rates when available.
+                                  (if (zero? pricing-total)
+                                    macc
+                                    (update macc model-name
+                                      (fn [existing]
+                                        (if (or (nil? existing)
+                                              (< pricing-total
+                                                (+ (double (:input existing))
+                                                  (double (:output existing)))))
+                                          pricing
+                                          existing)))))))
                    acc models))
       {} KNOWN_PROVIDER_MODELS)
     :default {:input 5.0 :output 15.0}))
@@ -462,7 +468,7 @@
        :capabilities (cond-> #{:chat}
                        (re-find #"vision|claude|gemini|gpt-4o|glm.*v|pixtral" m) (conj :vision))}
 
-      (re-find #"^o[1-9]|^o3-|^o4-|reasoner|thinking" m)
+      (re-find #"reasoner|thinking" m)
       {:intelligence :frontier :speed :slow :capabilities #{:chat}}
 
       (re-find #"opus|frontier" m)
@@ -497,7 +503,7 @@
 
 (defn- parse-gpt-version
   "Extract comparable GPT version [major minor] from ids such as
-   gpt-4o, gpt-5, gpt-5.2-codex, or gpt-5.4-mini. Non-GPT ids return nil."
+   gpt-4o, gpt-5, gpt-5.3-codex, or gpt-5.4-mini. Non-GPT ids return nil."
   [model-name]
   (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
     [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
@@ -700,10 +706,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-              (assoc ps
-                :cb-state :open
-                :cb-failures new-failures
-                :cb-open-until (+ now recovery-ms)))
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -715,7 +721,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -741,6 +747,8 @@
                   :budget budget
                   :spent {:tokens total-tokens :cost total-cost}}))))))
 
+(declare estimate-cost)
+
 (defn- budget-record!
   "Records token usage and cost against the router's budget."
   [router provider-id model-name api-usage]
@@ -748,15 +756,15 @@
     (let [input-tokens  (long (or (:prompt_tokens api-usage) 0))
           output-tokens (long (or (:completion_tokens api-usage) 0))
           total-tokens  (+ input-tokens output-tokens)
-          pricing (provider-model-pricing provider-id model-name)
-          input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing 5.0)))
-          output-cost (* (/ (double output-tokens) 1000000.0) (double (:output pricing 15.0)))
-          total-cost (+ input-cost output-cost)]
+          pricing-map   {model-name (provider-model-pricing provider-id model-name)}
+          cost          (estimate-cost model-name input-tokens output-tokens pricing-map
+                          {:api-usage api-usage
+                           :cache-tokens-in-input? (not= :anthropic (get-in KNOWN_PROVIDERS [provider-id :api-style]))})]
       (swap! (:budget-state router)
         (fn [bs]
           (-> bs
             (update :total-tokens + total-tokens)
-            (update :total-cost + total-cost)))))))
+            (update :total-cost + (:total-cost cost))))))))
 
 ;; =============================================================================
 ;; Cumulative stats recording
@@ -871,8 +879,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                    (keyword? prefer) [prefer]
-                    :else nil)
+                        (keyword? prefer) [prefer]
+                        :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))]
     (fn [[p m]] [(model-score m) (:priority p 0)])))
@@ -1006,52 +1014,52 @@
                 start-ms (router-now-ms router)]
             (swap! tried conj pid)
             (let [result (try (f provider model-map)
-                           (catch Exception e
-                             (cond
-                               (router-transient-error? router e)
-                               (do (trove/log! {:level :warn
-                                                :id ::provider-retry
-                                                :data {:provider-id pid
-                                                       :error (ex-message e)}
-                                                :msg "retrying with fallback provider"})
-                                 (swap! fallback-trace conj
-                                   {:provider-id pid
-                                    :model (:name model-map)
-                                    :error (ex-message e)
-                                    :status (:status (ex-data e))
-                                    :reason :transient-error})
-                                 (cb-record-failure! router pid
-                                   (= 429 (:status (ex-data e))))
-                                 (when-let [on-chunk (:on-chunk prefs)]
-                                   (on-chunk {:reset? true
-                                              :reason :provider-fallback
-                                              :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                              :new-provider nil}))
-                                 ::transient-error)
+                              (catch Exception e
+                                (cond
+                                  (router-transient-error? router e)
+                                  (do (trove/log! {:level :warn
+                                                   :id ::provider-retry
+                                                   :data {:provider-id pid
+                                                          :error (ex-message e)}
+                                                   :msg "retrying with fallback provider"})
+                                      (swap! fallback-trace conj
+                                        {:provider-id pid
+                                         :model (:name model-map)
+                                         :error (ex-message e)
+                                         :status (:status (ex-data e))
+                                         :reason :transient-error})
+                                      (cb-record-failure! router pid
+                                        (= 429 (:status (ex-data e))))
+                                      (when-let [on-chunk (:on-chunk prefs)]
+                                        (on-chunk {:reset? true
+                                                   :reason :provider-fallback
+                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                                   :new-provider nil}))
+                                      ::transient-error)
 
-                               (format-error? prefs e)
-                               (do (trove/log! {:level :warn
-                                                :id ::format-error-fallback
-                                                :data {:provider-id pid
-                                                       :model (:name model-map)
-                                                       :ex-type (:type (ex-data e))}
-                                                :msg "format error: trying next provider"})
-                                 (swap! format-failed conj pid)
-                                 (reset! last-format-error e)
-                                 (swap! fallback-trace conj
-                                   {:provider-id pid
-                                    :model (:name model-map)
-                                    :error (ex-message e)
-                                    :ex-type (:type (ex-data e))
-                                    :reason :format-error})
-                                 (when-let [on-chunk (:on-chunk prefs)]
-                                   (on-chunk {:reset? true
-                                              :reason :format-error-fallback
-                                              :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                              :new-provider nil}))
-                                 ::format-error)
+                                  (format-error? prefs e)
+                                  (do (trove/log! {:level :warn
+                                                   :id ::format-error-fallback
+                                                   :data {:provider-id pid
+                                                          :model (:name model-map)
+                                                          :ex-type (:type (ex-data e))}
+                                                   :msg "format error: trying next provider"})
+                                      (swap! format-failed conj pid)
+                                      (reset! last-format-error e)
+                                      (swap! fallback-trace conj
+                                        {:provider-id pid
+                                         :model (:name model-map)
+                                         :error (ex-message e)
+                                         :ex-type (:type (ex-data e))
+                                         :reason :format-error})
+                                      (when-let [on-chunk (:on-chunk prefs)]
+                                        (on-chunk {:reset? true
+                                                   :reason :format-error-fallback
+                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                                   :new-provider nil}))
+                                      ::format-error)
 
-                               :else (throw e))))]
+                                  :else (throw e))))]
               (cond
                 (or (= result ::transient-error)
                   (= result ::format-error))
@@ -1460,18 +1468,86 @@
        pricing)
      (:default pricing))))
 
+(defn- million-cost
+  [tokens rate]
+  (* (/ (double (max 0 (long (or tokens 0)))) 1000000.0)
+    (double (or rate 0.0))))
+
+(defn- tier-rate
+  "Some providers price full requests differently when prompt/input size
+   crosses a public threshold. `selector-tokens` is prompt/input size."
+  [pricing k selector-tokens]
+  (let [selector-tokens (long (or selector-tokens 0))
+        over-272k (keyword (str (name k) "-over-272k"))
+        over-200k (keyword (str (name k) "-over-200k"))]
+    (or (when (> selector-tokens 272000)
+          (get pricing over-272k))
+      (when (> selector-tokens 200000)
+        (get pricing over-200k))
+      (get pricing k))))
+
+(defn- cache-write-rate
+  [pricing ttl]
+  (case ttl
+    :1h (or (:cache-write-1h pricing) (:cache-write pricing) (:input pricing))
+    (or (:cache-write-5m pricing) (:cache-write pricing) (:input pricing))))
+
+(defn- usage-cache-tokens
+  [api-usage]
+  {:cached-tokens (long (or (get-in api-usage [:prompt_tokens_details :cached_tokens])
+                          (get-in api-usage [:prompt_tokens_details :input_cached_tokens])
+                          0))
+   :cache-creation-tokens (long (or (get-in api-usage [:prompt_tokens_details :cache_creation_tokens])
+                                  (get-in api-usage [:prompt_tokens_details :cache_write_tokens])
+                                  0))})
+
 (defn estimate-cost
-  "Estimates the cost in USD for a given token count."
-  ([^String model ^long input-tokens ^long output-tokens]
+  "Estimates USD cost with separate uncached input, cached input, cache
+   creation, and output components. Rates are USD per 1M tokens.
+
+   `input-tokens` normally means provider prompt/input tokens. For OpenAI,
+   Z.ai, Gemini, and OpenRouter this includes cached-read tokens, so cached
+   reads are subtracted before normal input cost. For Anthropic normalized
+   usage, `input_tokens` excludes cache read/write tokens; pass
+   `{:cache-tokens-in-input? false}` to keep base input intact."
+  ([model input-tokens output-tokens]
    (estimate-cost model input-tokens output-tokens MODEL_PRICING))
-  ([^String model ^long input-tokens ^long output-tokens pricing-map]
+  ([model input-tokens output-tokens pricing-map]
+   (estimate-cost model input-tokens output-tokens pricing-map {}))
+  ([model input-tokens output-tokens pricing-map opts]
    (let [pricing (get-model-pricing model pricing-map)
-         input-cost (* (/ (double input-tokens) 1000000.0) (double (:input pricing)))
-         output-cost (* (/ (double output-tokens) 1000000.0) (double (:output pricing)))
+         {:keys [cached-tokens cache-creation-tokens]} (merge (usage-cache-tokens (:api-usage opts))
+                                                         (select-keys opts [:cached-tokens :cache-creation-tokens]))
+         cached-tokens (long (or cached-tokens 0))
+         cache-creation-tokens (long (or cache-creation-tokens 0))
+         cache-tokens-in-input? (if (contains? opts :cache-tokens-in-input?)
+                                  (:cache-tokens-in-input? opts)
+                                  true)
+         input-uncached-tokens (if cache-tokens-in-input?
+                                 (max 0 (- (long input-tokens) cached-tokens cache-creation-tokens))
+                                 (long input-tokens))
+         input-rate (tier-rate pricing :input input-tokens)
+         cached-rate (or (tier-rate pricing :cached-input input-tokens) input-rate)
+         output-rate (tier-rate pricing :output input-tokens)
+         cache-write-rate (cache-write-rate pricing (or (:cache-creation-ttl opts) :5min))
+         input-uncached-cost (double (million-cost input-uncached-tokens input-rate))
+         input-cached-cost (double (million-cost cached-tokens cached-rate))
+         input-cache-write-cost (double (million-cost cache-creation-tokens cache-write-rate))
+         input-cost (+ input-uncached-cost input-cached-cost input-cache-write-cost)
+         output-cost (double (million-cost output-tokens output-rate))
          total-cost (+ input-cost output-cost)]
      {:input-cost input-cost
+      :input-uncached-cost input-uncached-cost
+      :input-cached-cost input-cached-cost
+      :input-cache-write-cost input-cache-write-cost
+      :cache-read-cost input-cached-cost
+      :cache-write-cost input-cache-write-cost
       :output-cost output-cost
       :total-cost total-cost
+      :input-uncached-tokens input-uncached-tokens
+      :input-cached-tokens cached-tokens
+      :input-cache-write-tokens cache-creation-tokens
+      :output-tokens output-tokens
       :model model
       :pricing pricing})))
 
@@ -1479,22 +1555,55 @@
 ;; Convenience Functions
 ;; =============================================================================
 
+(defn- content-cache-ttl
+  [content]
+  (cond
+    (map? content)
+    (when (:svar/cache content)
+      (:svar/cache-ttl content))
+
+    (sequential? content)
+    (some content-cache-ttl content)
+
+    :else nil))
+
+(defn- messages-cache-creation-ttl
+  [messages]
+  (if (some #(= :1h (content-cache-ttl (:content %))) messages)
+    :1h
+    :5min))
+
 (defn count-and-estimate
-  "Counts tokens and estimates cost in one call."
+  "Counts tokens and estimates cost in one call. Cost map separates
+   uncached input, cached-read input, cache-write input, output, and total."
   ([^String model messages ^String output-text]
    (count-and-estimate model messages output-text {}))
-  ([^String model messages ^String output-text {:keys [pricing input-tokens api-usage]}]
+  ([^String model messages ^String output-text {:keys [pricing input-tokens api-usage api-style
+                                                       cache-creation-ttl]
+                                                :as opts}]
    (let [input-tokens (long (or (:prompt_tokens api-usage) input-tokens (count-messages model messages)))
          output-tokens (long (or (:completion_tokens api-usage) (count-tokens model output-text)))
          reasoning-tokens (long (or (get-in api-usage [:completion_tokens_details :reasoning_tokens]) 0))
          cached-tokens (long (or (get-in api-usage [:prompt_tokens_details :cached_tokens]) 0))
+         cache-creation-tokens (long (or (get-in api-usage [:prompt_tokens_details :cache_creation_tokens])
+                                       (get-in api-usage [:prompt_tokens_details :cache_write_tokens])
+                                       0))
          total-tokens (+ input-tokens output-tokens)
+         cache-tokens-in-input? (not= api-style :anthropic)
          cost (estimate-cost model input-tokens output-tokens
-                (or pricing MODEL_PRICING))]
+                (or pricing MODEL_PRICING)
+                (merge {:api-usage api-usage
+                        :cached-tokens cached-tokens
+                        :cache-creation-tokens cache-creation-tokens
+                        :cache-creation-ttl (or cache-creation-ttl
+                                              (messages-cache-creation-ttl messages))
+                        :cache-tokens-in-input? cache-tokens-in-input?}
+                  (select-keys opts [:cache-tokens-in-input?])))]
      {:input-tokens input-tokens
       :output-tokens output-tokens
       :reasoning-tokens reasoning-tokens
       :cached-tokens cached-tokens
+      :cache-creation-tokens cache-creation-tokens
       :total-tokens total-tokens
       :cost cost})))
 

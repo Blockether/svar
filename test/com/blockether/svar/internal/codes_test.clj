@@ -36,10 +36,38 @@
       (let [blocks (sut/extract-code-blocks "```clojure\n(answer \"4\")```")]
         (expect (= [{:lang "clojure" :source "(answer \"4\")"}] blocks))))
 
+    (it "accepts an opener where code starts after a separating space"
+      (let [blocks (sut/extract-code-blocks "```clojure (answer \"4\")\n```")]
+        (expect (= [{:lang "clojure" :source "(answer \"4\")"}] blocks))))
+
     (it "does not swallow an empty fence plus following clojure fence into source"
       (let [blocks (sut/extract-code-blocks "```clojure\n```\n\n```clojure\n(answer \"4\")\n```")]
         (expect (= [{:lang "clojure" :source ""}
                     {:lang "clojure" :source "(answer \"4\")"}]
+                  blocks))))
+
+    (it "splits close fence followed by clojure opener on the next line"
+      (let [blocks (sut/extract-code-blocks "```clojure\n(def x 1)\n```\n```clojure\n(def y 2)\n```")]
+        (expect (= [{:lang "clojure" :source "(def x 1)"}
+                    {:lang "clojure" :source "(def y 2)"}]
+                  blocks))))
+
+    (it "splits glued close-open fence boundaries"
+      (let [blocks (sut/extract-code-blocks "```clojure\n(def x 1)\n``````clojure\n(def y 2)\n```")]
+        (expect (= [{:lang "clojure" :source "(def x 1)"}
+                    {:lang "clojure" :source "(def y 2)"}]
+                  blocks))))
+
+    (it "splits a closer glued to code before the next opener on the same line"
+      (let [blocks (sut/extract-code-blocks "```clojure\n(def x 1)```` ```clojure\n(def y 2)\n```")]
+        (expect (= [{:lang "clojure" :source "(def x 1)"}
+                    {:lang "clojure" :source "(def y 2)"}]
+                  blocks))))
+
+    (it "splits glued close-open boundaries for longer fences"
+      (let [blocks (sut/extract-code-blocks "````clojure\n(def x 1)\n````````clojure\n(def y 2)\n````")]
+        (expect (= [{:lang "clojure" :source "(def x 1)"}
+                    {:lang "clojure" :source "(def y 2)"}]
                   blocks)))))
 
   (describe "untagged fences"
@@ -69,7 +97,10 @@
       (expect (= [] (sut/extract-code-blocks "```\n\n```clojure"))))
 
     (it "returns [] for an unclosed fence instead of falling back to raw markdown"
-      (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)")))))
+      (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)"))))
+
+    (it "returns [] for a short next opener instead of guessing"
+      (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)```` ``clojure\n(def y 2)\n```")))))
 
   (describe "empty input"
     (it "returns [] for nil"
@@ -164,3 +195,4 @@
                    (sut/select-blocks "clojure")
                    sut/concat-sources)]
       (expect (= "(def x 42)\n(answer (str x))" source)))))
+

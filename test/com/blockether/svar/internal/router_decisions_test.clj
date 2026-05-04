@@ -342,25 +342,25 @@
     ;; different price points:
     ;;   gpt-4o   — 2.50 + 10.00 = $12.50/M blended,  NOT reasoning
     ;;   gpt-5-mini — 0.25 + 2.00 = $2.25/M blended,   reasoning
-    ;;   gpt-5.1  — 1.00 + 1.00  = $2.00/M blended,   reasoning
+    ;;   gpt-5.1  — 1.25 + 10.00 = $11.25/M blended,  reasoning
     (let [r (llm/make-router
               [{:id :openai :api-key "k"
                 :models [{:name "gpt-4o"} {:name "gpt-5-mini"} {:name "gpt-5.1"}]}])]
-      ;; Without filter, cheapest-by-pricing wins: gpt-5.1 ($2.00)
+      ;; Without filter, cheapest-by-pricing wins: gpt-5-mini ($2.25)
       (let [[_ model] (router/select-provider r {:prefer :cost})]
-        (expect (= "gpt-5.1" (:name model))))
-      ;; With :reasoning :deep filter, still gpt-5.1 (it IS reasoning-capable, cheapest)
+        (expect (= "gpt-5-mini" (:name model))))
+      ;; With :reasoning :deep filter, still gpt-5-mini (it IS reasoning-capable, cheapest)
       (let [{:keys [prefs]} (router/resolve-routing r {:optimize :cost :reasoning :deep})
             [_ model] (router/select-provider r prefs)]
-        (expect (= "gpt-5.1" (:name model))))))
+        (expect (= "gpt-5-mini" (:name model))))))
 
   (it "`:reasoning :deep` filters OUT a non-reasoning model even when it's cheapest"
     ;; Construct a case where the cheapest model is explicitly NOT reasoning,
     ;; to prove the filter actually changes selection:
     ;;   gpt-4o (non-reasoning, $12.50)
-    ;;   o3-mini (reasoning, $1.10 + $4.40 = $5.50)
-    ;;   gpt-5.1 (reasoning, $2.00) — cheapest reasoning-capable
-    ;; Without the filter gpt-5.1 wins anyway (both cheapest AND reasoning),
+    ;;   gpt-5-mini (reasoning, $0.25 + $2.00 = $2.25)
+    ;;   gpt-5.1 (reasoning, $1.25 + $10.00) — reasoning-capable
+    ;; Without the filter gpt-5-mini wins anyway (both cheapest AND reasoning),
     ;; but swap the scenario: explicit pricing on a synthetic fixture where
     ;; the cheapest happens to be non-reasoning.
     (let [r (llm/make-router
@@ -646,10 +646,11 @@
       (it "flash family" (expect (= :medium (:intelligence (infer "future-flash")))))
       (it "nano suffix"  (expect (= :medium (:intelligence (infer "acme-nano"))))))
 
-    (describe "`:frontier :slow` family (o-series / reasoner / thinking)"
-      (it "o1 prefix"        (expect (= :frontier (:intelligence (infer "o1-new")))))
-      (it "o3- prefix"       (expect (= :frontier (:intelligence (infer "o3-super")))))
-      (it "o4- prefix"       (expect (= :frontier (:intelligence (infer "o4-large")))))
+    (describe "`:frontier :slow` family (reasoner / thinking)"
+      (it "does not special-case obsolete o-series prefixes"
+        (expect (= :medium (:intelligence (infer "o1-new"))))
+        (expect (= :medium (:intelligence (infer "o3-super"))))
+        (expect (= :high (:intelligence (infer "o4-large")))))
       (it "reasoner keyword" (expect (= :frontier (:intelligence (infer "custom-reasoner")))))
       (it "thinking keyword" (expect (= :frontier (:intelligence (infer "future-thinking"))))))
 

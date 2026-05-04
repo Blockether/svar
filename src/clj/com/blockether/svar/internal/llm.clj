@@ -138,7 +138,7 @@
                     :timeout timeout-ms})
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                   (catch Exception _ nil))]
+                      (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -242,7 +242,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-        (assoc body :max_tokens required-min))
+          (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -686,16 +686,24 @@
           output-details (:output_tokens_details usage)]
       (if (or (contains? usage :input_tokens)
             (contains? usage :output_tokens))
-        (cond-> {:prompt_tokens     (:input_tokens usage)
-                 :completion_tokens (:output_tokens usage)
-                 :total_tokens      (:total_tokens usage)}
-          (:cached_tokens input-details)
-          (assoc :prompt_tokens_details
-            {:cached_tokens (:cached_tokens input-details)})
+        (let [prompt-details (cond-> {}
+                               (:cached_tokens input-details)
+                               (assoc :cached_tokens (:cached_tokens input-details))
 
-          (:reasoning_tokens output-details)
-          (assoc :completion_tokens_details
-            {:reasoning_tokens (:reasoning_tokens output-details)}))
+                               (:cache_creation_tokens input-details)
+                               (assoc :cache_creation_tokens (:cache_creation_tokens input-details))
+
+                               (:cache_write_tokens input-details)
+                               (assoc :cache_write_tokens (:cache_write_tokens input-details)))]
+          (cond-> {:prompt_tokens     (:input_tokens usage)
+                   :completion_tokens (:output_tokens usage)
+                   :total_tokens      (:total_tokens usage)}
+            (seq prompt-details)
+            (assoc :prompt_tokens_details prompt-details)
+
+            (:reasoning_tokens output-details)
+            (assoc :completion_tokens_details
+              {:reasoning_tokens (:reasoning_tokens output-details)})))
         usage))))
 
 ;; =============================================================================
@@ -1972,8 +1980,8 @@
    long transcripts. Parameterised by `lang` so the reminder names the
    tag the caller asked `ask-code!` to extract."
   [lang]
-  (str "Reply with " lang " source inside ```" lang " … ``` fences. "
-    "Multiple fenced blocks are allowed and will be concatenated in order. "
+  (str "Reply with exactly one " lang " source block inside ```" lang " … ``` fences. "
+    "Do not emit multiple fenced blocks; put all code in the one fenced block and never nest fences. "
     "No prose outside fences. No commentary, no explanation."))
 
 (defn- append-code-tail-pointer
@@ -2045,21 +2053,26 @@
 (defn- api-usage->tokens
   [api-usage]
   (when api-usage
-    (let [cached (get-in api-usage [:prompt_tokens_details :cached_tokens])]
+    (let [cached (get-in api-usage [:prompt_tokens_details :cached_tokens])
+          cache-created (or (get-in api-usage [:prompt_tokens_details :cache_creation_tokens])
+                          (get-in api-usage [:prompt_tokens_details :cache_write_tokens]))]
       (cond-> {:input     (:prompt_tokens api-usage)
                :output    (:completion_tokens api-usage)
                :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
                :total     (:total_tokens api-usage)}
-        (some? cached) (assoc :cached cached)))))
+        (some? cached) (assoc :cached cached)
+        (some? cache-created) (assoc :cache-created cache-created)))))
 
 (defn- token-stats->tokens
   [token-stats]
-  (let [cached (:cached-tokens token-stats)]
+  (let [cached (:cached-tokens token-stats)
+        cache-created (:cache-creation-tokens token-stats)]
     (cond-> {:input     (:input-tokens token-stats)
              :output    (:output-tokens token-stats)
              :reasoning (:reasoning-tokens token-stats)
              :total     (:total-tokens token-stats)}
-      (some? cached) (assoc :cached cached))))
+      (some? cached) (assoc :cached cached)
+      (some? cache-created) (assoc :cache-created cache-created))))
 
 (defn ask!*
   "Low-level ask — calls the LLM directly without routing. Use ask! instead.
@@ -2198,12 +2211,16 @@
                                      cost (when api-usage
                                             (router/estimate-cost model
                                               (or (:prompt_tokens api-usage) 0)
-                                              (or (:completion_tokens api-usage) 0)))
+                                              (or (:completion_tokens api-usage) 0)
+                                              pricing
+                                              {:api-usage api-usage
+                                               :api-style api-style
+                                               :cache-tokens-in-input? (not= api-style :anthropic)}))
                                      partial-map (jsonish/parse-partial content)
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                 (catch Exception _ partial-map)))]
+                                                    (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content — don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -2323,7 +2340,9 @@
             (when (:ok? http-outcome)
               (try
                 (let [token-stats (router/count-and-estimate model msgs content
-                                    (cond-> {:pricing pricing :api-usage api-usage}
+                                    (cond-> {:pricing pricing
+                                             :api-usage api-usage
+                                             :api-style api-style}
                                       context-check (assoc :input-tokens (:input-tokens context-check))))]
                   {:ok? true
                    :result (spec/str->data-with-spec content spec)
@@ -2522,7 +2541,11 @@
                                      cost (when api-usage
                                             (router/estimate-cost model
                                               (or (:prompt_tokens api-usage) 0)
-                                              (or (:completion_tokens api-usage) 0)))
+                                              (or (:completion_tokens api-usage) 0)
+                                              pricing
+                                              {:api-usage api-usage
+                                               :api-style api-style
+                                               :cache-tokens-in-input? (not= api-style :anthropic)}))
                                      blocks   (codes/extract-code-blocks content)
                                      selected (->> (codes/select-blocks blocks lang)
                                                 (remove #(str/blank? (:source %)))
@@ -2576,7 +2599,9 @@
                         vec)
           result      (codes/concat-sources selected)
           token-stats (router/count-and-estimate model with-tail content
-                        (cond-> {:pricing pricing :api-usage api-usage}
+                        (cond-> {:pricing pricing
+                                 :api-usage api-usage
+                                 :api-style api-style}
                           context-check (assoc :input-tokens (:input-tokens context-check))))
           tokens      (token-stats->tokens token-stats)
           cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
@@ -3103,8 +3128,8 @@
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                :else {:strategy :root})]
+                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                    :else {:strategy :root})]
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]

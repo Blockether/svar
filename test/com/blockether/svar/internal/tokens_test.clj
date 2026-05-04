@@ -23,8 +23,8 @@
     (it "returns 1000000 for gpt-4.1"
       (expect (= 1000000 (sut/context-limit "gpt-4.1"))))
 
-    (it "returns 200000 for claude-sonnet-4-6"
-      (expect (= 200000 (sut/context-limit "claude-sonnet-4-6"))))
+    (it "returns max provider context for claude-sonnet-4-6"
+      (expect (= 1000000 (sut/context-limit "claude-sonnet-4-6"))))
 
     (it "returns 1000000 for claude-opus-4-6"
       (expect (= 1000000 (sut/context-limit "claude-opus-4-6")))))
@@ -138,7 +138,82 @@
   (it "includes pricing rates in result"
     (let [cost (sut/estimate-cost "gpt-4o" 1000 500)]
       (expect (contains? (:pricing cost) :input))
-      (expect (contains? (:pricing cost) :output)))))
+      (expect (contains? (:pricing cost) :output))))
+
+  (it "tracks public OpenAI standard cached pricing"
+    (expect (= {:input 5.00 :cached-input 0.50 :output 30.00
+                :input-over-272k 10.00 :cached-input-over-272k 1.00
+                :output-over-272k 45.00}
+              (select-keys (:pricing (sut/estimate-cost "gpt-5.5" 1 1))
+                [:input :cached-input :output
+                 :input-over-272k :cached-input-over-272k :output-over-272k])))
+    (expect (= {:input 2.50 :cached-input 0.25 :output 15.00
+                :input-over-272k 5.00 :cached-input-over-272k 0.50
+                :output-over-272k 22.50}
+              (select-keys (:pricing (sut/estimate-cost "gpt-5.4" 1 1))
+                [:input :cached-input :output
+                 :input-over-272k :cached-input-over-272k :output-over-272k])))
+    (expect (= {:input 1.75 :cached-input 0.175 :output 14.00}
+              (select-keys (:pricing (sut/estimate-cost "gpt-5.3-codex" 1 1))
+                [:input :cached-input :output])))
+    (expect (= {:input 0.75 :cached-input 0.075 :output 4.50}
+              (select-keys (:pricing (sut/estimate-cost "gpt-5.4-mini" 1 1))
+                [:input :cached-input :output]))))
+
+  (it "applies OpenAI long-context pricing to uncached cached and output components"
+    (let [cost (sut/estimate-cost "gpt-5.5" 300000 1000
+                 {"gpt-5.5" {:input 5.00 :cached-input 0.50 :output 30.00
+                             :input-over-272k 10.00 :cached-input-over-272k 1.00
+                             :output-over-272k 45.00}}
+                 {:cached-tokens 100000})]
+      (expect (= 200000 (:input-uncached-tokens cost)))
+      (expect (= 100000 (:input-cached-tokens cost)))
+      (expect (< (Math/abs (- 2.0 (:input-uncached-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.1 (:input-cached-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.045 (:output-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 2.145 (:total-cost cost))) 1.0E-12))))
+
+  (it "tracks public Anthropic and Gemini cache pricing"
+    (expect (= {:input 5.00 :cached-input 0.50
+                :cache-write-5m 6.25 :cache-write-1h 10.00
+                :output 25.00}
+              (select-keys (:pricing (sut/estimate-cost "claude-opus-4-7" 1 1))
+                [:input :cached-input :cache-write-5m :cache-write-1h :output])))
+    (expect (= {:input 1.25 :cached-input 0.125 :output 10.00
+                :input-over-200k 2.50 :cached-input-over-200k 0.25
+                :output-over-200k 15.00}
+              (select-keys (:pricing (sut/estimate-cost "gemini-2.5-pro" 1 1))
+                [:input :cached-input :output
+                 :input-over-200k :cached-input-over-200k :output-over-200k]))))
+
+  (it "separates uncached input, cached input, output, and total cost"
+    (let [pricing {"gpt-4o" {:input 2.00 :cached-input 0.50 :output 10.00}}
+          cost (sut/estimate-cost "gpt-4o" 1000 500 pricing
+                 {:cached-tokens 400})]
+      (expect (= 600 (:input-uncached-tokens cost)))
+      (expect (= 400 (:input-cached-tokens cost)))
+      (expect (< (Math/abs (- 0.0012 (:input-uncached-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.0002 (:input-cached-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.0014 (:input-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.005 (:output-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.0064 (:total-cost cost))) 1.0E-12))))
+
+  (it "prices Anthropic cache writes separately when input_tokens excludes cache tokens"
+    (let [pricing {"claude-sonnet-4-6" {:input 3.00 :cached-input 0.30
+                                        :cache-write-5m 3.75 :cache-write-1h 6.00
+                                        :output 15.00}}
+          cost (sut/estimate-cost "claude-sonnet-4-6" 700 50 pricing
+                 {:cached-tokens 100
+                  :cache-creation-tokens 200
+                  :cache-tokens-in-input? false})]
+      (expect (= 700 (:input-uncached-tokens cost)))
+      (expect (= 100 (:input-cached-tokens cost)))
+      (expect (= 200 (:input-cache-write-tokens cost)))
+      (expect (< (Math/abs (- 0.0021 (:input-uncached-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.00003 (:input-cached-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.00075 (:input-cache-write-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.00075 (:output-cost cost))) 1.0E-12))
+      (expect (< (Math/abs (- 0.00363 (:total-cost cost))) 1.0E-12)))))
 
 ;; =============================================================================
 ;; Count and Estimate Tests
@@ -156,7 +231,25 @@
       (expect (= (:total-tokens result)
                 (+ (:input-tokens result) (:output-tokens result))))
       (expect (map? (:cost result)))
-      (expect (pos? (get-in result [:cost :total-cost]))))))
+      (expect (pos? (get-in result [:cost :total-cost])))))
+
+  (it "passes cached and cache-creation usage into cost breakdown"
+    (let [messages [{:role "system" :content [{:type "text" :text "stable"
+                                               :svar/cache true}]}
+                    {:role "user" :content "Hello!"}]
+          api-usage {:prompt_tokens 1000
+                     :completion_tokens 100
+                     :prompt_tokens_details {:cached_tokens 300
+                                             :cache_creation_tokens 200}}
+          pricing {"gpt-4o" {:input 2.00 :cached-input 0.50
+                             :cache-write-5m 2.50 :output 10.00}}
+          result (sut/count-and-estimate "gpt-4o" messages "ok"
+                   {:api-usage api-usage :pricing pricing})]
+      (expect (= 300 (:cached-tokens result)))
+      (expect (= 200 (:cache-creation-tokens result)))
+      (expect (= 500 (get-in result [:cost :input-uncached-tokens])))
+      (expect (= 300 (get-in result [:cost :input-cached-tokens])))
+      (expect (= 200 (get-in result [:cost :input-cache-write-tokens]))))))
 
 ;; =============================================================================
 ;; Format Cost Tests

@@ -60,11 +60,11 @@
                   (router/reasoning-extra-body :openai-compatible-chat gpt5 :deep)))))
 
     (it "accepts OpenAI-alias input too"
-      (let [o3 {:name "o3" :reasoning? true}]
+      (let [gpt5 {:name "gpt-5" :reasoning? true}]
         (expect (= {:reasoning_effort "low"}
-                  (router/reasoning-extra-body :openai-compatible-chat o3 :low)))
+                  (router/reasoning-extra-body :openai-compatible-chat gpt5 :low)))
         (expect (= {:reasoning_effort "high"}
-                  (router/reasoning-extra-body :openai-compatible-chat o3 "HIGH"))))))
+                  (router/reasoning-extra-body :openai-compatible-chat gpt5 "HIGH"))))))
 
   (describe "Anthropic api-style"
     (it "emits nested :thinking block for reasoning-capable models"
@@ -187,7 +187,7 @@
         (expect (= {:thinking {:type "enabled"}}
                   (router/reasoning-extra-body :openai-compatible-chat glm :deep))))
       ;; Even under `:anthropic`, explicit openai-effort wins.
-      (let [weird {:name "custom-o3" :reasoning? true :reasoning-style :openai-effort}]
+      (let [weird {:name "custom-reasoner" :reasoning? true :reasoning-style :openai-effort}]
         (expect (= {:reasoning_effort "high"}
                   (router/reasoning-extra-body :anthropic weird :deep)))))))
 
@@ -200,10 +200,10 @@
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5.1"))))
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5.3-codex")))))
 
-  (it "flags OpenAI o-series as reasoning-capable"
-    (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "o3"))))
-    (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "o3-mini"))))
-    (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "o4-mini")))))
+  (it "does not keep obsolete OpenAI o-series entries"
+    (expect (nil? (get router/KNOWN_MODEL_METADATA "o3")))
+    (expect (nil? (get router/KNOWN_MODEL_METADATA "o3-mini")))
+    (expect (nil? (get router/KNOWN_MODEL_METADATA "o4-mini"))))
 
   (it "flags Claude 4.x family as reasoning-capable"
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-5"))))
@@ -258,7 +258,6 @@
                                                :models [{:name "claude-sonnet-4-6"}
                                                         {:name "gpt-5.4"}
                                                         {:name "gpt-5.3-codex"}
-                                                        {:name "gpt-5.2-codex"}
                                                         {:name "gpt-4o"}]})
         by-name (zipmap (map :name (:models provider)) (:models provider))]
     (expect (= #{"claude-sonnet-4-6" "gpt-5.4" "gpt-5.3-codex"}
@@ -266,7 +265,6 @@
     (expect (= :anthropic (:api-style (get by-name "claude-sonnet-4-6"))))
     (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.4"))))
     (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.3-codex"))))
-    (expect (nil? (get by-name "gpt-5.2-codex")))
     (expect (nil? (get by-name "gpt-4o")))
     (expect (= {:effort "medium" :summary "detailed"}
               (get-in by-name ["gpt-5.4" :extra-body :reasoning])))))
@@ -276,15 +274,14 @@
                                                :api-key "test"
                                                :models [{:name "gpt-5"}
                                                         {:name "gpt-5.1"}
-                                                        {:name "gpt-5.2"}
-                                                        {:name "gpt-5.2-codex"}
+                                                        {:name "gpt-5.1-codex"}
                                                         {:name "gpt-5.3-codex"}
                                                         {:name "gpt-5.4"}
                                                         {:name "gpt-5.5"}]})]
     (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
               (mapv :name (:models provider))))
     (expect (router/provider-model-visible? :openai-codex "gpt-5.3-codex"))
-    (expect (not (router/provider-model-visible? :openai-codex "gpt-5.2-codex")))))
+    (expect (not (router/provider-model-visible? :openai-codex "gpt-5.1-codex")))))
 
 (defdescribe anthropic-thinking-max-tokens-clamp-test
   "Anthropic's API requires max_tokens > thinking.budget_tokens (thinking +

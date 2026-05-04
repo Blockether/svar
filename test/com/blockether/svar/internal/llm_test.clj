@@ -124,7 +124,7 @@
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
                                          {:data [{:id "gpt-4o"}
                                                  {:id "gpt-5"}
-                                                 {:id "gpt-5.2-codex"}
+                                                 {:id "gpt-5.1-codex"}
                                                  {:id "gpt-5.3-codex"}
                                                  {:id "gpt-5.4"}
                                                  {:id "gpt-5.5"}]})}
@@ -140,7 +140,6 @@
                                          {:data [{:id "claude-sonnet-4-6"}
                                                  {:id "gpt-4o"}
                                                  {:id "gpt-5.1-codex"}
-                                                 {:id "gpt-5.2-codex"}
                                                  {:id "gpt-5.3-codex"}
                                                  {:id "gpt-5.4"}
                                                  {:id "gemini-3-pro-preview"}]})}
@@ -165,7 +164,10 @@
             [provider model] (sut/select-provider router {:strategy :root})]
         (expect (= :openai-compatible-responses (:api-style provider)))
         (expect (= "/codex/responses" (:responses-path provider)))
-        (expect (= {:input 5.00 :output 30.00} (:pricing model)))
+        (expect (= {:input 5.00 :cached-input 0.50 :output 30.00
+                    :input-over-272k 10.00 :cached-input-over-272k 1.00
+                    :output-over-272k 45.00}
+                  (:pricing model)))
         (expect (= 400000 (:context model)))
         (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
