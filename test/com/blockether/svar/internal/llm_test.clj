@@ -241,6 +241,28 @@
             (expect (= "user" (get @seen "X-Initiator")))
             (expect (= "conversation-edits" (get @seen "Openai-Intent")))))))
 
+    (it "GitHub Copilot business chat forces SSE streaming"
+      (let [calls (atom [])
+            messages [(svar/user "hi")]]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
+                                                   (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
+                                                   {:content "ok"
+                                                    :reasoning nil
+                                                    :api-usage {}
+                                                    :http-response {:url url
+                                                                    :streaming? true
+                                                                    :status 200}})}
+          (fn []
+            (let [result (sut/chat-completion messages "gpt-4o" "sk-test" "https://proxy.business.githubcopilot.com"
+                           {:provider-id :github-copilot
+                            :llm-headers {"User-Agent" "VisCopilot/0.1"}})
+                  {:keys [url body headers on-delta]} (first @calls)]
+              (expect (= "ok" (:content result)))
+              (expect (= "https://proxy.business.githubcopilot.com/chat/completions" url))
+              (expect (= true (:stream body)))
+              (expect (ifn? on-delta))
+              (expect (= "text/event-stream" (get headers "Accept"))))))))
+
     (it "ask-code! sends prior encrypted reasoning items as Responses input sidecar"
       (let [calls (atom [])
             router (svar/make-router
@@ -266,7 +288,7 @@
                                                                     :status 200}})}
           (fn []
             (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]
-                                                :provider-state provider-state})
+                                                 :provider-state provider-state})
                   {:keys [body]} (first @calls)]
               (expect (= {:type "reasoning"
                           :id "rs_1"
@@ -485,7 +507,7 @@
                       :phase "commentary"}
             stream (str
                      "data: " (json/write-json-str {:type "response.output_item.done"
-                                                     :item raw-item}) "\n\n"
+                                                    :item raw-item}) "\n\n"
                      "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n\n"
                      "data: [DONE]\n\n")]
         (with-redefs [http/post (fn [_url _opts]

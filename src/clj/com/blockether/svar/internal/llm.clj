@@ -138,7 +138,7 @@
                     :timeout timeout-ms})
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                      (catch Exception _ nil))]
+                   (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -185,6 +185,11 @@
     (cond-> {"X-Initiator" (if (= "user" last-role) "user" "agent")
              "Openai-Intent" "conversation-edits"}
       (some message-has-image? messages) (assoc "Copilot-Vision-Request" "true"))))
+
+(defn- copilot-stream-required? [provider-id base-url]
+  (and (= :github-copilot provider-id)
+    (string? base-url)
+    (boolean (re-find #"(?i)(proxy|api)\.(business|enterprise)\.githubcopilot\.com" base-url))))
 
 (defn- request-headers [api-style api-key provider-id messages llm-headers]
   (merge (make-llm-headers api-style api-key provider-id)
@@ -237,7 +242,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-          (assoc body :max_tokens required-min))
+        (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -842,7 +847,7 @@
                          (normalize-text-verbosity (get-in extra-body [:text :verbosity])))
         max-output-tokens (or (:max_output_tokens extra-body) (:max_tokens extra-body))
         base-extra  (dissoc extra-body :reasoning_effort :response_format :verbosity :provider-state
-                       :max_tokens :max_output_tokens)
+                      :max_tokens :max_output_tokens)
         reasoning   (cond-> (:reasoning base-extra)
                       effort (assoc :effort effort))
         base-extra* (dissoc base-extra :reasoning)
@@ -1156,7 +1161,7 @@
          :reasoning-delta nil
          :content-fallback nil
          :reasoning-fallback (when (and (= "reasoning" (:type item))
-                                      (= "response.output_item.done" event-type))
+                                     (= "response.output_item.done" event-type))
                                (reasoning-part-text item))
          :provider-state (when (= "response.output_item.done" event-type)
                            (reasoning-item-provider-state item))
@@ -1387,7 +1392,8 @@
         request-body (cond-> (assoc base-body :stream true)
                        (not anthropic?) (assoc :stream_options {:include_usage true}))
         chat-url     (make-chat-url base-url api-style)
-        headers      (request-headers api-style api-key provider-id messages llm-headers)
+        headers      (merge (request-headers api-style api-key provider-id messages llm-headers)
+                       {"Accept" "text/event-stream"})
         delta-fn     (if anthropic? extract-anthropic-stream-delta extract-stream-delta)]
     (try
       (http-post-stream! chat-url request-body headers timeout-ms delta-fn
@@ -1434,7 +1440,9 @@
   ([messages model api-key base-url opts]
    (let [timeout-ms     (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
          extra-body     (:extra-body opts)
-         on-chunk       (:on-chunk opts)
+         on-chunk       (or (:on-chunk opts)
+                          (when (copilot-stream-required? (:provider-id opts) base-url)
+                            (constantly nil)))
          api-style      (:api-style opts)
          responses-path (:responses-path opts)
          llm-headers    (:llm-headers opts)
@@ -2196,7 +2204,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
+                                                 (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content — don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -3096,8 +3104,8 @@
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                    :else {:strategy :root})]
+                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                :else {:strategy :root})]
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
