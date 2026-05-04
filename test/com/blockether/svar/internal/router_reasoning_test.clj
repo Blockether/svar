@@ -197,7 +197,8 @@
   (it "flags GPT-5 family as reasoning-capable"
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5"))))
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5-mini"))))
-    (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5.1")))))
+    (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5.1"))))
+    (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "gpt-5.3-codex")))))
 
   (it "flags OpenAI o-series as reasoning-capable"
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "o3"))))
@@ -250,6 +251,25 @@
       (expect (= :zai-thinking (:reasoning-style resolved))))
     (let [resolved (router/infer-model-metadata {:name "gpt-4o"})]
       (expect (not (:reasoning? resolved))))))
+
+(it "flags GitHub Copilot known models with provider-specific API styles"
+  (let [provider (router/normalize-provider 0 {:id :github-copilot
+                                               :api-key "test"
+                                               :models [{:name "claude-sonnet-4-6"}
+                                                        {:name "gpt-5.4"}
+                                                        {:name "gpt-5.3-codex"}
+                                                        {:name "gpt-5.2-codex"}
+                                                        {:name "gpt-4o"}]})
+        by-name (zipmap (map :name (:models provider)) (:models provider))]
+    (expect (= #{"claude-sonnet-4-6" "gpt-5.4" "gpt-5.3-codex"}
+              (set (keys by-name))))
+    (expect (= :anthropic (:api-style (get by-name "claude-sonnet-4-6"))))
+    (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.4"))))
+    (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.3-codex"))))
+    (expect (nil? (get by-name "gpt-5.2-codex")))
+    (expect (nil? (get by-name "gpt-4o")))
+    (expect (= {:effort "medium" :summary "detailed"}
+              (get-in by-name ["gpt-5.4" :extra-body :reasoning])))))
 
 (defdescribe anthropic-thinking-max-tokens-clamp-test
   "Anthropic's API requires max_tokens > thinking.budget_tokens (thinking +

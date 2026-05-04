@@ -40,11 +40,21 @@
                  :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
+   :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000
+                    ;; Copilot currently exposes many historical GPT models; keep
+                    ;; the GPT family at gpt-5.3+ only. Other families (Claude,
+                    ;; Gemini, Grok) stay selectable.
+                    :exclude-models #{"gpt-4o" "gpt-4.1"
+                                      "gpt-5" "gpt-5-mini" "gpt-5.1"
+                                      "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
+                                      "gpt-5.2" "gpt-5.2-codex"}
+                    :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
                   :env-keys [] :api-style :openai-compatible-responses
                   :responses-path "/codex/responses"
                   :extra-body {:store false
                                :include ["reasoning.encrypted_content"]
+                               :reasoning {:summary "detailed"}
                                :text {:verbosity "low"}}}
    :ollama      {:base-url "http://localhost:11434/v1"            :rpm 1000 :tpm 10000000
                  :env-keys []}
@@ -71,8 +81,15 @@
    "gpt-5"                     {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5-mini"                {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.1"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.1-codex"             {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.1-codex-mini"        {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.1-codex-max"         {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.2"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.2-codex"             {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.3-codex"             {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.3-codex-spark"       {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.4-mini"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── OpenAI Reasoning (o-series, reasoning_effort) ───────────────────────
@@ -82,8 +99,10 @@
    "o4-mini"                   {:intelligence :high     :speed :medium :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── Anthropic Claude 4.x (extended thinking, budget_tokens) ─────────────
+   "claude-opus-4-7"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4"           {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-sonnet-4-6"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-sonnet-4-5"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-sonnet-4-20250514"  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
@@ -92,7 +111,13 @@
    ;; ── Google Gemini 2.5 (reasoning_effort via OpenAI-compat gateway) ──────
    "gemini-2.5-pro"            {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gemini-2.5-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gemini-3-flash-preview"    {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gemini-3-pro-preview"      {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gemini-3.1-pro-preview"    {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gemini-2.0-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision}}
+
+   ;; ── xAI / Copilot coding models ────────────────────────────────────────
+   "grok-code-fast-1"          {:intelligence :high     :speed :fast   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── Zhipu / ZAI (GLM-4.6+ binary thinking: `thinking: {type: enabled}`) ─
    ;; Z.ai's chat/completions endpoint is OpenAI-compatible for everything
@@ -303,6 +328,46 @@
     "glm-5.1"                   {:pricing {:input 1.20  :output 5.00}  :context 200000  :json-object-mode? true}
     "glm-5-turbo"               {:pricing {:input 0.60  :output 2.20}  :context 200000  :json-object-mode? true}}
 
+   :github-copilot
+   {"claude-opus-4-7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic}
+    "claude-opus-4-6"           {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :anthropic}
+    "claude-opus-4-5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :anthropic}
+    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic}
+    "claude-sonnet-4-6"         {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :anthropic}
+    "claude-sonnet-4-5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic}
+    "claude-haiku-4-5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic}
+
+    "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5-mini"                {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1"                   {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1-codex"             {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1-codex-max"         {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1-codex-mini"        {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.2"                   {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.2-codex"             {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.3-codex"             {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.4"                   {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.4-mini"              {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+
+    "gpt-4.1"                   {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "gpt-4o"                    {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "gemini-2.5-pro"            {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "gemini-3-flash-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "gemini-3-pro-preview"      {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "gemini-3.1-pro-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "grok-code-fast-1"          {:pricing {:input 0.0 :output 0.0} :context 128000}}
+
    :openrouter
    {"gpt-4o"                    {:pricing {:input 2.50  :output 10.00} :context 128000}
     "claude-sonnet-4-6"         {:pricing {:input 3.00  :output 15.00} :context 200000}
@@ -422,10 +487,18 @@
   (when (and (:name model-map) (not (str/blank? (str (:name model-map)))))
     (infer-model-metadata model-map)))
 
+(defn provider-excluded-model?
+  "True when a provider-scoped catalog marks a model unavailable.
+   Provider config may add `:exclude-models` as exact model names."
+  [provider-id model-name]
+  (let [excluded (set (:exclude-models (get KNOWN_PROVIDERS provider-id)))]
+    (contains? excluded model-name)))
+
 (defn provider-model-entry
   "Returns provider-scoped entry {:pricing ... :context ...} for a provider/model, or nil."
   [provider-id model-name]
-  (get-in KNOWN_PROVIDER_MODELS [provider-id model-name]))
+  (when-not (provider-excluded-model? provider-id model-name)
+    (get-in KNOWN_PROVIDER_MODELS [provider-id model-name])))
 
 (defn provider-model-pricing
   "Returns provider-scoped pricing for provider/model, falling back to flattened MODEL_PRICING."
@@ -457,11 +530,13 @@
         base-url (or (:base-url provider-map) (:base-url known))
         rpm (or (:rpm provider-map) (:rpm known) 500)
         tpm (or (:tpm provider-map) (:tpm known) 2000000)
+        exclude-models (set (concat (:exclude-models known) (:exclude-models provider-map)))
         models (->> (:models provider-map)
                  (keep (fn [m]
                          (when-let [normalized (normalize-model m)]
-                           (merge normalized
-                             (provider-model-entry id (:name normalized))))))
+                           (when-not (contains? exclude-models (:name normalized))
+                             (merge normalized
+                               (provider-model-entry id (:name normalized)))))))
                  vec)
         root-name (:name (first models))]
     (when-not id
@@ -597,10 +672,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -612,7 +687,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -768,8 +843,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
+                    (keyword? prefer) [prefer]
+                    :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))]
     (fn [[p m]] [(model-score m) (:priority p 0)])))
@@ -903,52 +978,52 @@
                 start-ms (router-now-ms router)]
             (swap! tried conj pid)
             (let [result (try (f provider model-map)
-                              (catch Exception e
-                                (cond
-                                  (router-transient-error? router e)
-                                  (do (trove/log! {:level :warn
-                                                   :id ::provider-retry
-                                                   :data {:provider-id pid
-                                                          :error (ex-message e)}
-                                                   :msg "retrying with fallback provider"})
-                                      (swap! fallback-trace conj
-                                        {:provider-id pid
-                                         :model (:name model-map)
-                                         :error (ex-message e)
-                                         :status (:status (ex-data e))
-                                         :reason :transient-error})
-                                      (cb-record-failure! router pid
-                                        (= 429 (:status (ex-data e))))
-                                      (when-let [on-chunk (:on-chunk prefs)]
-                                        (on-chunk {:reset? true
-                                                   :reason :provider-fallback
-                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                                   :new-provider nil}))
-                                      ::transient-error)
+                           (catch Exception e
+                             (cond
+                               (router-transient-error? router e)
+                               (do (trove/log! {:level :warn
+                                                :id ::provider-retry
+                                                :data {:provider-id pid
+                                                       :error (ex-message e)}
+                                                :msg "retrying with fallback provider"})
+                                 (swap! fallback-trace conj
+                                   {:provider-id pid
+                                    :model (:name model-map)
+                                    :error (ex-message e)
+                                    :status (:status (ex-data e))
+                                    :reason :transient-error})
+                                 (cb-record-failure! router pid
+                                   (= 429 (:status (ex-data e))))
+                                 (when-let [on-chunk (:on-chunk prefs)]
+                                   (on-chunk {:reset? true
+                                              :reason :provider-fallback
+                                              :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                              :new-provider nil}))
+                                 ::transient-error)
 
-                                  (format-error? prefs e)
-                                  (do (trove/log! {:level :warn
-                                                   :id ::format-error-fallback
-                                                   :data {:provider-id pid
-                                                          :model (:name model-map)
-                                                          :ex-type (:type (ex-data e))}
-                                                   :msg "format error: trying next provider"})
-                                      (swap! format-failed conj pid)
-                                      (reset! last-format-error e)
-                                      (swap! fallback-trace conj
-                                        {:provider-id pid
-                                         :model (:name model-map)
-                                         :error (ex-message e)
-                                         :ex-type (:type (ex-data e))
-                                         :reason :format-error})
-                                      (when-let [on-chunk (:on-chunk prefs)]
-                                        (on-chunk {:reset? true
-                                                   :reason :format-error-fallback
-                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                                   :new-provider nil}))
-                                      ::format-error)
+                               (format-error? prefs e)
+                               (do (trove/log! {:level :warn
+                                                :id ::format-error-fallback
+                                                :data {:provider-id pid
+                                                       :model (:name model-map)
+                                                       :ex-type (:type (ex-data e))}
+                                                :msg "format error: trying next provider"})
+                                 (swap! format-failed conj pid)
+                                 (reset! last-format-error e)
+                                 (swap! fallback-trace conj
+                                   {:provider-id pid
+                                    :model (:name model-map)
+                                    :error (ex-message e)
+                                    :ex-type (:type (ex-data e))
+                                    :reason :format-error})
+                                 (when-let [on-chunk (:on-chunk prefs)]
+                                   (on-chunk {:reset? true
+                                              :reason :format-error-fallback
+                                              :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
+                                              :new-provider nil}))
+                                 ::format-error)
 
-                                  :else (throw e))))]
+                               :else (throw e))))]
               (cond
                 (or (= result ::transient-error)
                   (= result ::format-error))

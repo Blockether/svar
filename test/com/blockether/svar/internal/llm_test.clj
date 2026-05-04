@@ -2,6 +2,7 @@
   "Tests for router model selection, preferences, and fallback logic."
   (:require
    [babashka.http-client :as http]
+   [charred.api :as json]
    [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.core :as svar]
@@ -162,6 +163,7 @@
               (expect (nil? (:max_tokens body)))
               (expect (= false (:store body)))
               (expect (= ["reasoning.encrypted_content"] (:include body)))
+              (expect (= {:summary "detailed"} (:reasoning body)))
               (expect (= "high" (get-in body [:text :verbosity])))
               (expect (= {:type "json_object"}
                         (get-in body [:text :format]))))))))
@@ -194,7 +196,86 @@
               (expect (= "text/event-stream" (get headers "Accept")))
               (expect (= true (:stream body)))
               (expect (nil? (:max_tokens body)))
+              (expect (= {:summary "detailed"} (:reasoning body)))
               (expect (= "low" (get-in body [:text :verbosity]))))))))
+
+    (it "ask-code! merges reasoning effort into nested Responses reasoning options"
+      (let [calls (atom [])
+            router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :llm-headers {"chatgpt-account-id" "acct_123"}
+                       :models [{:name "gpt-5.5"}]}])]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn _on-delta]
+                                                   (swap! calls conj {:url url :body body :headers headers})
+                                                   {:content "```clojure\n(+ 1 1)\n```"
+                                                    :reasoning nil
+                                                    :api-usage {:prompt_tokens 10
+                                                                :completion_tokens 5
+                                                                :total_tokens 15}
+                                                    :http-response {:url url
+                                                                    :streaming? true
+                                                                    :status 200}})}
+          (fn []
+            (svar/ask-code! router {:messages [(svar/user "Return code")]
+                                    :reasoning :quick
+                                    :extra-body {:reasoning {:summary "auto"}}})
+            (let [{:keys [body]} (first @calls)]
+              (expect (= {:effort "low" :summary "auto"}
+                        (:reasoning body))))))))
+
+    (it "chat-completion adds GitHub Copilot dynamic headers without replacing static headers"
+      (let [seen (atom nil)
+            messages [(svar/user "hi")]]
+        (with-redefs-fn {#'sut/http-post! (fn [_url _body headers _timeout-ms]
+                                            (reset! seen headers)
+                                            {:parsed {:choices [{:message {:content "ok"}}]}
+                                             :raw-body "{}"
+                                             :url "https://example.invalid/v1/chat/completions"
+                                             :status 200})}
+          (fn []
+            (sut/chat-completion messages "gpt-4o" "sk-test" "https://example.invalid/v1"
+              {:provider-id :github-copilot
+               :llm-headers {"User-Agent" "VisCopilot/0.1"}})
+            (expect (= "VisCopilot/0.1" (get @seen "User-Agent")))
+            (expect (= "user" (get @seen "X-Initiator")))
+            (expect (= "conversation-edits" (get @seen "Openai-Intent")))))))
+
+    (it "ask-code! sends prior encrypted reasoning items as Responses input sidecar"
+      (let [calls (atom [])
+            router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :llm-headers {"chatgpt-account-id" "acct_123"}
+                       :models [{:name "gpt-5.5"}]}])
+            provider-state {:provider :openai-responses
+                            :reasoning-items [{:id "rs_1"
+                                               :type "reasoning"
+                                               :summary []
+                                               :encrypted-content "ciphertext"}]}]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn _on-delta]
+                                                   (swap! calls conj {:url url :body body :headers headers})
+                                                   {:content "```clojure\n(+ 1 1)\n```"
+                                                    :reasoning nil
+                                                    :provider-state provider-state
+                                                    :api-usage {:prompt_tokens 10
+                                                                :completion_tokens 5
+                                                                :total_tokens 15}
+                                                    :http-response {:url url
+                                                                    :streaming? true
+                                                                    :status 200}})}
+          (fn []
+            (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                                                :provider-state provider-state})
+                  {:keys [body]} (first @calls)]
+              (expect (= {:type "reasoning"
+                          :id "rs_1"
+                          :summary []
+                          :encrypted_content "ciphertext"}
+                        (first (:input body))))
+              (expect (nil? (:provider-state body)))
+              (expect (= "ciphertext"
+                        (get-in result [:provider-state :reasoning-items 0 :encrypted-content]))))))))
 
     (it "ask-code! extracts malformed streamed fences without leaking markers"
       (let [router (svar/make-router
@@ -329,6 +410,7 @@
                           :base-url "https://example.invalid/v1"})]
             (expect (= "{\"answer\":\"ok\"}" (:content result)))
             (expect (= "plan first" (:reasoning result)))
+            (expect (= "plan first" (get-in result [:provider-state :reasoning-items 0 :summary-text])))
             (expect (= 11 (get-in result [:api-usage :prompt_tokens])))
             (expect (= 200 (get-in result [:http-response :status]))))))))
 
@@ -372,6 +454,95 @@
             (expect (= "" (:reasoning (first @events))))
             (expect (= "plan first" (:reasoning (second @events))))
             (expect (= "(def x 1)" (:content (second @events))))))))
+
+    (it "responses transport backfills reasoning from output_item.done summaries"
+      (let [events (atom [])
+            stream (str
+                     "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"summary\":[]}}\n\n"
+                     "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan first\"}]}}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :on-chunk #(swap! events conj %)})]
+            (expect (= "(def x 1)" (:content result)))
+            (expect (= "plan first" (:reasoning result)))
+            (expect (= "plan first" (get-in result [:provider-state :reasoning-items 0 :summary-text])))
+            (expect (= "plan first" (:reasoning (second @events))))))))
+
+    (it "responses transport preserves Pi-style raw reasoning item signature for replay"
+      (let [raw-item {:type "reasoning"
+                      :id "rs_123"
+                      :status "completed"
+                      :summary [{:type "summary_text" :text "plan first"}]
+                      :encrypted_content "ciphertext"
+                      :phase "commentary"}
+            stream (str
+                     "data: " (json/write-json-str {:type "response.output_item.done"
+                                                     :item raw-item}) "\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :on-chunk (constantly nil)})]
+            (expect (= raw-item (get-in result [:provider-state :reasoning-items 0 :raw-item])))))))
+
+    (it "responses transport reconstructs streamed summary into raw reasoning item when done omits it"
+      (let [stream (str
+                     "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_123\",\"summary\":[]}}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_part.added\",\"part\":{\"type\":\"summary_text\",\"text\":\"\"}}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n"
+                     "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\" first\"}\n\n"
+                     "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_123\",\"encrypted_content\":\"ciphertext\"}}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :on-chunk (constantly nil)})]
+            (expect (= "plan first" (:reasoning result)))
+            (expect (= "plan first"
+                      (get-in result [:provider-state :reasoning-items 0 :summary-text])))
+            (expect (= [{:type "summary_text" :text "plan first"}]
+                      (get-in result [:provider-state :reasoning-items 0 :raw-item :summary])))))))
+
+    (it "responses transport surfaces encrypted-only reasoning as unavailable"
+      (let [events (atom [])
+            stream (str
+                     "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ciphertext\"}}\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"(def x 1)\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :on-chunk #(swap! events conj %)})]
+            (expect (= "(def x 1)" (:content result)))
+            (expect (= "[provider returned encrypted reasoning; plaintext reasoning is unavailable]"
+                      (:reasoning result)))
+            (expect (= "ciphertext" (get-in result [:provider-state :reasoning-items 0 :encrypted-content])))
+            (expect (= (:reasoning result) (:reasoning (first @events))))))))
 
     (it "responses transport preserves whitespace-only reasoning deltas like content deltas"
       (let [events (atom [])
