@@ -142,9 +142,10 @@
                                                  {:id "gpt-5.1-codex"}
                                                  {:id "gpt-5.3-codex"}
                                                  {:id "gpt-5.4"}
+                                                 {:id "gpt-5.5"}
                                                  {:id "gemini-3-pro-preview"}]})}
         (fn []
-          (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gemini-3-pro-preview"]
+          (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gpt-5.5" "gemini-3-pro-preview"]
                     (mapv :id (svar/models! router))))))))
 
   (it "keeps z.ai Coding Plan glm-5v-turbo in /models output"

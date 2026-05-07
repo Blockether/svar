@@ -347,6 +347,9 @@
     "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}}
 
    :github-copilot
+   ;; Copilot /models reports total context for GPT reasoning models, but the
+   ;; prompt/input budget is smaller because 128K output is reserved. svar's
+   ;; `:context` is input budget for pre-flight checks.
    {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
     "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
     "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
@@ -361,17 +364,19 @@
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
     "gpt-5.1"                   {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex"             {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+    "gpt-5.1-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex-max"         {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+    "gpt-5.1-codex-max"         {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex-mini"        {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+    "gpt-5.1-codex-mini"        {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.3-codex"             {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+    "gpt-5.3-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.4"                   {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+    "gpt-5.4"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.4-mini"              {:pricing {:input 0.0 :output 0.0} :context 400000 :api-style :openai-compatible-responses
+    "gpt-5.4-mini"              {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.5"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
 
     "gpt-4.1"                   {:pricing {:input 0.0 :output 0.0} :context 128000}
