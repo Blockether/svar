@@ -290,20 +290,23 @@
                                  :context 1050000}}
 
    :openai-codex
+   ;; OpenAI Codex model catalog reports `context_window` as prompt budget.
+   ;; 400K product window = 272K input + 128K output; Codex UI may show
+   ;; ~258.4K usable after its 5% compaction reserve.
    {"gpt-5"                     {:pricing {:input 1.25  :cached-input 0.125 :output 10.00} :context 400000}
     "gpt-5.1"                   {:pricing {:input 1.25  :cached-input 0.125 :output 10.00}  :context 128000}
-    "gpt-5.3-codex"             {:pricing {:input 1.75  :cached-input 0.175 :output 14.00}  :context 400000}
+    "gpt-5.3-codex"             {:pricing {:input 1.75  :cached-input 0.175 :output 14.00}  :context 272000}
     "gpt-5.4"                   {:pricing {:input 2.50  :cached-input 0.25  :output 15.00
                                            :input-over-272k 5.00 :cached-input-over-272k 0.50
                                            :output-over-272k 22.50}
-                                 :context 1050000}
-    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 128000}
+                                 :context 272000}
+    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 272000}
     ;; Codex product docs publish credit rates; these USD estimates use the
     ;; matching public API model rates for routing / accounting heuristics.
     "gpt-5.5"                   {:pricing {:input 5.00  :cached-input 0.50  :output 30.00
                                            :input-over-272k 10.00 :cached-input-over-272k 1.00
                                            :output-over-272k 45.00}
-                                 :context 400000}}
+                                 :context 272000}}
 
    :anthropic
    {"claude-opus-4-7"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}

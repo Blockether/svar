@@ -180,7 +180,7 @@
                     :input-over-272k 10.00 :cached-input-over-272k 1.00
                     :output-over-272k 45.00}
                   (:pricing model)))
-        (expect (= 400000 (:context model)))
+        (expect (= 272000 (:context model)))
         (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
                                                    {:content "{\"answer\":\"ok\"}"

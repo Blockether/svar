@@ -33,11 +33,16 @@
       (expect (= 1000000 (sut/context-limit "claude-opus-4-6"))))
 
     (it "returns conservative flattened GPT-5.5 context"
-      (expect (= 400000 (sut/context-limit "gpt-5.5"))))
+      (expect (= 272000 (sut/context-limit "gpt-5.5"))))
 
     (it "keeps provider-scoped GPT-5.5 contexts exact"
       (expect (= 1050000 (sut/provider-model-context :openai "gpt-5.5")))
-      (expect (= 400000 (sut/provider-model-context :openai-codex "gpt-5.5")))))
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.5"))))
+
+    (it "uses Codex catalog prompt windows for current GPT coding models"
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.3-codex")))
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4")))
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4-mini")))))
 
   (describe "unknown models"
     (it "returns default for unknown model"
