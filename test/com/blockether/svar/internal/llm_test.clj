@@ -271,6 +271,48 @@
               (expect (= {:effort "low" :summary "auto"}
                         (:reasoning body))))))))
 
+    (it "Copilot Responses requests reuse OpenAI reasoning and include Copilot headers"
+      (let [calls (atom [])
+            router (svar/make-router
+                     [{:id :github-copilot
+                       :api-key "sk-test"
+                       :models [{:name "gpt-5.5"}]}])
+            answer-spec (svar/spec
+                          (svar/field svar/NAME :answer
+                            svar/TYPE svar/TYPE_STRING
+                            svar/CARDINALITY svar/CARDINALITY_ONE
+                            svar/DESCRIPTION "answer"))]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn _on-delta]
+                                                   (swap! calls conj {:url url :body body :headers headers})
+                                                   {:content "{\"answer\":\"ok\"}"
+                                                    :reasoning nil
+                                                    :api-usage {:prompt_tokens 10
+                                                                :completion_tokens 5
+                                                                :total_tokens 15}
+                                                    :http-response {:url url
+                                                                    :streaming? true
+                                                                    :status 200}})}
+          (fn []
+            (let [result (svar/ask! router
+                           {:spec answer-spec
+                            :messages [(svar/system "Return JSON.")
+                                       (svar/user "Reply ok")]
+                            :reasoning :deep
+                            :json-object-mode? true})
+                  {:keys [url body headers]} (first @calls)]
+              (expect (= "ok" (get-in result [:result :answer])))
+              (expect (= "https://api.individual.githubcopilot.com/responses" url))
+              (expect (= "vscode/1.100.0" (get headers "Editor-Version")))
+              (expect (= "copilot-chat/0.26.7" (get headers "Editor-Plugin-Version")))
+              (expect (= "vscode-chat" (get headers "Copilot-Integration-Id")))
+              (expect (= "GitHubCopilotChat/0.26.7" (get headers "User-Agent")))
+              (expect (= "user" (get headers "X-Initiator")))
+              (expect (= "conversation-edits" (get headers "Openai-Intent")))
+              (expect (= "text/event-stream" (get headers "Accept")))
+              (expect (= true (:stream body)))
+              (expect (= {:effort "high" :summary "detailed"} (:reasoning body)))
+              (expect (= ["reasoning.encrypted_content"] (:include body))))))))
+
     (it "chat-completion adds GitHub Copilot dynamic headers without replacing static headers"
       (let [seen (atom nil)
             messages [(svar/user "hi")]]
@@ -285,6 +327,9 @@
               {:provider-id :github-copilot
                :llm-headers {"User-Agent" "VisCopilot/0.1"}})
             (expect (= "VisCopilot/0.1" (get @seen "User-Agent")))
+            (expect (= "vscode/1.100.0" (get @seen "Editor-Version")))
+            (expect (= "copilot-chat/0.26.7" (get @seen "Editor-Plugin-Version")))
+            (expect (= "vscode-chat" (get @seen "Copilot-Integration-Id")))
             (expect (= "user" (get @seen "X-Initiator")))
             (expect (= "conversation-edits" (get @seen "Openai-Intent")))))))
 

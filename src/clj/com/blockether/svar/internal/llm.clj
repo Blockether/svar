@@ -189,6 +189,9 @@
             (contains? #{"assistant" "tool"} (:role message)))
       messages)))
 
+(defn- copilot-static-headers []
+  (get-in router/KNOWN_PROVIDERS [:github-copilot :llm-headers]))
+
 (defn- copilot-dynamic-headers [messages]
   (cond-> {"X-Initiator" (if (copilot-agent-initiated? messages) "agent" "user")
            "Openai-Intent" "conversation-edits"}
@@ -201,6 +204,8 @@
 
 (defn- request-headers [api-style api-key provider-id messages llm-headers]
   (merge (make-llm-headers api-style api-key provider-id)
+    (when (= :github-copilot provider-id)
+      (copilot-static-headers))
     llm-headers
     (when (= :github-copilot provider-id)
       (copilot-dynamic-headers messages))))
@@ -1473,7 +1478,9 @@
          responses-path (:responses-path opts)
          llm-headers    (:llm-headers opts)
          provider-id     (:provider-id opts)
-         headers         (merge llm-headers
+         headers         (merge (when (= :github-copilot provider-id)
+                                  (copilot-static-headers))
+                           llm-headers
                            (when (= :github-copilot provider-id)
                              (copilot-dynamic-headers messages)))]
      (if (= api-style :openai-compatible-responses)
