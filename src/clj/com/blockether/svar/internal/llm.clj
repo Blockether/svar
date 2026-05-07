@@ -158,16 +158,37 @@
 ;; API-style dispatch (OpenAI vs Anthropic)
 ;; =============================================================================
 
+(defn- anthropic-oauth-token?
+  [token]
+  (boolean (and (string? token) (str/includes? token "sk-ant-oat"))))
+
+(defn- anthropic-oauth-headers
+  [api-key]
+  {"Authorization" (str "Bearer " api-key)
+   "anthropic-version" "2023-06-01"
+   "Content-Type" "application/json"
+   "accept" "application/json"
+   "anthropic-dangerous-direct-browser-access" "true"
+   "anthropic-beta" "claude-code-20250219,oauth-2025-04-20"
+   "user-agent" "claude-cli/2.1.2"
+   "x-app" "cli"})
+
 (defn- make-llm-headers
   "Builds HTTP headers for the given API style."
   ([api-style api-key]
    (make-llm-headers api-style api-key nil))
   ([api-style api-key provider-id]
    (case api-style
-     :anthropic (if (= :github-copilot provider-id)
+     :anthropic (cond
+                  (= :github-copilot provider-id)
                   {"Authorization" (str "Bearer " api-key)
                    "anthropic-version" "2023-06-01"
                    "Content-Type" "application/json"}
+
+                  (anthropic-oauth-token? api-key)
+                  (anthropic-oauth-headers api-key)
+
+                  :else
                   {"x-api-key" api-key
                    "anthropic-version" "2023-06-01"
                    "Content-Type" "application/json"})
@@ -376,27 +397,33 @@
    `:max_tokens` is always present (Anthropic requirement) and
    `clamp-anthropic-thinking-max-tokens` ensures visible output has
    room above `:thinking.budget_tokens` when extended thinking is on."
-  [messages model extra-body]
-  (let [sys-blocks  (vec (mapcat #(normalize-content (:content %))
-                           (filter #(= "system" (:role %)) messages)))
-        any-cache?  (some :svar/cache sys-blocks)
-        system-wire (cond
-                      (empty? sys-blocks) nil
-                      any-cache?          (mapv anthropic-block sys-blocks)
-                      :else               (str/join "\n" (map :text sys-blocks)))
-        non-system  (->> messages
-                      (remove #(= "system" (:role %)))
-                      (mapv (fn [{:keys [role content]}]
-                              {:role role
-                               :content (anthropic-content (normalize-content content))})))
-        max-tokens  (or (:max_tokens extra-body) 4096)
-        body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
-                      system-wire (assoc :system system-wire)
-                      (seq extra-body) (merge (dissoc extra-body :stream_options)))]
+  ([messages model extra-body]
+   (build-anthropic-request-body messages model extra-body nil))
+  ([messages model extra-body {:keys [anthropic-oauth?]}]
+   (let [sys-blocks  (cond-> (vec (mapcat #(normalize-content (:content %))
+                                    (filter #(= "system" (:role %)) messages)))
+                       anthropic-oauth? (->> (into [{:type "text"
+                                                     :text "You are Claude Code, Anthropic's official CLI for Claude."
+                                                     :svar/cache true}])
+                                          vec))
+         any-cache?  (some :svar/cache sys-blocks)
+         system-wire (cond
+                       (empty? sys-blocks) nil
+                       any-cache?          (mapv anthropic-block sys-blocks)
+                       :else               (str/join "\n" (map :text sys-blocks)))
+         non-system  (->> messages
+                       (remove #(= "system" (:role %)))
+                       (mapv (fn [{:keys [role content]}]
+                               {:role role
+                                :content (anthropic-content (normalize-content content))})))
+         max-tokens  (or (:max_tokens extra-body) 4096)
+         body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
+                       system-wire (assoc :system system-wire)
+                       (seq extra-body) (merge (dissoc extra-body :stream_options)))]
     ;; Re-assert system after merge so extra-body can't clobber it,
     ;; then apply the thinking-aware max_tokens clamp.
-    (-> (cond-> body system-wire (assoc :system system-wire))
-      clamp-anthropic-thinking-max-tokens)))
+     (-> (cond-> body system-wire (assoc :system system-wire))
+       clamp-anthropic-thinking-max-tokens))))
 
 (defn- extract-anthropic-response-data
   "Extracts content, reasoning, and usage from an Anthropic Messages API
@@ -1062,8 +1089,10 @@
   (let [api-style    (or api-style :openai-compatible-chat)
         provider-id  (:provider-id retry-opts)
         llm-headers  (:llm-headers retry-opts)
+        anthropic-oauth? (and (= api-style :anthropic) (anthropic-oauth-token? api-key))
         request-body (if (= api-style :anthropic)
-                       (build-anthropic-request-body messages model extra-body)
+                       (build-anthropic-request-body messages model extra-body
+                         {:anthropic-oauth? anthropic-oauth?})
                        (build-request-body messages model extra-body))
         input-tokens (router/count-messages model messages)
         chat-url     (make-chat-url base-url api-style)
@@ -1417,8 +1446,10 @@
         provider-id  (:provider-id retry-opts)
         llm-headers  (:llm-headers retry-opts)
         anthropic?   (= api-style :anthropic)
+        anthropic-oauth? (and anthropic? (anthropic-oauth-token? api-key))
         base-body    (if anthropic?
-                       (build-anthropic-request-body messages model extra-body)
+                       (build-anthropic-request-body messages model extra-body
+                         {:anthropic-oauth? anthropic-oauth?})
                        (build-request-body messages model extra-body))
         request-body (cond-> (assoc base-body :stream true)
                        (not anthropic?) (assoc :stream_options {:include_usage true}))

@@ -34,6 +34,12 @@
                  :env-keys ["OPENAI_API_KEY"]}
    :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic}
+   :anthropic-coding-plan
+   {:base-url "https://api.anthropic.com/v1" :rpm 500 :tpm 2000000
+    :env-keys [] :api-style :anthropic
+    :provider-model-source :anthropic
+    :default-models [{:name "claude-opus-4-7"}]
+    :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/paas/v4"        :rpm 500 :tpm 2000000
                  :env-keys ["ZAI_API_KEY"]}
    :zai-coding  {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
@@ -534,6 +540,19 @@
   (when (and (:name model-map) (not (str/blank? (str (:name model-map)))))
     (infer-model-metadata model-map)))
 
+(defn- configured-model-inputs
+  [known provider-map]
+  (let [configured (:models provider-map)]
+    (if (:prepend-default-models? known)
+      (concat (:default-models known) configured)
+      configured)))
+
+(defn- conj-model-once
+  [models model]
+  (if (some #(= (:name %) (:name model)) models)
+    models
+    (conj models model)))
+
 (defn- parse-gpt-version
   "Extract comparable GPT version [major minor] from ids such as
    gpt-4o, gpt-5, gpt-5.3-codex, or gpt-5.4-mini. Non-GPT ids return nil."
@@ -561,11 +580,15 @@
   [provider-id model-name]
   (not (provider-excluded-model? provider-id model-name)))
 
+(defn- provider-model-source
+  [provider-id]
+  (or (get-in KNOWN_PROVIDERS [provider-id :provider-model-source]) provider-id))
+
 (defn provider-model-entry
   "Returns provider-scoped entry {:pricing ... :context ...} for a provider/model, or nil."
   [provider-id model-name]
   (when-not (provider-excluded-model? provider-id model-name)
-    (get-in KNOWN_PROVIDER_MODELS [provider-id model-name])))
+    (get-in KNOWN_PROVIDER_MODELS [(provider-model-source provider-id) model-name])))
 
 (defn provider-model-pricing
   "Returns provider-scoped pricing for provider/model, falling back to flattened MODEL_PRICING."
@@ -598,13 +621,13 @@
         rpm (or (:rpm provider-map) (:rpm known) 500)
         tpm (or (:tpm provider-map) (:tpm known) 2000000)
         exclude-models (set (concat (:exclude-models known) (:exclude-models provider-map)))
-        models (->> (:models provider-map)
+        models (->> (configured-model-inputs known provider-map)
                  (keep (fn [m]
                          (when-let [normalized (normalize-model m)]
                            (when-not (contains? exclude-models (:name normalized))
                              (merge normalized
                                (provider-model-entry id (:name normalized)))))))
-                 vec)
+                 (reduce conj-model-once []))
         root-name (:name (first models))]
     (when-not id
       (throw (ex-info "Provider :id is required" {:provider provider-map})))

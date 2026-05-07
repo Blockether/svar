@@ -325,6 +325,28 @@
       (let [[provider _] (router/select-provider r {:prefer :intelligence})]
         (expect (= :openai (:id provider)))))))
 
+(defdescribe anthropic-coding-plan-default-model-test
+  (it "prepends Claude Opus 4.7 to existing subscription provider configs"
+    (let [r (llm/make-router
+              [{:id :anthropic-coding-plan
+                :api-key "sk-ant-oat01-test"
+                :models [{:name "claude-opus-4-6"}
+                         {:name "claude-sonnet-4-6"}]}])
+          provider (first (:providers r))]
+      (expect (= "claude-opus-4-7" (:root provider)))
+      (expect (= ["claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6"]
+                (mapv :name (:models provider))))
+      (expect (= :anthropic (:api-style provider)))
+      (expect (= {:input 5.0
+                  :cached-input 0.5
+                  :cache-write-5m 6.25
+                  :cache-write-1h 10.0
+                  :output 25.0}
+                (get-in provider [:models 0 :pricing])))))
+
+  (it "does not claim nonexistent Claude Sonnet 4.7 catalog metadata"
+    (expect (nil? (router/provider-model-entry :anthropic-coding-plan "claude-sonnet-4-7")))))
+
 ;; =============================================================================
 ;; Tier 3 — `:reasoning` integrates with routing (selection filter)
 ;; =============================================================================

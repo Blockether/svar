@@ -313,6 +313,34 @@
               (expect (= {:effort "high" :summary "detailed"} (:reasoning body)))
               (expect (= ["reasoning.encrypted_content"] (:include body))))))))
 
+    (it "chat-completion sends Anthropic OAuth tokens with Claude Code headers and system identity"
+      (let [seen (atom nil)
+            messages [(svar/system "Follow project rules.")
+                      (svar/user "hi")]]
+        (with-redefs-fn {#'sut/http-post! (fn [_url body headers _timeout-ms]
+                                            (reset! seen {:body body :headers headers})
+                                            {:parsed {:content [{:type "text" :text "ok"}]
+                                                      :usage {:input_tokens 10
+                                                              :output_tokens 1}}
+                                             :raw-body "{}"
+                                             :url "https://api.anthropic.com/v1/messages"
+                                             :status 200})}
+          (fn []
+            (sut/chat-completion messages "claude-sonnet-4-5" "sk-ant-oat01-test" "https://api.anthropic.com/v1"
+              {:api-style :anthropic})
+            (let [{:keys [body headers]} @seen]
+              (expect (= "Bearer sk-ant-oat01-test" (get headers "Authorization")))
+              (expect (nil? (get headers "x-api-key")))
+              (expect (str/includes? (get headers "anthropic-beta") "claude-code-20250219"))
+              (expect (str/includes? (get headers "anthropic-beta") "oauth-2025-04-20"))
+              (expect (= "claude-cli/2.1.2" (get headers "user-agent")))
+              (expect (= "cli" (get headers "x-app")))
+              (expect (= "You are Claude Code, Anthropic's official CLI for Claude."
+                        (get-in body [:system 0 :text])))
+              (expect (= {:type "ephemeral"} (get-in body [:system 0 :cache_control])))
+              (expect (= "Follow project rules." (get-in body [:system 1 :text])))
+              (expect (= [{:role "user" :content "hi"}] (:messages body))))))))
+
     (it "chat-completion adds GitHub Copilot dynamic headers without replacing static headers"
       (let [seen (atom nil)
             messages [(svar/user "hi")]]
