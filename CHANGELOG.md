@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.8] - 2026-05-07
+
+### Changed
+- Fix Copilot reasoning wire format
+- release: update version files for v0.4.7, bump to next dev version
+
+
 ## [v0.4.7] - 2026-05-07
 
 ### Changed
@@ -573,7 +580,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.8...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -597,3 +604,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.5]: https://github.com/Blockether/svar/releases/tag/v0.4.5
 [v0.4.6]: https://github.com/Blockether/svar/releases/tag/v0.4.6
 [v0.4.7]: https://github.com/Blockether/svar/releases/tag/v0.4.7
+[v0.4.8]: https://github.com/Blockether/svar/releases/tag/v0.4.8
