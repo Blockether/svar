@@ -145,6 +145,18 @@
                                                  {:id "gemini-3-pro-preview"}]})}
         (fn []
           (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gemini-3-pro-preview"]
+                    (mapv :id (svar/models! router))))))))
+
+  (it "keeps z.ai Coding Plan glm-5v-turbo in /models output"
+    (let [router (svar/make-router [{:id :zai-coding
+                                     :api-key "sk-test"
+                                     :models [{:name "glm-4.7"}]}])]
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
+                                         {:data [{:id "glm-4.7"}
+                                                 {:id "glm-5-turbo"}
+                                                 {:id "glm-5v-turbo"}]})}
+        (fn []
+          (expect (= ["glm-4.7" "glm-5-turbo" "glm-5v-turbo"]
                     (mapv :id (svar/models! router)))))))))
 
 (defdescribe transparent-openai-responses-routing-test

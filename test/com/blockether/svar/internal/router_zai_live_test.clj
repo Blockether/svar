@@ -223,12 +223,12 @@
                 (:env-keys (:zai-coding router/KNOWN_PROVIDERS))))))
 
   (describe "Pricing tables"
-    (it ":zai has pricing for the 5 reasoning-capable GLM models"
-      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo"]]
+    (it ":zai has pricing for the 6 reasoning-capable GLM models"
+      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
         (expect (some? (:pricing (router/provider-model-entry :zai name))))))
 
     (it ":zai-coding mirrors :zai pricing (subscription-overage parity)"
-      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo"]]
+      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
         (let [zai (:pricing (router/provider-model-entry :zai name))
               cod (:pricing (router/provider-model-entry :zai-coding name))]
           (expect (= zai cod)))))))

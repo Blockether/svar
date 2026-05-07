@@ -218,13 +218,13 @@
     (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "minimax-m2.5")))))
 
   (it "flags GLM-4.6+ as reasoning-capable with :zai-thinking style"
-    (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo"]]
+    (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
       (let [m (get router/KNOWN_MODEL_METADATA name)]
         (expect (true? (:reasoning? m)))
         (expect (= :zai-thinking (:reasoning-style m))))))
 
   (it ":zai provider has per-token pricing for every reasoning-capable GLM"
-    (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo"]]
+    (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
       (let [pricing (:pricing (router/provider-model-entry :zai name))]
         (expect (map? pricing))
         (expect (number? (:input pricing)))
@@ -234,7 +234,7 @@
   (it ":zai-coding provider has pricing for subscription-overage accounting"
     ;; Coding Plan is subscription-billed but overage meters per-token.
     ;; Router keeps pricing so `budget-record!` stays honest.
-    (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo"]]
+    (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
       (let [pricing (:pricing (router/provider-model-entry :zai-coding name))]
         (expect (map? pricing))
         (expect (pos? (+ (:input pricing) (:output pricing)))))))

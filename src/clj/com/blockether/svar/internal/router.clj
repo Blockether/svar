@@ -125,6 +125,7 @@
    "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
    "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
    "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
+   "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
 
    ;; ── DeepSeek (reasoning_effort on reasoner only) ────────────────────────
    "deepseek-v3"               {:intelligence :high     :speed :medium :capabilities #{:chat}}
@@ -322,6 +323,7 @@
     "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
     "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
     "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
+    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
@@ -338,7 +340,8 @@
     "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
     "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
     "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}}
+    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
+    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}}
 
    :github-copilot
    {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
@@ -395,17 +398,35 @@
 
 (def MODEL_CONTEXT_LIMITS
   "Best-effort flattened model context limits for legacy token utilities.
-    When a model exists on multiple providers with different contexts, the maximum is used."
-  (assoc
-    (reduce-kv (fn [acc _pid models]
-                 (reduce-kv (fn [macc model-name {:keys [context]}]
-                              (update macc model-name
-                                (fn [existing]
-                                  (max (long (or existing 0))
-                                    (long (or context 0))))))
-                   acc models))
-      {} KNOWN_PROVIDER_MODELS)
-    :default 8192))
+    When a model exists on multiple providers with different contexts, the most
+    conservative context is used. Provider-aware code should use
+    provider-model-context instead."
+  (letfn [(parse-gpt-version [model-name]
+            (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
+              [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
+          (version< [a b]
+            (neg? (compare (vec a) (vec b))))
+          (visible? [pid model-name]
+            (let [known (get KNOWN_PROVIDERS pid)
+                  excluded (set (:exclude-models known))
+                  version (parse-gpt-version model-name)
+                  min-version (:min-gpt-version known)]
+              (not (or (contains? excluded model-name)
+                     (and version min-version (version< version min-version))))))]
+    (assoc
+      (reduce-kv (fn [acc pid models]
+                   (reduce-kv (fn [macc model-name {:keys [context]}]
+                                (if (or (nil? context)
+                                      (not (visible? pid model-name)))
+                                  macc
+                                  (update macc model-name
+                                    (fn [existing]
+                                      (if (nil? existing)
+                                        (long context)
+                                        (min (long existing) (long context)))))))
+                     acc models))
+        {} KNOWN_PROVIDER_MODELS)
+      :default 8192)))
 
 (def MODEL_PRICING
   "Best-effort flattened model pricing for legacy token utilities.
@@ -604,14 +625,14 @@
 ;; =============================================================================
 
 (defn context-limit
-  "Returns the maximum context window size for a model.
+  "Returns provider-agnostic conservative context window size for a model.
 
    Params:
    `model` - String. Model name.
    `context-limits` - Map, optional. Override map (merged defaults from config).
 
    Returns:
-   Integer. Maximum context tokens."
+   Integer. Conservative context tokens."
   (^long [^String model]
    (context-limit model MODEL_CONTEXT_LIMITS))
   (^long [^String model context-limits]
