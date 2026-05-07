@@ -288,6 +288,22 @@
             (expect (= "user" (get @seen "X-Initiator")))
             (expect (= "conversation-edits" (get @seen "Openai-Intent")))))))
 
+    (it "chat-completion marks Copilot requests with prior assistant turns as agent initiated"
+      (let [seen (atom nil)
+            messages [(svar/user "first")
+                      {:role "assistant" :content "previous"}
+                      (svar/user "continue")]]
+        (with-redefs-fn {#'sut/http-post! (fn [_url _body headers _timeout-ms]
+                                            (reset! seen headers)
+                                            {:parsed {:choices [{:message {:content "ok"}}]}
+                                             :raw-body "{}"
+                                             :url "https://example.invalid/v1/chat/completions"
+                                             :status 200})}
+          (fn []
+            (sut/chat-completion messages "gpt-4o" "sk-test" "https://example.invalid/v1"
+              {:provider-id :github-copilot})
+            (expect (= "agent" (get @seen "X-Initiator")))))))
+
     (it "GitHub Copilot chat forces SSE streaming"
       (let [calls (atom [])
             messages [(svar/user "hi")]]

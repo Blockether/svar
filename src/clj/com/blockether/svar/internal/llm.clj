@@ -180,11 +180,19 @@
           (= "image_url" (:type block)))
     (when (sequential? (:content message)) (:content message))))
 
+(defn- copilot-agent-initiated? [messages]
+  ;; Copilot classifies a request with prior assistant/tool context as agent
+  ;; initiated. Last-role-only is wrong for multi-turn agent loops where the
+  ;; final prompt is still a user-role continuation/journal message.
+  (boolean
+    (some (fn [message]
+            (contains? #{"assistant" "tool"} (:role message)))
+      messages)))
+
 (defn- copilot-dynamic-headers [messages]
-  (let [last-role (:role (last messages))]
-    (cond-> {"X-Initiator" (if (= "user" last-role) "user" "agent")
-             "Openai-Intent" "conversation-edits"}
-      (some message-has-image? messages) (assoc "Copilot-Vision-Request" "true"))))
+  (cond-> {"X-Initiator" (if (copilot-agent-initiated? messages) "agent" "user")
+           "Openai-Intent" "conversation-edits"}
+    (some message-has-image? messages) (assoc "Copilot-Vision-Request" "true")))
 
 (defn- copilot-stream-required? [provider-id base-url]
   (and (= :github-copilot provider-id)

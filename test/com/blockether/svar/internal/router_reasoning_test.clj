@@ -88,6 +88,19 @@
                                [:thinking :budget_tokens]))]
         (expect (< (budget :quick) (budget :balanced) (budget :deep))))))
 
+  (describe "GitHub Copilot reasoning"
+    (it "emits Responses reasoning effort with encrypted state include"
+      (let [gpt {:name "gpt-5.5" :reasoning? true :reasoning-style :copilot-reasoning}]
+        (expect (= {:reasoning_effort "high"
+                    :reasoning {:summary "detailed"}
+                    :include ["reasoning.encrypted_content"]}
+                  (router/reasoning-extra-body :openai-compatible-responses gpt :deep)))))
+
+    (it "emits chat-compatible reasoning_effort only on Copilot chat models"
+      (let [claude {:name "claude-sonnet-4.6" :reasoning? true :reasoning-style :copilot-reasoning}]
+        (expect (= {:reasoning_effort "medium"}
+                  (router/reasoning-extra-body :openai-compatible-chat claude :balanced))))))
+
   (describe "Z.ai / GLM binary thinking"
     (it "emits `{:thinking {:type \"disabled\"}}` for :quick"
       (let [glm {:name "glm-4.6" :reasoning? true :reasoning-style :zai-thinking}]
@@ -264,9 +277,12 @@
     (expect (= #{"claude-sonnet-4.6" "gpt-5.4" "gpt-5.5" "gpt-5.3-codex"}
               (set (keys by-name))))
     (expect (= :openai-compatible-chat (:api-style (get by-name "claude-sonnet-4.6"))))
+    (expect (= :copilot-reasoning (:reasoning-style (get by-name "claude-sonnet-4.6"))))
     (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.4"))))
     (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.5"))))
     (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.3-codex"))))
+    (expect (= :copilot-reasoning (:reasoning-style (get by-name "gpt-5.4"))))
+    (expect (= :copilot-reasoning (:reasoning-style (get by-name "gpt-5.5"))))
     (expect (= 272000 (:context (get by-name "gpt-5.4"))))
     (expect (= 272000 (:context (get by-name "gpt-5.5"))))
     (expect (nil? (get by-name "gpt-4o")))

@@ -146,6 +146,9 @@
      `:openai-effort`      → flat top-level `:reasoning_effort` string.
                              Used by GPT-5.x, o-series, Gemini 2.5 via OpenAI gateway,
                              DeepSeek Reasoner, and most OpenAI-compatible reasoners.
+     `:copilot-reasoning`  → Copilot gateway effort. Chat uses `reasoning_effort`;
+                             Responses also asks for detailed summary + encrypted
+                             reasoning state so agent loops can replay it.
      `:anthropic-thinking` → nested `:thinking {:type \"enabled\" :budget_tokens N}`.
                              Budget magnitudes fit within 200k-context Claude 4.x
                              max_tokens windows; tune if you hit ceilings.
@@ -155,9 +158,9 @@
                              See also `:preserved-thinking?` below for the
                              `clear_thinking: false` flag that keeps reasoning
                              across assistant turns."
-  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled"}
-   :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"}
-   :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"}})
+  {:quick    {:openai-effort "low"    :copilot-reasoning "low"    :anthropic-thinking 1024  :zai-thinking "disabled"}
+   :balanced {:openai-effort "medium" :copilot-reasoning "medium" :anthropic-thinking 8192  :zai-thinking "enabled"}
+   :deep     {:openai-effort "high"   :copilot-reasoning "high"   :anthropic-thinking 24000 :zai-thinking "enabled"}})
 
 (defn normalize-reasoning-level
   "Coerce any accepted spelling to a canonical :quick|:balanced|:deep keyword.
@@ -221,6 +224,10 @@
          (when mapped
            (case style
              :openai-effort      {:reasoning_effort mapped}
+             :copilot-reasoning  (cond-> {:reasoning_effort mapped}
+                                   (= api-style :openai-compatible-responses)
+                                   (assoc :reasoning {:summary "detailed"}
+                                     :include ["reasoning.encrypted_content"]))
              :anthropic-thinking {:thinking {:type "enabled" :budget_tokens mapped}}
              :zai-thinking       {:thinking (cond-> {:type mapped}
                                               ;; `clear_thinking: false` = keep reasoning_content
@@ -350,33 +357,33 @@
    ;; Copilot /models reports total context for GPT reasoning models, but the
    ;; prompt/input budget is smaller because 128K output is reserved. svar's
    ;; `:context` is input budget for pre-flight checks.
-   {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+   {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :copilot-reasoning}
+    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :copilot-reasoning}
+    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :copilot-reasoning}
+    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :copilot-reasoning}
+    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :copilot-reasoning}
+    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :copilot-reasoning}
+    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :copilot-reasoning}
 
-    "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses
+    "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5-mini"                {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses
+    "gpt-5-mini"                {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1"                   {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses
+    "gpt-5.1"                   {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+    "gpt-5.1-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex-max"         {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+    "gpt-5.1-codex-max"         {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex-mini"        {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+    "gpt-5.1-codex-mini"        {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.3-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+    "gpt-5.3-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.4"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+    "gpt-5.4"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.4-mini"              {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+    "gpt-5.4-mini"              {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.5"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses
+    "gpt-5.5"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :copilot-reasoning
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
 
     "gpt-4.1"                   {:pricing {:input 0.0 :output 0.0} :context 128000}
