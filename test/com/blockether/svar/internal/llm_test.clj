@@ -399,23 +399,46 @@
               (expect (ifn? on-delta))
               (expect (= "text/event-stream" (get headers "Accept"))))))))
 
-    (it "ask-code! sends prior encrypted reasoning items as Responses input sidecar"
+    (it "ask-code! re-emits canonical thinking blocks as Responses input reasoning items"
+      ;; New contract: callers no longer pass `:provider-state` as an
+      ;; opt; they round-trip the prior `:assistant-message` directly
+      ;; through `:messages`. Each canonical `{:type "thinking"}` block
+      ;; on an assistant message gets hoisted into a standalone
+      ;; `reasoning` entry placed RIGHT BEFORE the message in `:input`,
+      ;; preserving positional pairing the OpenAI Responses API expects.
       (let [calls (atom [])
             router (svar/make-router
                      [{:id :openai-codex
                        :api-key "sk-test"
                        :llm-headers {"chatgpt-account-id" "acct_123"}
                        :models [{:name "gpt-5.5"}]}])
-            provider-state {:provider :openai-responses
-                            :reasoning-items [{:id "rs_1"
-                                               :type "reasoning"
-                                               :summary []
-                                               :encrypted-content "ciphertext"}]}]
+            raw-reasoning-item {:type "reasoning"
+                                :id "rs_1"
+                                :summary []
+                                :encrypted_content "ciphertext"}
+            prior-assistant-message
+            {:role "assistant"
+             :content [{:type "thinking"
+                        :thinking ""
+                        :thinking-signature (json/write-json-str raw-reasoning-item)
+                        :redacted? false}
+                       {:type "text" :text "(+ 1 1)"}]}]
         (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn _on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers})
                                                    {:content "```clojure\n(+ 1 1)\n```"
                                                     :reasoning nil
-                                                    :provider-state provider-state
+                                                    :provider-state {:provider :openai-responses
+                                                                     :reasoning-items [{:id "rs_1"
+                                                                                        :type "reasoning"
+                                                                                        :summary []
+                                                                                        :encrypted-content "ciphertext"
+                                                                                        :raw-item raw-reasoning-item}]}
+                                                    :assistant-message {:role "assistant"
+                                                                        :content [{:type "thinking"
+                                                                                   :thinking ""
+                                                                                   :thinking-signature (json/write-json-str raw-reasoning-item)
+                                                                                   :redacted? false}
+                                                                                  {:type "text" :text "(+ 1 1)"}]}
                                                     :api-usage {:prompt_tokens 10
                                                                 :completion_tokens 5
                                                                 :total_tokens 15}
@@ -423,17 +446,22 @@
                                                                     :streaming? true
                                                                     :status 200}})}
           (fn []
-            (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]
-                                                 :provider-state provider-state})
+            (let [result (svar/ask-code! router {:messages [(svar/user "Continue")
+                                                            prior-assistant-message
+                                                            (svar/user "now what?")]})
                   {:keys [body]} (first @calls)]
-              (expect (= {:type "reasoning"
-                          :id "rs_1"
-                          :summary []
-                          :encrypted_content "ciphertext"}
-                        (first (:input body))))
+              ;; Reasoning input entry sits right before its parent
+              ;; assistant message in :input, encrypted_content intact.
+              (let [reasoning-entry (->> (:input body)
+                                      (filter #(= "reasoning" (:type %)))
+                                      first)]
+                (expect (= "rs_1" (:id reasoning-entry)))
+                (expect (= "ciphertext" (:encrypted_content reasoning-entry))))
+              ;; The new contract does not put :provider-state on the wire.
               (expect (nil? (:provider-state body)))
-              (expect (= "ciphertext"
-                        (get-in result [:provider-state :reasoning-items 0 :encrypted-content]))))))))
+              ;; svar still surfaces :assistant-message for the caller
+              ;; to round-trip on the next call.
+              (expect (= prior-assistant-message (:assistant-message result))))))))
 
     (it "ask-code! extracts malformed streamed fences without leaking markers"
       (let [router (svar/make-router

@@ -76,30 +76,4 @@
         (expect (= :parse (:phase diagnosis)))
         (expect (= {:city "Paris"} (:value diagnosis)))))))
 
-(defdescribe provenance-extension-test
-  (describe "provenance refs and lifecycle"
-    (it "captures provider-state as stable resumable provenance ref"
-      (let [provider-state {:provider :openai-responses
-                            :reasoning-items [{:id "rs_1"
-                                               :summary []
-                                               :encrypted-content "ciphertext"}]}
-            result {:result {:ok true}
-                    :provider-state provider-state}
-            ref (ext/provenance-ref result {:created-at-ms 123})
-            lifecycle (ext/provenance-lifecycle result)]
-        (expect (= :svar.provenance/provider-state (:type ref)))
-        (expect (= :openai-responses (:provider ref)))
-        (expect (= 123 (:created-at-ms ref)))
-        (expect (= 1 (:items-count ref)))
-        (expect (= ["rs_1"] (:item-ids ref)))
-        (expect (= provider-state (:provider-state ref)))
-        (expect (true? (:available? lifecycle)))
-        (expect (= :captured (:stage lifecycle)))
-        (expect (= {:provider-state provider-state} (:resume-opts lifecycle)))))
 
-    (it "reports absent provenance when no provider-state exists"
-      (let [lifecycle (ext/provenance-lifecycle {:result {:ok true}})]
-        (expect (false? (:available? lifecycle)))
-        (expect (= :absent (:stage lifecycle)))
-        (expect (nil? (:ref lifecycle)))
-        (expect (nil? (:resume-opts lifecycle)))))))

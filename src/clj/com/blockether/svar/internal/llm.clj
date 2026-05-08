@@ -383,6 +383,66 @@
       (and (= 1 (count wire)) (text-block? (first wire))) (-> wire first :text)
       :else                                             wire)))
 
+(defn- canonical-thinking-block?
+  "Recognizes svar's canonical preserved-thinking content block. Mirrors
+   pi-ai's shape: `{:type \"thinking\" :thinking str :thinking-signature
+   str :redacted? bool}`. The thinking-signature is an opaque
+   per-provider payload that has to round-trip verbatim on the next
+   call — Anthropic's HMAC `signature`, Anthropic redacted-thinking's
+   encrypted `data`, OpenAI Responses' JSON-encoded reasoning item,
+   z.ai's exact `reasoning_content` text, etc. Wire serializers per
+   api-style read this canonical shape and emit native wire blocks."
+  [block]
+  (and (map? block) (= "thinking" (:type block))))
+
+(defn- canonical-thinking->anthropic-block
+  "Translates one canonical thinking block to its Anthropic wire shape.
+   `:redacted? true` becomes `redacted_thinking` carrying the encrypted
+   data under `:data`; otherwise emits a normal `thinking` block whose
+   `:signature` round-trips Anthropic's HMAC verbatim. Blocks that
+   never received a signature (e.g. an aborted stream) degrade to a
+   plain text block so Anthropic doesn't reject the request — this
+   matches pi-ai's behavior."
+  [{:keys [thinking thinking-signature redacted?]}]
+  (cond
+    redacted?
+    {:type "redacted_thinking"
+     :data thinking-signature}
+
+    (and (string? thinking-signature) (not (str/blank? thinking-signature)))
+    {:type "thinking"
+     :thinking (or thinking "")
+     :signature thinking-signature}
+
+    :else
+    ;; Missing signature — fall back to a text block so Anthropic doesn't
+    ;; reject the next request and Claude doesn't start mimicking the
+    ;; <thinking> tags in subsequent responses.
+    {:type "text"
+     :text (or thinking "")}))
+
+(defn- anthropic-message-content
+  "Builds the wire content for one message under `:anthropic` api-style.
+   Walks each canonical content block: `{:type \"thinking\"}` blocks go
+   through `canonical-thinking->anthropic-block` (signature/redacted
+   rendered natively), everything else passes through `anthropic-block`
+   unchanged. Force the array form whenever a thinking block is present
+   — the single-text-collapse path would drop the signed blocks."
+  [{:keys [content]}]
+  (let [blocks       (normalize-content content)
+        has-thinking? (some canonical-thinking-block? blocks)
+        wire         (mapv (fn [b]
+                             (if (canonical-thinking-block? b)
+                               (canonical-thinking->anthropic-block b)
+                               (anthropic-block b)))
+                       blocks)]
+    (if (or has-thinking?
+          (not= 1 (count wire))
+          (not (text-block? (first wire)))
+          (some? (:cache_control (first wire))))
+      wire
+      (-> wire first :text))))
+
 (defn- build-anthropic-request-body
   "Builds request body in Anthropic Messages API format.
 
@@ -393,6 +453,14 @@
    `:svar/cache true` markers on user/assistant content blocks are
    translated to `cache_control: {type: \"ephemeral\"}` per block.
    Anthropic enforces a hard cap of 4 cache breakpoints per call.
+
+   Assistant messages whose `:content` contains canonical
+   `{:type \"thinking\"}` blocks emit them as native Anthropic
+   `thinking` / `redacted_thinking` wire blocks (see
+   `canonical-thinking->anthropic-block`). Echoing them back is how
+   Anthropic's extended thinking is continued across calls — the model
+   sees its own prior reasoning (signature-verified server-side) before
+   the next user turn instead of re-thinking from scratch.
 
    `:max_tokens` is always present (Anthropic requirement) and
    `clamp-anthropic-thinking-max-tokens` ensures visible output has
@@ -413,9 +481,9 @@
                        :else               (str/join "\n" (map :text sys-blocks)))
          non-system  (->> messages
                        (remove #(= "system" (:role %)))
-                       (mapv (fn [{:keys [role content]}]
+                       (mapv (fn [{:keys [role] :as msg}]
                                {:role role
-                                :content (anthropic-content (normalize-content content))})))
+                                :content (anthropic-message-content msg)})))
          max-tokens  (or (:max_tokens extra-body) 4096)
          body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
                        system-wire (assoc :system system-wire)
@@ -425,12 +493,59 @@
      (-> (cond-> body system-wire (assoc :system system-wire))
        clamp-anthropic-thinking-max-tokens))))
 
+(defn- anthropic-wire->canonical-block
+  "Translates one Anthropic wire content block to svar's canonical
+   shape. `text` blocks become `{:type \"text\" :text str}`; `thinking`
+   blocks become canonical thinking blocks carrying the HMAC signature
+   in `:thinking-signature`; `redacted_thinking` blocks become
+   canonical thinking blocks with `:redacted? true` and the encrypted
+   data carried under `:thinking-signature`. Anything else passes
+   through unchanged so future Anthropic block types (tool_use,
+   server_tool_use, …) survive a round-trip."
+  [block]
+  (case (:type block)
+    "text"
+    {:type "text" :text (or (:text block) "")}
+
+    "thinking"
+    {:type "thinking"
+     :thinking (or (:thinking block) "")
+     :thinking-signature (or (:signature block) "")
+     :redacted? false}
+
+    "redacted_thinking"
+    {:type "thinking"
+     :thinking ""
+     :thinking-signature (or (:data block) "")
+     :redacted? true}
+
+    block))
+
+(defn- anthropic-canonical-assistant-message
+  "Builds the canonical `:assistant-message` for an Anthropic response.
+   The result is a normal svar message map — callers append it to
+   `:messages` on the next call. nil when the response had no content
+   blocks worth round-tripping."
+  [content-blocks]
+  (when (seq content-blocks)
+    (let [canonical (mapv anthropic-wire->canonical-block content-blocks)]
+      {:role "assistant"
+       :content canonical})))
+
 (defn- extract-anthropic-response-data
-  "Extracts content, reasoning, and usage from an Anthropic Messages API
-   response envelope (the map returned by `http-post!`).
-   Normalizes usage keys to OpenAI names so downstream token counting works
-   unchanged, and preserves the raw envelope under :http-response for
-   error-site attachment (see `extract-response-data` docstring)."
+  "Extracts content, reasoning, usage, and the canonical assistant
+   message from an Anthropic Messages API response envelope.
+   Normalizes usage keys to OpenAI names so downstream token counting
+   works unchanged, and preserves the raw envelope under :http-response
+   for error-site attachment (see `extract-response-data` docstring).
+
+   `:assistant-message` carries the response's full content as svar's
+   provider-agnostic canonical message: text blocks plus any `thinking`
+   blocks (with HMAC signature under `:thinking-signature`) and any
+   `redacted_thinking` blocks (encrypted data under
+   `:thinking-signature`, `:redacted? true`). Caller appends this map
+   to `:messages` on the next call to keep Claude's extended thinking
+   session active."
   [envelope]
   (let [response       (:parsed envelope)
         content-blocks (:content response)
@@ -440,23 +555,40 @@
         thinking-parts (->> content-blocks
                          (filter #(= "thinking" (:type %)))
                          (map :thinking))
-        usage          (:usage response)]
-    {:content       (when (seq text-parts) (str/join "\n" text-parts))
-     :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
-     :api-usage     (when usage
-                      (let [cache-read   (:cache_read_input_tokens usage)
-                            cache-create (:cache_creation_input_tokens usage)]
-                        (cond-> {:prompt_tokens     (:input_tokens usage)
-                                 :completion_tokens (:output_tokens usage)}
-                          (or cache-read cache-create)
-                          (assoc :prompt_tokens_details
-                            (cond-> {}
-                              cache-read   (assoc :cached_tokens cache-read)
-                              cache-create (assoc :cache_creation_tokens cache-create))))))
-     :http-response envelope}))
+        usage          (:usage response)
+        visible        (when (seq text-parts) (str/join "\n" text-parts))
+        canonical-msg  (anthropic-canonical-assistant-message content-blocks)]
+    (cond-> {:content       visible
+             :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
+             :api-usage     (when usage
+                              (let [cache-read   (:cache_read_input_tokens usage)
+                                    cache-create (:cache_creation_input_tokens usage)]
+                                (cond-> {:prompt_tokens     (:input_tokens usage)
+                                         :completion_tokens (:output_tokens usage)}
+                                  (or cache-read cache-create)
+                                  (assoc :prompt_tokens_details
+                                    (cond-> {}
+                                      cache-read   (assoc :cached_tokens cache-read)
+                                      cache-create (assoc :cache_creation_tokens cache-create))))))
+             :http-response envelope}
+      canonical-msg (assoc :assistant-message canonical-msg))))
+
+(defn- anthropic-stream-usage [u]
+  (when u
+    (let [cr (:cache_read_input_tokens u)
+          cc (:cache_creation_input_tokens u)]
+      (cond-> {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)}
+        (or cr cc) (assoc :prompt_tokens_details
+                     (cond-> {}
+                       cr (assoc :cached_tokens cr)
+                       cc (assoc :cache_creation_tokens cc)))))))
 
 (defn- extract-anthropic-stream-delta
-  "Extracts content/reasoning deltas from an Anthropic SSE event chunk."
+  "Stateless one-shot extractor for individual Anthropic SSE events.
+   Used by tests + non-aggregating callers; the streaming pipeline
+   prefers `make-anthropic-stream-delta-fn` because that closure keeps
+   per-block accumulator state (signature, redacted_thinking data) that
+   has to round-trip on the next request."
   [chunk]
   (case (:type chunk)
     "content_block_delta"
@@ -466,29 +598,93 @@
         "thinking_delta" {:content-delta nil               :reasoning-delta (:thinking delta) :api-usage nil}
         {:content-delta nil :reasoning-delta nil :api-usage nil}))
     "message_delta"
-    {:content-delta nil :reasoning-delta nil
-     :api-usage (when-let [u (:usage chunk)]
-                  (let [cr (:cache_read_input_tokens u)
-                        cc (:cache_creation_input_tokens u)]
-                    (cond-> {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)}
-                      (or cr cc) (assoc :prompt_tokens_details
-                                   (cond-> {}
-                                     cr (assoc :cached_tokens cr)
-                                     cc (assoc :cache_creation_tokens cc))))))}
+    {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (:usage chunk))}
     "message_start"
-    {:content-delta nil :reasoning-delta nil
-     :api-usage (when-let [u (get-in chunk [:message :usage])]
-                  (let [cr (:cache_read_input_tokens u)
-                        cc (:cache_creation_input_tokens u)]
-                    (cond-> {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)}
-                      (or cr cc) (assoc :prompt_tokens_details
-                                   (cond-> {}
-                                     cr (assoc :cached_tokens cr)
-                                     cc (assoc :cache_creation_tokens cc))))))}
+    {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (get-in chunk [:message :usage]))}
     "message_stop"
     {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
     ;; default — ignore other event types
     {:content-delta nil :reasoning-delta nil :api-usage nil}))
+
+(defn- make-anthropic-stream-delta-fn
+  "Builds a stateful one-arg delta-fn closure for Anthropic SSE streams.
+   Mirrors the public per-event shape returned by
+   `extract-anthropic-stream-delta` (so the SSE aggregator stays
+   uniform) and additionally accumulates partial wire blocks across
+   `content_block_start` … `content_block_delta` … `content_block_stop`.
+   Each closed block is converted to svar's canonical form
+   (`anthropic-wire->canonical-block`) and flushed to the aggregator
+   via `:provider-state {:provider :anthropic :blocks [<canonical>]}`.
+   The aggregator concatenates blocks in arrival order — the same order
+   Anthropic requires them re-sent in to keep the extended-thinking
+   session valid.
+
+   Why a closure: a flat per-event extractor cannot pair a
+   `signature_delta` with the `thinking_delta` chunks that preceded it
+   under the same block index, and Anthropic's `signature` field is
+   required verbatim on replay — dropping it invalidates the next
+   request server-side."
+  []
+  (let [pending (atom {})] ;; index -> partial wire block map
+    (fn [chunk]
+      (case (:type chunk)
+        "content_block_start"
+        (let [idx (:index chunk)
+              block (:content_block chunk)]
+          (swap! pending assoc idx (or block {}))
+          {:content-delta nil :reasoning-delta nil :api-usage nil})
+
+        "content_block_delta"
+        (let [idx   (:index chunk)
+              delta (:delta chunk)]
+          (case (:type delta)
+            "text_delta"
+            (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
+              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+
+            "thinking_delta"
+            (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
+              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+
+            "signature_delta"
+            (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
+
+            ;; Anthropic also emits input_json_delta for tool_use blocks;
+            ;; svar doesn't use Anthropic tool_use today, but keep the
+            ;; accumulator forward-compatible by passing the raw delta
+            ;; through under a synthetic :partial_json key.
+            "input_json_delta"
+            (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
+
+            {:content-delta nil :reasoning-delta nil :api-usage nil}))
+
+        "content_block_stop"
+        (let [idx (:index chunk)
+              wire-block (get @pending idx)]
+          (swap! pending dissoc idx)
+          (if (seq wire-block)
+            ;; Convert wire → canonical and flush. Text blocks are
+            ;; included so the aggregator can rebuild a faithful
+            ;; canonical assistant message preserving block order;
+            ;; thinking/redacted_thinking carry their signatures
+            ;; verbatim for round-trip.
+            {:content-delta nil :reasoning-delta nil :api-usage nil
+             :provider-state {:provider :anthropic
+                              :blocks [(anthropic-wire->canonical-block wire-block)]}}
+            {:content-delta nil :reasoning-delta nil :api-usage nil}))
+
+        "message_delta"
+        {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (:usage chunk))}
+
+        "message_start"
+        {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (get-in chunk [:message :usage]))}
+
+        "message_stop"
+        {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
+
+        {:content-delta nil :reasoning-delta nil :api-usage nil}))))
 
 (defn- with-retry
   "Executes a function with exponential backoff retry for transient errors.
@@ -701,22 +897,47 @@
           items)]
     (mapv by-key order)))
 
-(defn- merge-provider-state [a b]
+(defn- merge-provider-state
+  "Provider-aware aggregator. The streaming pipeline merges every
+   `:provider-state` event coming out of `delta-fn` into a single
+   running map; the merge strategy depends on which provider populated
+   it. OpenAI Responses dedupes `:reasoning-items` by id; Anthropic
+   appends finished content blocks to `:blocks` (one block per
+   `content_block_stop` event); plain providers fall back to a flat
+   merge."
+  [a b]
   (cond
     (nil? a) b
     (nil? b) a
     :else
-    (let [items (dedupe-reasoning-items
-                  (concat (:reasoning-items a) (:reasoning-items b)))]
-      (cond-> (merge a b)
-        (seq items) (assoc :reasoning-items items)))))
+    (let [provider (or (:provider b) (:provider a))]
+      (case provider
+        :openai-responses
+        (let [items (dedupe-reasoning-items
+                      (concat (:reasoning-items a) (:reasoning-items b)))]
+          (cond-> (merge a b)
+            (seq items) (assoc :reasoning-items items)))
+
+        :anthropic
+        (let [blocks (vec (concat (or (:blocks a) []) (or (:blocks b) [])))]
+          (cond-> (merge a b)
+            (seq blocks) (assoc :blocks blocks)))
+
+        (merge a b)))))
 
 (defn- reasoning-item-provider-state [item]
   (when-let [state (reasoning-item-state item)]
     {:provider :openai-responses
      :reasoning-items [state]}))
 
-(defn- response-provider-state [response]
+(defn- openai-responses-state
+  "Builds the OpenAI Responses preserved-thinking state from the
+   response's `:output` array. The result is exposed under
+   `:provider-state` for diagnostic / fallback uses; the canonical
+   replay path lifts each reasoning item into a `{:type \"thinking\"}`
+   block on `:assistant-message` so callers don't have to touch this
+   shape directly."
+  [response]
   (let [items (dedupe-reasoning-items
                 (keep reasoning-item-state (:output response)))]
     (when (seq items)
@@ -753,6 +974,83 @@
 ;; LLM API
 ;; =============================================================================
 
+;; =============================================================================
+;; OpenAI Responses ↔ canonical converters
+;;
+;; Symmetric pair with the Anthropic converters above; pi-style
+;; canonical thinking blocks are the single caller-facing shape, the
+;; wire form is API-specific. Reasoning items live as standalone
+;; `:input` entries on the wire (NOT inline content) so the message
+;; expansion below lifts thinking blocks out of `:content` and
+;; positions them right before their parent assistant message.
+;; =============================================================================
+
+(defn- responses-reasoning-item->canonical-thinking-block
+  "Lifts one OpenAI Responses reasoning item (svar's deduped form, as
+   produced by `reasoning-item-state`) into svar's canonical thinking
+   block. The full raw item is JSON-encoded under `:thinking-signature`
+   so a round-trip can re-emit the exact wire shape — including ids,
+   encrypted_content, raw summary parts — byte-for-byte."
+  [{:keys [summary-text content-text raw-item] :as item}]
+  {:type "thinking"
+   :thinking (or summary-text content-text "")
+   :thinking-signature (json/write-json-str (or raw-item item))
+   :redacted? false})
+
+(defn- canonical-thinking-block->responses-reasoning-item
+  "Decodes a canonical thinking block's `:thinking-signature` back into
+   the OpenAI Responses wire-shape map the API expects in `:input`.
+   Falls back to a synthesized minimal item if the signature is not
+   parseable JSON — keeps round-trips robust without leaking thinking
+   content the model would refuse on replay."
+  [{:keys [thinking thinking-signature]}]
+  (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
+        (try (json/read-json thinking-signature :key-fn keyword)
+          (catch Exception _ nil)))
+    (when (and (string? thinking) (not (str/blank? thinking)))
+      {:type "reasoning"
+       :summary [{:type "summary_text" :text thinking}]})))
+
+(defn- responses-extract-assistant-message
+  "Builds the canonical `:assistant-message` for an OpenAI Responses
+   call from a deduped reasoning-items vec plus the visible text. Used
+   from both the streaming aggregator and any non-streaming Responses
+   extract path so both surfaces produce the same canonical shape."
+  [reasoning-items visible-text]
+  (let [thinking-blocks (mapv responses-reasoning-item->canonical-thinking-block
+                          (or reasoning-items []))
+        text-blocks     (when (and (string? visible-text) (not (str/blank? visible-text)))
+                          [{:type "text" :text visible-text}])
+        content         (vec (concat thinking-blocks text-blocks))]
+    (when (seq content)
+      {:role "assistant" :content content})))
+
+(defn- openai-chat-canonical-assistant-message
+  "Builds the canonical `:assistant-message` for an OpenAI-compatible
+   chat response. When the response carried `reasoning_content`
+   (z.ai GLM Preserved Thinking, OpenRouter, etc.) it is captured as a
+   canonical thinking block; the same text doubles as the
+   `:thinking-signature` because z.ai's preservation contract is
+   verbatim text echo with no separate HMAC. Caller appends the
+   resulting message to `:messages` on the next call so the wire
+   serializer can re-emit `reasoning_content` faithfully.
+
+   Returns nil when there is no usable assistant content — callers
+   then skip the replay step."
+  [{:keys [content reasoning-content]}]
+  (let [text? (and (string? content) (not (str/blank? content)))
+        rc?   (and (string? reasoning-content) (not (str/blank? reasoning-content)))]
+    (when (or text? rc?)
+      (let [thinking-block (when rc?
+                             {:type "thinking"
+                              :thinking reasoning-content
+                              :thinking-signature reasoning-content
+                              :redacted? false})
+            text-block     (when text?
+                             {:type "text" :text content})]
+        {:role "assistant"
+         :content (vec (keep identity [thinking-block text-block]))}))))
+
 (defn- extract-response-data
   "Extracts content, reasoning, and usage data from an OpenAI-compatible
    response envelope. Accepts the map returned by `http-post!`:
@@ -762,16 +1060,24 @@
    and Responses-style `:output` fallbacks some gateways only surface on
    the terminal payload.
 
-   Returns: {:content :reasoning :api-usage :http-response},
+   Returns: {:content :reasoning :provider-state :assistant-message
+             :api-usage :http-response},
    where :http-response is the ORIGINAL envelope preserved so a downstream
    error site (e.g. the empty-content throw in `ask!*`) can attach the
    full raw response to its ex-data for triage. Callers that only want the
-   content/reasoning can just destructure the three leaf keys."
+   content/reasoning can just destructure the three leaf keys.
+
+   `:assistant-message` is populated when the response carried a
+   server-issued preserved-reasoning channel (e.g. z.ai GLM
+   `reasoning_content`, OpenAI Responses reasoning items). Append it
+   to `:messages` on the next call to keep the thinking session
+   active."
   [envelope]
   (let [response           (:parsed envelope)
         message            (get-in response [:choices 0 :message])
         raw-content        (:content message)
-        raw-reasoning      (or (:reasoning_content message)
+        message-reasoning-content (:reasoning_content message)
+        raw-reasoning      (or message-reasoning-content
                              (:reasoning message)
                              (:reasoning_text message)
                              (:reasoning_summary message)
@@ -784,7 +1090,7 @@
                              (reasoning-blocks-text raw-content))
         fallback-content   (response-output-text response)
         fallback-reasoning (response-output-reasoning response)
-        provider-state     (response-provider-state response)
+        provider-state     (openai-responses-state response)
         content            (cond
                              (string? raw-content) raw-content
                              (not (str/blank? (or block-content ""))) block-content
@@ -792,12 +1098,27 @@
                              :else nil)
         reasoning          (or (reasoning-part-text raw-reasoning)
                              block-reasoning
-                             (when-not (str/blank? fallback-reasoning) fallback-reasoning))]
-    {:content        content
-     :reasoning      reasoning
-     :provider-state provider-state
-     :api-usage      (normalize-openai-usage (get-in response [:usage]))
-     :http-response  envelope}))
+                             (when-not (str/blank? fallback-reasoning) fallback-reasoning))
+        ;; Two extract paths share this fn: chat-completions (z.ai
+        ;; GLM, OpenRouter, plain OpenAI Chat — use
+        ;; `openai-chat-canonical-assistant-message`) and OpenAI
+        ;; Responses (rich `:output` array with reasoning items — use
+        ;; `responses-extract-assistant-message`). Provider-state
+        ;; presence picks the Responses path so we don't double-build
+        ;; on chat-completions where it stays nil.
+        canonical-msg      (or (when provider-state
+                                 (responses-extract-assistant-message
+                                   (:reasoning-items provider-state) content))
+                             (openai-chat-canonical-assistant-message
+                               {:content content
+                                :reasoning-content (when (string? message-reasoning-content)
+                                                     message-reasoning-content)}))]
+    (cond-> {:content        content
+             :reasoning      reasoning
+             :provider-state provider-state
+             :api-usage      (normalize-openai-usage (get-in response [:usage]))
+             :http-response  envelope}
+      canonical-msg (assoc :assistant-message canonical-msg))))
 
 (defn- responses-text-content [content]
   (cond
@@ -844,19 +1165,6 @@
       :else
       [{:type text-type :text (str content)}])))
 
-(defn- provider-state->responses-input [provider-state]
-  (when (= :openai-responses (:provider provider-state))
-    (->> (:reasoning-items provider-state)
-      (keep (fn [{:keys [id status summary content encrypted-content raw-item]}]
-              (or raw-item
-                (cond-> {:type "reasoning"
-                         :summary (or summary [])}
-                  id (assoc :id id)
-                  status (assoc :status status)
-                  content (assoc :content content)
-                  encrypted-content (assoc :encrypted_content encrypted-content)))))
-      vec)))
-
 (defn- normalize-text-verbosity [v]
   (let [raw (cond
               (keyword? v) (name v)
@@ -877,19 +1185,41 @@
                      :strict (:strict response-format)}
       nil)))
 
+
+(defn- responses-message-input-entries
+  "Expands one canonical message into the OpenAI Responses `:input`
+   entries it generates: thinking blocks become standalone `reasoning`
+   items emitted BEFORE the message itself, the rest of the content
+   becomes the message entry. System messages are filtered out
+   upstream; this helper handles user/assistant only."
+  [{:keys [role content]}]
+  (let [normalized (normalize-content content)
+        [thinking-blocks rest-blocks] (if (= role "assistant")
+                                        [(filterv canonical-thinking-block? normalized)
+                                         (filterv (complement canonical-thinking-block?) normalized)]
+                                        [nil normalized])
+        reasoning-items (when (= role "assistant")
+                          (vec (keep canonical-thinking-block->responses-reasoning-item thinking-blocks)))
+        message-entry {:role    (if (= role "assistant") "assistant" "user")
+                       :content (responses-content-blocks role rest-blocks)}]
+    (vec (concat reasoning-items [message-entry]))))
+
 (defn- build-openai-responses-request-body [messages model extra-body]
   (let [system-text (->> messages
                       (filter #(= "system" (:role %)))
                       (map (comp responses-text-content :content))
                       (remove str/blank?)
                       (str/join "\n\n"))
-        message-input (->> messages
-                        (remove #(= "system" (:role %)))
-                        (mapv (fn [{:keys [role content]}]
-                                {:role    (if (= role "assistant") "assistant" "user")
-                                 :content (responses-content-blocks role content)})))
-        state-input (provider-state->responses-input (:provider-state extra-body))
-        input       (vec (concat state-input message-input))
+        ;; Canonical thinking blocks live inline on assistant messages.
+        ;; Each one is hoisted out as a `reasoning` input entry placed
+        ;; right before its parent message — the OpenAI Responses API
+        ;; pairs reasoning items with the assistant turn that produced
+        ;; them by ordering, not by id, so positional faithfulness here
+        ;; is what keeps the thinking session valid.
+        input       (->> messages
+                      (remove #(= "system" (:role %)))
+                      (mapcat responses-message-input-entries)
+                      vec)
         effort      (:reasoning_effort extra-body)
         text-format (or (get-in extra-body [:text :format])
                       (response-format->text-format (:response_format extra-body)))
@@ -911,6 +1241,32 @@
       text-format (assoc :text (assoc base-text :format text-format))
       (seq base-extra*) (merge (cond-> base-extra* text-format (dissoc :text))))))
 
+(defn- openai-chat-split-thinking
+  "Splits a normalized canonical content vec into `[thinking-blocks
+   non-thinking-blocks]`. OpenAI-style chat completions (z.ai included)
+   carry preserved reasoning under a per-message `reasoning_content`
+   string, not as inline content blocks — so we hoist the canonical
+   thinking blocks out of the wire content and emit their text under
+   the dedicated field instead."
+  [blocks]
+  [(filterv canonical-thinking-block? blocks)
+   (filterv (complement canonical-thinking-block?) blocks)])
+
+(defn- openai-chat-reasoning-content
+  "Concatenates the `:thinking-signature` of every canonical thinking
+   block on the message, in order, into the single string that z.ai /
+   OpenRouter expect under `reasoning_content`. We use the signature
+   (not the visible `:thinking`) because z.ai's preservation contract
+   is exact-text echo — svar populates both fields with the same
+   provider-issued text on capture."
+  [thinking-blocks]
+  (let [parts (->> thinking-blocks
+                (map (fn [{:keys [thinking-signature thinking]}]
+                       (or thinking-signature thinking)))
+                (remove str/blank?))]
+    (when (seq parts)
+      (str/join "\n" parts))))
+
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
 
@@ -918,6 +1274,12 @@
    passes through unchanged. svar-internal markers like `:svar/cache`
    are stripped — OpenAI implicit caching benefits from a stable prefix
    without any client signal.
+
+   Canonical `{:type \"thinking\"}` blocks on assistant messages are
+   hoisted out of `:content` and re-emitted under the dedicated
+   `:reasoning_content` field so providers that speak the
+   preserved-thinking convention (z.ai GLM, OpenRouter) keep the
+   model's thinking session active across calls.
 
    Params:
    `messages` - Vector. Chat messages.
@@ -928,9 +1290,19 @@
    (build-request-body messages model nil))
   ([messages model extra-body]
    (let [processed (mapv (fn [{:keys [role content] :as m}]
-                           (-> m
-                             (assoc :content (openai-content (normalize-content content)))
-                             (cond-> (= role "system") (assoc :role "system"))))
+                           (let [normalized (normalize-content content)
+                                 [thinking-blocks rest-blocks]
+                                 (if (= role "assistant")
+                                   (openai-chat-split-thinking normalized)
+                                   [nil normalized])
+                                 reasoning-content
+                                 (when (seq thinking-blocks)
+                                   (openai-chat-reasoning-content thinking-blocks))
+                                 base (-> m
+                                        (assoc :content (openai-content rest-blocks))
+                                        (cond-> (= role "system") (assoc :role "system")))]
+                             (cond-> base
+                               reasoning-content (assoc :reasoning_content reasoning-content))))
                      messages)]
      (cond-> {:model model :messages processed}
        (seq extra-body) (merge extra-body)))))
@@ -1233,7 +1605,7 @@
          :reasoning-delta nil
          :content-fallback (response-output-text response)
          :reasoning-fallback (response-output-reasoning response)
-         :provider-state (response-provider-state response)
+         :provider-state (openai-responses-state response)
          :api-usage (normalize-openai-usage (or (:usage response) (:usage chunk)))
          :terminal? true
          :incomplete? (= "response.incomplete" event-type)
@@ -1412,13 +1784,42 @@
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
                     :partial-content (when (pos? (.length content-acc)) (str content-acc))})))
-        {:content        (let [s (str content-acc)] (when-not (str/blank? s) s))
-         :reasoning      (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
-         :provider-state @provider-state-atom
-         :api-usage      @usage-atom
-         :http-response  {:url        url
-                          :streaming? true
-                          :status     (:status response)}})
+        (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
+              final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
+              ps              @provider-state-atom
+              ;; Each provider has a dedicated extract-assistant-message
+              ;; helper that maps its accumulated provider-state shape
+              ;; to svar's canonical assistant message. Anthropic
+              ;; flushes already-canonical blocks in arrival order;
+              ;; OpenAI Responses surfaces reasoning items that we lift
+              ;; into thinking blocks (signed wire shape JSON-encoded
+              ;; under :thinking-signature for byte-perfect replay).
+              ;; Plain chat completions (z.ai GLM, OpenRouter, etc.)
+              ;; arrive without a populated provider-state; build the
+              ;; canonical message from the streamed visible text plus
+              ;; the accumulated reasoning_content channel so callers
+              ;; round-trip through the same shape as non-streaming.
+              assistant-msg   (case (:provider ps)
+                                :anthropic
+                                (when (seq (:blocks ps))
+                                  {:role "assistant"
+                                   :content (vec (:blocks ps))})
+
+                                :openai-responses
+                                (responses-extract-assistant-message
+                                  (:reasoning-items ps) final-content)
+
+                                (openai-chat-canonical-assistant-message
+                                  {:content final-content
+                                   :reasoning-content final-reasoning}))]
+          (cond-> {:content        final-content
+                   :reasoning      final-reasoning
+                   :provider-state ps
+                   :api-usage      @usage-atom
+                   :http-response  {:url        url
+                                    :streaming? true
+                                    :status     (:status response)}}
+            assistant-msg (assoc :assistant-message assistant-msg))))
       (catch clojure.lang.ExceptionInfo e
         (if (stream-finalization-error? e)
           (throw e)
@@ -1456,7 +1857,10 @@
         chat-url     (make-chat-url base-url api-style)
         headers      (merge (request-headers api-style api-key provider-id messages llm-headers)
                        {"Accept" "text/event-stream"})
-        delta-fn     (if anthropic? extract-anthropic-stream-delta extract-stream-delta)]
+        ;; Anthropic uses a stateful closure so per-block
+        ;; signature/text accumulation survives the SSE event boundary.
+        ;; Other providers stay on the stateless extractor.
+        delta-fn     (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
     (try
       (http-post-stream! chat-url request-body headers timeout-ms delta-fn
         (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
@@ -1801,7 +2205,6 @@
                            api-style model-map (:reasoning opts)
                            {:preserved-thinking? (:preserved-thinking? opts)})
         merged-body (cond-> (merge (:extra-body provider) (:extra-body model-map) auto-params reasoning-params (:extra-body opts))
-                      (:provider-state opts) (assoc :provider-state (:provider-state opts))
                       (:verbosity opts) (assoc :verbosity (:verbosity opts)))
         ;; Caller's explicit :json-object-mode? (true OR false) wins; otherwise
         ;; inherit the routed model's metadata flag. `contains?` so explicit
@@ -2293,8 +2696,10 @@
         ;; `:json-object-mode?` auto-injection — caller's `:extra-body
         ;; :response_format` always wins. OpenAI chat-completions and
         ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
-        caller-extra-body (cond-> (or (:extra-body opts) {})
-                            (:provider-state opts) (assoc :provider-state (:provider-state opts)))
+        ;; `:json-object-mode?` auto-injection — caller's `:extra-body
+        ;; :response_format` always wins. OpenAI chat-completions and
+        ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
+        caller-extra-body (or (:extra-body opts) {})
         extra-body (cond-> caller-extra-body
                      (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
                        (:json-object-mode? opts)
@@ -2621,15 +3026,14 @@
                                               :tokens    tokens
                                               :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                                               :done?     false})))))
-        caller-extra-body (cond-> (or (:extra-body opts) {})
-                            (:provider-state opts) (assoc :provider-state (:provider-state opts)))
+        caller-extra-body (or (:extra-body opts) {})
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      (seq caller-extra-body) (assoc :extra-body caller-extra-body)
                      responses-path (assoc :responses-path responses-path)
                      llm-headers (assoc :llm-headers llm-headers))
-        [{:keys [content reasoning provider-state api-usage http-response]} duration-ms]
+        [{:keys [content reasoning provider-state assistant-message api-usage http-response]} duration-ms]
         (util/with-elapsed
           (chat-completion with-tail model api-key chat-url retry-opts))]
     (trove/log! {:level :info
@@ -2651,6 +3055,7 @@
                          :duration-ms duration-ms :api-usage api-usage
                          :reasoning reasoning :content content
                          :provider-state provider-state
+                         :assistant-message assistant-message
                          :http-response http-response :provider-id provider-id})
                  :type :svar.llm/empty-content))))
     (let [blocks      (codes/extract-code-blocks content)
@@ -2680,8 +3085,9 @@
                :tokens      tokens
                :cost        cost
                :duration-ms duration-ms}
-        reasoning      (assoc :reasoning reasoning)
-        provider-state (assoc :provider-state provider-state)))))
+        reasoning         (assoc :reasoning reasoning)
+        provider-state    (assoc :provider-state provider-state)
+        assistant-message (assoc :assistant-message assistant-message)))))
 
 (defn ask-code!
   "Plain-text completion + fenced code-block extraction. Routed sibling of
@@ -2704,6 +3110,17 @@
     :raw         <full assistant text content>
     :reasoning   <provider reasoning channel, when present>
     :provider-state <opaque provider continuation state, when present>
+    :assistant-message svar's canonical assistant turn:
+                       `{:role \"assistant\" :content [<blocks>]}`.
+                       Append it to `:messages` on the next call to
+                       keep preserved thinking alive. Canonical
+                       `{:type \"thinking\"}` content blocks carry the
+                       per-provider preserved-reasoning signature
+                       (Anthropic HMAC, OpenAI Responses raw item JSON,
+                       z.ai verbatim text) under `:thinking-signature`;
+                       the wire serializer transforms them to native
+                       shapes. Only present for providers that emit
+                       preserved reasoning.
     :tokens      {:input :output :reasoning :cached :total}
     :cost        {:input-cost :output-cost :total-cost}
     :duration-ms <ms>}

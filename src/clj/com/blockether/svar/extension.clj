@@ -1,13 +1,22 @@
 (ns com.blockether.svar.extension
-  "Extension-facing helpers for router limits, parse diagnostics, and
-   provider-state provenance handoff. These functions keep extension/TUI code
-   out of svar internals while preserving the full forensic state needed to
-   resume provider-specific conversations."
+  "Extension-facing helpers for router limits and parse diagnostics.
+
+   Preserved-thinking handoff is provider-agnostic via the
+   `:assistant-message` field on `ask!` / `ask-code!` results. The
+   value is a canonical svar message — `{:role \"assistant\" :content
+   [<canonical-blocks>]}` — which callers append to `:messages` on
+   the next call. Canonical `{:type \"thinking\"}` content blocks
+   carry the per-provider preserved-reasoning state under
+   `:thinking-signature`; svar's wire serializers transform them into
+   native shapes (Anthropic signed thinking blocks, z.ai
+   `reasoning_content` field, OpenAI Responses reasoning input items).
+   Plain chat models without preserved thinking just don't surface
+   `:assistant-message`, so the same caller pipeline
+   `(keep :assistant-message results)` works uniformly across every
+   provider with zero per-provider branching."
   (:require
    [com.blockether.svar.internal.jsonish :as jsonish]
-   [com.blockether.svar.internal.spec :as spec])
-  (:import
-   (java.util UUID)))
+   [com.blockether.svar.internal.spec :as spec]))
 
 ;; =============================================================================
 ;; Provider limits
@@ -168,67 +177,4 @@
         :phase :parse
         :error (exception->data e)}))))
 
-;; =============================================================================
-;; Provenance lifecycle + refs
-;; =============================================================================
-
-(defn- response-provider-state
-  [x]
-  (or (:provider-state x)
-    (some->> (:format-attempts x)
-      reverse
-      (keep :provider-state)
-      first)
-    (when (= :openai-responses (:provider x)) x)))
-
-(defn- stable-provenance-id
-  [provider-state]
-  (str "svar-prov-"
-    (UUID/nameUUIDFromBytes (.getBytes (pr-str provider-state) "UTF-8"))))
-
-(defn provenance-ref
-  "Builds a stable provenance reference from an `ask!`/`ask-code!` result or
-   a raw `:provider-state` map.
-
-   The returned map intentionally carries the full `:provider-state`. Extension
-   code can persist it under `:id`, then resume a later call with:
-   `{:provider-state (:provider-state ref)}`. Returns nil when no provider
-   continuation state is present."
-  ([x]
-   (provenance-ref x nil))
-  ([x {:keys [id created-at-ms]}]
-   (when-let [provider-state (response-provider-state x)]
-     (let [items (:reasoning-items provider-state)]
-       {:id (or id (stable-provenance-id provider-state))
-        :type :svar.provenance/provider-state
-        :provider (:provider provider-state)
-        :created-at-ms (or created-at-ms (System/currentTimeMillis))
-        :items-count (count items)
-        :item-ids (->> items (keep :id) vec)
-        :provider-state provider-state}))))
-
-(defn provenance-lifecycle
-  "Returns provenance lifecycle data for extension hosts.
-
-   Zero-arity returns the contract. One-arity inspects a result/provider-state
-   and returns capture/resume data. Resume by merging `:resume-opts` into the
-   next svar call opts. Clear by omitting `:provider-state`."
-  ([]
-   {:stages [{:stage :capture
-              :description "Read :provider-state from ask!/ask-code! result."}
-             {:stage :persist
-              :description "Store (provenance-ref result) by :id in extension state."}
-             {:stage :resume
-              :description "Pass {:provider-state (:provider-state ref)} on the next call."}
-             {:stage :clear
-              :description "Drop the ref or omit :provider-state to start fresh."}]
-    :ref-key :provider-state
-    :ref-fn 'com.blockether.svar.extension/provenance-ref})
-  ([x]
-   (let [ref (provenance-ref x)]
-     {:available? (boolean ref)
-      :stage (if ref :captured :absent)
-      :ref ref
-      :resume-opts (when ref {:provider-state (:provider-state ref)})
-      :lifecycle (provenance-lifecycle)})))
 
