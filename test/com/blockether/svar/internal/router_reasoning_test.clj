@@ -77,12 +77,23 @@
         (expect (= {:thinking {:type "enabled" :budget_tokens 24000}}
                   (router/reasoning-extra-body :anthropic claude :deep)))))
 
+    (it "uses adaptive thinking for Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6"
+      (doseq [[model level effort] [["claude-opus-4-7" :balanced "medium"]
+                                    ["claude-opus-4-6" :deep "high"]
+                                    ["claude-sonnet-4-6" :quick "low"]]]
+        (let [out (router/reasoning-extra-body :anthropic
+                    {:name model :reasoning? true :reasoning-style :anthropic-thinking}
+                    level)]
+          (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
+          (expect (= {:effort effort} (:output_config out)))
+          (expect (nil? (get-in out [:thinking :budget_tokens]))))))
+
     (it "infers :anthropic-thinking from :api-style :anthropic when style is unset"
       (let [claude {:name "unknown-claude" :reasoning? true}]
         (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}
                   (router/reasoning-extra-body :anthropic claude :balanced)))))
 
-    (it "budget_tokens values are strictly ascending"
+    (it "budget_tokens values are strictly ascending for manual-thinking Claude models"
       (let [claude {:name "claude-opus-4-5" :reasoning? true :reasoning-style :anthropic-thinking}
             budget (fn [lvl] (get-in (router/reasoning-extra-body :anthropic claude lvl)
                                [:thinking :budget_tokens]))]

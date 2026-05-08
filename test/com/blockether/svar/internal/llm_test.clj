@@ -333,7 +333,7 @@
               (expect (nil? (get headers "x-api-key")))
               (expect (str/includes? (get headers "anthropic-beta") "claude-code-20250219"))
               (expect (str/includes? (get headers "anthropic-beta") "oauth-2025-04-20"))
-              (expect (= "claude-cli/2.1.2" (get headers "user-agent")))
+              (expect (= "claude-cli/2.1.62" (get headers "user-agent")))
               (expect (= "cli" (get headers "x-app")))
               (expect (= "You are Claude Code, Anthropic's official CLI for Claude."
                         (get-in body [:system 0 :text])))

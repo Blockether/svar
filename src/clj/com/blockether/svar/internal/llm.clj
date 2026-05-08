@@ -170,7 +170,7 @@
    "accept" "application/json"
    "anthropic-dangerous-direct-browser-access" "true"
    "anthropic-beta" "claude-code-20250219,oauth-2025-04-20"
-   "user-agent" "claude-cli/2.1.2"
+   "user-agent" "claude-cli/2.1.62"
    "x-app" "cli"})
 
 (defn- make-llm-headers

@@ -156,9 +156,10 @@
      `:openai-effort`      → flat top-level `:reasoning_effort` string.
                              Used by GPT-5.x, o-series, Gemini 2.5 via OpenAI gateway,
                              DeepSeek Reasoner, Copilot, and most OpenAI-compatible reasoners.
-     `:anthropic-thinking` → nested `:thinking {:type \"enabled\" :budget_tokens N}`.
-                             Budget magnitudes fit within 200k-context Claude 4.x
-                             max_tokens windows; tune if you hit ceilings.
+     `:anthropic-thinking` → Claude thinking controls.
+                             Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 use
+                             adaptive thinking + output_config.effort. Older
+                             Claude 4 models use manual budget_tokens.
      `:zai-thinking`       → binary `:thinking {:type \"enabled\"|\"disabled\"}` on
                              Z.ai / GLM-4.6+. No budget_tokens — thinking is on/off.
                              `:quick` disables, `:balanced`/`:deep` enable.
@@ -199,6 +200,24 @@
   (or (:reasoning-style model-map)
     (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
 
+(defn- anthropic-adaptive-thinking-model?
+  "Claude Opus 4.7 rejects manual budget_tokens. Opus 4.6 and Sonnet 4.6
+   still accept manual thinking today, but Anthropic marks it deprecated.
+   Use adaptive thinking for all three families. Accept dot/dash aliases so
+   Copilot-style names do not regress if routed through Anthropic style."
+  [model-name]
+  (boolean
+    (re-find #"(?i)^claude-(?:opus-4[-.][67]|sonnet-4[-.]6)(?:$|-)"
+      (str model-name))))
+
+(defn- anthropic-thinking-extra-body
+  [model-map norm budget]
+  (if (anthropic-adaptive-thinking-model? (:name model-map))
+    {:thinking {:type "adaptive"
+                :display "summarized"}
+     :output_config {:effort (get-in REASONING_LEVELS [norm :openai-effort])}}
+    {:thinking {:type "enabled" :budget_tokens budget}}))
+
 (defn reasoning-extra-body
   "Translates an abstract reasoning level into provider-specific extra-body.
    Returns nil when:
@@ -231,7 +250,7 @@
          (when mapped
            (case style
              :openai-effort      {:reasoning_effort mapped}
-             :anthropic-thinking {:thinking {:type "enabled" :budget_tokens mapped}}
+             :anthropic-thinking (anthropic-thinking-extra-body model-map norm mapped)
              :zai-thinking       {:thinking (cond-> {:type mapped}
                                               ;; `clear_thinking: false` = keep reasoning_content
                                               ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
