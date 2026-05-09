@@ -490,21 +490,75 @@
     {:type "text"
      :text (or thinking "")}))
 
+(defn- demote-interior-thinking-blocks
+  "Anthropic's contract: in any assistant message, all `thinking` /
+   `redacted_thinking` blocks must appear BEFORE any `text` /
+   `tool_use` / `tool_result` block. Interior thinking blocks (after
+   a non-thinking block) are only legal under the
+   `interleaved-thinking-2025-05-14` beta and only when anchored by a
+   `tool_use` — never after plain text.
+
+   Claude Code's `claude-code-20250219` beta sometimes streams a
+   trailing thinking block after a text block in a SINGLE response.
+   Anthropic accepts that on output, but its signature validator
+   rejects it on REPLAY with `messages.X.content.Y: Invalid signature
+   in thinking block` 400 (Vis conversation 6f5f7dbb). Whatever
+   Anthropic's reasoning, the contract on the documented wire is
+   leading-thinking-only.
+
+   Strategy: keep every leading thinking block (with its HMAC
+   signature) verbatim; once we hit the first non-thinking canonical
+   block, demote any further thinking block to a plain text block —
+   the model still sees its own prior reasoning, just as visible text
+   instead of a signed block. This is the same fallback
+   `canonical-thinking->anthropic-block` already does for
+   missing-signature thinking, applied here for a different reason.
+
+   z.ai / OpenAI Responses are NOT routed through this fn — z.ai's
+   contract requires the run stay contiguous and verbatim, never
+   reordered or demoted (see `preserved-thinking-replay-messages` in
+   Vis loop.clj). This is Anthropic-only."
+  [blocks]
+  (let [{:keys [out _]}
+        (reduce (fn [{:keys [out seen-non-thinking?]} b]
+                  (cond
+                    (not (canonical-thinking-block? b))
+                    {:out (conj out b) :seen-non-thinking? true}
+
+                    seen-non-thinking?
+                    ;; Interior thinking — demote to text. Drops the
+                    ;; signature on purpose; Anthropic would reject it
+                    ;; anyway and the visible text round-trips fine.
+                    {:out (conj out {:type "text"
+                                     :text (or (:thinking b) "")})
+                     :seen-non-thinking? true}
+
+                    :else
+                    {:out (conj out b) :seen-non-thinking? false}))
+          {:out [] :seen-non-thinking? false}
+          blocks)]
+    out))
+
 (defn- anthropic-message-content
   "Builds the wire content for one message under `:anthropic` api-style.
    Walks each canonical content block: `{:type \"thinking\"}` blocks go
    through `canonical-thinking->anthropic-block` (signature/redacted
    rendered natively), everything else passes through `anthropic-block`
    unchanged. Force the array form whenever a thinking block is present
-   — the single-text-collapse path would drop the signed blocks."
+   — the single-text-collapse path would drop the signed blocks.
+
+   Before serialization, `demote-interior-thinking-blocks` rewrites
+   any `thinking` block that appears AFTER a non-thinking block as a
+   plain text block. See that fn's docstring for the full rationale
+   (Anthropic 400 `Invalid signature in thinking block` on replay)."
   [{:keys [content]}]
-  (let [blocks       (normalize-content content)
+  (let [blocks        (-> content normalize-content demote-interior-thinking-blocks)
         has-thinking? (some canonical-thinking-block? blocks)
-        wire         (mapv (fn [b]
-                             (if (canonical-thinking-block? b)
-                               (canonical-thinking->anthropic-block b)
-                               (anthropic-block b)))
-                       blocks)]
+        wire          (mapv (fn [b]
+                              (if (canonical-thinking-block? b)
+                                (canonical-thinking->anthropic-block b)
+                                (anthropic-block b)))
+                        blocks)]
     (if (or has-thinking?
           (not= 1 (count wire))
           (not (text-block? (first wire)))
