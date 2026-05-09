@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.14] - 2026-05-09
+
+### Changed
+- anthropic: demote interior thinking blocks on wire to dodge replay 400
+- preserve upstream HTTP body on :svar.core/http-error ex-data
+
+
 ## [v0.4.13] - 2026-05-09
 
 ### Changed
@@ -642,7 +649,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.13...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.14...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -672,3 +679,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.11]: https://github.com/Blockether/svar/releases/tag/v0.4.11
 [v0.4.12]: https://github.com/Blockether/svar/releases/tag/v0.4.12
 [v0.4.13]: https://github.com/Blockether/svar/releases/tag/v0.4.13
+[v0.4.14]: https://github.com/Blockether/svar/releases/tag/v0.4.14
