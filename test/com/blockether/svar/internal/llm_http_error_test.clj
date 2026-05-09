@@ -1,0 +1,91 @@
+(ns com.blockether.svar.internal.llm-http-error-test
+  "Regression: upstream HTTP error body must survive on
+   `:svar.core/http-error` ex-data.
+
+   Pre-fix behavior dropped the `:body` key from ex-data on both the
+   non-stream `chat-completion-with-retry` and the streaming
+   `chat-completion-streaming` paths. svar still trove-logged a 200-char
+   body snippet at WARN, but every downstream consumer (Vis chat
+   renderer, Vis loop logger, third-party callers) had to scrape the
+   file-log to recover it. That made real provider errors invisible in
+   chat \u2014 e.g. Anthropic's `messages.X.content.Y: Invalid signature in
+   thinking block` 400 surfaced to the user as the empty wrapper
+   `Exceptional status code: 400` and nothing else.
+
+   These tests pin both halves of the contract:
+
+   1. `truncate-error-body` is a pure size-bounded stringifier.
+   2. The catch-and-rethrow path on the non-stream completion attaches
+      `:body` (truncated) to the rethrown `:svar.core/http-error`
+      ex-data so callers can render it without scraping logs."
+  (:require
+   [clojure.string :as str]
+   [lazytest.core :refer [defdescribe describe expect it]]
+   [com.blockether.svar.internal.llm :as sut]))
+
+;;; ── helper ─────────────────────────────────────────────────────────────
+
+(def ^:private truncate-error-body @#'sut/truncate-error-body)
+(def ^:private MAX-CHARS @#'sut/MAX_HTTP_ERROR_BODY_CHARS)
+
+(defdescribe truncate-error-body-test
+  (describe "pure stringifier"
+    (it "returns nil for nil"
+      (expect (nil? (truncate-error-body nil))))
+
+    (it "returns nil for blank string"
+      (expect (nil? (truncate-error-body "")))
+      (expect (nil? (truncate-error-body "   \n  "))))
+
+    (it "passes short strings through unchanged"
+      (expect (= "{\"error\":\"boom\"}" (truncate-error-body "{\"error\":\"boom\"}"))))
+
+    (it "truncates over-cap strings with a count suffix"
+      (let [body (apply str (repeat (+ MAX-CHARS 50) "x"))
+            out  (truncate-error-body body)]
+        (expect (str/starts-with? out (apply str (repeat MAX-CHARS "x"))))
+        (expect (str/includes? out "...<+50 more chars>"))))
+
+    (it "stringifies non-string bodies (defensive)"
+      (expect (= "42" (truncate-error-body 42))))))
+
+;;; ── ex-data round-trip ─────────────────────────────────────────────────
+
+;; The actual catch path lives in `chat-completion-with-retry` and
+;; `chat-completion-streaming` \u2014 both private. We exercise the contract
+;; at the public `chat-completion` entry point with a redefined
+;; `http-post!` that throws an ExceptionInfo carrying a `:body` (the
+;; shape babashka.http-client emits on non-2xx). The rethrown
+;; `:svar.core/http-error` MUST still expose that body to callers.
+
+(defdescribe http-error-ex-data-preserves-body-test
+  (describe "non-stream chat-completion"
+    (it "attaches the upstream response body to :svar.core/http-error ex-data"
+      (let [anthropic-error-body
+            (str "{\"type\":\"error\","
+              "\"error\":{\"type\":\"invalid_request_error\","
+              "\"message\":\"messages.1.content.1: Invalid `signature` in `thinking` block\"},"
+              "\"request_id\":\"req_011CarodswSWgEdPfFaJakLs\"}")
+            captured (with-redefs-fn
+                       {#'com.blockether.svar.internal.llm/http-post!
+                        (fn [_ _ _ _]
+                          (throw (ex-info "Exceptional status code: 400"
+                                   {:status 400
+                                    :body anthropic-error-body})))}
+                       (fn []
+                         (try
+                           (sut/chat-completion
+                             [{:role "user" :content "hi"}]
+                             "claude-opus-4-7"
+                             "sk-fake"
+                             "https://api.anthropic.com/v1"
+                             {:api-style   :anthropic
+                              :timeout-ms  1000
+                              :max-retries 1})
+                           (catch clojure.lang.ExceptionInfo e
+                             (ex-data e)))))]
+        (expect (= :svar.core/http-error (:type captured)))
+        (expect (= 400 (:status captured)))
+        (expect (string? (:body captured)))
+        (expect (str/includes? (:body captured) "Invalid `signature` in `thinking` block"))
+        (expect (str/includes? (:body captured) "request_id"))))))

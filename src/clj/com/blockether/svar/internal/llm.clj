@@ -412,6 +412,46 @@
       (and (= 1 (count wire)) (text-block? (first wire))) (-> wire first :text)
       :else                                             wire)))
 
+(def ^:private MAX_HTTP_ERROR_BODY_CHARS
+  "Cap on raw upstream response body chars carried in `:svar.core/http-error`
+   ex-data. Tradeoff: large enough that Anthropic / OpenAI / z.ai full JSON
+   error envelopes survive intact (their longest `error.message` strings stay
+   well below 4 KB), small enough that nothing pathological (entire failed
+   stream body, retry-attempt logs, etc.) gets pinned on the exception and
+   echoed by every downstream telemetry sink. 8 KiB matches Anthropic's own
+   max-error-body documented limit."
+  8192)
+
+(defn- truncate-error-body
+  "Returns a short string suitable for `:body` / `:body-snippet` on
+   `:svar.core/http-error` ex-data. Stringifies non-string bodies
+   (`InputStream` callers should already have slurped). Returns nil for
+   nil / blank input so `cond->` callers can skip the assoc cleanly.
+
+   Truncates to `MAX_HTTP_ERROR_BODY_CHARS` and appends a `...<+N more>`
+   suffix so downstream renderers (Vis chat error bubble) can show the
+   first ~8 KB of an upstream provider error envelope verbatim — that
+   first slice is where Anthropic's `error.message` (e.g. `Invalid
+   signature in thinking block`) and `request_id` always live.
+
+   Pre-fix Vis only saw `Exceptional status code: 400` because callers
+   above us `(dissoc ex-data-map :body)`'d the only place this content
+   lived. Surfacing the snippet from svar means every consumer (Vis
+   loop logger, Vis chat renderer, third-party callers, tests) gets
+   the same truthful payload without each one re-implementing the
+   trove WARN-log scrape."
+  [body]
+  (cond
+    (nil? body)                  nil
+    (and (string? body)
+      (str/blank? body))         nil
+    (string? body)               (let [n (count body)
+                                       cap (long MAX_HTTP_ERROR_BODY_CHARS)]
+                                   (if (<= n cap)
+                                     body
+                                     (str (subs body 0 cap) "...<+" (- n cap) " more chars>")))
+    :else                        (recur (str body))))
+
 (defn- canonical-thinking-block?
   "Recognizes svar's canonical preserved-thinking content block. Mirrors
    pi-ai's shape: `{:type \"thinking\" :thinking str :thinking-signature
@@ -1482,6 +1522,7 @@
               (cond-> (merge (dissoc ex-data-map :body)
                         {:type :svar.core/http-error
                          :llm-request llm-request})
+                response-body (assoc :body (truncate-error-body response-body))
                 api-key-error (assoc :api-key-error api-key-error)))))))))
 
 (defn- chat-completion-with-retry
@@ -1909,6 +1950,7 @@
             (anomaly/fault! error-message
               (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
                                                          :llm-request {:model model :base-url base-url}})
+                response-body (assoc :body (truncate-error-body response-body))
                 api-key-error (assoc :api-key-error api-key-error)
                 true          (assoc :cause-class (some-> (ex-cause e) class .getName)
                                 :original-message (some-> (ex-cause e) ex-message))))))))))
