@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.4.13] - 2026-05-09
 
+### Changed
+- feat: platform-agnostic OAuth-aware models! + Codex /codex/models
+- release: update version files for v0.4.12, bump to next dev version
+
+
+## [v0.4.13] - 2026-05-09
+
 ### Added
 - `models!` is now OAuth-aware and platform-agnostic. The internal `http-get!`
   routes through the same `make-llm-headers` dispatcher chat does, so
