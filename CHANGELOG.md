@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.13] - 2026-05-09
+
+### Added
+- `models!` is now OAuth-aware and platform-agnostic. The internal `http-get!`
+  routes through the same `make-llm-headers` dispatcher chat does, so
+  Anthropic OAuth tokens (Claude Code subscription) attach
+  `anthropic-version`, `anthropic-beta`, `user-agent`, `x-app`; Anthropic
+  API keys attach `x-api-key`; everything else falls back to bearer auth.
+  Provider `:llm-headers` (e.g. Codex `chatgpt-account-id`) merge on top.
+- Per-provider `:models-path` + `:models-query-params` hooks in
+  `KNOWN_PROVIDERS`. `:openai-codex` now points at
+  `/codex/models?client_version=1.0.0` to surface the live Codex
+  inference fleet (gpt-5.5, gpt-5.4, gpt-5.3-codex, ...). The bare
+  `/models` route on the same host returns chatgpt.com product
+  metadata, not inference models.
+- `normalize-models-response` accepts both OpenAI/Anthropic
+  `{:data [...]}` and ChatGPT-backend `{:models [{:slug ...}]}`
+  shapes; `:slug` promotes to `:id` so downstream filters work
+  unchanged.
+- `models!` returns `[]` on HTTP failure by default; pass
+  `{:strict? true}` to surface the underlying `ex-info`.
+
+### Fixed
+- Anthropic Claude subscription `/v1/models` no longer 400s on
+  "anthropic-version: header is required" — the OAuth header set
+  flows through the same code path used for `/v1/messages`.
+
 ## [v0.4.12] - 2026-05-08
 
 ### Changed
@@ -608,7 +635,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.12...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.13...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -637,3 +664,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.10]: https://github.com/Blockether/svar/releases/tag/v0.4.10
 [v0.4.11]: https://github.com/Blockether/svar/releases/tag/v0.4.11
 [v0.4.12]: https://github.com/Blockether/svar/releases/tag/v0.4.12
+[v0.4.13]: https://github.com/Blockether/svar/releases/tag/v0.4.13

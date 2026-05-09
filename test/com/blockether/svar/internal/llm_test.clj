@@ -121,7 +121,12 @@
     (let [router (svar/make-router [{:id :openai-codex
                                      :api-key "sk-test"
                                      :models [{:name "gpt-5.5"}]}])]
-      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
+      ;; `http-get!` now takes an optional opts map (api-style /
+      ;; provider-id / llm-headers / query-params) so callers don't
+      ;; have to special-case OAuth headers per-provider. Use a
+      ;; variadic stub here so the test contract follows the
+      ;; production signature.
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                          {:data [{:id "gpt-4o"}
                                                  {:id "gpt-5"}
                                                  {:id "gpt-5.1-codex"}
@@ -136,7 +141,7 @@
     (let [router (svar/make-router [{:id :github-copilot
                                      :api-key "sk-test"
                                      :models [{:name "gpt-5.4"}]}])]
-      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                          {:data [{:id "claude-sonnet-4.6"}
                                                  {:id "gpt-4o"}
                                                  {:id "gpt-5.1-codex"}
@@ -152,13 +157,47 @@
     (let [router (svar/make-router [{:id :zai-coding
                                      :api-key "sk-test"
                                      :models [{:name "glm-4.7"}]}])]
-      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key]
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                          {:data [{:id "glm-4.7"}
                                                  {:id "glm-5-turbo"}
                                                  {:id "glm-5v-turbo"}]})}
         (fn []
           (expect (= ["glm-4.7" "glm-5-turbo" "glm-5v-turbo"]
-                    (mapv :id (svar/models! router)))))))))
+                    (mapv :id (svar/models! router))))))))
+
+  (it "forwards api-style + provider-id + llm-headers + query-params to http-get!"
+    (let [router (svar/make-router [{:id :openai-codex
+                                     :api-key "sk-test"
+                                     :llm-headers {"chatgpt-account-id" "acct_123"}
+                                     :models [{:name "gpt-5.5"}]}])
+          captured (atom nil)]
+      (with-redefs-fn {#'sut/http-get! (fn [url _api-key & [opts]]
+                                         (reset! captured (assoc opts :url url))
+                                         {:models [{:slug "gpt-5.5" :id "gpt-5.5"}]})}
+        (fn []
+          (svar/models! router)
+          (let [c @captured]
+            ;; Codex `KNOWN_PROVIDERS` pins the per-provider models
+            ;; endpoint and `client_version` query param. svar must
+            ;; surface both on the http-get call without callers
+            ;; ever poking at provider internals.
+            (expect (= :openai-compatible-responses (:api-style c)))
+            (expect (= :openai-codex (:provider-id c)))
+            (expect (= {"chatgpt-account-id" "acct_123"} (:llm-headers c)))
+            (expect (= {"client_version" "1.0.0"} (:query-params c)))
+            (expect (.endsWith ^String (:url c) "/codex/models")))))))
+
+  (it "normalizes ChatGPT-backend `{:models [{:slug ...}]}` shape to {:id ...}"
+    (let [router (svar/make-router [{:id :openai-codex
+                                     :api-key "sk-test"
+                                     :models [{:name "gpt-5.5"}]}])]
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
+                                         {:models [{:slug "gpt-5.5" :display_name "GPT-5.5"}
+                                                   {:slug "gpt-5.4"}
+                                                   {:slug "gpt-5.3-codex"}]})}
+        (fn []
+          (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
+                    (sort (mapv :id (svar/models! router))))))))))
 
 (defdescribe transparent-openai-responses-routing-test
   (describe "ask! / ask-code! transparency"

@@ -67,6 +67,27 @@
                                     "gpt-5" "gpt-5-mini" "gpt-5.1"
                                     "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
                   :responses-path "/codex/responses"
+                  ;; `/codex/models` returns the live Codex inference
+                  ;; catalog (gpt-5.3-codex et al.) and refuses without
+                  ;; `client_version`. The bare `/models` route under
+                  ;; the same host returns the chatgpt.com product
+                  ;; catalog (research, agent-mode, ...) which is not
+                  ;; the inference fleet. We pin a known-good
+                  ;; `client_version` here so callers don't have to
+                  ;; care about wire details. The shape under
+                  ;; `:models` is `{slug, display_name, ...}` — the
+                  ;; `normalize-models-response` in `internal/llm`
+                  ;; promotes `:slug` to `:id` so downstream filters
+                  ;; work unchanged.
+                  ;;
+                  ;; Codex gates new model rollouts behind
+                  ;; `client_version`: <0.99 only sees gpt-5.2; 0.99
+                  ;; adds gpt-5.4/5.3-codex; >=1.0.0 adds gpt-5.5
+                  ;; and gpt-5.3-codex-spark. Pin a high version so
+                  ;; svar surfaces the whole fleet — OpenAI server
+                  ;; doesn't validate that we actually run Codex CLI.
+                  :models-path "/codex/models"
+                  :models-query-params {"client_version" "1.0.0"}
                   :extra-body {:store false
                                :include ["reasoning.encrypted_content"]
                                :reasoning {:summary "detailed"}

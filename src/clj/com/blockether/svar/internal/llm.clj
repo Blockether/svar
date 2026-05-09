@@ -144,15 +144,44 @@
      :url      url
      :status   (:status response)}))
 
+(declare make-llm-headers)
+
 (defn- http-get!
-  "Makes an HTTP GET request with OAuth token.
-   Reuses the shared HttpClient to avoid thread/resource leaks."
-  [url api-key]
-  (let [response (http/get url
-                   {:client @shared-http-client
-                    :headers {"Authorization" (str "Bearer " api-key)
-                              "Content-Type" "application/json"}})]
-    (json/read-json (:body response) :key-fn keyword)))
+  "Makes an HTTP GET request.
+
+   Reuses the shared HttpClient to avoid thread/resource leaks.
+
+   Default header dispatcher mirrors chat: api-style + provider-id
+   determine whether the call needs Anthropic OAuth headers
+   (`anthropic-version`, `anthropic-beta`, `user-agent`, `x-app`),
+   Anthropic API-key headers (`x-api-key`), or generic Bearer auth.
+   Provider-supplied `:llm-headers` (e.g. Codex `chatgpt-account-id`)
+   are merged on top.
+
+   Throws an `ex-info` with `:type :svar/http-error` on non-2xx so
+   callers can decide whether to fall back to a catalog default."
+  ([url api-key]
+   (http-get! url api-key {}))
+  ([url api-key {:keys [api-style provider-id llm-headers query-params]
+                 :or   {api-style :openai-compatible-chat}}]
+   (let [headers   (cond-> (make-llm-headers api-style api-key provider-id)
+                     (seq llm-headers) (merge llm-headers))
+         req-opts  (cond-> {:client  @shared-http-client
+                            :headers headers
+                            :throw   false}
+                     (seq query-params) (assoc :query-params query-params))
+         response  (http/get url req-opts)
+         status    (:status response)
+         raw-body  (:body response)]
+     (when-not (and (integer? status) (<= 200 status 299))
+       (throw (ex-info (str "GET " url " failed: HTTP " status)
+                {:type        :svar/http-error
+                 :status      status
+                 :body        raw-body
+                 :url         url
+                 :provider-id provider-id
+                 :api-style   api-style})))
+     (json/read-json raw-body :key-fn keyword))))
 
 ;; =============================================================================
 ;; API-style dispatch (OpenAI vs Anthropic)
@@ -4444,20 +4473,93 @@
     (filterv #(router/provider-model-visible? provider-id (provider-model-id %)) models)
     (vec models)))
 
+(defn- normalize-models-response
+  "Normalize a `/models` response body to a vector of model maps with
+   at least `{:id ...}`.
+
+   Recognized shapes:
+     - OpenAI/Anthropic standard:  `{:data [{:id ... :name ...} ...]}`
+     - ChatGPT backend (Codex):    `{:models [{:slug ... :display_name ...} ...]}`
+     - Plain vector:               `[{:id ...} ...]`
+
+   Codex `slug` maps to `:id` so downstream `provider-model-id` works
+   without special-casing. The original keys are preserved."
+  [body]
+  (cond
+    (sequential? body) (vec body)
+
+    (and (map? body) (sequential? (:data body)))
+    (vec (:data body))
+
+    (and (map? body) (sequential? (:models body)))
+    (->> (:models body)
+      (mapv (fn [m]
+              (cond-> m
+                (and (not (:id m)) (:slug m)) (assoc :id (:slug m))))))
+
+    :else []))
+
 (defn models!
   "Fetches available models from the LLM API. Provider-scoped model exclusions
-   are applied to the returned `/models` list."
+   are applied to the returned `/models` list.
+
+   Header dispatch (`make-llm-headers` via `http-get!`) covers:
+     - Anthropic OAuth tokens (subscription / Claude Code) → full set
+       of Anthropic OAuth headers including `anthropic-version`,
+       `anthropic-beta`, `user-agent`, `x-app`.
+     - Anthropic API keys → `x-api-key` + `anthropic-version`.
+     - Everything else → `Authorization: Bearer <token>`.
+
+   Provider-supplied `:llm-headers` are merged on top so providers
+   like OpenAI Codex can attach `chatgpt-account-id`.
+
+   Returns `[]` on HTTP failure rather than throwing — callers fall
+   back to a catalog default. Set `:opts {:strict? true}` to surface
+   the underlying `ex-info` instead."
   ([router] (models! router {}))
   ([router opts]
-   (let [resolved (resolve-opts router opts)
+   ;; NOTE: `resolve-opts` defaults `:api-style` to
+   ;; `:openai-compatible-chat` when the caller didn't pass one, so we
+   ;; can't trust `(:api-style resolved)` to detect "unset". Fall back
+   ;; to the selected provider whenever the caller didn't explicitly
+   ;; pin `:api-style` / `:provider-id` / `:llm-headers` in opts.
+   (let [resolved              (resolve-opts router opts)
          [selected-provider _] (when-not (:base-url resolved)
                                  (router/select-provider router {:strategy :root}))
-         api-key (or (:api-key resolved) (:api-key selected-provider))
-         base-url (or (:base-url resolved) (:base-url selected-provider))
-         provider-id (or (:provider-id resolved) (:id selected-provider))
-         models-url (str base-url "/models")
-         body (http-get! models-url api-key)
-         models (or (:data body) [])]
+         api-key               (or (:api-key resolved) (:api-key selected-provider))
+         base-url              (or (:base-url resolved) (:base-url selected-provider))
+         provider-id           (or (:provider-id opts) (:id selected-provider))
+         api-style             (or (:api-style opts)
+                                 (:api-style selected-provider)
+                                 :openai-compatible-chat)
+         llm-headers           (or (:llm-headers opts)
+                                 (:llm-headers selected-provider))
+         ;; Per-provider hooks live in svar's `KNOWN_PROVIDERS` so the
+         ;; whole stack stays platform-agnostic: callers pass a
+         ;; provider-id and svar knows which endpoint, query params,
+         ;; and response shape to expect (Anthropic `/v1/models`,
+         ;; OpenAI `/models`, Codex `/codex/models?client_version=...`,
+         ;; Z.ai `/models`, ...). Caller-supplied opts override.
+         known-provider        (when provider-id
+                                 (get router/KNOWN_PROVIDERS provider-id))
+         models-path           (or (:models-path opts)
+                                 (:models-path known-provider)
+                                 "/models")
+         models-query-params   (or (:models-query-params opts)
+                                 (:models-query-params known-provider))
+         models-url            (str base-url models-path)
+         strict?               (boolean (:strict? opts))
+         http-opts             (cond-> {:api-style   api-style
+                                        :provider-id provider-id
+                                        :llm-headers llm-headers}
+                                 (seq models-query-params)
+                                 (assoc :query-params models-query-params))
+         body                  (try
+                                 (http-get! models-url api-key http-opts)
+                                 (catch clojure.lang.ExceptionInfo ex
+                                   (when strict? (throw ex))
+                                   nil))
+         models                (normalize-models-response body)]
      (filter-provider-models provider-id models))))
 
 ;; =============================================================================
