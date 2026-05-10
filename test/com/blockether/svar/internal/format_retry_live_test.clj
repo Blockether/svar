@@ -127,14 +127,6 @@
       (expect (true? (:json-object-mode?
                       (router/provider-model-entry :zai-coding "glm-5.1"))))))
 
-  (describe ":blockether proxy GLM models"
-    (it "glm-5.1 has :json-object-mode? true"
-      (expect (true? (:json-object-mode?
-                      (router/provider-model-entry :blockether "glm-5.1")))))
-    (it "glm-4.7 has :json-object-mode? true"
-      (expect (true? (:json-object-mode?
-                      (router/provider-model-entry :blockether "glm-4.7"))))))
-
   (describe "non-GLM models are NOT flagged"
     (it "gpt-5-mini has no :json-object-mode? flag"
       (expect (not (:json-object-mode?
@@ -152,17 +144,6 @@
       (let [r (svar/make-router
                 [{:id :zai-coding
                   :api-key "sk-fake"
-                  :models [{:name "glm-4.7"}]}])
-            model (first (filter #(= "glm-4.7" (:name %))
-                           (:models (first (:providers r)))))]
-        (expect (true? (:json-object-mode? model))))))
-
-  (describe "make-router on :blockether with glm-4.7"
-    (it "model-map gets :json-object-mode? true via Blockether-scoped metadata"
-      (let [r (svar/make-router
-                [{:id :blockether
-                  :api-key "sk-fake"
-                  :base-url "https://llm.blockether.com/v1"
                   :models [{:name "glm-4.7"}]}])
             model (first (filter #(= "glm-4.7" (:name %))
                            (:models (first (:providers r)))))]

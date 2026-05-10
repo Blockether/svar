@@ -36,7 +36,7 @@
                             [:license
                              [:name "Apache License, Version 2.0"]
                              [:url "https://www.apache.org/licenses/LICENSE-2.0"]]]]})
-  (b/copy-dir {:src-dirs ["src/clj" "src/java"]
+  (b/copy-dir {:src-dirs ["src/clj" "src/java" "resources"]
                :target-dir class-dir})
   (b/jar {:class-dir class-dir
           :jar-file jar-file})

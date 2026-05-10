@@ -291,8 +291,8 @@
 
   (it "picks cheaper model across providers"
     (let [r (llm/make-router
-              [;; blockether gpt-5-mini: 0.25 + 2.00 = 2.25
-               {:id :blockether :api-key "k"
+              [;; openai gpt-5-mini: 0.25 + 2.00 = 2.25
+               {:id :openai :api-key "k"
                 :models [{:name "gpt-5-mini"}]}
                ;; openrouter glm-4.6v: 0.30 + 0.90 = 1.20 (cheaper)
                {:id :zai :api-key "k"
@@ -342,7 +342,8 @@
                   :cache-write-5m 6.25
                   :cache-write-1h 10.0
                   :output 25.0}
-                (get-in provider [:models 0 :pricing])))))
+                (select-keys (get-in provider [:models 0 :pricing])
+                  [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
 
   (it "does not claim nonexistent Claude Sonnet 4.7 catalog metadata"
     (expect (nil? (router/provider-model-entry :anthropic-coding-plan "claude-sonnet-4-7")))))

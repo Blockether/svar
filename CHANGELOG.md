@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.4.15] - 2026-05-10
+
+### Added
+- **models.dev catalog integration.** Bundled snapshot at
+  `resources/models.dev.json` (1.9 MB, 118 providers) drives pricing,
+  context, modalities, cache-read/write, family, capability flags,
+  knowledge cutoff, and release dates for every known provider model.
+  Refresh with `make refresh-models`.
+- New ns `com.blockether.svar.internal.modelsdev` exposing `catalog`,
+  `provider-models`, `provider-meta`, `normalize-model`, `resolve-models`,
+  and `merge-overlay`.
+- `:pricing-source` overlay key on `KNOWN_PROVIDERS` redirects catalog
+  lookup to a different provider id. `:openai-codex` and
+  `:anthropic-coding-plan` now meter at **retail** OpenAI / Anthropic
+  rates (honest accounting once plan quota is exceeded).
+- `:modalities`, `:cache-read`, `:cache-write`, `:input-limit`,
+  `:output-limit`, `:family`, `:knowledge-cutoff`, `:release-date`,
+  `:tool-call?`, `:attachment?`, `:open-weights?`, `:temperature?`
+  surface on every `provider-model-entry` / `(:models provider)`.
+
+### Changed
+- `KNOWN_PROVIDER_MODELS` slimmed to wire/policy-only overlays.
+  Pricing/context flow from the catalog by default; overlays add only
+  what the catalog can't express (Anthropic 5m/1h cache tiers,
+  OpenAI long-context tiers, GLM `:json-object-mode?`, Copilot
+  per-model `:extra-body` + `:reasoning-style`).
+- `provider-model-entry` returns catalog ⊕ overlay merge (overlay wins
+  on wire keys, pricing maps deep-merge so overlay rate overrides keep
+  catalog `:cache-read` / `:cache-write`).
+- `MODEL_CONTEXT_LIMITS` and `MODEL_PRICING` now union catalog + overlay
+  via the new private `merged-provider-models`, so legacy
+  `tokens/estimate-cost` and `context-limit` see the full catalog.
+- `:zai-coding` no longer duplicates `:zai`'s GLM table; inherits via
+  new `:provider-model-source :zai` (overlay) +
+  `:pricing-source :zai` (retail metering for subscription overage).
+- `resources/` is now on `:paths` in `deps.edn` and copied into the jar
+  by `build.clj` so the bundled catalog ships with every release.
+
+### Removed
+- Built-in `:blockether` provider (`KNOWN_PROVIDERS` entry, model table,
+  `BLOCKETHER_LLM_DEFAULT_MODEL` env fallback, README built-in mention).
+  Still fully usable as a user-supplied custom provider — callers pass
+  `:base-url` and per-model `:pricing` / `:reasoning?` like any other
+  custom provider.
+
 ## [v0.4.14] - 2026-05-09
 
 ### Changed
@@ -649,7 +694,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.14...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.13...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -679,4 +724,3 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.11]: https://github.com/Blockether/svar/releases/tag/v0.4.11
 [v0.4.12]: https://github.com/Blockether/svar/releases/tag/v0.4.12
 [v0.4.13]: https://github.com/Blockether/svar/releases/tag/v0.4.13
-[v0.4.14]: https://github.com/Blockether/svar/releases/tag/v0.4.14

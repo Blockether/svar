@@ -216,10 +216,14 @@
             [provider model] (sut/select-provider router {:strategy :root})]
         (expect (= :openai-compatible-responses (:api-style provider)))
         (expect (= "/codex/responses" (:responses-path provider)))
+        ;; Pricing now flows from models.dev catalog ⊕ overlay; catalog
+        ;; contributes `:cache-read` so we assert overlay keys with select-keys.
         (expect (= {:input 5.00 :cached-input 0.50 :output 30.00
                     :input-over-272k 10.00 :cached-input-over-272k 1.00
                     :output-over-272k 45.00}
-                  (:pricing model)))
+                  (select-keys (:pricing model)
+                    [:input :cached-input :output
+                     :input-over-272k :cached-input-over-272k :output-over-272k])))
         (expect (= 272000 (:context model)))
         (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})

@@ -228,7 +228,11 @@
         (expect (some? (:pricing (router/provider-model-entry :zai name))))))
 
     (it ":zai-coding mirrors :zai pricing (subscription-overage parity)"
-      (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
-        (let [zai (:pricing (router/provider-model-entry :zai name))
-              cod (:pricing (router/provider-model-entry :zai-coding name))]
-          (expect (= zai cod)))))))
+      ;; Compare per-token public rates only — the catalog reports `:cache-read 0`
+      ;; on the coding-plan entry and a real cache rate on direct :zai. The
+      ;; subscription-overage invariant is about input/output/cached-input parity.
+      (let [keys-of-interest [:input :cached-input :output]]
+        (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
+          (let [zai (select-keys (:pricing (router/provider-model-entry :zai name)) keys-of-interest)
+                cod (select-keys (:pricing (router/provider-model-entry :zai-coding name)) keys-of-interest)]
+            (expect (= zai cod))))))))

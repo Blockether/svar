@@ -27,8 +27,8 @@
 ;; =============================================================================
 
 (def ^:private DEFAULT_MODERATION_MODEL
-  "Default model for LLM-based moderation. Falls back to BLOCKETHER_LLM_DEFAULT_MODEL env var."
-  (or (System/getenv "BLOCKETHER_LLM_DEFAULT_MODEL") nil))
+  "Default model for LLM-based moderation. Caller-supplied; no built-in default."
+  nil)
 
 (def DEFAULT_INJECTION_PATTERNS
   "Default patterns for detecting prompt injection attempts.

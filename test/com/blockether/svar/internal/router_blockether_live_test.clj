@@ -39,15 +39,32 @@
     (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
     "https://llm.blockether.com/v1"))
 
+;; `:blockether` is a user-supplied custom provider id (no built-in entry
+;; in KNOWN_PROVIDERS anymore), so the test injects pricing + reasoning
+;; metadata explicitly per model. Same shape any user-defined provider gets.
+(def ^:private MODEL_META
+  {"gpt-4o"     {:pricing {:input 2.50 :output 10.00} :context 128000}
+   "gpt-4.1"    {:pricing {:input 2.00 :output  8.00} :context 1000000}
+   "gpt-5"      {:pricing {:input 1.25 :output 10.00} :context 400000
+                 :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5-mini" {:pricing {:input 0.25 :output  2.00} :context 128000
+                 :reasoning? true :reasoning-style :openai-effort}
+   "glm-4.6v"   {:pricing {:input 0.30 :output  0.90} :context 128000
+                 :reasoning? true :reasoning-style :zai-thinking}
+   "glm-4.7"    {:pricing {:input 0.60 :output  2.20} :context 200000
+                 :reasoning? true :reasoning-style :zai-thinking}})
+
 (defn- router-with-models
-  "One Blockether provider with the given model names. Auto-attaches pricing
-   + reasoning metadata from svar's `KNOWN_PROVIDER_MODELS` / `KNOWN_MODEL_METADATA`."
+  "One Blockether provider with the given model names. Pricing + reasoning
+   metadata is supplied explicitly per model — `:blockether` has no
+   built-in entry, so we pass through the same per-model config that any
+   user-defined custom provider would use."
   [model-names]
   (svar/make-router
     [{:id :blockether
       :api-key (blockether-key)
       :base-url (blockether-base-url)
-      :models (mapv (fn [n] {:name n}) model-names)}]))
+      :models (mapv (fn [n] (merge {:name n} (MODEL_META n))) model-names)}]))
 
 ;; Minimal spec — one string field. Cheap to generate.
 (def ^:private answer-spec
@@ -65,11 +82,16 @@
   (describe "basic ask! against Blockether"
     (it "returns a parsed structured response on gpt-5-mini"
       (when (blockether-enabled?)
+        ;; gpt-5-mini is a reasoning model; without an explicit reasoning
+        ;; hint the proxy can burn the full output budget on internal
+        ;; reasoning and return empty content. `:reasoning :quick` keeps
+        ;; the call deterministic without changing what the test verifies.
         (let [r (router-with-models ["gpt-5-mini"])
               result (svar/ask! r
                        {:spec answer-spec
                         :messages [(svar/user "What is 2+2? Reply with just the number.")]
-                        :model "gpt-5-mini"})]
+                        :model "gpt-5-mini"
+                        :reasoning :quick})]
           (expect (map? result))
           (expect (map? (:result result)))
           (expect (string? (get-in result [:result :answer])))
@@ -93,7 +115,9 @@
               result (svar/ask! r
                        {:spec answer-spec
                         :messages [(svar/user "Reply with the word 'ok'.")]
-                        :routing {:optimize :cost}})]
+                        :routing {:optimize :cost}
+                        ;; Avoid reasoning-budget burn on gpt-5-mini.
+                        :reasoning :quick})]
           (expect (= "gpt-5-mini" (:routed/model result)))
           (expect (some? (get-in result [:result :answer]))))))))
 

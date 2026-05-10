@@ -1,4 +1,4 @@
-{:paths ["src/clj" "src/java" "target/classes"]
+{:paths ["src/clj" "src/java" "resources" "target/classes"]
 
  :deps {;; Anomaly - standardized error categories
         com.blockether/anomaly    {:mvn/version "1.0.1"}

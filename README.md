@@ -49,7 +49,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 
 ```clojure
 ;; deps.edn
-{:deps {'com.blockether/svar {:mvn/version "0.4.14"}}}
+{:deps {'com.blockether/svar {:mvn/version "0.4.15"}}}
 ```
 
 ```clojure
@@ -353,7 +353,7 @@ exception's ex-data. Streaming (`:on-chunk`) forces retries to 0.
 **`:json-object-mode?`** — on `:openai-compatible-chat` api-style providers, injects
 `response_format: {type: "json_object"}` into the request body. GLM
 models (`glm-5.1`, `glm-4.7`, `glm-5-turbo`, `glm-4.6`, `glm-4.6v`) are
-opted in by default across `:zai`, `:zai-coding`, and `:blockether`
+opted in by default across `:zai` and `:zai-coding`
 providers. Caller's `:extra-body :response_format` always wins; pass
 `:json-object-mode? false` to opt out a flagged model.
 

@@ -8,6 +8,7 @@
    [clojure.core.async :as async]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
+   [com.blockether.svar.internal.modelsdev :as modelsdev]
    [taoensso.trove :as trove])
   (:import
    (com.knuddels.jtokkit Encodings)
@@ -28,9 +29,7 @@
 ;; =============================================================================
 
 (def KNOWN_PROVIDERS
-  {:blockether  {:base-url "https://llm.blockether.com/v1"       :rpm 500 :tpm 2000000
-                 :env-keys ["BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"]}
-   :openai      {:base-url "https://api.openai.com/v1"           :rpm 500 :tpm 2000000
+  {:openai      {:base-url "https://api.openai.com/v1"           :rpm 500 :tpm 2000000
                  :env-keys ["OPENAI_API_KEY"]}
    :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic}
@@ -38,11 +37,21 @@
    {:base-url "https://api.anthropic.com/v1" :rpm 500 :tpm 2000000
     :env-keys [] :api-style :anthropic
     :provider-model-source :anthropic
+    ;; OAuth coding plan: use retail Anthropic pricing for honest metering
+    ;; once the included quota is exhausted (see internal/modelsdev).
+    :pricing-source :anthropic
     :default-models [{:name "claude-opus-4-7"}]
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/paas/v4"        :rpm 500 :tpm 2000000
                  :env-keys ["ZAI_API_KEY"]}
    :zai-coding  {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
+                 ;; Coding Plan endpoint, but for budget accounting we use
+                 ;; retail :zai per-token rates (the plan meters overage at
+                 ;; the same rates). `:provider-model-source :zai` lets the
+                 ;; svar overlay inherit `:json-object-mode?` from :zai's
+                 ;; GLM table so we don't duplicate the entries.
+                 :pricing-source :zai
+                 :provider-model-source :zai
                  :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
@@ -66,6 +75,9 @@
                   :exclude-models #{"gpt-4o" "gpt-4.1"
                                     "gpt-5" "gpt-5-mini" "gpt-5.1"
                                     "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
+                  ;; Codex plan: pull retail OpenAI pricing for metering
+                  ;; via internal/modelsdev (`:pricing-source` overlay).
+                  :pricing-source :openai
                   :responses-path "/codex/responses"
                   ;; `/codex/models` returns the live Codex inference
                   ;; catalog (gpt-5.3-codex et al.) and refuses without
@@ -299,64 +311,31 @@
   ;; api-style only; callers can override via the top-level
   ;; `:json-object-mode?` opt or by setting `:response_format` directly in
   ;; `:extra-body`.
-  {:blockether
-   {"gemini-2.5-pro"            {:pricing {:input 1.25 :cached-input 0.125 :output 10.00
-                                           :input-over-200k 2.50 :cached-input-over-200k 0.25
-                                           :output-over-200k 15.00}
-                                 :context 2000000}
-    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
-    "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
-    "gpt-4.1"                   {:pricing {:input 2.00  :cached-input 0.50  :output 8.00}  :context 1000000}
-    "gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
-    "gpt-5"                     {:pricing {:input 1.25  :cached-input 0.125 :output 10.00} :context 400000}
-    "gpt-5-mini"                {:pricing {:input 0.25  :cached-input 0.025 :output 2.00}  :context 128000}
-    ;; OpenAI public API standard pricing. Cached input is billed separately
-    ;; when provider usage reports cached tokens.
-    "gpt-5.1"                   {:pricing {:input 1.25  :cached-input 0.125 :output 10.00}  :context 128000}
-    "gpt-5.4"                   {:pricing {:input 2.50  :cached-input 0.25  :output 15.00
-                                           :input-over-272k 5.00 :cached-input-over-272k 0.50
-                                           :output-over-272k 22.50}
-                                 :context 1050000}
-    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 128000}
-    "minimax-m2.5"              {:pricing {:input 0.50  :output 2.00}  :context 128000}
-    "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 128000}}
-
-   :openai
-   {"gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
-    "gpt-4.1"                   {:pricing {:input 2.00  :cached-input 0.50  :output 8.00}  :context 1000000}
-    "gpt-5"                     {:pricing {:input 1.25  :cached-input 0.125 :output 10.00} :context 400000}
-    "gpt-5-mini"                {:pricing {:input 0.25  :cached-input 0.025 :output 2.00}  :context 128000}
-    "gpt-5.1"                   {:pricing {:input 1.25  :cached-input 0.125 :output 10.00}  :context 128000}
-    "gpt-5.4"                   {:pricing {:input 2.50  :cached-input 0.25  :output 15.00
-                                           :input-over-272k 5.00 :cached-input-over-272k 0.50
-                                           :output-over-272k 22.50}
-                                 :context 1050000}
-    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 128000}
-    "gpt-5.5"                   {:pricing {:input 5.00  :cached-input 0.50  :output 30.00
-                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
-                                           :output-over-272k 45.00}
-                                 :context 1050000}}
+  ;; Slimmed: pricing/context flow from models.dev catalog by default
+  ;; (`internal/modelsdev`); overlays here add only what catalog can't
+  ;; express — OpenAI long-context tiers (`:input-over-272k`), Anthropic
+  ;; 5m/1h cache tiers, GLM `:json-object-mode?`, Copilot per-model wire
+  ;; overrides (`:extra-body`, `:reasoning-style`).
+  {:openai
+   {;; Long-context tier pricing (>272k tokens) — not in models.dev.
+    "gpt-5.4"                   {:pricing {:input-over-272k 5.00 :cached-input-over-272k 0.50
+                                           :output-over-272k 22.50}}
+    "gpt-5.5"                   {:pricing {:input-over-272k 10.00 :cached-input-over-272k 1.00
+                                           :output-over-272k 45.00}}}
 
    :openai-codex
-   ;; OpenAI Codex model catalog reports `context_window` as prompt budget.
-   ;; 400K product window = 272K input + 128K output; Codex UI may show
-   ;; ~258.4K usable after its 5% compaction reserve.
-   {"gpt-5"                     {:pricing {:input 1.25  :cached-input 0.125 :output 10.00} :context 400000}
-    "gpt-5.1"                   {:pricing {:input 1.25  :cached-input 0.125 :output 10.00}  :context 128000}
-    "gpt-5.3-codex"             {:pricing {:input 1.75  :cached-input 0.175 :output 14.00}  :context 272000}
-    "gpt-5.4"                   {:pricing {:input 2.50  :cached-input 0.25  :output 15.00
-                                           :input-over-272k 5.00 :cached-input-over-272k 0.50
-                                           :output-over-272k 22.50}
-                                 :context 272000}
-    "gpt-5.4-mini"              {:pricing {:input 0.75  :cached-input 0.075 :output 4.50}  :context 272000}
-    ;; Codex product docs publish credit rates; these USD estimates use the
-    ;; matching public API model rates for routing / accounting heuristics.
-    "gpt-5.5"                   {:pricing {:input 5.00  :cached-input 0.50  :output 30.00
-                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
-                                           :output-over-272k 45.00}
-                                 :context 272000}}
+   ;; Codex prompt budget = 272K input (catalog reports 400K product window
+   ;; = 272K input + 128K output). Pricing flows from `:pricing-source :openai`.
+   {"gpt-5"                     {:context 400000}
+    "gpt-5.1"                   {:context 128000}
+    "gpt-5.3-codex"             {:context 272000}
+    "gpt-5.4"                   {:context 272000
+                                 :pricing {:input-over-272k 5.00 :cached-input-over-272k 0.50
+                                           :output-over-272k 22.50}}
+    "gpt-5.4-mini"              {:context 272000}
+    "gpt-5.5"                   {:context 272000
+                                 :pricing {:input-over-272k 10.00 :cached-input-over-272k 1.00
+                                           :output-over-272k 45.00}}}
 
    :anthropic
    {"claude-opus-4-7"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
@@ -381,20 +360,8 @@
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
 
-   :zai-coding
-   ;; Z.ai Coding Plan — subscription-billed ($3/$15/$30 per month tiers),
-   ;; but overage is metered per-token at the rates below. We keep the same
-   ;; rates as :zai so budget accounting stays honest when a subscription is
-   ;; exceeded. Preserved thinking (`clear_thinking: false`) is ON by default
-   ;; server-side on this endpoint — `:preserved-thinking?` on ask! is a
-   ;; no-op here (the server already does it). GLM-4.7 is the recommended
-   ;; model on this plan per z.ai docs.
-   {"glm-4.6"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
-    "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
-    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}}
+   ;; :zai-coding inherits :zai's overlay table via `:provider-model-source :zai`
+   ;; declared on the provider — no duplicate model map.
 
    :github-copilot
    ;; Copilot /models reports total context for GPT reasoning models, but the
@@ -440,78 +407,107 @@
    :openrouter
    {"gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
     "claude-sonnet-4-6"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "gemini-2.0-flash"          {:pricing {:input 0.10  :cached-input 0.025 :output 0.40}  :context 1000000}}
+    "gemini-2.0-flash"          {:pricing {:input 0.10  :cached-input 0.025 :output 0.40}  :context 1000000}
+    ;; Public Google Gemini retail pricing (long-context tiered) — indexed under
+    ;; openrouter since it's the multi-provider gateway in svar's defaults;
+    ;; `tokens/estimate-cost` flattens by model name across providers.
+    "gemini-2.5-pro"            {:pricing {:input 1.25 :cached-input 0.125 :output 10.00
+                                           :input-over-200k 2.50 :cached-input-over-200k 0.25
+                                           :output-over-200k 15.00}
+                                 :context 2000000}}
 
    :ollama
    {}
 
-   :lmstudio
-   {"gemma-4-21b-reap-tool-calling-mlx"                  {:pricing {:input 0.0 :output 0.0} :context 32000}
-    "qwen3.5-27b-claude-4.6-opus-distilled-mlx"        {:pricing {:input 0.0 :output 0.0} :context 128000}
-    "qwen3.5-9b-claude-4.6-opus-reasoning-distilled"   {:pricing {:input 0.0 :output 0.0} :context 128000}}})
+   ;; :lmstudio — user-supplied local models; pricing/context come from
+   ;; the caller's `:models` config (no built-in catalog).
+   :lmstudio {}})
 
 ;; =============================================================================
 ;; Derived compatibility maps
 ;; =============================================================================
+
+(defn- pid-visible? [pid model-name]
+  (letfn [(parse-gpt-version [model-name]
+            (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
+              [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
+          (version< [a b] (neg? (compare (vec a) (vec b))))]
+    (let [known (get KNOWN_PROVIDERS pid)
+          excluded (set (:exclude-models known))
+          version (parse-gpt-version model-name)
+          min-version (:min-gpt-version known)]
+      (not (or (contains? excluded model-name)
+             (and version min-version (version< version min-version)))))))
+
+(defn- merged-provider-models
+  "Catalog ⊕ overlay model map for one svar provider id (visible entries only).
+   Same merge rules as `provider-model-entry` but enumerated."
+  [pid]
+  (let [overlay (get KNOWN_PROVIDER_MODELS
+                  (or (get-in KNOWN_PROVIDERS [pid :provider-model-source]) pid))
+        catalog (modelsdev/provider-models
+                  (or (get-in KNOWN_PROVIDERS [pid :pricing-source])
+                    (get-in KNOWN_PROVIDERS [pid :provider-model-source])
+                    pid))]
+    (reduce
+      (fn [acc nm]
+        (if-not (pid-visible? pid nm)
+          acc
+          (let [c (get catalog nm)
+                o (get overlay nm)
+                merged (cond-> (merge c o)
+                         (and (:pricing c) (:pricing o))
+                         (assoc :pricing (merge (:pricing c) (:pricing o))))]
+            (assoc acc nm merged))))
+      {}
+      (into (set (keys catalog)) (keys overlay)))))
 
 (def MODEL_CONTEXT_LIMITS
   "Best-effort flattened model context limits for legacy token utilities.
     When a model exists on multiple providers with different contexts, the most
     conservative context is used. Provider-aware code should use
     provider-model-context instead."
-  (letfn [(parse-gpt-version [model-name]
-            (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
-              [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
-          (version< [a b]
-            (neg? (compare (vec a) (vec b))))
-          (visible? [pid model-name]
-            (let [known (get KNOWN_PROVIDERS pid)
-                  excluded (set (:exclude-models known))
-                  version (parse-gpt-version model-name)
-                  min-version (:min-gpt-version known)]
-              (not (or (contains? excluded model-name)
-                     (and version min-version (version< version min-version))))))]
-    (assoc
-      (reduce-kv (fn [acc pid models]
-                   (reduce-kv (fn [macc model-name {:keys [context]}]
-                                (if (or (nil? context)
-                                      (not (visible? pid model-name)))
-                                  macc
-                                  (update macc model-name
-                                    (fn [existing]
-                                      (if (nil? existing)
-                                        (long context)
-                                        (min (long existing) (long context)))))))
-                     acc models))
-        {} KNOWN_PROVIDER_MODELS)
-      :default 8192)))
+  (assoc
+    (reduce
+      (fn [acc pid]
+        (reduce-kv (fn [macc model-name {:keys [context]}]
+                     (if (nil? context)
+                       macc
+                       (update macc model-name
+                         (fn [existing]
+                           (if (nil? existing)
+                             (long context)
+                             (min (long existing) (long context)))))))
+          acc (merged-provider-models pid)))
+      {} (keys KNOWN_PROVIDERS))
+    :default 8192))
 
 (def MODEL_PRICING
   "Best-effort flattened model pricing for legacy token utilities.
     When a model exists on multiple providers, the lowest total pricing is chosen.
     Provider-aware code should NOT use this — use provider-model-pricing instead."
   (assoc
-    (reduce-kv (fn [acc _pid models]
-                 (reduce-kv (fn [macc model-name {:keys [pricing]}]
-                              (if-not pricing
-                                macc
-                                (let [pricing-total (+ (double (:input pricing 0.0))
-                                                      (double (:output pricing 0.0)))]
-                                  ;; Subscription/local providers advertise 0/0
-                                  ;; for routing, but legacy cost utilities need
-                                  ;; public paid rates when available.
-                                  (if (zero? pricing-total)
-                                    macc
-                                    (update macc model-name
-                                      (fn [existing]
-                                        (if (or (nil? existing)
-                                              (< pricing-total
-                                                (+ (double (:input existing))
-                                                  (double (:output existing)))))
-                                          pricing
-                                          existing)))))))
-                   acc models))
-      {} KNOWN_PROVIDER_MODELS)
+    (reduce
+      (fn [acc pid]
+        (reduce-kv (fn [macc model-name {:keys [pricing]}]
+                     (if-not pricing
+                       macc
+                       (let [pricing-total (+ (double (:input pricing 0.0))
+                                             (double (:output pricing 0.0)))]
+                         ;; Subscription/local providers advertise 0/0 for
+                         ;; routing; legacy cost utilities prefer paid rates.
+                         (if (zero? pricing-total)
+                           macc
+                           (update macc model-name
+                             (fn [existing]
+                               (if (or (nil? existing)
+                                     (< pricing-total
+                                       (+ (double (:input existing))
+                                         (double (:output existing)))))
+                                 pricing
+                                 existing)))))))
+          acc (merged-provider-models pid)))
+      {} (keys KNOWN_PROVIDERS))
     :default {:input 5.0 :output 15.0}))
 
 ;; =============================================================================
@@ -624,11 +620,37 @@
   [provider-id]
   (or (get-in KNOWN_PROVIDERS [provider-id :provider-model-source]) provider-id))
 
+(defn- provider-pricing-source
+  "Catalog provider-id used to resolve pricing/context/modalities from
+   models.dev. Honors `:pricing-source` overlay (e.g. `:openai-codex` →
+   `:openai` for retail metering, `:zai-coding` → `:zai-coding-plan` for
+   id-mapping). Defaults to `provider-model-source`."
+  [provider-id]
+  (or (get-in KNOWN_PROVIDERS [provider-id :pricing-source])
+    (provider-model-source provider-id)))
+
 (defn provider-model-entry
-  "Returns provider-scoped entry {:pricing ... :context ...} for a provider/model, or nil."
+  "Returns provider-scoped entry for a provider/model, or nil if excluded.
+
+   Composition:
+     1. Catalog entry from models.dev (pricing, context, modalities,
+        capability flags, family, knowledge cutoff, release dates) —
+        looked up under `:pricing-source` if declared, else `:id`.
+     2. svar overlay from KNOWN_PROVIDER_MODELS (wire/policy keys:
+        `:api-style`, `:reasoning-style`, `:json-object-mode?`,
+        `:extra-body`, plus any pricing/context overrides).
+
+   Overlay wins on conflicts. Pricing maps deep-merge so an overlay
+   can override a single rate without dropping `:cache-read` /
+   `:cache-write` from the catalog."
   [provider-id model-name]
   (when-not (provider-excluded-model? provider-id model-name)
-    (get-in KNOWN_PROVIDER_MODELS [(provider-model-source provider-id) model-name])))
+    (let [overlay (get-in KNOWN_PROVIDER_MODELS [(provider-model-source provider-id) model-name])
+          catalog (get (modelsdev/provider-models (provider-pricing-source provider-id)) model-name)]
+      (when (or overlay catalog)
+        (cond-> (merge catalog overlay)
+          (and (:pricing catalog) (:pricing overlay))
+          (assoc :pricing (merge (:pricing catalog) (:pricing overlay))))))))
 
 (defn provider-model-pricing
   "Returns provider-scoped pricing for provider/model, falling back to flattened MODEL_PRICING."

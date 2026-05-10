@@ -1,4 +1,11 @@
-.PHONY: test test-ff test-readme test-watch clean jar install deploy lint compile-java prepare test-allure allure-serve allure bench bench-4clojure bench-4clojure-quick bench-humaneval bench-humaneval-quick bench-list
+.PHONY: test test-ff test-readme test-watch clean jar install deploy lint compile-java prepare test-allure allure-serve allure bench bench-4clojure bench-4clojure-quick bench-humaneval bench-humaneval-quick bench-list refresh-models
+
+# Snapshot models.dev catalog. Bundled at build time; refresh manually per release.
+refresh-models:
+	@echo ">> fetching https://models.dev/api.json"
+	@curl -fsSL https://models.dev/api.json -o resources/models.dev.json
+	@echo ">> $$(wc -c < resources/models.dev.json) bytes, $$(python3 -c "import json;print(len(json.load(open('resources/models.dev.json'))))") providers"
+	@git add resources/models.dev.json
 
 prepare: compile-java
 

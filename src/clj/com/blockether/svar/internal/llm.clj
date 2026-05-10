@@ -389,18 +389,6 @@
     (cond-> clean
       cc (assoc :cache_control cc))))
 
-(defn- anthropic-content
-  "Walks canonical blocks → Anthropic wire content. Collapses to a bare
-   string when there is exactly ONE plain text block with no cache
-   marker, otherwise emits the array form."
-  [blocks]
-  (let [wire (mapv anthropic-block blocks)]
-    (if (and (= 1 (count wire))
-          (text-block? (first wire))
-          (nil? (:cache_control (first wire))))
-      (-> wire first :text)
-      wire)))
-
 (defn- openai-content
   "Walks canonical blocks → OpenAI wire content. Cache markers are
    stripped; OpenAI's implicit caching benefits from a stable prefix
@@ -706,34 +694,11 @@
                        cr (assoc :cached_tokens cr)
                        cc (assoc :cache_creation_tokens cc)))))))
 
-(defn- extract-anthropic-stream-delta
-  "Stateless one-shot extractor for individual Anthropic SSE events.
-   Used by tests + non-aggregating callers; the streaming pipeline
-   prefers `make-anthropic-stream-delta-fn` because that closure keeps
-   per-block accumulator state (signature, redacted_thinking data) that
-   has to round-trip on the next request."
-  [chunk]
-  (case (:type chunk)
-    "content_block_delta"
-    (let [delta (:delta chunk)]
-      (case (:type delta)
-        "text_delta"     {:content-delta (:text delta)     :reasoning-delta nil :api-usage nil}
-        "thinking_delta" {:content-delta nil               :reasoning-delta (:thinking delta) :api-usage nil}
-        {:content-delta nil :reasoning-delta nil :api-usage nil}))
-    "message_delta"
-    {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (:usage chunk))}
-    "message_start"
-    {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (get-in chunk [:message :usage]))}
-    "message_stop"
-    {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
-    ;; default — ignore other event types
-    {:content-delta nil :reasoning-delta nil :api-usage nil}))
-
 (defn- make-anthropic-stream-delta-fn
   "Builds a stateful one-arg delta-fn closure for Anthropic SSE streams.
-   Mirrors the public per-event shape returned by
-   `extract-anthropic-stream-delta` (so the SSE aggregator stays
-   uniform) and additionally accumulates partial wire blocks across
+   Per-event return shape (the SSE aggregator expects this uniformly):
+   `{:content-delta s? :reasoning-delta s? :api-usage m? :terminal? b?}`.
+   Additionally accumulates partial wire blocks across
    `content_block_start` … `content_block_delta` … `content_block_stop`.
    Each closed block is converted to svar's canonical form
    (`anthropic-wire->canonical-block`) and flushed to the aggregator
@@ -763,15 +728,15 @@
           (case (:type delta)
             "text_delta"
             (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
-              {:content-delta nil :reasoning-delta nil :api-usage nil})
+                {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic also emits input_json_delta for tool_use blocks;
             ;; svar doesn't use Anthropic tool_use today, but keep the
@@ -779,7 +744,7 @@
             ;; through under a synthetic :partial_json key.
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-              {:content-delta nil :reasoning-delta nil :api-usage nil})
+                {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -1129,7 +1094,7 @@
   [{:keys [thinking thinking-signature]}]
   (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
         (try (json/read-json thinking-signature :key-fn keyword)
-          (catch Exception _ nil)))
+             (catch Exception _ nil)))
     (when (and (string? thinking) (not (str/blank? thinking)))
       {:type "reasoning"
        :summary [{:type "summary_text" :text thinking}]})))
@@ -1307,7 +1272,6 @@
                      :schema (:schema response-format)
                      :strict (:strict response-format)}
       nil)))
-
 
 (defn- responses-message-input-entries
   "Expands one canonical message into the OpenAI Responses `:input`
