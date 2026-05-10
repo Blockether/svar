@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.4.15] - 2026-05-10
 
+### Changed
+- release: v0.4.15 — models.dev catalog integration
+- release: update version files for v0.4.14, bump to next dev version
+
+
+## [v0.4.15] - 2026-05-10
+
 ### Added
 - **models.dev catalog integration.** Bundled snapshot at
   `resources/models.dev.json` (1.9 MB, 118 providers) drives pricing,
@@ -694,7 +701,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.13...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.15...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -724,3 +731,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.11]: https://github.com/Blockether/svar/releases/tag/v0.4.11
 [v0.4.12]: https://github.com/Blockether/svar/releases/tag/v0.4.12
 [v0.4.13]: https://github.com/Blockether/svar/releases/tag/v0.4.13
+[v0.4.15]: https://github.com/Blockether/svar/releases/tag/v0.4.15
