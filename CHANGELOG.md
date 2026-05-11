@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.5.0] - 2026-05-11
 
+### Changed
+- release: v0.5.0 — Java fence parsers, kill O(N²) per-chunk re-parse
+- perf: kill O(N²) per-chunk re-parse + Java fence parsers
+- release: update version files for v0.4.15, bump to next dev version
+
+
+## [v0.5.0] - 2026-05-11
+
 ### Fixed
 - **Streaming responses no longer hang on long completions.** `ask-code!*`
   used to invoke `codes/extract-code-blocks` on every SSE delta over the
@@ -745,7 +753,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.4.15...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.0...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -776,3 +784,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.12]: https://github.com/Blockether/svar/releases/tag/v0.4.12
 [v0.4.13]: https://github.com/Blockether/svar/releases/tag/v0.4.13
 [v0.4.15]: https://github.com/Blockether/svar/releases/tag/v0.4.15
+[v0.5.0]: https://github.com/Blockether/svar/releases/tag/v0.5.0
