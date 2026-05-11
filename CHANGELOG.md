@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-05-11
+
+### Fixed
+- **Streaming responses no longer hang on long completions.** `ask-code!*`
+  used to invoke `codes/extract-code-blocks` on every SSE delta over the
+  *full* accumulated buffer. Combined with `(?m)…$` regex normalizers,
+  total work was quadratic in stream size. Live repro on glm-5.1 wedged a
+  Vis TUI virtual thread in `java.util.regex.Pattern$BmpCharPropertyGreedy.match`
+  for minutes (Vis conversation `0c8188ac`). Streaming `on-chunk` now
+  signals progress only (`:raw`, `:reasoning`, `:done?`); the final
+  parse happens exactly once after the stream closes and is surfaced in
+  the `:done? true` chunk and the return value. Mid-stream `:result` /
+  `:blocks` are `nil` — a deliberate contract change.
+
+### Added
+- **`com.blockether.svar.FenceNormalizer` (Java).** Single linear scan
+  over the input. Three fence transforms (opener-split,
+  inline-boundary-split, closer-split) folded into one fused per-line
+  emit. Fast paths for inputs without carriage returns and without
+  backticks. Replaces the prior `(?m)…` regex pipeline in
+  `codes/normalize-*`.
+- **`com.blockether.svar.FenceBlocksParser` (Java).** Line-based fence
+  block parser. Body materialised with one `String.substring` per block
+  (bodies are contiguous slices of the normalized input). Replaces the
+  Clojure `parse-fenced-blocks` loop.
+- **Bench suite under `bench/`** with `:bench` alias (`criterium`
+  `0.4.6`). Reproduces the Vis hang scenario and tracks throughput of
+  the new Java parsers.
+
+### Performance
+- `extract-code-blocks` end-to-end on a 0.87 MB / 12 000-line fenced
+  response: **2.80 ms** (~310 MB/s). Pre-fix: minutes of CPU.
+- `FenceNormalizer/normalize`: 1.02 ms on the same input.
+- `FenceBlocksParser/parse`: 1.54 ms on the same input.
+- `pathological-line` (78 KB single line with stray backticks +
+  glued closer): 166 µs.
+
+### Changed
+- `codes/normalize-fence-openers`, `normalize-fence-closers`,
+  `normalize-inline-fence-boundaries`, `parse-fenced-blocks`,
+  `malformed-fence-fragment?` and the `FENCE_LINE_RE` constant are
+  gone. Their behaviour now lives in the Java parsers behind the
+  existing public `codes/extract-code-blocks` API.
+
 ## [v0.4.15] - 2026-05-10
 
 ### Changed
