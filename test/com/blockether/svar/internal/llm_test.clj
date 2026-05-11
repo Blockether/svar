@@ -6,6 +6,7 @@
    [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.core :as svar]
+   [com.blockether.svar.internal.codes :as codes]
    [com.blockether.svar.internal.llm :as sut])
   (:import
    (java.io ByteArrayInputStream)))
@@ -518,13 +519,17 @@
         (with-redefs [http/post (fn [_url _opts]
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          ;; Mid-stream `:result` is always nil (svar no longer re-parses
+          ;; the buffer per chunk — was O(N²)). Final parse is surfaced
+          ;; in the `:done? true` chunk + return value.
           (let [events (atom [])
                 result (svar/ask-code! router {:messages [(svar/user "Return code")]
                                                :on-chunk #(swap! events conj %)})]
             (expect (= "(answer \"4\")" (:result result)))
             (expect (not (re-find #"```" (:result result))))
-            (expect (every? #(or (:done? %)
-                               (not (str/blank? (:result %))))
+            (expect (every? #(if (:done? %)
+                               (not (str/blank? (:result %)))
+                               (nil? (:result %)))
                       @events))
             (expect (= "(answer \"4\")" (:result (last @events))))
             (expect (= true (:done? (last @events))))))))
@@ -583,6 +588,44 @@
             (expect false)
             (catch clojure.lang.ExceptionInfo e
               (expect (= :svar.core/stream-truncated (:type (ex-data e)))))))))
+
+    (it "ask-code! does NOT re-parse the full buffer per chunk by default (perf regression)"
+      ;; Regression for Vis 0c8188ac-style hang: streaming a long
+      ;; response over many chunks must NOT invoke codes/extract-code-blocks
+      ;; on every chunk (it re-parses the whole accumulated buffer,
+      ;; O(N²) total). Default `:partial-extraction?` is false; assert no
+      ;; call to extract-code-blocks during the on-delta callbacks.
+      (let [router (svar/make-router
+                     [{:id :zai-coding
+                       :api-key "sk-test"
+                       :base-url "https://example.invalid/v1"
+                       :models [{:name "glm-5.1"}]}])
+            chunks (mapv (fn [i] (str "data: {\"choices\":[{\"delta\":{\"content\":\"x" i "\"}}]}\n\n"))
+                     (range 50))
+            stream (str "data: {\"choices\":[{\"delta\":{\"content\":\"```clojure\\n\"}}]}\n\n"
+                     (apply str chunks)
+                     "data: {\"choices\":[{\"delta\":{\"content\":\"\\n```\"}}]}\n\n"
+                     "data: [DONE]\n\n")
+            extract-calls (atom 0)
+            real-extract codes/extract-code-blocks
+            events (atom [])]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})
+                      codes/extract-code-blocks (fn [s]
+                                                  (swap! extract-calls inc)
+                                                  (real-extract s))]
+          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                                               :on-chunk #(swap! events conj %)})]
+            ;; Final result still parsed correctly
+            (expect (re-find #"x0.*x49" (:result result)))
+            ;; Exactly ONE final extraction — not 52 (one per chunk).
+            ;; Allows up to 2 (final result + any single defensive parse)
+            ;; to stay robust to refactors, but flags a per-chunk regression.
+            (expect (<= @extract-calls 2))
+            ;; Streaming on-chunk still fires (caller still sees chunks)
+            (expect (pos? (count @events)))
+            (expect (= true (:done? (last @events))))))))
 
     (it "ask-code! does not expose empty fences as executable blocks"
       (let [router (svar/make-router

@@ -80,9 +80,9 @@
    Uses shared-http-executor so blocked HTTP calls cost almost nothing and
    don't pin OS threads.
 
-   HTTP/1.1 PIN — some remote providers and local LLM servers (LM Studio,
+   HTTP/1.1 PIN - some remote providers and local LLM servers (LM Studio,
    Ollama) choke on HTTP/2 trailers. If you need HTTP/2 for a specific call,
-   build a second client — do NOT flip this default."
+   build a second client - do NOT flip this default."
   (delay
     (http/client (assoc http/default-client-opts
                    :executor @shared-http-executor
@@ -90,7 +90,7 @@
 
 (defn shutdown-http-client!
   "Closes the shared HTTP client's virtual-thread executor.
-   Idempotent — safe to call multiple times. Call before JVM exit in
+   Idempotent - safe to call multiple times. Call before JVM exit in
    scripts/tests to avoid hanging on non-daemon threads. Registered as
    a shutdown hook automatically; manual invocation is only needed when
    the JVM would otherwise not exit.
@@ -126,7 +126,7 @@
       :status   <HTTP status code, e.g. 200>}
 
    Exposing the envelope (instead of just the parsed body) lets downstream
-   error sites include the raw response in ex-data — critical when a
+   error sites include the raw response in ex-data - critical when a
    provider returns HTTP 200 with a shape we don't understand (reasoning
    only, partial JSON, undocumented fields) and vanilla `:message :content`
    extraction loses the evidence."
@@ -221,7 +221,7 @@
                   {"x-api-key" api-key
                    "anthropic-version" "2023-06-01"
                    "Content-Type" "application/json"})
-     ;; :openai-compatible-chat and everything else — Bearer token
+     ;; :openai-compatible-chat and everything else - Bearer token
      {"Authorization" (str "Bearer " api-key)
       "Content-Type" "application/json"})))
 
@@ -326,7 +326,7 @@
 ;;
 ;; On non-Anthropic styles (OpenAI, Z.ai, gateway-style proxies) the
 ;; marker is stripped from the wire body. OpenAI's implicit caching
-;; still kicks in for stable ≥1024-tok prefixes — no client signal
+;; still kicks in for stable ≥1024-tok prefixes - no client signal
 ;; required.
 ;;
 ;; Up to 4 cache breakpoints per Anthropic call. A `cache_control` on a
@@ -375,7 +375,7 @@
                  {:type :svar.core/invalid-cache-ttl :got ttl}))))))
 
 (defn- strip-svar-keys
-  "Drop svar-internal `:svar/*` markers from a content block — used for
+  "Drop svar-internal `:svar/*` markers from a content block - used for
    wire formats that don't speak our markers (OpenAI etc)."
   [block]
   (into {} (remove (fn [[k _]] (and (keyword? k) (= "svar" (namespace k))))) block))
@@ -418,7 +418,7 @@
 
    Truncates to `MAX_HTTP_ERROR_BODY_CHARS` and appends a `...<+N more>`
    suffix so downstream renderers (Vis chat error bubble) can show the
-   first ~8 KB of an upstream provider error envelope verbatim — that
+   first ~8 KB of an upstream provider error envelope verbatim - that
    first slice is where Anthropic's `error.message` (e.g. `Invalid
    signature in thinking block`) and `request_id` always live.
 
@@ -445,7 +445,7 @@
    pi-ai's shape: `{:type \"thinking\" :thinking str :thinking-signature
    str :redacted? bool}`. The thinking-signature is an opaque
    per-provider payload that has to round-trip verbatim on the next
-   call — Anthropic's HMAC `signature`, Anthropic redacted-thinking's
+   call - Anthropic's HMAC `signature`, Anthropic redacted-thinking's
    encrypted `data`, OpenAI Responses' JSON-encoded reasoning item,
    z.ai's exact `reasoning_content` text, etc. Wire serializers per
    api-style read this canonical shape and emit native wire blocks."
@@ -458,7 +458,7 @@
    data under `:data`; otherwise emits a normal `thinking` block whose
    `:signature` round-trips Anthropic's HMAC verbatim. Blocks that
    never received a signature (e.g. an aborted stream) degrade to a
-   plain text block so Anthropic doesn't reject the request — this
+   plain text block so Anthropic doesn't reject the request - this
    matches pi-ai's behavior."
   [{:keys [thinking thinking-signature redacted?]}]
   (cond
@@ -472,7 +472,7 @@
      :signature thinking-signature}
 
     :else
-    ;; Missing signature — fall back to a text block so Anthropic doesn't
+    ;; Missing signature - fall back to a text block so Anthropic doesn't
     ;; reject the next request and Claude doesn't start mimicking the
     ;; <thinking> tags in subsequent responses.
     {:type "text"
@@ -484,7 +484,7 @@
    `tool_use` / `tool_result` block. Interior thinking blocks (after
    a non-thinking block) are only legal under the
    `interleaved-thinking-2025-05-14` beta and only when anchored by a
-   `tool_use` — never after plain text.
+   `tool_use` - never after plain text.
 
    Claude Code's `claude-code-20250219` beta sometimes streams a
    trailing thinking block after a text block in a SINGLE response.
@@ -496,13 +496,13 @@
 
    Strategy: keep every leading thinking block (with its HMAC
    signature) verbatim; once we hit the first non-thinking canonical
-   block, demote any further thinking block to a plain text block —
+   block, demote any further thinking block to a plain text block -
    the model still sees its own prior reasoning, just as visible text
    instead of a signed block. This is the same fallback
    `canonical-thinking->anthropic-block` already does for
    missing-signature thinking, applied here for a different reason.
 
-   z.ai / OpenAI Responses are NOT routed through this fn — z.ai's
+   z.ai / OpenAI Responses are NOT routed through this fn - z.ai's
    contract requires the run stay contiguous and verbatim, never
    reordered or demoted (see `preserved-thinking-replay-messages` in
    Vis loop.clj). This is Anthropic-only."
@@ -514,7 +514,7 @@
                     {:out (conj out b) :seen-non-thinking? true}
 
                     seen-non-thinking?
-                    ;; Interior thinking — demote to text. Drops the
+                    ;; Interior thinking - demote to text. Drops the
                     ;; signature on purpose; Anthropic would reject it
                     ;; anyway and the visible text round-trips fine.
                     {:out (conj out {:type "text"
@@ -533,7 +533,7 @@
    through `canonical-thinking->anthropic-block` (signature/redacted
    rendered natively), everything else passes through `anthropic-block`
    unchanged. Force the array form whenever a thinking block is present
-   — the single-text-collapse path would drop the signed blocks.
+   - the single-text-collapse path would drop the signed blocks.
 
    Before serialization, `demote-interior-thinking-blocks` rewrites
    any `thinking` block that appears AFTER a non-thinking block as a
@@ -559,7 +559,7 @@
 
    Top-level `:system` is emitted as a STRING when no system block
    carries a cache marker, and as an ARRAY of text blocks (with
-   per-block `cache_control`) otherwise — Anthropic accepts both.
+   per-block `cache_control`) otherwise - Anthropic accepts both.
 
    `:svar/cache true` markers on user/assistant content blocks are
    translated to `cache_control: {type: \"ephemeral\"}` per block.
@@ -569,7 +569,7 @@
    `{:type \"thinking\"}` blocks emit them as native Anthropic
    `thinking` / `redacted_thinking` wire blocks (see
    `canonical-thinking->anthropic-block`). Echoing them back is how
-   Anthropic's extended thinking is continued across calls — the model
+   Anthropic's extended thinking is continued across calls - the model
    sees its own prior reasoning (signature-verified server-side) before
    the next user turn instead of re-thinking from scratch.
 
@@ -612,7 +612,7 @@
    canonical thinking blocks with `:redacted? true` and the encrypted
    data carried under `:thinking-signature`. Anything else passes
    through unchanged so future Anthropic block types (tool_use,
-   server_tool_use, …) survive a round-trip."
+   server_tool_use, ...) survive a round-trip."
   [block]
   (case (:type block)
     "text"
@@ -634,7 +634,7 @@
 
 (defn- anthropic-canonical-assistant-message
   "Builds the canonical `:assistant-message` for an Anthropic response.
-   The result is a normal svar message map — callers append it to
+   The result is a normal svar message map - callers append it to
    `:messages` on the next call. nil when the response had no content
    blocks worth round-tripping."
   [content-blocks]
@@ -699,18 +699,18 @@
    Per-event return shape (the SSE aggregator expects this uniformly):
    `{:content-delta s? :reasoning-delta s? :api-usage m? :terminal? b?}`.
    Additionally accumulates partial wire blocks across
-   `content_block_start` … `content_block_delta` … `content_block_stop`.
+   `content_block_start` ... `content_block_delta` ... `content_block_stop`.
    Each closed block is converted to svar's canonical form
    (`anthropic-wire->canonical-block`) and flushed to the aggregator
    via `:provider-state {:provider :anthropic :blocks [<canonical>]}`.
-   The aggregator concatenates blocks in arrival order — the same order
+   The aggregator concatenates blocks in arrival order - the same order
    Anthropic requires them re-sent in to keep the extended-thinking
    session valid.
 
    Why a closure: a flat per-event extractor cannot pair a
    `signature_delta` with the `thinking_delta` chunks that preceded it
    under the same block index, and Anthropic's `signature` field is
-   required verbatim on replay — dropping it invalidates the next
+   required verbatim on replay - dropping it invalidates the next
    request server-side."
   []
   (let [pending (atom {})] ;; index -> partial wire block map
@@ -776,9 +776,9 @@
 
 (defn- with-retry
   "Executes a function with exponential backoff retry for transient errors.
-   
+
    Retries on HTTP status codes 429, 502, 503, 504.
-   
+
    Params:
    `f` - Function to execute (no args).
    `opts` - Map, optional:
@@ -786,10 +786,10 @@
      - :initial-delay-ms - Integer. Initial backoff (default: 1000ms).
      - :max-delay-ms - Integer. Max backoff cap (default: 60000ms).
      - :multiplier - Number. Backoff multiplier (default: 2.0).
-   
+
    Returns:
    Result of f.
-   
+
    Throws:
    ExceptionInfo if all retries exhausted."
   ([f] (with-retry f {}))
@@ -1077,8 +1077,8 @@
   "Lifts one OpenAI Responses reasoning item (svar's deduped form, as
    produced by `reasoning-item-state`) into svar's canonical thinking
    block. The full raw item is JSON-encoded under `:thinking-signature`
-   so a round-trip can re-emit the exact wire shape — including ids,
-   encrypted_content, raw summary parts — byte-for-byte."
+   so a round-trip can re-emit the exact wire shape - including ids,
+   encrypted_content, raw summary parts - byte-for-byte."
   [{:keys [summary-text content-text raw-item] :as item}]
   {:type "thinking"
    :thinking (or summary-text content-text "")
@@ -1089,7 +1089,7 @@
   "Decodes a canonical thinking block's `:thinking-signature` back into
    the OpenAI Responses wire-shape map the API expects in `:input`.
    Falls back to a synthesized minimal item if the signature is not
-   parseable JSON — keeps round-trips robust without leaking thinking
+   parseable JSON - keeps round-trips robust without leaking thinking
    content the model would refuse on replay."
   [{:keys [thinking thinking-signature]}]
   (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
@@ -1123,7 +1123,7 @@
    resulting message to `:messages` on the next call so the wire
    serializer can re-emit `reasoning_content` faithfully.
 
-   Returns nil when there is no usable assistant content — callers
+   Returns nil when there is no usable assistant content - callers
    then skip the replay step."
   [{:keys [content reasoning-content]}]
   (let [text? (and (string? content) (not (str/blank? content)))
@@ -1188,9 +1188,9 @@
                              block-reasoning
                              (when-not (str/blank? fallback-reasoning) fallback-reasoning))
         ;; Two extract paths share this fn: chat-completions (z.ai
-        ;; GLM, OpenRouter, plain OpenAI Chat — use
+        ;; GLM, OpenRouter, plain OpenAI Chat - use
         ;; `openai-chat-canonical-assistant-message`) and OpenAI
-        ;; Responses (rich `:output` array with reasoning items — use
+        ;; Responses (rich `:output` array with reasoning items - use
         ;; `responses-extract-assistant-message`). Provider-state
         ;; presence picks the Responses path so we don't double-build
         ;; on chat-completions where it stays nil.
@@ -1299,7 +1299,7 @@
                       (str/join "\n\n"))
         ;; Canonical thinking blocks live inline on assistant messages.
         ;; Each one is hoisted out as a `reasoning` input entry placed
-        ;; right before its parent message — the OpenAI Responses API
+        ;; right before its parent message - the OpenAI Responses API
         ;; pairs reasoning items with the assistant turn that produced
         ;; them by ordering, not by id, so positional faithfulness here
         ;; is what keeps the thinking session valid.
@@ -1332,7 +1332,7 @@
   "Splits a normalized canonical content vec into `[thinking-blocks
    non-thinking-blocks]`. OpenAI-style chat completions (z.ai included)
    carry preserved reasoning under a per-message `reasoning_content`
-   string, not as inline content blocks — so we hoist the canonical
+   string, not as inline content blocks - so we hoist the canonical
    thinking blocks out of the wire content and emit their text under
    the dedicated field instead."
   [blocks]
@@ -1344,7 +1344,7 @@
    block on the message, in order, into the single string that z.ai /
    OpenRouter expect under `reasoning_content`. We use the signature
    (not the visible `:thinking`) because z.ai's preservation contract
-   is exact-text echo — svar populates both fields with the same
+   is exact-text echo - svar populates both fields with the same
    provider-issued text on capture."
   [thinking-blocks]
   (let [parts (->> thinking-blocks
@@ -1359,7 +1359,7 @@
 
    Multi-block content (`{:type \"text\" :text ...}` arrays, image blocks)
    passes through unchanged. svar-internal markers like `:svar/cache`
-   are stripped — OpenAI implicit caching benefits from a stable prefix
+   are stripped - OpenAI implicit caching benefits from a stable prefix
    without any client signal.
 
    Canonical `{:type \"thinking\"}` blocks on assistant messages are
@@ -1396,12 +1396,12 @@
 
 (defn- sanitize-messages-for-logging
   "Removes base64 image data from messages for safe logging.
-   
+
    Replaces large base64 strings with placeholder to avoid huge log entries.
-   
+
    Params:
    `messages` - Vector. Chat messages.
-   
+
    Returns:
    Vector. Messages with base64 data replaced by placeholder."
   [messages]
@@ -1790,7 +1790,7 @@
       :http-response {:url :streaming? :status}}
    Mirrors the shape of non-streaming `extract-response-data` so
    downstream callers destructure uniformly. There is no `:raw-body` on
-   streaming paths — the SSE chunks are consumed incrementally, so the
+   streaming paths - the SSE chunks are consumed incrementally, so the
    accumulated `:content` / `:reasoning` are the closest analogues."
   [url body headers timeout-ms delta-fn on-delta]
   (let [response (try
@@ -1986,7 +1986,7 @@
      - :extra-body - Map. Additional params for the API request body.
      - :on-chunk - Function. When provided, enables SSE streaming. Callback receives
                    accumulated text string after each chunk.
-     - :max-retries, :initial-delay-ms, :max-delay-ms, :multiplier — retry config.
+     - :max-retries, :initial-delay-ms, :max-delay-ms, :multiplier - retry config.
 
    Returns:
    Map with :content, :reasoning (may be nil), :api-usage."
@@ -2046,16 +2046,16 @@
 
 (defn image
   "Creates an image attachment for use with `user` messages.
-   
+
    Accepts either base64-encoded image data or an HTTP(S) URL.
    URLs are passed through directly to the LLM API; base64 strings
    are wrapped in a data URI with the given media-type.
-   
+
    Params:
    `source` - String. Base64-encoded image data or an image URL (http/https).
    `media-type` - String, optional. MIME type (default: \"image/png\").
                   Ignored when source is a URL.
-   
+
    Returns:
    Map marker that `user` recognizes and converts to multimodal content.
    When source is a URL, returns {:svar/type :image :url \"...\"}.
@@ -2072,7 +2072,7 @@
 
    On `:anthropic` api-style, emitted as a text block carrying
    `cache_control: {type: \"ephemeral\"}`. On other api-styles the marker
-   is stripped from the wire — OpenAI's implicit caching reads the same
+   is stripped from the wire - OpenAI's implicit caching reads the same
    stable prefix without any client signal.
 
    Anthropic enforces ≤ 4 cache breakpoints per call. A `cache_control`
@@ -2230,7 +2230,7 @@
 ;; on transient errors with automatic fallback to the next provider.
 
 ;; =============================================================================
-;; Router delegation — all routing logic lives in router.clj
+;; Router delegation - all routing logic lives in router.clj
 ;; =============================================================================
 
 (def make-router
@@ -2283,7 +2283,7 @@
    - `:json-object-mode?` is propagated from the routed model's metadata
      when the caller didn't set it explicitly. Used by `ask!*` to auto-inject
      `response_format: {type: \"json_object\"}` on
-     `:openai-compatible-chat` api-style — hardens prose-leaking models (GLM
+     `:openai-compatible-chat` api-style - hardens prose-leaking models (GLM
      family historically leaks prose into
      `content` under `:deep` reasoning)."
   [opts provider model-map]
@@ -2338,7 +2338,7 @@
 ;; ask!* - Low-level structured output (primitive, no routing)
 ;; =============================================================================
 
-;; Forward declaration — ask!* is defined next, ask! (routed) wraps it below
+;; Forward declaration - ask!* is defined next, ask! (routed) wraps it below
 (declare ask!*)
 
 ;; =============================================================================
@@ -2372,7 +2372,7 @@
        reasoning_content back in subsequent assistant turns or quality and
        cache hit rates degrade. No-op on non-z.ai styles. The Coding Plan
        endpoint (`:zai-coding`) has preserved thinking ON by default
-       server-side — setting this flag is harmless there.
+       server-side - setting this flag is harmless there.
      :extra-body - Map merged into the API request body. Use this to pass
        provider-specific params (e.g. {:temperature 0.3}, {:top_p 0.9}) or
        to override reasoning params with explicit wire-shape overrides.
@@ -2390,13 +2390,13 @@
        head-only mode. See `ask!*` for the full rationale.
      :on-format-error - Routing strategy when a provider returns content
        that fails schema parsing. One of:
-         :fail               (default) — throw with the full forensic envelope.
-         :fallback-provider  — treat the failure as transient and try the
+         :fail               (default) - throw with the full forensic envelope.
+         :fallback-provider  - treat the failure as transient and try the
             next provider/model in the fleet, excluding the offender. The
             final exception (when all providers fail) is the LAST format
             error seen, with `:routed/fallback-trace` and `:format-failed`
             merged into ex-data. Pairs well with `:format-retries N` per
-            provider — retries first absorb prose-leaks locally, fallback
+            provider - retries first absorb prose-leaks locally, fallback
             kicks in only when the whole model is broken for this spec.
      :format-retries / :format-retry-on / :json-object-mode? - See `ask!*`.
        These reach the LLM call via the routed-params pipeline."
@@ -2441,7 +2441,7 @@
       humanizable-fields)))
 
 ;; =============================================================================
-;; Format-retry support — in-process retry on schema-rejected provider output
+;; Format-retry support - in-process retry on schema-rejected provider output
 ;; =============================================================================
 ;;
 ;; Some providers (notably GLM-5.1 under `:deep` reasoning) emit a bare prose
@@ -2453,7 +2453,7 @@
 ;; `:format-retries` lets `ask!*` absorb that noise locally: catch the
 ;; schema-rejection, append a tiny FORMAT-RETRY turn to messages, and re-call
 ;; the provider. Tokens are still billed (we cannot avoid the bad attempt's
-;; tokens — the provider already produced them) but the caller sees one
+;; tokens - the provider already produced them) but the caller sees one
 ;; logical `ask!` call, not N visible failed iterations.
 ;;
 ;; Retries are NOT semantic agent retries. The retry message is a transport
@@ -2467,7 +2467,7 @@
     :svar.spec/required-field-missing})
 
 ;; =============================================================================
-;; Schema tail pointer — recency anchor past the cache breakpoint
+;; Schema tail pointer - recency anchor past the cache breakpoint
 ;; =============================================================================
 ;;
 ;; The full schema-prompt is inlined into the SYSTEM message for cache
@@ -2478,8 +2478,8 @@
 ;; multi-turn transcript can dilute a head-anchored schema.
 ;;
 ;; The tail pointer is a tiny (~30 tok) reminder appended as the LAST text
-;; block of the LAST user message. It does NOT repeat the schema body —
-;; that stays cached at the head — it just points back to it. Sits PAST
+;; block of the LAST user message. It does NOT repeat the schema body -
+;; that stays cached at the head - it just points back to it. Sits PAST
 ;; any cache breakpoint on Anthropic, so it never bloats the cached prefix
 ;; and never burns a breakpoint slot. Tokens billed per call are cheap and
 ;; constant.
@@ -2491,7 +2491,7 @@
 
 (def ^:private SCHEMA_TAIL_POINTER
   "Short schema-pointer text appended as the last block of the last user
-   message. Does not repeat the schema body — points back to the cached
+   message. Does not repeat the schema body - points back to the cached
    schema in the system message. Sits past the cache breakpoint, so it is
    billed but never cached, never burns a breakpoint slot."
   (str "Reply with one JSON object matching the schema in the system message.\n"
@@ -2501,7 +2501,7 @@
 (defn- append-schema-tail-pointer
   "Appends `SCHEMA_TAIL_POINTER` as a trailing text block on the LAST user
    message. If no user message exists in `messages`, appends a new user
-   message carrying just the pointer (degenerate input — schema-only ask).
+   message carrying just the pointer (degenerate input - schema-only ask).
 
    Multimodal content is preserved: the pointer is added as one extra text
    block alongside any existing text/image blocks in the user content vec."
@@ -2560,7 +2560,7 @@
 
 (defn- format-retry-prompt
   "Tiny re-prompt appended after the model's failed assistant response. Kept
-   short — long retry messages waste tokens on every attempt and dilute the
+   short - long retry messages waste tokens on every attempt and dilute the
    instruction. Echoes the parser's exact reason verbatim so the model sees
    which contract clause it violated."
   [attempt total reason received-type]
@@ -2575,7 +2575,7 @@
 (defn- append-format-retry-turn
   "Appends [assistant<previous-bad-content>, user<retry-prompt>] to messages
    so the model sees its own failed output AND the corrective instruction.
-   Empirically outperforms a bare retry instruction — the model self-diagnoses
+   Empirically outperforms a bare retry instruction - the model self-diagnoses
    what it produced."
   [messages prev-content attempt total reason received-type]
   (conj (vec messages)
@@ -2586,7 +2586,7 @@
 
 (defn- envelope-data
   "Forensic envelope merged into every error ex-data thrown from `ask!*`. No
-   truncation — callers (Vis triage, post-mortem tooling) need the full raw
+   truncation - callers (Vis triage, post-mortem tooling) need the full raw
    value to reproduce / persist / display. If a consumer wants a preview, it
    can substr `:content` itself; svar must not destroy forensic data here."
   [{:keys [model api-style chat-url duration-ms api-usage
@@ -2627,7 +2627,7 @@
       (some? cache-created) (assoc :cache-created cache-created))))
 
 (defn ask!*
-  "Low-level ask — calls the LLM directly without routing. Use ask! instead.
+  "Low-level ask - calls the LLM directly without routing. Use ask! instead.
 
    Includes automatic pre-flight context limit checking. If your input exceeds
    the model's context window, throws a clear error with actionable suggestions
@@ -2647,8 +2647,8 @@
      - :format-retries - Integer, optional. Default 0. Number of in-process
        retries when the provider returns content that fails schema parsing
        (e.g. bare prose, wrong top-level type, missing required fields).
-       Each retry is a separate HTTP call — tokens are still billed by the
-       provider — but the caller sees one logical `ask!` call rather than
+       Each retry is a separate HTTP call - tokens are still billed by the
+       provider - but the caller sees one logical `ask!` call rather than
        multiple visible failures. Disabled when `:on-chunk` is provided
        (streaming + retries don't compose). See also `:format-retry-on`.
      - :format-retry-on - Set of exception `:type` keywords that trigger a
@@ -2666,15 +2666,15 @@
      - :schema-tail-pointer? - Boolean, optional. Default true. Appends a
        short (~30 tok) reminder as the last text block of the last user
        message that points back to the schema in the system message. Does
-       NOT repeat the schema body — the body stays cached at the head.
+       NOT repeat the schema body - the body stays cached at the head.
        Restores recency-driven schema adherence after head-inlining the
        schema for cache friendliness. Pass `false` for head-only mode
-       (rare — mostly for quirky local models that double-emit on
+       (rare - mostly for quirky local models that double-emit on
        reminders, or for benchmarking the placement effect).
 
    Returns:
    Map with :result, :tokens, :cost, :duration-ms. When format retries
-   occurred, includes :format-attempts — a vector of per-attempt records
+   occurred, includes :format-attempts - a vector of per-attempt records
    carrying the full content, reasoning, api-usage, and rejection reason for
    each failed attempt before the final success.
 
@@ -2682,7 +2682,7 @@
    ex-info with full forensic envelope merged into ex-data: :model,
    :api-style, :chat-url, :duration-ms, :api-usage, :reasoning, :content,
    :http-response, plus :format-attempts when retries were exhausted. No
-   truncation — ex-data is the canonical post-mortem record."
+   truncation - ex-data is the canonical post-mortem record."
   [router {:keys [spec messages humanizer cache-system? schema-tail-pointer?] :as opts}]
   (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
         provider-id (:provider-id opts)
@@ -2691,7 +2691,7 @@
         ;; Schema placement: full schema body is inlined into the SYSTEM
         ;; message (head, cache-friendly) AND a tiny tail pointer is
         ;; appended to the LAST user message (recency-friendly). The
-        ;; pointer does not repeat the schema body — it just points back
+        ;; pointer does not repeat the schema body - it just points back
         ;; to the cached schema in system. Trade-off rationale:
         ;;  - Schema body is the most stable thing in the payload; head
         ;;    placement lets a single cache_control breakpoint (or OpenAI
@@ -2732,7 +2732,7 @@
                              (assoc m :content
                                (update blocks last-i assoc :svar/cache true))))))
                      with-spec)
-        ;; Tail pointer ON by default — only skipped when caller passes
+        ;; Tail pointer ON by default - only skipped when caller passes
         ;; an explicit `false`. `nil`/missing → ON.
         with-tail (if (false? schema-tail-pointer?)
                     with-cache
@@ -2755,7 +2755,7 @@
                                              (int (* (double (:overflow check)) 0.75)) " words, "
                                              "or use a larger context model.")}))
                           check))
-          ;; API call — streaming if :on-chunk provided
+          ;; API call - streaming if :on-chunk provided
         on-chunk (:on-chunk opts)
         streaming-on-chunk (when on-chunk
                              (fn [{:keys [content reasoning provider-state api-usage]}]
@@ -2774,7 +2774,7 @@
                                                       (json/write-json-str partial-map) spec)
                                                     (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
-                                 ;; Reasoning streams before content — don't gate on content.
+                                 ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
                                    (on-chunk {:result coerced
                                               :reasoning reasoning
@@ -2782,10 +2782,10 @@
                                               :tokens tokens
                                               :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                                               :done? false})))))
-        ;; `:json-object-mode?` auto-injection — caller's `:extra-body
+        ;; `:json-object-mode?` auto-injection - caller's `:extra-body
         ;; :response_format` always wins. OpenAI chat-completions and
         ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
-        ;; `:json-object-mode?` auto-injection — caller's `:extra-body
+        ;; `:json-object-mode?` auto-injection - caller's `:extra-body
         ;; :response_format` always wins. OpenAI chat-completions and
         ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
         caller-extra-body (or (:extra-body opts) {})
@@ -2817,7 +2817,7 @@
                                           :input-tokens (:prompt_tokens api-usage)
                                           :output-tokens (:completion_tokens api-usage)
                                           ;; nil distinguishes "no field in response" from
-                                          ;; "field present but empty" — crucial for triaging
+                                          ;; "field present but empty" - crucial for triaging
                                           ;; provider quirks where content is omitted entirely
                                           ;; versus returned as an empty string.
                                           :reasoning-length (when reasoning (count reasoning))
@@ -2828,7 +2828,7 @@
                          :msg "HTTP response received"})
             ;; Some providers (notably reasoning-capable models) return HTTP 200
             ;; with a non-empty `reasoning_content` but an empty or nil `content`
-            ;; field — usually because the output budget was consumed by reasoning
+            ;; field - usually because the output budget was consumed by reasoning
             ;; or the spec could not be satisfied for the given input. Letting this
             ;; propagate into `jsonish/parse-json` leaks a parser-internal
             ;; "Input cannot be nil or empty" IllegalArgumentException to callers.
@@ -2864,7 +2864,7 @@
       ;; Two-step outcome: HTTP first (which may throw `:svar.llm/empty-content`
       ;; with the envelope ALREADY in ex-data because `do-attempt` populated
       ;; it), then parse (which throws `:svar.spec/schema-rejected` /
-      ;; `:svar.spec/required-field-missing` from the spec layer — spec has
+      ;; `:svar.spec/required-field-missing` from the spec layer - spec has
       ;; no idea about HTTP, so its ex-data carries no envelope). We capture
       ;; the HTTP envelope OUTSIDE the parse try/catch so it's available for
       ;; both branches and merges into the terminal throw regardless of which
@@ -2929,7 +2929,7 @@
                         :api-usage api-usage :http-response http-response
                         :duration-ms duration-ms))]
         (cond
-          ;; SUCCESS — parse worked; humanize, fire done callback, return.
+          ;; SUCCESS - parse worked; humanize, fire done callback, return.
           (:ok? outcome)
           (let [{:keys [result token-stats]} outcome
                 final-result (if humanizer
@@ -2960,7 +2960,7 @@
               ;; Empty / single-element vec is noise on the happy path.
               (> (count all-attempts) 1) (assoc :format-attempts all-attempts)))
 
-          ;; RETRYABLE FAILURE with budget remaining — append format-retry turn
+          ;; RETRYABLE FAILURE with budget remaining - append format-retry turn
           ;; and recur. Token cost of the bad attempt is already sunk (provider
           ;; produced + billed it); we record it for forensic accounting.
           (and (:retryable? outcome)
@@ -2999,7 +2999,7 @@
               (inc attempt)
               (conj prior-attempts attempt-record)))
 
-          ;; TERMINAL FAILURE — either non-retryable type or retries exhausted.
+          ;; TERMINAL FAILURE - either non-retryable type or retries exhausted.
           ;; Re-throw with full forensic envelope merged into ex-data.
           :else
           (let [{:keys [ex ex-type reason received-type content reasoning provider-state
@@ -3039,12 +3039,12 @@
 ;; response with `codes/extract-code-blocks`, filters by `:lang` (default
 ;; "clojure"), and returns the concatenated source.
 ;;
-;; Empty `:result` (no matching code blocks) is a VALID success — the caller
+;; Empty `:result` (no matching code blocks) is a VALID success - the caller
 ;; decides what to do (semantic retry with reminder, treat as no-op, etc.).
 ;; svar throws only on transport-level failures: HTTP errors propagate from
 ;; `chat-completion`; `:svar.llm/empty-content` is thrown when the provider
 ;; returns no content at all (reasoning-only response). No format-retry loop
-;; here — extraction shape is the caller's contract, not svar's.
+;; here - extraction shape is the caller's contract, not svar's.
 ;;
 ;; Tail-pointer placement (`:code-tail-pointer?`) mirrors the schema-tail
 ;; pointer on `ask!*`: a short code-format reminder is appended as the last
@@ -3053,7 +3053,7 @@
 ;; long transcripts without burning a cache breakpoint.
 
 (defn ask-code!*
-  "Low-level ask-code — calls the LLM directly without routing. Use `ask-code!`.
+  "Low-level ask-code - calls the LLM directly without routing. Use `ask-code!`.
 
    See `ask-code!` for the full param + return contract."
   [router {:keys [messages on-chunk code-tail-pointer?] :as opts}]
@@ -3089,6 +3089,14 @@
                                              (int (* (double (:overflow check)) 0.75)) " words, "
                                              "or use a larger context model.")}))
                           check))
+        ;; Per-chunk on-chunk: signal progress only. Never re-parse the
+        ;; accumulated buffer here — `codes/extract-code-blocks` is
+        ;; O(N) per call and the buffer grows monotonically, so doing
+        ;; it on every SSE delta is O(N²) and pegs CPU on long
+        ;; responses (reproduced live in Vis conv 0c8188ac, glm-5.1,
+        ;; thread stuck in `normalize-fence-closers`). The final parse
+        ;; happens exactly once after `chat-completion` returns and is
+        ;; surfaced in the `:done? true` chunk + return value below.
         streaming-on-chunk (when on-chunk
                              (fn [{:keys [content reasoning provider-state api-usage]}]
                                (let [tokens (api-usage->tokens api-usage)
@@ -3099,16 +3107,11 @@
                                               pricing
                                               {:api-usage api-usage
                                                :api-style api-style
-                                               :cache-tokens-in-input? (not= api-style :anthropic)}))
-                                     blocks   (codes/extract-code-blocks content)
-                                     selected (->> (codes/select-blocks blocks lang)
-                                                (remove #(str/blank? (:source %)))
-                                                vec)
-                                     partial-result (codes/concat-sources selected)]
-                                 (when (or (not (str/blank? partial-result))
-                                         (not (str/blank? (or reasoning ""))))
-                                   (on-chunk {:result    partial-result
-                                              :blocks    selected
+                                               :cache-tokens-in-input? (not= api-style :anthropic)}))]
+                                 (when (or (not (str/blank? (or reasoning "")))
+                                         (not (str/blank? (or content ""))))
+                                   (on-chunk {:result    nil
+                                              :blocks    nil
                                               :raw       content
                                               :reasoning reasoning
                                               :provider-state provider-state
@@ -3190,12 +3193,12 @@
      :code-tail-pointer? - Boolean, default true. Appends a short code-format
              reminder as the last text block of the last user message,
              pointing at the format contract (\"reply with `lang` source
-             inside ```lang … ``` fences\"). Restores recency-driven format
+             inside ```lang ... ``` fences\"). Restores recency-driven format
              adherence on long transcripts. Set to `false` to opt out.
 
    Returns:
    {:result      <concatenated source string of selected blocks>
-    :blocks      [{:lang <str-or-nil> :source <str>} …]
+    :blocks      [{:lang <str-or-nil> :source <str>} ...]
     :raw         <full assistant text content>
     :reasoning   <provider reasoning channel, when present>
     :provider-state <opaque provider continuation state, when present>
@@ -3237,7 +3240,7 @@
 ;; =============================================================================
 
 (defn abstract!
-  "Routed abstract! — provider fallback + rate limiting.
+  "Routed abstract! - provider fallback + rate limiting.
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
@@ -3260,12 +3263,12 @@
 
 (def ^:private COD_ENTITY_CRITERIA
   "Shared XML definition of entity selection criteria.
-   Faithful to Adams et al., 2023 — entity types are intentionally open-ended."
+   Faithful to Adams et al., 2023 - entity types are intentionally open-ended."
   "<entity_criteria>
-    <criterion name=\"atomic\">Each entity must be a single named thing — a person, place, date, organization, concept, or term. NOT a phrase, clause, or description.</criterion>
+    <criterion name=\"atomic\">Each entity must be a single named thing - a person, place, date, organization, concept, or term. NOT a phrase, clause, or description.</criterion>
     <criterion name=\"relevant\">Related to the main story or central theme</criterion>
-    <criterion name=\"specific\">A proper noun, date, or precise term from the text — not a generic description or paraphrase</criterion>
-    <criterion name=\"faithful\">Must appear verbatim or near-verbatim in the source text — no invented modifiers or rewordings</criterion>
+    <criterion name=\"specific\">A proper noun, date, or precise term from the text - not a generic description or paraphrase</criterion>
+    <criterion name=\"faithful\">Must appear verbatim or near-verbatim in the source text - no invented modifiers or rewordings</criterion>
 </entity_criteria>")
 
 (defn- build-cod-first-iteration-objective
@@ -3273,16 +3276,16 @@
   [target-length special-instructions]
   (str "<chain_of_density_iteration>
     <task>Create the first summary of the provided text, covering only the most prominent entities.</task>
-    
+
     <instructions>
         <instruction>Identify key salient entities from the text to include</instruction>
         <instruction>Write a factual summary (4-5 sentences, ~" target-length " words) that covers the broad topic</instruction>
-        <instruction>Use ONLY words and facts that appear in the source text — do not add adjectives, modifiers, or characterizations not present in the original</instruction>
-        <instruction>Do NOT describe what the text is (e.g. \"this article discusses\") — summarize WHAT IT SAYS</instruction>
+        <instruction>Use ONLY words and facts that appear in the source text - do not add adjectives, modifiers, or characterizations not present in the original</instruction>
+        <instruction>Do NOT describe what the text is (e.g. \"this article discusses\") - summarize WHAT IT SAYS</instruction>
         <instruction>Do NOT add evaluative language (e.g. \"revolutionary\", \"groundbreaking\", \"important\") unless the source text uses those exact words</instruction>
-        <instruction>This is the sparse starting point — later iterations will add more entities and compress further</instruction>
+        <instruction>This is the sparse starting point - later iterations will add more entities and compress further</instruction>
     </instructions>
-    
+
     " COD_ENTITY_CRITERIA "
     "
     (when special-instructions
@@ -3304,13 +3307,13 @@
   [target-length special-instructions]
   (str "<chain_of_density_iteration>
     <task>Create a denser version of the previous summary by incorporating missing entities.</task>
-    
+
     <process>
-        <step number=\"1\">Review the already-extracted entities list — do NOT re-extract any of them</step>
+        <step number=\"1\">Review the already-extracted entities list - do NOT re-extract any of them</step>
         <step number=\"2\">Identify salient entities from the SOURCE TEXT that are missing from BOTH the entity list AND the previous summary</step>
         <step number=\"3\">Rewrite the summary to incorporate these genuinely new entities while maintaining the same word count</step>
     </process>
-    
+
     " (str/replace COD_ENTITY_CRITERIA
         "</entity_criteria>"
         (str "    <criterion name=\"novel\">Not present in the previous summary or the already-extracted entities list</criterion>\n"
@@ -3326,15 +3329,15 @@
     <guidelines>
         <instruction>Make every word count by rewriting for better flow</instruction>
         <instruction>Create space through fusion, compression, and removing fillers</instruction>
-        <instruction>Use ONLY information present in the source text — remove any interpretation, framing, or meta-commentary</instruction>
-        <instruction>Do NOT describe what the text is — summarize WHAT IT SAYS</instruction>
+        <instruction>Use ONLY information present in the source text - remove any interpretation, framing, or meta-commentary</instruction>
+        <instruction>Do NOT describe what the text is - summarize WHAT IT SAYS</instruction>
         <instruction>The summary must be self-contained and understandable without the source</instruction>
         <instruction>Missing entities can appear anywhere in the new summary</instruction>
         <instruction>Never drop entities from the previous summary</instruction>
         <instruction>If no space can be made, add fewer new entities rather than dropping old ones</instruction>
         <constraint>Maintain approximately ~" target-length " words</constraint>
     </guidelines>
-    
+
     <output_requirements>
         <field name=\"entities\">Array of NEW entity objects added in this iteration, each with 'entity' (atomic name), 'rationale' (why it's salient), and 'score' (0.0-1.0 salience)</field>
         <field name=\"summary\">The rewritten denser summary (~" target-length " words)</field>
@@ -3363,7 +3366,7 @@
     (spec/field ::spec/name :entity
       ::spec/type :spec.type/string
       ::spec/cardinality :spec.cardinality/one
-      ::spec/description "Atomic entity name — a single person, place, date, concept, or thing")
+      ::spec/description "Atomic entity name - a single person, place, date, concept, or thing")
     (spec/field ::spec/name :rationale
       ::spec/type :spec.type/string
       ::spec/cardinality :spec.cardinality/one
@@ -3371,7 +3374,7 @@
     (spec/field ::spec/name :score
       ::spec/type :spec.type/float
       ::spec/cardinality :spec.cardinality/one
-      ::spec/description "Salience score from 0.0 to 1.0 — how central this entity is to the text's main point")))
+      ::spec/description "Salience score from 0.0 to 1.0 - how central this entity is to the text's main point")))
 
 (defn- build-cod-spec
   "Builds the spec for a single Chain of Density iteration output.
@@ -3415,7 +3418,7 @@
             (trove/log! {:level :warn
                          :id ::cod-non-map-result
                          :data {:result-type (type result) :result (pr-str result)}
-                         :msg "SAP returned non-map for CoD spec — check jsonish/spec pipeline"}))
+                         :msg "SAP returned non-map for CoD spec - check jsonish/spec pipeline"}))
         ;; First-iteration nil summary is unrecoverable; subsequent iterations fall back.
         _ (when (and first-iteration? (nil? (:summary result)))
             (anomaly/fault! "LLM returned nil summary on first CoD iteration"
@@ -3459,18 +3462,18 @@
 
 (defn abstract!*
   "Creates a dense, entity-rich summary of text using Chain of Density prompting.
-   
+
    Based on \"From Sparse to Dense: GPT-4 Summarization with Chain of Density Prompting\"
    (Adams et al., 2023). Iteratively refines a summary by identifying missing salient
    entities and incorporating them while maintaining a fixed length.
-   
+
     When `:eval?` is true, each iteration is scored against the source text using `eval!`,
    giving a quality gradient across iterations (`:score` field per iteration).
-   
+
    When `:refine?` is true, the final summary is verified against the source text using
    Chain of Verification (CoVe) via `refine!`. This catches hallucinated framing,
    unfaithful claims, and information not present in the source.
-   
+
    Opts:
      :text - String. Source text to summarize.
      :model - String. LLM model to use.
@@ -3630,7 +3633,7 @@
                                (str/join "\n")))]
     (str "<evaluation_task>
     <role>You are a rigorous evaluator assessing LLM outputs for quality and correctness.</role>
-    
+
     <instructions>
         <instruction>Carefully analyze the ORIGINAL TASK and the OUTPUT to evaluate</instruction>
         <instruction>Score each criterion from 0.0 to 1.0 with honest, critical assessment</instruction>
@@ -3639,12 +3642,12 @@
         <instruction>Be skeptical - do not assume correctness without verification</instruction>
         <instruction>Consider edge cases and potential failure modes</instruction>
     </instructions>
-    
+
     <evaluation_criteria>
         Evaluate the output against EACH of these criteria (include ALL in the criteria array):
 " criteria-list "
     </evaluation_criteria>
-    
+
     <scoring_guidelines>
         <guideline range=\"0.9-1.0\">Excellent - No issues, fully meets criterion</guideline>
         <guideline range=\"0.7-0.9\">Good - Minor issues, mostly meets criterion</guideline>
@@ -3690,7 +3693,7 @@
     (assoc criteria-scores :overall (:overall-score eval-result))))
 
 (defn eval!
-  "Routed eval! — provider fallback + rate limiting.
+  "Routed eval! - provider fallback + rate limiting.
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
@@ -3702,7 +3705,7 @@
         (eval!* router (inject-routed-params opts provider model-map))))))
 
 (defn eval!*
-  "Low-level eval — calls ask!* directly without routing. Use eval! instead."
+  "Low-level eval - calls ask!* directly without routing. Use eval! instead."
   [router {:keys [task output messages criteria ground-truths context]
            :as opts
            :or {criteria EVAL_CRITERIA}}]
@@ -3781,11 +3784,11 @@
   [original-objective]
   (str "<decomposition_task>
     <role>You are an expert analyst who identifies and extracts verifiable claims from text.</role>
-    
+
     <context>
         <original_objective>" original-objective "</original_objective>
     </context>
-    
+
     <instructions>
         <instruction>Analyze the OUTPUT and extract all distinct claims or assertions</instruction>
         <instruction>Each claim should be a single, atomic statement that can be evaluated</instruction>
@@ -3795,14 +3798,14 @@
         <instruction>Focus on claims that matter most to the original objective</instruction>
         <instruction>Include both explicit and implicit claims</instruction>
     </instructions>
-    
+
     <claim_guidelines>
         <guideline>Factual claims: Statements about concrete facts, numbers, dates, names</guideline>
         <guideline>Inference claims: Conclusions, implications, or derived statements</guideline>
         <guideline>Subjective claims: Opinions, evaluations, or value judgments</guideline>
         <guideline>Prioritize claims that are critical to the output's correctness</guideline>
     </claim_guidelines>
-    
+
     <output_requirements>
         <requirement>Extract 3-10 claims depending on output complexity</requirement>
         <requirement>Order claims by importance to the original objective</requirement>
@@ -3911,18 +3914,18 @@
   [original-objective]
   (str "<question_planning_task>
     <role>You are an expert fact-checker who designs targeted verification questions.</role>
-    
+
     <context>
         <original_objective>" original-objective "</original_objective>
     </context>
-    
+
     <instructions>
         <instruction>For each claim, generate ONE specific verification question</instruction>
         <instruction>The question should be answerable independently without seeing the original output</instruction>
         <instruction>Questions should test the factual accuracy of the claim</instruction>
         <instruction>Do NOT answer the questions - only generate them</instruction>
     </instructions>
-    
+
     <question_guidelines>
         <guideline>Questions should be specific and testable</guideline>
         <guideline>Avoid yes/no questions - prefer questions that require detailed answers</guideline>
@@ -4016,7 +4019,7 @@
   (if (seq documents)
     "<independent_verification>
     <role>You are a rigorous fact-checker answering a verification question.</role>
-    
+
     <instructions>
         <instruction>Answer the verification question using ONLY the provided source documents and your knowledge</instruction>
         <instruction>You are NOT shown the original output being verified - this is intentional</instruction>
@@ -4024,7 +4027,7 @@
         <instruction>Then compare your answer against the original claim to determine a verdict</instruction>
         <instruction>Cite the specific document, page, and section that supports your answer</instruction>
     </instructions>
-    
+
     <principles>
         <principle>Be skeptical - do not assume the claim is correct</principle>
         <principle>Base your answer on evidence, not assumptions</principle>
@@ -4033,14 +4036,14 @@
 </independent_verification>"
     "<independent_verification>
     <role>You are a rigorous fact-checker answering a verification question.</role>
-    
+
     <instructions>
         <instruction>Answer the verification question independently using your knowledge</instruction>
         <instruction>You are NOT shown the original output being verified - this is intentional</instruction>
         <instruction>Answer as accurately and independently as possible</instruction>
         <instruction>Then compare your answer against the original claim to determine a verdict</instruction>
     </instructions>
-    
+
     <principles>
         <principle>Be skeptical - do not assume the claim is correct</principle>
         <principle>Base your answer on evidence, not assumptions</principle>
@@ -4083,7 +4086,7 @@
   [claims original-task original-objective model router documents llm-opts]
   (let [{:keys [verifiable non-verifiable]} (filter-verifiable-claims claims)]
     (if (empty? verifiable)
-      ;; All claims are non-verifiable — return as uncertain
+      ;; All claims are non-verifiable - return as uncertain
       {:verifications (mapv (fn [claim]
                               {:claim (:claim claim)
                                :question "N/A"
@@ -4092,7 +4095,7 @@
                                :reasoning "Claim is subjective or not independently verifiable"})
                         non-verifiable)}
       ;; Factored CoVe
-      (let [;; Step 1: Plan verification questions (one LLM call — sees all claims)
+      (let [;; Step 1: Plan verification questions (one LLM call - sees all claims)
             planning-result (plan-verification-questions verifiable original-task
                               original-objective model router llm-opts)
             planned-questions (:questions planning-result)
@@ -4185,7 +4188,7 @@
         <instruction>Compare ALL verification answers against each other to find cross-claim contradictions</instruction>
         <instruction>Compare each verification answer against the original output to find undetected divergences</instruction>
         <instruction>Look for cases where individually 'correct' claims conflict with each other</instruction>
-        <instruction>Identify factual drift — where the original output subtly diverges from verification answers</instruction>
+        <instruction>Identify factual drift - where the original output subtly diverges from verification answers</instruction>
         <instruction>If no inconsistencies are found, return an empty inconsistencies array</instruction>
     </instructions>
 
@@ -4268,24 +4271,24 @@
   [original-objective iteration]
   (str "<refinement_task>
     <role>You are an expert editor who improves outputs based on verification feedback.</role>
-    
+
     <context>
         <original_objective>" original-objective "</original_objective>
         <iteration>" iteration "</iteration>
     </context>
-    
+
     <instructions>
         <instruction>Review the ORIGINAL OUTPUT and the VERIFICATION FEEDBACK</instruction>
         <instruction>Address ALL issues marked as incorrect or partially-correct</instruction>
         <instruction>Apply suggested corrections where provided</instruction>
-        <instruction>Resolve ALL cross-claim inconsistencies — these are conflicts between claims that were individually verified but contradict each other</instruction>
+        <instruction>Resolve ALL cross-claim inconsistencies - these are conflicts between claims that were individually verified but contradict each other</instruction>
         <instruction>Maintain all aspects that were verified as correct and are not part of an inconsistency</instruction>
         <instruction>Improve clarity and accuracy without changing correct content</instruction>
         <instruction>Ensure the refined output fully addresses the original task</instruction>
     </instructions>
-    
+
     <refinement_principles>
-        <principle>Prioritize resolving cross-claim contradictions — these indicate structural errors in the output</principle>
+        <principle>Prioritize resolving cross-claim contradictions - these indicate structural errors in the output</principle>
         <principle>Prioritize fixing high-severity issues next</principle>
         <principle>Do not introduce new errors while fixing existing ones</principle>
         <principle>Preserve the overall structure and intent of the original output</principle>
@@ -4432,8 +4435,8 @@
      :total total}))
 
 (defn refine!*
-  "Low-level refine — calls ask!* directly without routing. Use refine! instead.
-   
+  "Low-level refine - calls ask!* directly without routing. Use refine! instead.
+
    Implements the Factor+Revise variant of Chain of Verification (CoVe)
    from Dhuliawala et al. (2023), combined with DuTy decomposition."
   [router {:keys [spec messages iterations threshold stop-strategy
@@ -4573,7 +4576,7 @@
    Provider-supplied `:llm-headers` are merged on top so providers
    like OpenAI Codex can attach `chatgpt-account-id`.
 
-   Returns `[]` on HTTP failure rather than throwing — callers fall
+   Returns `[]` on HTTP failure rather than throwing - callers fall
    back to a catalog default. Set `:opts {:strict? true}` to surface
    the underlying `ex-info` instead."
   ([router] (models! router {}))
@@ -4668,7 +4671,7 @@
       "Maintain what was good and fix the identified issues.")))
 
 (defn sample!
-  "Routed sample! — provider fallback + rate limiting.
+  "Routed sample! - provider fallback + rate limiting.
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
@@ -4678,7 +4681,7 @@
         (sample!* router (inject-routed-params opts provider model-map))))))
 
 (defn sample!*
-  "Low-level sample — generates test data without routing. Use sample! instead."
+  "Low-level sample - generates test data without routing. Use sample! instead."
   [router {:keys [spec messages criteria iterations threshold]
            :as opts
            n :count
@@ -4740,7 +4743,7 @@
 
                 (if (or (>= score (double threshold))
                       (>= (long iter) (dec (long iterations))))
-                  ;; Done — return best result
+                  ;; Done - return best result
                   {:samples new-best-samples
                    :scores (:scores evaluation)
                    :final-score new-best-score
@@ -4768,7 +4771,7 @@
 ;; =============================================================================
 
 (defn refine!
-  "Routed refine — iterative refinement with provider fallback and rate limiting.
+  "Routed refine - iterative refinement with provider fallback and rate limiting.
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]

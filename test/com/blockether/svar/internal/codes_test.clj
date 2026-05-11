@@ -2,6 +2,7 @@
   "Tests for fenced code-block extraction (codes/extract-code-blocks,
    codes/select-blocks, codes/concat-sources)."
   (:require
+   [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
    [com.blockether.svar.internal.codes :as sut]))
 
@@ -195,4 +196,29 @@
                    (sut/select-blocks "clojure")
                    sut/concat-sources)]
       (expect (= "(def x 42)\n(answer (str x))" source)))))
+
+(defdescribe extract-code-blocks-perf-test
+  ;; Regression for Vis conv 0c8188ac: `normalize-fence-closers` used to
+  ;; run a `(?m)…$` regex over the entire buffer. Combined with the LLM
+  ;; layer re-parsing on every SSE chunk, total work was O(N²). Even with
+  ;; the LLM-layer per-chunk re-parse removed, the normalizers must stay
+  ;; linear so callers that DO invoke extraction on a megabyte-scale
+  ;; response finish in tens of ms, not minutes.
+  (describe "linear-time normalization on large buffers"
+    (it "extracts a 1 MB fenced response in well under a second"
+      (let [;; ~1 MB of realistic Clojure-looking lines inside one fence,
+            ;; with sprinkled backticks/brackets to stress the regexes
+            ;; that used to backtrack catastrophically.
+            line   "(defn foo-bar [x y] (let [r `(:a :b :c)] (str x y r [1 2] {:k :v})))"
+            body   (str/join "\n" (repeat 12000 line))
+            response (str "```clojure\n" body "\n```")
+            start  (System/nanoTime)
+            blocks (sut/extract-code-blocks response)
+            elapsed-ms (/ (- (System/nanoTime) start) 1e6)]
+        (expect (= 1 (count blocks)))
+        (expect (= "clojure" (:lang (first blocks))))
+        ;; Generous bound: pre-fix this took tens of seconds on the same
+        ;; input. 1.5 s leaves headroom for slow CI without masking a
+        ;; reintroduction of the quadratic pass.
+        (expect (< elapsed-ms 1500))))))
 
