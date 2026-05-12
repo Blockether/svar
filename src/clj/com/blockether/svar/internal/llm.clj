@@ -256,9 +256,11 @@
   (merge (make-llm-headers api-style api-key provider-id)
     (when (= :github-copilot provider-id)
       (copilot-static-headers))
-    llm-headers
     (when (= :github-copilot provider-id)
-      (copilot-dynamic-headers messages))))
+      (copilot-dynamic-headers messages))
+    ;; Caller headers win. Lets apps force Copilot X-Initiator through
+    ;; :llm-headers when auto inference is wrong for internal calls.
+    llm-headers))
 
 (defn- make-chat-url
   "Builds the chat endpoint URL for the given API style.
@@ -2089,9 +2091,11 @@
          provider-id     (:provider-id opts)
          headers         (merge (when (= :github-copilot provider-id)
                                   (copilot-static-headers))
-                           llm-headers
                            (when (= :github-copilot provider-id)
-                             (copilot-dynamic-headers messages)))]
+                             (copilot-dynamic-headers messages))
+                           ;; Caller headers win. Mirrors request-headers for
+                           ;; Responses transport.
+                           llm-headers)]
      (if (= api-style :openai-compatible-responses)
        (openai-responses-completion
          (build-openai-responses-request-body messages model extra-body)
@@ -2370,7 +2374,8 @@
      `response_format: {type: \"json_object\"}` on
      `:openai-compatible-chat` api-style - hardens prose-leaking models (GLM
      family historically leaks prose into
-     `content` under `:deep` reasoning)."
+     `content` under `:deep` reasoning).
+   - `:llm-headers` merges provider defaults with caller headers; caller wins."
   [opts provider model-map]
   (let [ctx (long (or (:context model-map) 8192))
         auto-params {:max_tokens (long (* 0.25 ctx))}
@@ -2380,6 +2385,7 @@
                            {:preserved-thinking? (:preserved-thinking? opts)})
         merged-body (cond-> (merge (:extra-body provider) (:extra-body model-map) auto-params reasoning-params (:extra-body opts))
                       (:verbosity opts) (assoc :verbosity (:verbosity opts)))
+        merged-headers (not-empty (merge (:llm-headers provider) (:llm-headers opts)))
         ;; Caller's explicit :json-object-mode? (true OR false) wins; otherwise
         ;; inherit the routed model's metadata flag. `contains?` so explicit
         ;; `false` opts out of auto-injection even when the model is flagged.
@@ -2398,8 +2404,8 @@
         :extra-body merged-body)
       (cond-> (some? (:responses-path provider))
         (assoc :responses-path (:responses-path provider)))
-      (cond-> (some? (:llm-headers provider))
-        (assoc :llm-headers (:llm-headers provider))))))
+      (cond-> merged-headers
+        (assoc :llm-headers merged-headers)))))
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.

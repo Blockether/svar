@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Caller `:llm-headers` now override inferred GitHub Copilot dynamic headers,
+  allowing per-call `{"X-Initiator" "agent"}` without private patches.
+
 ## [v0.5.1] - 2026-05-12
 
 ### Changed

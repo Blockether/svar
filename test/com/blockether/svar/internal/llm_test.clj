@@ -315,7 +315,7 @@
               (expect (= {:effort "low" :summary "auto"}
                         (:reasoning body))))))))
 
-    (it "Copilot Responses requests reuse OpenAI reasoning and include Copilot headers"
+    (it "Copilot Responses requests reuse OpenAI reasoning and honor Copilot header overrides"
       (let [calls (atom [])
             router (svar/make-router
                      [{:id :github-copilot
@@ -342,7 +342,8 @@
                             :messages [(svar/system "Return JSON.")
                                        (svar/user "Reply ok")]
                             :reasoning :deep
-                            :json-object-mode? true})
+                            :json-object-mode? true
+                            :llm-headers {"X-Initiator" "agent"}})
                   {:keys [url body headers]} (first @calls)]
               (expect (= "ok" (get-in result [:result :answer])))
               (expect (= "https://api.individual.githubcopilot.com/responses" url))
@@ -350,7 +351,7 @@
               (expect (= "copilot-chat/0.26.7" (get headers "Editor-Plugin-Version")))
               (expect (= "vscode-chat" (get headers "Copilot-Integration-Id")))
               (expect (= "GitHubCopilotChat/0.26.7" (get headers "User-Agent")))
-              (expect (= "user" (get headers "X-Initiator")))
+              (expect (= "agent" (get headers "X-Initiator")))
               (expect (= "conversation-edits" (get headers "Openai-Intent")))
               (expect (= "text/event-stream" (get headers "Accept")))
               (expect (= true (:stream body)))
@@ -403,6 +404,22 @@
             (expect (= "copilot-chat/0.26.7" (get @seen "Editor-Plugin-Version")))
             (expect (= "vscode-chat" (get @seen "Copilot-Integration-Id")))
             (expect (= "user" (get @seen "X-Initiator")))
+            (expect (= "conversation-edits" (get @seen "Openai-Intent")))))))
+
+    (it "chat-completion lets llm-headers override inferred Copilot X-Initiator"
+      (let [seen (atom nil)
+            messages [(svar/user "internal call")]]
+        (with-redefs-fn {#'sut/http-post! (fn [_url _body headers _timeout-ms]
+                                            (reset! seen headers)
+                                            {:parsed {:choices [{:message {:content "ok"}}]}
+                                             :raw-body "{}"
+                                             :url "https://example.invalid/v1/chat/completions"
+                                             :status 200})}
+          (fn []
+            (sut/chat-completion messages "gpt-4o" "sk-test" "https://example.invalid/v1"
+              {:provider-id :github-copilot
+               :llm-headers {"X-Initiator" "agent"}})
+            (expect (= "agent" (get @seen "X-Initiator")))
             (expect (= "conversation-edits" (get @seen "Openai-Intent")))))))
 
     (it "chat-completion marks Copilot requests with prior assistant turns as agent initiated"
