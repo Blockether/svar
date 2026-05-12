@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.2] - 2026-05-12
+
+### Changed
+- fix: let llm-headers override Copilot initiator
+- release: update version files for v0.5.1, bump to next dev version
+
+
 ### Changed
 - Caller `:llm-headers` now override inferred GitHub Copilot dynamic headers,
   allowing per-call `{"X-Initiator" "agent"}` without private patches.
@@ -764,7 +771,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.2...HEAD
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
 [v0.1.3]: https://github.com/Blockether/svar/releases/tag/v0.1.3
@@ -797,3 +804,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.4.15]: https://github.com/Blockether/svar/releases/tag/v0.4.15
 [v0.5.0]: https://github.com/Blockether/svar/releases/tag/v0.5.0
 [v0.5.1]: https://github.com/Blockether/svar/releases/tag/v0.5.1
+[v0.5.2]: https://github.com/Blockether/svar/releases/tag/v0.5.2
