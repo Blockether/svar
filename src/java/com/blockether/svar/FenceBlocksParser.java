@@ -23,8 +23,11 @@ import java.util.List;
  *       backtick run is at least {@code open-len + 3} characters long is
  *       treated as the close of the current block plus the open of the
  *       next.</li>
- *   <li>Unclosed or malformed final fence → return {@code malformed = true}
- *       and an empty block list.</li>
+ *   <li>Unclosed final fence at EOF → implicit close when body has real
+ *       content and no nested fence line. This preserves streamed LLM output
+ *       whose final ``` closer was truncated.</li>
+ *   <li>Malformed final fence → return {@code malformed = true}; completed
+ *       blocks remain available, invalid final block is dropped.</li>
  *   <li>Any extracted body that still contains a glued close+short-open
  *       fragment ({@code ```{3,}[ \t]+`{1,2}[A-Za-z0-9_+-]+}) → also
  *       malformed; reject the whole extraction.</li>
@@ -117,8 +120,15 @@ public final class FenceBlocksParser {
         }
 
         if (inBlock) {
-            // unclosed final fence → malformed
-            return new Result(new ArrayList<>(), true, true);
+            // EOF after opener. LLM streams often lose only final ``` closer.
+            // Treat non-empty, fence-free body as implicitly closed; drop bad
+            // final body but keep earlier complete blocks for recovery.
+            String source = sliceBody(s, bodyStart, bodyEnd);
+            if (!isBlank(source) && !containsStandaloneFenceLine(source)) {
+                blocks.add(new Block(openLang, source));
+            } else {
+                return new Result(blocks, true, true);
+            }
         }
 
         for (Block b : blocks) {
@@ -178,6 +188,28 @@ public final class FenceBlocksParser {
             sb.append(c);
         }
         return sb.toString();
+    }
+
+    private static boolean isBlank(String source) {
+        if (source == null || source.isEmpty()) return true;
+        for (int i = 0; i < source.length(); i++) {
+            char c = source.charAt(i);
+            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return false;
+        }
+        return true;
+    }
+
+    private static boolean containsStandaloneFenceLine(String source) {
+        if (source == null || source.isEmpty()) return false;
+        int n = source.length();
+        int lineStart = 0;
+        for (int i = 0; i <= n; i++) {
+            if (i == n || source.charAt(i) == '\n') {
+                if (recognizeFenceLine(source, lineStart, i) != null) return true;
+                lineStart = i + 1;
+            }
+        }
+        return false;
     }
 
     // ---------------------------------------------------------------------

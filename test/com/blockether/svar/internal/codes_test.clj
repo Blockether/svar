@@ -97,8 +97,14 @@
     (it "returns [] instead of leaking raw fence markers"
       (expect (= [] (sut/extract-code-blocks "```\n\n```clojure"))))
 
-    (it "returns [] for an unclosed fence instead of falling back to raw markdown"
-      (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)"))))
+    (it "implicitly closes a non-empty trailing fence at EOF"
+      (expect (= [{:lang "clojure" :source "(def x 1)"}]
+                (sut/extract-code-blocks "```clojure\n(def x 1)"))))
+
+    (it "keeps completed blocks when the final fence is missing its closer"
+      (expect (= [{:lang "clojure" :source "(def x 1)"}
+                  {:lang "clojure" :source "(def y 2)"}]
+                (sut/extract-code-blocks "```clojure\n(def x 1)\n```\n\n```clojure\n(def y 2)"))))
 
     (it "returns [] for a short next opener instead of guessing"
       (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)```` ``clojure\n(def y 2)\n```")))))

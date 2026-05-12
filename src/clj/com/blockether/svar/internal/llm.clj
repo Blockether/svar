@@ -1627,6 +1627,34 @@
         (json/read-json trimmed :key-fn keyword)
         (catch Exception _ nil)))))
 
+(defn- stream-event-type
+  [chunk]
+  (or (:type chunk)
+    (:object chunk)))
+
+(defn- stream-finish-reason
+  [chunk]
+  (or (:finish_reason chunk)
+    (:finish-reason chunk)
+    (get-in chunk [:choices 0 :finish_reason])
+    (get-in chunk [:choices 0 :finish-reason])
+    (get-in chunk [:response :status])
+    (:status chunk)))
+
+(defn- stream-finalization-summary
+  [{:keys [terminal incomplete last-event-type last-finish-reason
+           content-acc reasoning-acc response]}]
+  (cond-> {:terminal? (boolean terminal)
+           :terminal-kind (:kind terminal)
+           :terminal-event-type (:event-type terminal)
+           :last-event-type last-event-type
+           :finish-reason last-finish-reason
+           :incomplete? (boolean incomplete)
+           :incomplete-reason (:reason incomplete)
+           :content-acc-len (.length ^StringBuilder content-acc)
+           :reasoning-acc-len (.length ^StringBuilder reasoning-acc)}
+    response (assoc :http-status (:status response))))
+
 (defn- extract-stream-delta
   "Extracts content and reasoning deltas from a streaming SSE chunk."
   [chunk]
@@ -1814,7 +1842,9 @@
         usage-atom (atom nil)
         provider-state-atom (atom nil)
         current-reasoning-item (atom nil)
-        terminal-seen? (atom false)
+        terminal-event (atom nil)
+        last-event-type (atom nil)
+        last-finish-reason (atom nil)
         incomplete-response (atom nil)]
     (try
       (with-open [reader (BufferedReader. (InputStreamReader. ^java.io.InputStream input-stream "UTF-8"))]
@@ -1826,7 +1856,7 @@
                       parsed (parse-sse-data data-str)]
                   (cond
                     (= sse-done parsed)
-                    (reset! terminal-seen? true)
+                    (reset! terminal-event {:kind :done-marker})
 
                     parsed
                     (let [parsed (enrich-responses-reasoning-event current-reasoning-item parsed)
@@ -1839,7 +1869,13 @@
                           reasoning-piece (or reasoning-delta
                                             (when (zero? (.length reasoning-acc))
                                               (some-> reasoning-fallback reasoning-part-text)))]
-                      (when terminal? (reset! terminal-seen? true))
+                      (when-let [event-type (stream-event-type parsed)]
+                        (reset! last-event-type event-type))
+                      (when-let [finish-reason (stream-finish-reason parsed)]
+                        (reset! last-finish-reason finish-reason))
+                      (when terminal?
+                        (reset! terminal-event {:kind :terminal-event
+                                                :event-type (stream-event-type parsed)}))
                       (when incomplete?
                         (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
                       (when content-piece (.append content-acc content-piece))
@@ -1856,22 +1892,40 @@
                                    :api-usage api-usage}))))))
               (recur))))
         (when-let [incomplete @incomplete-response]
-          (throw (ex-info "Stream ended with incomplete response."
-                   {:type :svar.core/stream-incomplete
-                    :stream? true
-                    :url url
-                    :reason (:reason incomplete)
-                    :content-acc-len (.length content-acc)
-                    :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))})))
-        (when-not @terminal-seen?
-          (throw (ex-info "Stream ended before terminal marker."
-                   {:type :svar.core/stream-truncated
-                    :stream? true
-                    :url url
-                    :content-acc-len (.length content-acc)
-                    :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))})))
+          (let [stream-finalization (stream-finalization-summary
+                                      {:terminal @terminal-event
+                                       :incomplete incomplete
+                                       :last-event-type @last-event-type
+                                       :last-finish-reason @last-finish-reason
+                                       :content-acc content-acc
+                                       :reasoning-acc reasoning-acc
+                                       :response response})]
+            (throw (ex-info "Stream ended with incomplete response."
+                     {:type :svar.core/stream-incomplete
+                      :stream? true
+                      :url url
+                      :reason (:reason incomplete)
+                      :stream-finalization stream-finalization
+                      :content-acc-len (.length content-acc)
+                      :reasoning-acc-len (.length reasoning-acc)
+                      :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+        (when-not @terminal-event
+          (let [stream-finalization (stream-finalization-summary
+                                      {:terminal nil
+                                       :incomplete nil
+                                       :last-event-type @last-event-type
+                                       :last-finish-reason @last-finish-reason
+                                       :content-acc content-acc
+                                       :reasoning-acc reasoning-acc
+                                       :response response})]
+            (throw (ex-info "Stream ended before terminal marker."
+                     {:type :svar.core/stream-truncated
+                      :stream? true
+                      :url url
+                      :stream-finalization stream-finalization
+                      :content-acc-len (.length content-acc)
+                      :reasoning-acc-len (.length reasoning-acc)
+                      :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
         (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
               final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
               ps              @provider-state-atom
@@ -1899,33 +1953,64 @@
 
                                 (openai-chat-canonical-assistant-message
                                   {:content final-content
-                                   :reasoning-content final-reasoning}))]
+                                   :reasoning-content final-reasoning}))
+              stream-finalization (stream-finalization-summary
+                                    {:terminal @terminal-event
+                                     :incomplete nil
+                                     :last-event-type @last-event-type
+                                     :last-finish-reason @last-finish-reason
+                                     :content-acc content-acc
+                                     :reasoning-acc reasoning-acc
+                                     :response response})]
+          (trove/log! {:level :debug :id ::stream-finalized
+                       :data  (log-data (assoc stream-finalization :url url))
+                       :msg   "stream finalized"})
           (cond-> {:content        final-content
                    :reasoning      final-reasoning
                    :provider-state ps
                    :api-usage      @usage-atom
+                   :stream-finalization stream-finalization
                    :http-response  {:url        url
                                     :streaming? true
-                                    :status     (:status response)}}
+                                    :status     (:status response)
+                                    :stream-finalization stream-finalization}}
             assistant-msg (assoc :assistant-message assistant-msg))))
       (catch clojure.lang.ExceptionInfo e
         (if (stream-finalization-error? e)
           (throw e)
+          (let [stream-finalization (stream-finalization-summary
+                                      {:terminal @terminal-event
+                                       :incomplete @incomplete-response
+                                       :last-event-type @last-event-type
+                                       :last-finish-reason @last-finish-reason
+                                       :content-acc content-acc
+                                       :reasoning-acc reasoning-acc
+                                       :response response})]
+            (throw (ex-info (str "Stream connection error: " (ex-message e))
+                     {:type :svar.core/http-error :stream? true :url url
+                      :cause-class (.getName (class e))
+                      :stream-finalization stream-finalization
+                      :content-acc-len (.length content-acc)
+                      :reasoning-acc-len (.length reasoning-acc)
+                      :partial-content (when (pos? (.length content-acc)) (str content-acc))}
+                     e)))))
+      (catch Exception e
+        (let [stream-finalization (stream-finalization-summary
+                                    {:terminal @terminal-event
+                                     :incomplete @incomplete-response
+                                     :last-event-type @last-event-type
+                                     :last-finish-reason @last-finish-reason
+                                     :content-acc content-acc
+                                     :reasoning-acc reasoning-acc
+                                     :response response})]
           (throw (ex-info (str "Stream connection error: " (ex-message e))
                    {:type :svar.core/http-error :stream? true :url url
                     :cause-class (.getName (class e))
+                    :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
                     :partial-content (when (pos? (.length content-acc)) (str content-acc))}
-                   e))))
-      (catch Exception e
-        (throw (ex-info (str "Stream connection error: " (ex-message e))
-                 {:type :svar.core/http-error :stream? true :url url
-                  :cause-class (.getName (class e))
-                  :content-acc-len (.length content-acc)
-                  :reasoning-acc-len (.length reasoning-acc)
-                  :partial-content (when (pos? (.length content-acc)) (str content-acc))}
-                 e))))))
+                   e)))))))
 
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
@@ -3125,18 +3210,23 @@
                      (seq caller-extra-body) (assoc :extra-body caller-extra-body)
                      responses-path (assoc :responses-path responses-path)
                      llm-headers (assoc :llm-headers llm-headers))
-        [{:keys [content reasoning provider-state assistant-message api-usage http-response]} duration-ms]
+        [{:keys [content reasoning provider-state assistant-message api-usage http-response
+                 stream-finalization]} duration-ms]
         (util/with-elapsed
-          (chat-completion with-tail model api-key chat-url retry-opts))]
+          (chat-completion with-tail model api-key chat-url retry-opts))
+        stream-finalization (or stream-finalization
+                              (:stream-finalization http-response))]
     (trove/log! {:level :info
-                 :data (log-data {:model model
-                                  :duration-ms duration-ms
-                                  :input-tokens (:prompt_tokens api-usage)
-                                  :output-tokens (:completion_tokens api-usage)
-                                  :reasoning-length (when reasoning (count reasoning))
-                                  :content-length   (when content (count content))
-                                  :content-preview  (when content
-                                                      (subs content 0 (min 200 (count content))))})
+                 :data (log-data (cond-> {:model model
+                                          :duration-ms duration-ms
+                                          :input-tokens (:prompt_tokens api-usage)
+                                          :output-tokens (:completion_tokens api-usage)
+                                          :reasoning-length (when reasoning (count reasoning))
+                                          :content-length   (when content (count content))
+                                          :content-preview  (when content
+                                                              (subs content 0 (min 200 (count content))))}
+                                   stream-finalization
+                                   (assoc :stream-finalization stream-finalization)))
                  :msg "ask-code! HTTP response received"})
     (when (str/blank? content)
       (throw (ex-info
@@ -3148,7 +3238,9 @@
                          :reasoning reasoning :content content
                          :provider-state provider-state
                          :assistant-message assistant-message
-                         :http-response http-response :provider-id provider-id})
+                         :http-response http-response
+                         :stream-finalization stream-finalization
+                         :provider-id provider-id})
                  :type :svar.llm/empty-content))))
     (let [blocks      (codes/extract-code-blocks content)
           selected    (->> (codes/select-blocks blocks lang)
@@ -3168,6 +3260,7 @@
                    :raw       content
                    :reasoning reasoning
                    :provider-state provider-state
+                   :stream-finalization stream-finalization
                    :tokens    tokens
                    :cost      cost
                    :done?     true}))
@@ -3177,9 +3270,11 @@
                :tokens      tokens
                :cost        cost
                :duration-ms duration-ms}
-        reasoning         (assoc :reasoning reasoning)
-        provider-state    (assoc :provider-state provider-state)
-        assistant-message (assoc :assistant-message assistant-message)))))
+        reasoning           (assoc :reasoning reasoning)
+        provider-state      (assoc :provider-state provider-state)
+        assistant-message   (assoc :assistant-message assistant-message)
+        http-response       (assoc :http-response http-response)
+        stream-finalization (assoc :stream-finalization stream-finalization)))))
 
 (defn ask-code!
   "Plain-text completion + fenced code-block extraction. Routed sibling of
@@ -3215,7 +3310,10 @@
                        preserved reasoning.
     :tokens      {:input :output :reasoning :cached :total}
     :cost        {:input-cost :output-cost :total-cost}
-    :duration-ms <ms>}
+    :duration-ms <ms>
+    :stream-finalization {:terminal? :terminal-kind :finish-reason
+                          :content-acc-len ...} ; streaming calls only
+    :http-response {:status :streaming? :stream-finalization ...}}
 
    Empty `:result` is a valid success.
 

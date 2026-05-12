@@ -587,7 +587,35 @@
             (svar/ask-code! router {:messages [(svar/user "Return code")]})
             (expect false)
             (catch clojure.lang.ExceptionInfo e
-              (expect (= :svar.core/stream-truncated (:type (ex-data e)))))))))
+              (let [data (ex-data e)]
+                (expect (= :svar.core/stream-truncated (:type data)))
+                (expect (= false (get-in data [:stream-finalization :terminal?])))
+                (expect (= "response.output_text.delta"
+                          (get-in data [:stream-finalization :last-event-type])))))))))
+
+    (it "ask-code! exposes stream finalization metadata for done-marker streams"
+      (let [router (svar/make-router
+                     [{:id :zai-coding
+                       :api-key "sk-test"
+                       :base-url "https://example.invalid/v1"
+                       :models [{:name "glm-5.1"}]}])
+            stream (str "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"```clojure\\n(+ 1 2)\\n```\"}}]}\n\n"
+                     "data: {\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [events (atom [])
+                result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                                               :on-chunk #(swap! events conj %)})
+                finalization (:stream-finalization result)]
+            (expect (= "(+ 1 2)" (:result result)))
+            (expect (= true (:terminal? finalization)))
+            (expect (= :done-marker (:terminal-kind finalization)))
+            (expect (= "chat.completion.chunk" (:last-event-type finalization)))
+            (expect (= "stop" (:finish-reason finalization)))
+            (expect (= (count "```clojure\n(+ 1 2)\n```") (:content-acc-len finalization)))
+            (expect (= finalization (:stream-finalization (last @events))))))))
 
     (it "ask-code! does NOT re-parse the full buffer per chunk by default (perf regression)"
       ;; Regression for Vis 0c8188ac-style hang: streaming a long

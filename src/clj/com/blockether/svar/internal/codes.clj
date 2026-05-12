@@ -17,7 +17,7 @@
    [clojure.string :as str])
   (:import
    (com.blockether.svar FenceBlocksParser FenceBlocksParser$Block
-                        FenceNormalizer)))
+     FenceNormalizer)))
 
 (defn- normalize-fences
   "Apply opener / inline-boundary / closer normalization in a single linear
