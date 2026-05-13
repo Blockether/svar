@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.5.3] - 2026-05-13
 
+### Changed
+- release v0.5.3 \u2014 strict :lang on ask-code!, blocks-only return, Markdown-code-blocks prompt
+- strict :lang on ask-code! + drop :result + Markdown-code-blocks prompt
+- release: update version files for v0.5.2, bump to next dev version
+
+
+## [v0.5.3] - 2026-05-13
+
 ### Changed (BREAKING)
 - `ask-code!` `:lang` is now REQUIRED. The previous `"clojure"` default is
   gone; callers must pass an explicit non-blank string. Throws
