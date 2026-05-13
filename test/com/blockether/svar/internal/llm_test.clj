@@ -278,9 +278,9 @@
                                                                     :streaming? true
                                                                     :status 200}})}
           (fn []
-            (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})
+            (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]})
                   {:keys [url body headers]} (first @calls)]
-              (expect (= "(+ 1 1)" (:result result)))
+              (expect (= "(+ 1 1)" (-> result :blocks first :source)))
               (expect (= 7 (get-in result [:tokens :cached])))
               (expect (= "https://chatgpt.com/backend-api/codex/responses" url))
               (expect (= "acct_123" (get headers "chatgpt-account-id")))
@@ -308,7 +308,7 @@
                                                                     :streaming? true
                                                                     :status 200}})}
           (fn []
-            (svar/ask-code! router {:messages [(svar/user "Return code")]
+            (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]
                                     :reasoning :quick
                                     :extra-body {:reasoning {:summary "auto"}}})
             (let [{:keys [body]} (first @calls)]
@@ -507,7 +507,7 @@
                                                                     :streaming? true
                                                                     :status 200}})}
           (fn []
-            (let [result (svar/ask-code! router {:messages [(svar/user "Continue")
+            (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Continue")
                                                             prior-assistant-message
                                                             (svar/user "now what?")]})
                   {:keys [body]} (first @calls)]
@@ -536,19 +536,20 @@
         (with-redefs [http/post (fn [_url _opts]
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
-          ;; Mid-stream `:result` is always nil (svar no longer re-parses
+          ;; Mid-stream chunks carry `:blocks nil` (svar no longer re-parses
           ;; the buffer per chunk — was O(N²)). Final parse is surfaced
           ;; in the `:done? true` chunk + return value.
           (let [events (atom [])
-                result (svar/ask-code! router {:messages [(svar/user "Return code")]
-                                               :on-chunk #(swap! events conj %)})]
-            (expect (= "(answer \"4\")" (:result result)))
-            (expect (not (re-find #"```" (:result result))))
+                result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]
+                                               :on-chunk #(swap! events conj %)})
+                done-source (-> result :blocks first :source)]
+            (expect (= "(answer \"4\")" done-source))
+            (expect (not (re-find #"```" done-source)))
             (expect (every? #(if (:done? %)
-                               (not (str/blank? (:result %)))
-                               (nil? (:result %)))
+                               (seq (:blocks %))
+                               (nil? (:blocks %)))
                       @events))
-            (expect (= "(answer \"4\")" (:result (last @events))))
+            (expect (= "(answer \"4\")" (-> @events last :blocks first :source)))
             (expect (= true (:done? (last @events))))))))
 
     (it "ask-code! preserves whitespace-only deltas in streamed code"
@@ -564,8 +565,8 @@
         (with-redefs [http/post (fn [_url _opts]
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
-          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]})]
-            (expect (= "(v/cat p {:max-lines 260})" (:result result)))))))
+          (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]})]
+            (expect (= "(v/cat p {:max-lines 260})" (-> result :blocks first :source)))))))
 
     (it "ask-code! preserves whitespace-only OpenAI-chat reasoning deltas like content deltas"
       (let [router (svar/make-router
@@ -585,9 +586,9 @@
         (with-redefs [http/post (fn [_url _opts]
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
-          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]
+          (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]
                                                :on-chunk #(swap! events conj %)})]
-            (expect (= "(+ 1 2)" (:result result)))
+            (expect (= "(+ 1 2)" (-> result :blocks first :source)))
             (expect (= "passes I continue" (:reasoning result)))
             (expect (= "passes I continue" (:reasoning (last @events))))))))
 
@@ -601,7 +602,7 @@
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
           (try
-            (svar/ask-code! router {:messages [(svar/user "Return code")]})
+            (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]})
             (expect false)
             (catch clojure.lang.ExceptionInfo e
               (let [data (ex-data e)]
@@ -623,10 +624,10 @@
                                   {:status 200
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
           (let [events (atom [])
-                result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]
                                                :on-chunk #(swap! events conj %)})
                 finalization (:stream-finalization result)]
-            (expect (= "(+ 1 2)" (:result result)))
+            (expect (= "(+ 1 2)" (-> result :blocks first :source)))
             (expect (= true (:terminal? finalization)))
             (expect (= :done-marker (:terminal-kind finalization)))
             (expect (= "chat.completion.chunk" (:last-event-type finalization)))
@@ -660,10 +661,10 @@
                       codes/extract-code-blocks (fn [s]
                                                   (swap! extract-calls inc)
                                                   (real-extract s))]
-          (let [result (svar/ask-code! router {:messages [(svar/user "Return code")]
+          (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]
                                                :on-chunk #(swap! events conj %)})]
             ;; Final result still parsed correctly
-            (expect (re-find #"x0.*x49" (:result result)))
+            (expect (re-find #"x0.*x49" (-> result :blocks first :source)))
             ;; Exactly ONE final extraction — not 52 (one per chunk).
             ;; Allows up to 2 (final result + any single defensive parse)
             ;; to stay robust to refactors, but flags a per-chunk regression.
@@ -688,12 +689,11 @@
                                                                     :status 200}})}
           (fn []
             (let [events (atom [])
-                  result (svar/ask-code! router {:messages [(svar/user "Return code")]
+                  result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]
                                                  :on-chunk #(swap! events conj %)})]
-              (expect (= "" (:result result)))
               (expect (= [] (:blocks result)))
-              (expect (= [{:result "" :blocks [] :done? true}]
-                        (mapv #(select-keys % [:result :blocks :done?]) @events))))))))))
+              (expect (= [{:blocks [] :done? true}]
+                        (mapv #(select-keys % [:blocks :done?]) @events))))))))))
 
 (defdescribe response-output-fallback-test
   (describe "responses-url"

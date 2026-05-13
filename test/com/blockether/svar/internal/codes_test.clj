@@ -126,15 +126,19 @@
         (expect (= src (:source (first blocks))))))))
 
 (defdescribe select-blocks-test
-  "select-blocks filters by lang, treating untagged blocks as matches."
+  "select-blocks filters strictly by lang — untagged blocks are DROPPED."
 
-  (it "keeps tagged matches and untagged blocks"
+  (it "keeps tagged matches and drops untagged blocks"
     (let [blocks [{:lang "clojure" :source "(a)"}
                   {:lang "bash"    :source "echo"}
                   {:lang nil       :source "(b)"}]]
-      (expect (= [{:lang "clojure" :source "(a)"}
-                  {:lang nil       :source "(b)"}]
+      (expect (= [{:lang "clojure" :source "(a)"}]
                 (sut/select-blocks blocks "clojure")))))
+
+  (it "drops ALL untagged blocks even when none match the target"
+    (let [blocks [{:lang nil :source "(a)"}
+                  {:lang nil :source "(b)"}]]
+      (expect (= [] (sut/select-blocks blocks "clojure")))))
 
   (it "is case-insensitive on lang"
     (let [blocks [{:lang "clojure" :source "(a)"}]]
@@ -196,12 +200,16 @@
                    sut/concat-sources)]
       (expect (= "(answer \"hi\")" source))))
 
-  (it "handles a fenceless raw response as a single Clojure block"
+  (it "DROPS a fenceless raw response (no explicit lang tag)"
+    ;; Strict-lang contract: a model that emits raw code with no fence at
+    ;; all produces a `:lang nil` block via the lenient+ fallback, which
+    ;; `select-blocks` now drops. Models MUST tag their fence to be
+    ;; accepted by routed `ask-code!`.
     (let [response "(def x 42)\n(answer (str x))"
-          source (-> (sut/extract-code-blocks response)
-                   (sut/select-blocks "clojure")
-                   sut/concat-sources)]
-      (expect (= "(def x 42)\n(answer (str x))" source)))))
+          selected (-> (sut/extract-code-blocks response)
+                     (sut/select-blocks "clojure"))]
+      (expect (= [] selected))
+      (expect (= "" (sut/concat-sources selected))))))
 
 (defdescribe extract-code-blocks-perf-test
   ;; Regression for Vis conv 0c8188ac: `normalize-fence-closers` used to

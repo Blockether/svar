@@ -2,17 +2,20 @@
   "Fenced code-block extraction from raw LLM text responses.
 
    Pure parsing. No HTTP, no provider knowledge. Used by `ask-code!` to turn
-   a plain-text completion (`(defn …) wrapped in ```clojure fences`) into a
-   single concatenated source string ready for the caller to read/eval.
+   a plain-text completion into a vector of tagged code blocks the caller
+   reads/evals directly.
 
-   Lenient+ rules — handles the three shapes models produce in practice:
-     1. Tagged fence:        ```clojure\\n…\\n```
-     2. Untagged fence:      ```\\n…\\n```
-     3. No fence at all:     entire response treated as one untagged block.
+   Extraction rules — `extract-code-blocks` recognizes three shapes:
+     1. Tagged fence:        ```clojure\\n…\\n```   →  {:lang \"clojure\" :source …}
+     2. Untagged fence:      ```\\n…\\n```          →  {:lang nil       :source …}
+     3. No fence at all:     entire response          →  {:lang nil       :source …}
 
-   Multiple fences are concatenated (joined with a blank line) so the model
-   can split a response across narration + multiple code blobs and the
-   caller still receives one source string."
+   `select-blocks` then enforces strict lang matching: ONLY blocks whose
+   `:lang` equals the caller-supplied target survive. Untagged blocks
+   (`:lang nil`) — including the fenceless-fallback case — are DROPPED.
+   Models that want their code accepted MUST tag their fence with the
+   requested lang."
+
   (:require
    [clojure.string :as str])
   (:import
@@ -54,7 +57,11 @@
 
    Lenient+ fallback: when `raw` contains NO fenced block at all, returns
    one block `{:lang nil :source <trimmed-raw>}`. Empty / blank input
-   returns `[]`."
+   returns `[]`.
+
+   NOTE: untagged blocks (`:lang nil`) — including the fenceless-fallback —
+   are dropped by `select-blocks`. Pre-select consumers see them; routed
+   `ask-code!` callers do not."
   [raw]
   (let [s (normalize-fences raw)
         {:keys [blocks saw-fence?]} (parse-fenced-blocks s)]
@@ -68,18 +75,24 @@
           :else [{:lang nil :source trimmed}])))))
 
 (defn select-blocks
-  "Filter `blocks` to those whose `:lang` matches `lang` (case-insensitive)
-   OR is `nil` (untagged — treated as a match for any language).
+  "Filter `blocks` to those whose `:lang` STRICTLY equals `lang`
+   (case-insensitive).
 
-   `lang` MUST be a non-blank string; pass `\"clojure\"`, `\"python\"`, etc."
+   Untagged blocks (`:lang nil`) are DROPPED — NOT treated as a wildcard.
+   This is a deliberate strictness contract: models must tag their fence
+   with the requested lang to have their code accepted. The fenceless-
+   fallback path in `extract-code-blocks` also produces `:lang nil` and is
+   therefore likewise dropped here.
+
+   `lang` MUST be a non-blank string; pass `\"clojure\"`, `\"python\"`, etc.
+   `nil` / `\"\"` / whitespace raise `IllegalArgumentException`."
   [blocks lang]
   (when-not (and (string? lang) (not (str/blank? lang)))
     (throw (IllegalArgumentException.
              (str "select-blocks: lang must be a non-blank string, got "
                (pr-str lang)))))
   (let [target (str/lower-case lang)]
-    (filterv #(let [bl (:lang %)] (or (nil? bl) (= bl target)))
-      blocks)))
+    (filterv #(= (:lang %) target) blocks)))
 
 (defn concat-sources
   "Concatenate non-blank `:source` values, joined by a blank-line separator."

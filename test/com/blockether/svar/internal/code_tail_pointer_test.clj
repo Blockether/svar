@@ -77,30 +77,34 @@
       (let [calls (atom [])]
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
-            {:messages [(svar/system "You are helpful.")
+            {:lang "clojure"
+             :messages [(svar/system "You are helpful.")
                         (svar/user "Reply with (answer \"ok\").")]}))
         (let [msgs (:messages (first @calls))
               last-user (last (user-msgs msgs))
               tail-text (joined-text last-user)]
-          ;; Pointer is present
-          (expect (re-find #"fences" tail-text))
-          (expect (re-find #"No prose outside fences" tail-text))
-          (expect (re-find #"Opening fence line must contain only" tail-text))
-          (expect (re-find #"Closing fence line must contain only" tail-text))
-          (expect (re-find #"no code on fence line" tail-text))
-          (expect (re-find #"no glued fences" tail-text))
+          ;; Pointer is present — compact rules format
+          (expect (re-find #"Rules:" tail-text))
+          (expect (re-find #"Markdown code blocks" tail-text))
+          (expect (re-find #"DROPPED" tail-text))
+          (expect (re-find #"Opener " tail-text))
+          (expect (re-find #"closer " tail-text))
+          (expect (re-find #"own line" tail-text))
+          (expect (re-find #"blank line between Markdown code blocks" tail-text))
+          (expect (re-find #"No prose" tail-text))
+          (expect (re-find #"glued Markdown code blocks" tail-text))
           ;; Original user content preserved
           (expect (re-find #"\(answer \"ok\"\)" tail-text)))))
 
-    (it "names the default :lang \"clojure\" in the reminder"
+    (it "names the explicit :lang \"clojure\" in the reminder"
       (let [calls (atom [])]
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
-            {:messages [(svar/user "go")]}))
+            {:lang "clojure" :messages [(svar/user "go")]}))
         (let [msgs (:messages (first @calls))
               tail-text (joined-text (last (user-msgs msgs)))]
-          (expect (re-find #"clojure source" tail-text))
-          (expect (re-find #"```clojure" tail-text)))))
+          (expect (re-find #"```clojure" tail-text))
+          (expect (not (re-find #"```python" tail-text))))))
 
     (it "names a non-default :lang in the reminder"
       (let [calls (atom [])]
@@ -111,7 +115,6 @@
              :lang "python"}))
         (let [msgs (:messages (first @calls))
               tail-text (joined-text (last (user-msgs msgs)))]
-          (expect (re-find #"python source" tail-text))
           (expect (re-find #"```python" tail-text))
           (expect (not (re-find #"clojure" tail-text))))))
 
@@ -119,17 +122,17 @@
       (let [calls (atom [])]
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
-            {:messages [(svar/user "first thing")
+            {:lang "clojure" :messages [(svar/user "first thing")
                         (svar/user "second thing")]}))
         (let [msgs (:messages (first @calls))
               users (user-msgs msgs)
               last-u (last users)
               blocks (text-blocks last-u)]
           ;; Pointer attached to the LAST user, not earlier ones
-          (expect (re-find #"fences" (joined-text last-u)))
-          (expect (not (re-find #"fences" (joined-text (first users)))))
+          (expect (re-find #"Markdown code blocks" (joined-text last-u)))
+          (expect (not (re-find #"Markdown code blocks" (joined-text (first users)))))
           ;; Pointer is the LAST block of last-user content.
-          (expect (re-find #"fences" (:text (last blocks)))))))))
+          (expect (re-find #"Markdown code blocks" (:text (last blocks)))))))))
 
 ;; =============================================================================
 ;; Opt-out \u2014 :code-tail-pointer? false sends user message verbatim
@@ -142,23 +145,23 @@
       (let [calls (atom [])]
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
-            {:messages [(svar/user "Reply with (answer \"ok\").")]
+            {:lang "clojure" :messages [(svar/user "Reply with (answer \"ok\").")]
              :code-tail-pointer? false}))
         (let [msgs (:messages (first @calls))
               last-user (last (user-msgs msgs))
               tail-text (joined-text last-user)]
           (expect (= "Reply with (answer \"ok\")." tail-text))
-          (expect (not (re-find #"fences" tail-text))))))
+          (expect (not (re-find #"Markdown code blocks" tail-text))))))
 
     (it "treats nil/missing as ON (only literal `false` opts out)"
       (let [calls (atom [])]
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
-            {:messages [(svar/user "go")]
+            {:lang "clojure" :messages [(svar/user "go")]
              :code-tail-pointer? nil}))
         (let [msgs (:messages (first @calls))
               last-user (last (user-msgs msgs))]
-          (expect (re-find #"fences" (joined-text last-user))))))))
+          (expect (re-find #"Markdown code blocks" (joined-text last-user))))))))
 
 ;; =============================================================================
 ;; Multimodal preservation \u2014 pointer added as text block, images untouched
@@ -173,7 +176,8 @@
                        :image_url {:url "data:image/png;base64,AAAA"}}]
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
-            {:messages [{:role "user"
+            {:lang "clojure"
+             :messages [{:role "user"
                          :content [{:type "text" :text "describe this"}
                                    img-block]}]}))
         (let [msgs (:messages (first @calls))
@@ -183,7 +187,7 @@
           (expect (vector? content))
           (expect (some #(= "image_url" %) types))
           (expect (= "text" (:type (last content))))
-          (expect (re-find #"fences" (:text (last content))))
+          (expect (re-find #"Markdown code blocks" (:text (last content))))
           ;; Original prompt text still present
           (expect (some #(= "describe this" (:text %))
                     (filter #(= "text" (:type %)) content))))))))
@@ -199,8 +203,9 @@
       (let [calls (atom [])]
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
-            {:messages [(svar/system "Generate a sample.")]}))
+            {:lang "clojure"
+             :messages [(svar/system "Generate a sample.")]}))
         (let [msgs (:messages (first @calls))
               users (user-msgs msgs)]
           (expect (= 1 (count users)))
-          (expect (re-find #"fences" (joined-text (first users)))))))))
+          (expect (re-find #"Markdown code blocks" (joined-text (first users)))))))))

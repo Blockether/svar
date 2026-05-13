@@ -7,16 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+- `ask-code!` `:lang` is now REQUIRED. The previous `"clojure"` default is
+  gone; callers must pass an explicit non-blank string. Throws
+  `:svar.core/invalid-lang` otherwise.
+- `select-blocks` now drops `:lang nil` (untagged) blocks unconditionally
+  instead of treating them as a wildcard match. Models MUST tag their
+  Markdown code block with the requested lang. The lenient+ fenceless-
+  fallback path in `extract-code-blocks` still produces a `:lang nil`
+  block, but it no longer survives `select-blocks`.
+- `ask-code!` return map no longer contains `:result` (the concatenated
+  source string). `:blocks` is the single source of truth; callers that
+  want a concatenated string call `codes/concat-sources` themselves. The
+  streaming `on-chunk` payload also drops `:result`.
+- `code-tail-pointer-text` rewritten as a compact 5-line Rules: list.
+  Now spells out the strict-lang contract ("Untagged or other-lang blocks
+  are DROPPED") so models learn the rule in-context instead of being
+  punished invisibly. Says "Markdown code blocks" instead of "fences"
+  for precision. ~280 chars vs the previous ~480.
+
 ## [v0.5.2] - 2026-05-12
 
 ### Changed
 - fix: let llm-headers override Copilot initiator
 - release: update version files for v0.5.1, bump to next dev version
-
-
-### Changed
-- Caller `:llm-headers` now override inferred GitHub Copilot dynamic headers,
-  allowing per-call `{"X-Initiator" "agent"}` without private patches.
 
 ## [v0.5.1] - 2026-05-12
 

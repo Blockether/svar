@@ -2618,14 +2618,19 @@
    plain-text-with-fenced-code path: nudges the model back to the format
    contract right before generation, restoring recency-driven adherence on
    long transcripts. Parameterised by `lang` so the reminder names the
-   tag the caller asked `ask-code!` to extract."
+   tag the caller asked `ask-code!` to extract.
+
+   The reminder also states the strict-lang contract explicitly: untagged
+   fences (```…```) and fences tagged with any OTHER lang are DROPPED
+   silently by `select-blocks`. Without this in-prompt warning, a model
+   that emits ``` without a tag would be punished invisibly — its code
+   never reaches the runtime and it has no way to learn why."
   [lang]
-  (str "Reply with exactly one " lang " source block in Markdown fences. "
-    "Opening fence line must contain only ```" lang ". Closing fence line must contain only ```. "
-    "All executable source goes between those two fence lines. "
-    "Fence lines must be on their own lines: no code on fence line, "
-    "no glued fences like ``````" lang " or ``` ```" lang ". "
-    "No prose outside fences. No commentary, no explanation."))
+  (str "Rules:\n"
+    "- One or more ```" lang " Markdown code blocks. Untagged or other-lang blocks are DROPPED.\n"
+    "- Opener ```" lang " and closer ``` each on their own line.\n"
+    "- Exactly one blank line between Markdown code blocks.\n"
+    "- No prose, commentary, or glued Markdown code blocks."))
 
 (defn- append-code-tail-pointer
   "`append-schema-tail-pointer` for the `ask-code!*` path. Appends the
@@ -3148,9 +3153,11 @@
 
    See `ask-code!` for the full param + return contract."
   [router {:keys [messages on-chunk code-tail-pointer?] :as opts}]
-  (let [lang (or (:lang opts) "clojure")
+  (let [lang (:lang opts)
         _ (when-not (and (string? lang) (not (str/blank? lang)))
-            (anomaly/incorrect! ":lang must be a non-blank string"
+            ;; `:lang` is REQUIRED. No default. `select-blocks` filters
+            ;; strictly on this tag; without it we don't know what to keep.
+            (anomaly/incorrect! ":lang is required on ask-code! and must be a non-blank string"
               {:type :svar.core/invalid-lang :lang lang}))
         {:keys [model api-key base-url api-style timeout-ms output-reserve
                 check-context? network pricing context-limits responses-path llm-headers]}
@@ -3201,8 +3208,7 @@
                                                :cache-tokens-in-input? (not= api-style :anthropic)}))]
                                  (when (or (not (str/blank? (or reasoning "")))
                                          (not (str/blank? (or content ""))))
-                                   (on-chunk {:result    nil
-                                              :blocks    nil
+                                   (on-chunk {:blocks    nil
                                               :raw       content
                                               :reasoning reasoning
                                               :provider-state provider-state
@@ -3252,7 +3258,6 @@
           selected    (->> (codes/select-blocks blocks lang)
                         (remove #(str/blank? (:source %)))
                         vec)
-          result      (codes/concat-sources selected)
           token-stats (router/count-and-estimate model with-tail content
                         (cond-> {:pricing pricing
                                  :api-usage api-usage
@@ -3261,8 +3266,7 @@
           tokens      (token-stats->tokens token-stats)
           cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
       (when on-chunk
-        (on-chunk {:result    result
-                   :blocks    selected
+        (on-chunk {:blocks    selected
                    :raw       content
                    :reasoning reasoning
                    :provider-state provider-state
@@ -3270,8 +3274,7 @@
                    :tokens    tokens
                    :cost      cost
                    :done?     true}))
-      (cond-> {:result      result
-               :blocks      selected
+      (cond-> {:blocks      selected
                :raw         content
                :tokens      tokens
                :cost        cost
@@ -3321,10 +3324,11 @@
                           :content-acc-len ...} ; streaming calls only
     :http-response {:status :streaming? :stream-finalization ...}}
 
-   Empty `:result` is a valid success.
+   Empty `:blocks` is a valid success.
 
    Throws ex-info on transport-level failure (`:svar.llm/empty-content` when
-   the provider returns no content; HTTP errors from `chat-completion`)."
+   the provider returns no content; HTTP errors from `chat-completion`).
+   Throws `:svar.core/invalid-lang` when `:lang` is missing/blank."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
