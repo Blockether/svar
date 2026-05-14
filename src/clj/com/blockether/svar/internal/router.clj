@@ -522,24 +522,16 @@
 (def DEFAULT_TTFT_TIMEOUT_MS
   "Default time-to-first-token timeout (ms) for streaming HTTP responses.
    Bounds the wait between sending the HTTP request and receiving response
-   headers (i.e. the moment `http/post` returns and the body `InputStream`
-   becomes available). On fire, raises `:svar.core/stream-ttft-timeout`.
+   headers. On fire, raises `:svar.core/stream-ttft-timeout` and the caller
+   thread's interrupt unparks the underlying `CompletableFuture.get`.
 
-   Distinct from `DEFAULT_IDLE_TIMEOUT_MS`: TTFT covers the pre-body
-   phase, idle covers the post-headers stream. A dead upstream that
-   accepts the TCP+TLS connection and then sends no response headers
-   (real repro: z.ai glm-5.1 on JDK 25 + HTTP/2, where the JDK's own
-   `HttpRequest.timeout` failed to fire) will sit inside
-   `HttpClient.send -> CompletableFuture.get` until something kicks it.
-   The idle watchdog can't reach this phase because it needs the body
-   stream to operate on; TTFT uses `Thread.interrupt()` on the caller
-   instead, which unparks the `CompletableFuture.get` cleanly.
-
-   90s matches Anthropic SDK PR #959's chosen default. Tight enough to
-   catch dead connects in seconds, generous enough for cold reasoning
-   queues (o1-style models can legitimately take 30-60s before the first
-   byte). Disable per-call with `:ttft-timeout-ms nil`."
-  90000)
+   10 s default — aggressive on purpose. The original 90 s allowed stuck
+   provider connections to burn a whole autoresearch iteration before the
+   watchdog fired. With 10 s the failure surfaces fast and the caller
+   (Vis loop) gets to retry / move on quickly. Disable per-call with
+   `:ttft-timeout-ms nil`; pass a larger value when you know you're
+   talking to a slow reasoning model."
+  10000)
 
 (def DEFAULT_IDLE_TIMEOUT_MS
   "Default idle-stream timeout (ms) for streaming HTTP responses. If no
@@ -566,8 +558,12 @@
        extended-thinking workloads should bump this to 240-300 s, or
        pass `:idle-timeout-ms nil` to disable.
 
-   Disable per-call: `(svar/ask-code! router {... :idle-timeout-ms nil})`."
-  120000)
+   Disable per-call: `(svar/ask-code! router {... :idle-timeout-ms nil})`.
+
+   10 s default — mirrors the TTFT cap. Streaming providers that hang
+   mid-response (no SSE bytes, no keepalive pings) surface as
+   `:svar.core/stream-idle-timeout` in 10 s instead of 2 minutes."
+  10000)
 
 (def DEFAULT_RETRY
   "Default retry policy for transient HTTP errors."

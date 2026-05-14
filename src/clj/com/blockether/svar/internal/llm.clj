@@ -66,11 +66,22 @@
         (some-> cause retryable-exception?)))))
 
 (def ^:private shared-http-executor
-  "Virtual-thread-per-task executor that backs the shared HttpClient.
-   Held separately from the client so shutdown-http-client! can close it
-   explicitly. Without this the JVM keeps non-daemon threads alive, blocking
-   clean exit in REPLs, test runners, and scripts."
-  (delay (java.util.concurrent.Executors/newVirtualThreadPerTaskExecutor)))
+  "Cached thread pool that backs the shared HttpClient.
+
+   Used to use a virtual-thread-per-task executor, but JDK virtual threads
+   on HTTP/2 + JDK 25 occasionally pinned `CompletableFuture.get` past every
+   timer (see TTFT watchdog rationale) and complicated cancellation. A
+   plain cached thread pool with daemon threads keeps HTTP/1.1 streaming
+   responsive and lets the JVM exit cleanly when `shutdown-http-client!`
+   runs."
+  (delay
+    (let [counter (java.util.concurrent.atomic.AtomicInteger.)
+          factory (reify java.util.concurrent.ThreadFactory
+                    (newThread [_ r]
+                      (doto (Thread. ^Runnable r
+                              (str "svar-http-" (.incrementAndGet counter)))
+                        (.setDaemon true))))]
+      (java.util.concurrent.Executors/newCachedThreadPool factory))))
 
 (def ^:private shared-http-client
   "Single shared HttpClient reused across ALL LLM requests. Without this each
