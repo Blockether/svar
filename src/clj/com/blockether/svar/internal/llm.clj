@@ -1493,9 +1493,10 @@
 
    Returns same normalized shape as `chat-completion`:
    {:content :reasoning :provider-state :api-usage :http-response}"
-  [request-body {:keys [api-key base-url responses-path headers timeout-ms idle-timeout-ms on-chunk]
+  [request-body {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms idle-timeout-ms on-chunk]
                  :or   {responses-path "/responses"
                         timeout-ms router/DEFAULT_TIMEOUT_MS
+                        ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS
                         idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS}}]
   (let [url           (responses-url base-url responses-path)
         model         (:model request-body)
@@ -1513,12 +1514,13 @@
                  :data (log-data {:model model
                                   :url url
                                   :timeout-ms timeout-ms
+                                  :ttft-timeout-ms ttft-timeout-ms
                                   :idle-timeout-ms idle-timeout-ms
                                   :stream? (boolean stream?)})
                  :msg "responses request dispatched"})
     (try
       (if stream?
-        (http-post-stream! url request-body http-headers timeout-ms idle-timeout-ms extract-stream-delta
+        (http-post-stream! url request-body http-headers timeout-ms ttft-timeout-ms idle-timeout-ms extract-stream-delta
           (when on-chunk
             (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
               (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
@@ -1812,6 +1814,54 @@
   [is]
   (try (slurp is) (catch Exception _ nil)))
 
+(defn- start-ttft-watchdog!
+  "Daemon thread that interrupts `caller` if `headers-received?-atom` is
+   still false after `ttft-timeout-ms`. Used to bound the wait inside
+   `http/post` -> `HttpClient.send` -> `CompletableFuture.get` when the
+   upstream accepts the connection but never returns response headers.
+
+   Distinct from `start-idle-stream-watchdog!`: that one closes the body
+   `InputStream` (which is unavailable in this phase — the whole reason
+   we need a separate watchdog). `Thread.interrupt()` on the caller is
+   the lever that reaches the parked `CompletableFuture.get` cleanly:
+   `Signaller.block` checks the interrupted flag on unpark and surfaces
+   `InterruptedException`, which propagates out of `HttpClient.send` as
+   `IOException` (wrapped by babashka.http-client as ExceptionInfo).
+   Caller distinguishes via the `ttft-fired?-atom` flag we set BEFORE
+   the interrupt; on a successful return the caller flips
+   `headers-received?-atom` true and we exit without interrupting.
+
+   Returns the thread so the caller can interrupt it on success."
+  [^Thread caller ttft-timeout-ms headers-received?-atom ttft-fired?-atom]
+  (let [;; Clamp the per-tick sleep to [100, 5000] ms so the watchdog
+        ;; wakes within 5s of caller success regardless of the configured
+        ;; ttft-timeout-ms. Without this a 90s timeout would park the
+        ;; daemon thread for the full 90s after a healthy response
+        ;; returned in 50ms, wasting a thread slot.
+        check-ms    (-> (long ttft-timeout-ms) (quot 4) (max 100) (min 5000))
+        deadline-ns (+ (System/nanoTime) (* (long ttft-timeout-ms) 1000000))
+        runnable    (fn []
+                      (try
+                        (loop []
+                          (Thread/sleep (long check-ms))
+                          (cond
+                            ;; Caller signalled success between ticks; exit
+                            ;; without interrupting.
+                            @headers-received?-atom nil
+                            ;; Deadline crossed; recheck flag once more under
+                            ;; race-window guard, then fire.
+                            (>= (System/nanoTime) deadline-ns)
+                            (when-not @headers-received?-atom
+                              (reset! ttft-fired?-atom true)
+                              (.interrupt caller))
+                            :else (recur)))
+                        (catch InterruptedException _ nil)
+                        (catch Throwable _ nil)))
+        thread      (doto (Thread. ^Runnable runnable "svar-ttft-watchdog")
+                      (.setDaemon true)
+                      (.start))]
+    thread))
+
 (defn- start-idle-stream-watchdog!
   "Daemon thread. Closes `stream` if `last-byte-ns-atom` stale > idle-ms.
    Reader loop bumps the atom every line; when wall-clock gap exceeds the
@@ -1830,7 +1880,11 @@
    `on-fire` called once with elapsed-ms before the close; lets the caller
    stamp telemetry. Returns the thread for shutdown."
   [^java.io.InputStream stream idle-timeout-ms last-byte-ns-atom alive?-atom on-fire]
-  (let [check-ms (max 100 (long (/ (long idle-timeout-ms) 4)))
+  (let [;; Clamp the per-tick sleep to [100, 5000] ms. The watchdog stays
+        ;; sensitive enough to fire close to the configured deadline while
+        ;; never blocking caller shutdown for longer than 5s on long
+        ;; timeouts (120s idle default would otherwise sleep 30s per tick).
+        check-ms (-> (long idle-timeout-ms) (quot 4) (max 100) (min 5000))
         runnable (fn []
                    (try
                      (loop []
@@ -1852,8 +1906,10 @@
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
    for each. `headers` - HTTP headers map. `delta-fn` - extracts delta
-   from parsed SSE chunk. `idle-timeout-ms` - optional inter-chunk idle
-   ceiling (nil/0 disables).
+   from parsed SSE chunk. `ttft-timeout-ms` - optional time-to-first-token
+   ceiling for the pre-headers phase (nil/0 disables). `idle-timeout-ms`
+   - optional inter-chunk idle ceiling for the post-headers stream
+   (nil/0 disables).
 
    Returns an envelope:
      {:content :reasoning :api-usage
@@ -1862,13 +1918,20 @@
    downstream callers destructure uniformly. There is no `:raw-body` on
    streaming paths - the SSE chunks are consumed incrementally, so the
    accumulated `:content` / `:reasoning` are the closest analogues."
-  [url body headers timeout-ms idle-timeout-ms delta-fn on-delta]
+  [url body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn on-delta]
   (let [_ (trove/log! {:level :info :id ::stream-started
                        :data  (log-data {:url url
                                          :timeout-ms timeout-ms
+                                         :ttft-timeout-ms ttft-timeout-ms
                                          :idle-timeout-ms idle-timeout-ms})
                        :msg   "stream HTTP POST dispatched"})
-        request-start-ns (System/nanoTime)
+        request-start-ns  (System/nanoTime)
+        caller-thread     (Thread/currentThread)
+        headers-received? (atom false)
+        ttft-fired?       (atom false)
+        ttft-watchdog     (when (and (number? ttft-timeout-ms) (pos? (long ttft-timeout-ms)))
+                            (start-ttft-watchdog! caller-thread ttft-timeout-ms
+                              headers-received? ttft-fired?))
         response (try
                    (http/post url
                      {:headers headers
@@ -1876,14 +1939,60 @@
                       :timeout timeout-ms
                       :as :stream})
                    (catch clojure.lang.ExceptionInfo e
-                     ;; Convert InputStream body to string for error handling
-                     (let [ed (ex-data e)
-                           body-str (when (instance? java.io.InputStream (:body ed))
-                                      (slurp-input-stream (:body ed)))]
-                       (throw (ex-info (ex-message e)
-                                (cond-> (dissoc ed :body)
-                                  body-str (assoc :body body-str))
-                                (ex-cause e))))))
+                     ;; If the TTFT watchdog fired, the interrupt may
+                     ;; surface as ExceptionInfo wrapping IOException.
+                     ;; Reclassify before propagating; otherwise convert
+                     ;; InputStream body to string and re-throw as today.
+                     (if @ttft-fired?
+                       (do
+                         ;; Consume any leftover interrupt so we don't
+                         ;; poison unrelated code further up the stack.
+                         (Thread/interrupted)
+                         (trove/log! {:level :warn :id ::stream-ttft-timeout
+                                      :data (log-data {:url url
+                                                       :ttft-timeout-ms ttft-timeout-ms})
+                                      :msg "TTFT timeout, no headers received"})
+                         (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                                           "ms with no response headers): " (ex-message e))
+                                  {:type :svar.core/stream-ttft-timeout
+                                   :stream? true :url url
+                                   :ttft-timeout-ms ttft-timeout-ms
+                                   :cause-class (.getName (class e))}
+                                  e)))
+                       (let [ed (ex-data e)
+                             body-str (when (instance? java.io.InputStream (:body ed))
+                                        (slurp-input-stream (:body ed)))]
+                         (throw (ex-info (ex-message e)
+                                  (cond-> (dissoc ed :body)
+                                    body-str (assoc :body body-str))
+                                  (ex-cause e))))))
+                   (catch java.io.IOException e
+                     ;; Same reclassification for raw IOExceptions (the
+                     ;; JDK may surface InterruptedIOException here).
+                     (if @ttft-fired?
+                       (do
+                         (Thread/interrupted)
+                         (trove/log! {:level :warn :id ::stream-ttft-timeout
+                                      :data (log-data {:url url
+                                                       :ttft-timeout-ms ttft-timeout-ms})
+                                      :msg "TTFT timeout, no headers received"})
+                         (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                                           "ms with no response headers): " (ex-message e))
+                                  {:type :svar.core/stream-ttft-timeout
+                                   :stream? true :url url
+                                   :ttft-timeout-ms ttft-timeout-ms
+                                   :cause-class (.getName (class e))}
+                                  e)))
+                       (throw e)))
+                   (finally
+                     ;; Order matters: flip the flag BEFORE interrupting
+                     ;; the watchdog so the watchdog's recheck sees the
+                     ;; success. Then interrupt to wake it from sleep
+                     ;; immediately; without this it'd live until the
+                     ;; full ttft-timeout-ms.
+                     (reset! headers-received? true)
+                     (when ttft-watchdog
+                       (try (.interrupt ^Thread ttft-watchdog) (catch Throwable _ nil)))))
         _ (trove/log! {:level :debug :id ::stream-headers
                        :data (log-data {:url url
                                         :status (:status response)
@@ -2107,7 +2216,7 @@
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
-  [messages model api-key base-url retry-opts timeout-ms idle-timeout-ms extra-body on-chunk api-style]
+  [messages model api-key base-url retry-opts timeout-ms ttft-timeout-ms idle-timeout-ms extra-body on-chunk api-style]
   (let [api-style    (or api-style :openai-compatible-chat)
         provider-id  (:provider-id retry-opts)
         llm-headers  (:llm-headers retry-opts)
@@ -2127,7 +2236,7 @@
         ;; Other providers stay on the stateless extractor.
         delta-fn     (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
     (try
-      (http-post-stream! chat-url request-body headers timeout-ms idle-timeout-ms delta-fn
+      (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
         (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
           (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                      :provider-state provider-state
@@ -2161,6 +2270,13 @@
    `opts` - Map, optional:
      - :timeout-ms      - Integer. Whole-request timeout (default:
                           router/DEFAULT_TIMEOUT_MS).
+     - :ttft-timeout-ms - Integer. Time-to-first-token timeout for
+                          streaming responses (default:
+                          router/DEFAULT_TTFT_TIMEOUT_MS). Bounds the
+                          wait between the request leaving and the
+                          response headers arriving. Surfaces
+                          `:svar.core/stream-ttft-timeout`. Pass `nil`
+                          to disable.
      - :idle-timeout-ms - Integer. Inter-chunk idle timeout for streaming
                           responses (default: router/DEFAULT_IDLE_TIMEOUT_MS).
                           Closes the SSE stream if no bytes arrive for this
@@ -2178,7 +2294,11 @@
   ([messages model api-key base-url opts]
    (let [timeout-ms      (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
          ;; `contains?` (not `get` with default) so a caller can pass
-         ;; `:idle-timeout-ms nil` to explicitly disable the watchdog.
+         ;; `:ttft-timeout-ms nil` / `:idle-timeout-ms nil` to explicitly
+         ;; disable each watchdog without falling through to the default.
+         ttft-timeout-ms (if (contains? opts :ttft-timeout-ms)
+                           (:ttft-timeout-ms opts)
+                           router/DEFAULT_TTFT_TIMEOUT_MS)
          idle-timeout-ms (if (contains? opts :idle-timeout-ms)
                            (:idle-timeout-ms opts)
                            router/DEFAULT_IDLE_TIMEOUT_MS)
@@ -2205,11 +2325,12 @@
           :responses-path  (or responses-path "/responses")
           :headers         headers
           :timeout-ms      timeout-ms
+          :ttft-timeout-ms ttft-timeout-ms
           :idle-timeout-ms idle-timeout-ms
           :on-chunk        on-chunk})
        (if on-chunk
          (chat-completion-streaming
-           messages model api-key base-url opts timeout-ms idle-timeout-ms extra-body on-chunk api-style)
+           messages model api-key base-url opts timeout-ms ttft-timeout-ms idle-timeout-ms extra-body on-chunk api-style)
          (chat-completion-with-retry
            messages model api-key base-url opts timeout-ms extra-body api-style))))))
 
@@ -2341,16 +2462,20 @@
    `(select-keys ... [...])` site. Includes:
      - routing-resolved fields (`:model`, `:api-key`, `:base-url`,
        `:api-style`, `:provider-id`)
-     - LLM tuning (`:extra-body`, `:timeout-ms`, `:check-context?`,
-       `:output-reserve`, `:cache-system?`)
+     - LLM tuning (`:extra-body`, `:timeout-ms`, `:ttft-timeout-ms`,
+       `:idle-timeout-ms`, `:check-context?`, `:output-reserve`,
+       `:cache-system?`)
      - format-noise hardening (`:format-retries`, `:format-retry-on`,
        `:json-object-mode?`, `:on-format-error`)
    Used by `abstract!*`, `eval!*`, `refine!*`, `sample!*`, and the CoVe
    helpers. Without this, calling e.g. `(svar/abstract! router
-   {:format-retries 2 ...})` would silently drop `:format-retries` on the
-   way to the inner `ask!*` call."
+   {:ttft-timeout-ms 30000 ...})` would silently drop the override on
+   the way to the inner `ask!*` call — the watchdog would use the
+   package default instead of the caller's value."
   [:model :api-key :base-url :api-style :provider-id
-   :extra-body :provider-state :timeout-ms :check-context? :output-reserve :cache-system?
+   :extra-body :provider-state
+   :timeout-ms :ttft-timeout-ms :idle-timeout-ms
+   :check-context? :output-reserve :cache-system?
    :format-retries :format-retry-on :json-object-mode? :on-format-error
    :responses-path :llm-headers :verbosity])
 
@@ -2371,7 +2496,7 @@
    AND the LLM_PASSTHROUGH_KEYS verbatim, so internal helpers can
    `(merge (llm-passthrough resolved-opts) ...)` and have the new opts
    propagate without enumerating them at every call site."
-  [router {:keys [model timeout-ms idle-timeout-ms check-context? output-reserve api-key
+  [router {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms check-context? output-reserve api-key
                   base-url provider-id api-style extra-body provider-state cache-system?
                   format-retries format-retry-on on-format-error
                   responses-path llm-headers verbosity]
@@ -2387,9 +2512,14 @@
                          default-context-limits)]
     (cond-> {:model model
              :timeout-ms (or timeout-ms (:timeout-ms network) router/DEFAULT_TIMEOUT_MS)
-             ;; Idle-stream timeout: caller > router > package default.
+             ;; TTFT + idle timeouts: caller > router > package default.
              ;; `contains?` (not `or`) at each step so an explicit nil
-             ;; disables the watchdog without falling through.
+             ;; disables the corresponding watchdog without falling
+             ;; through.
+             :ttft-timeout-ms (cond
+                                (contains? opts :ttft-timeout-ms)    ttft-timeout-ms
+                                (contains? network :ttft-timeout-ms) (:ttft-timeout-ms network)
+                                :else                                router/DEFAULT_TTFT_TIMEOUT_MS)
              :idle-timeout-ms (cond
                                 (contains? opts :idle-timeout-ms)    idle-timeout-ms
                                 (contains? network :idle-timeout-ms) (:idle-timeout-ms network)
@@ -2516,11 +2646,47 @@
       (cond-> merged-headers
         (assoc :llm-headers merged-headers)))))
 
+(defn- resolved-network-timeout
+  "Single point of truth for the streaming-timeout precedence chain:
+   caller > router > package-default. `contains?` (not `or`) at each
+   layer so an explicit `nil` from the caller disables the watchdog
+   without falling through to the router default.
+
+   `k` is one of `:timeout-ms`, `:ttft-timeout-ms`, `:idle-timeout-ms`.
+   `default` is `router/DEFAULT_*_MS`. Mirrors what `resolve-opts` /
+   `ask-code!*` / `ask!*` already do internally; lifted here so every
+   public entrypoint (`routed-chat-completion`, `chat-completion`,
+   `ask!`, `ask-code!`, `abstract!`, `eval!`, `refine!`, `sample!`)
+   resolves the same way."
+  [opts router-network k default]
+  (cond
+    (contains? opts k)           (get opts k)
+    (contains? router-network k) (get router-network k)
+    :else                        default))
+
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
-   opts may include :routing, :on-chunk, :reasoning, :extra-body."
+
+   opts may include:
+     - :routing, :on-chunk, :reasoning, :extra-body — routing inputs.
+     - :timeout-ms      — whole-request HTTP timeout (svar passes this
+                          to babashka.http-client's `:timeout`).
+     - :ttft-timeout-ms — time-to-first-token (pre-headers) ceiling.
+                          Interrupts `HttpClient.send` if the upstream
+                          never returns response headers within the
+                          window. Raises `:svar.core/stream-ttft-timeout`.
+     - :idle-timeout-ms — inter-chunk idle ceiling for streaming. Closes
+                          the SSE `InputStream` if no bytes arrive within
+                          the window. Raises `:svar.core/stream-idle-timeout`.
+
+   Precedence per key: caller `opts` > router `:network` > package
+   default. Pass an explicit `nil` to disable the corresponding watchdog."
   [router messages opts]
-  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))
+        network  (:network router)
+        timeout-ms      (resolved-network-timeout opts network :timeout-ms      router/DEFAULT_TIMEOUT_MS)
+        ttft-timeout-ms (resolved-network-timeout opts network :ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS)
+        idle-timeout-ms (resolved-network-timeout opts network :idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS)]
     (router/with-provider-fallback router (:prefs resolved)
       (fn [provider model-map]
         (let [{:keys [extra-body api-style responses-path llm-headers]}
@@ -2528,7 +2694,11 @@
           (chat-completion messages (:name model-map)
             (:api-key provider)
             (:base-url provider)
-            (cond-> {:extra-body extra-body :api-style api-style}
+            (cond-> {:extra-body      extra-body
+                     :api-style       api-style
+                     :timeout-ms      timeout-ms
+                     :ttft-timeout-ms ttft-timeout-ms
+                     :idle-timeout-ms idle-timeout-ms}
               (:id provider)     (assoc :provider-id (:id provider))
               (:on-chunk opts)   (assoc :on-chunk (:on-chunk opts))
               responses-path     (assoc :responses-path responses-path)
@@ -2599,7 +2769,28 @@
             provider - retries first absorb prose-leaks locally, fallback
             kicks in only when the whole model is broken for this spec.
      :format-retries / :format-retry-on / :json-object-mode? - See `ask!*`.
-       These reach the LLM call via the routed-params pipeline."
+       These reach the LLM call via the routed-params pipeline.
+
+   Network / streaming timeouts (precedence per key: caller `opts` > router
+   `:network` > package default; pass an explicit `nil` to disable):
+     :timeout-ms      - Whole-request HTTP timeout. Default
+                        `router/DEFAULT_TIMEOUT_MS` (5 min).
+     :ttft-timeout-ms - Time-to-first-token: bounds the pre-headers
+                        phase by interrupting the calling thread inside
+                        `HttpClient.send` if no response headers arrive
+                        within the window. Surfaces typed ex-info
+                        `:type :svar.core/stream-ttft-timeout`. Default
+                        `router/DEFAULT_TTFT_TIMEOUT_MS` (90 s).
+     :idle-timeout-ms - Inter-chunk idle ceiling for streaming responses.
+                        Closes the body `InputStream` if no SSE bytes
+                        arrive within the window. Surfaces
+                        `:type :svar.core/stream-idle-timeout`. Resets
+                        on every line incl. SSE `: ping` comments, so
+                        the watchdog is ping-aware for free. Default
+                        `router/DEFAULT_IDLE_TIMEOUT_MS` (120 s).
+     For Opus-style extended-thinking workloads bump `:idle-timeout-ms`
+     to 240000-300000; reproductions of legitimate 185 s silences are
+     documented in anthropics/claude-agent-sdk-typescript#44."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
     (router/with-provider-fallback
@@ -2889,7 +3080,7 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
   [router {:keys [spec messages humanizer cache-system? schema-tail-pointer?] :as opts}]
-  (let [{:keys [model api-key base-url api-style timeout-ms idle-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
+  (let [{:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
@@ -3000,8 +3191,9 @@
                        (not (contains? caller-extra-body :response_format)))
                      (assoc :response_format {:type "json_object"}))
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
-                                           ;; See `ask-code!*`: carry resolved idle-timeout-ms
-                                           ;; verbatim so an explicit nil disables the watchdog.
+                                           ;; See `ask-code!*`: carry resolved TTFT + idle
+                                           ;; verbatim so an explicit nil disables either.
+                                           :ttft-timeout-ms ttft-timeout-ms
                                            :idle-timeout-ms idle-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
@@ -3271,7 +3463,7 @@
             ;; strictly on this tag; without it we don't know what to keep.
             (anomaly/incorrect! ":lang is required on ask-code! and must be a non-blank string"
               {:type :svar.core/invalid-lang :lang lang}))
-        {:keys [model api-key base-url api-style timeout-ms idle-timeout-ms output-reserve
+        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms output-reserve
                 check-context? network pricing context-limits responses-path llm-headers]}
         (resolve-opts router opts)
         provider-id (:provider-id opts)
@@ -3329,10 +3521,11 @@
                                               :done?     false})))))
         caller-extra-body (or (:extra-body opts) {})
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
-                                           ;; Carry the resolved idle-timeout-ms explicitly
+                                           ;; Carry resolved TTFT + idle timeouts verbatim
                                            ;; (incl. an explicit nil from the caller) so
                                            ;; `chat-completion` sees the post-`resolve-opts`
                                            ;; precedence, not whatever raw `network` had.
+                                           :ttft-timeout-ms ttft-timeout-ms
                                            :idle-timeout-ms idle-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)

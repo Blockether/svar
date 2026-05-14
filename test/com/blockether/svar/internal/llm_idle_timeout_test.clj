@@ -1,24 +1,26 @@
 (ns com.blockether.svar.internal.llm-idle-timeout-test
-  "Regression: streaming HTTP responses that wedge mid-flight must surface
-   `:svar.core/stream-idle-timeout` and release the calling thread quickly.
+  "Regression: streaming HTTP responses that wedge must surface a typed
+   `:svar.core/stream-{ttft,idle}-timeout` and release the calling thread
+   quickly. Two distinct phases, two distinct watchdogs:
+
+   - TTFT watchdog (`start-ttft-watchdog!`) bounds the pre-headers phase
+     by interrupting the calling thread inside `HttpClient.send -> CF.get`
+     when no response headers arrive within `:ttft-timeout-ms`.
+   - Idle watchdog (`start-idle-stream-watchdog!`) bounds the post-headers
+     phase by closing the body `InputStream` when no SSE bytes arrive
+     within `:idle-timeout-ms`.
 
    Pre-fix behavior: `http-post-stream!` relied on
-   `HttpRequest.Builder.timeout` to bound the call, but on JDK 25 +
+   `HttpRequest.Builder.timeout` to bound the whole call, but on JDK 25 +
    HTTP/2 streaming bodies that timer doesn't reliably fire when the
    upstream sends headers and then stalls without body frames. Real
    reproduction: Vis conv `1b7603b9-...` iter 7 sat in
    `CompletableFuture.get -> HttpClient.send` for 11+ minutes against
    z.ai glm-5.1, well past svar's 5-min `DEFAULT_TIMEOUT_MS`, with no
-   exception ever raised. The idle-stream watchdog closes the
-   `InputStream` after `:idle-timeout-ms` of zero inter-chunk bytes
-   regardless of whether the JDK timer is alive, which is the signal
-   that actually maps to \"upstream is dead\".
+   exception ever raised. The watchdogs are signal-driven, distinct
+   from the JDK timer's mood.
 
-   These tests pin the watchdog helper in isolation (no real HTTP):
-
-   1. fires when no bytes arrive within the timeout.
-   2. does NOT fire while the producer keeps emitting bytes.
-   3. cleanly exits when the caller flips `alive?` to false."
+   These tests pin both watchdog helpers in isolation (no real HTTP)."
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.internal.llm :as sut])
@@ -26,7 +28,8 @@
    (java.io ByteArrayInputStream PipedInputStream PipedOutputStream)
    (java.util.concurrent.atomic AtomicBoolean)))
 
-(def ^:private start-watchdog @#'sut/start-idle-stream-watchdog!)
+(def ^:private start-watchdog      @#'sut/start-idle-stream-watchdog!)
+(def ^:private start-ttft-watchdog @#'sut/start-ttft-watchdog!)
 
 (defn- close-tracking-stream
   "Wraps `delegate` and atomically sets `closed?` when `.close` is invoked.
@@ -119,3 +122,50 @@
         (expect (false? (.isAlive t)))
         (expect (false? (.get closed?)))
         (expect (false? @fired?))))))
+
+(defdescribe ttft-watchdog-test
+  (describe "fires when headers-received? stays false past ttft-timeout-ms"
+    (it "interrupts the calling thread and sets ttft-fired? exactly once"
+      (let [caller            (Thread/currentThread)
+            headers-received? (atom false)
+            ttft-fired?       (atom false)
+            ttft-ms           150
+            ;; Clear any leftover interrupt before we start so the
+            ;; sleep below isn't poisoned by an unrelated test.
+            _                 (Thread/interrupted)
+            t                 (start-ttft-watchdog caller ttft-ms
+                                headers-received? ttft-fired?)
+            interrupted?      (try
+                                ;; Simulate the caller parked in
+                                ;; HttpClient.send: sleep generously
+                                ;; past the TTFT window. The watchdog
+                                ;; should fire and interrupt us.
+                                (Thread/sleep 1000)
+                                false
+                                (catch InterruptedException _ true))]
+        (.interrupt ^Thread t)
+        (expect interrupted?)
+        (expect (true? @ttft-fired?))
+        (expect (false? @headers-received?)))))
+
+  (describe "does NOT fire if headers-received? flips to true in time"
+    (it "caller is not interrupted and ttft-fired? stays false"
+      (let [caller            (Thread/currentThread)
+            headers-received? (atom false)
+            ttft-fired?       (atom false)
+            ttft-ms           300
+            _                 (Thread/interrupted)
+            t                 (start-ttft-watchdog caller ttft-ms
+                                headers-received? ttft-fired?)]
+        ;; Simulate http/post returning with headers well before the
+        ;; TTFT window elapses. The watchdog must see this and exit
+        ;; without interrupting.
+        (Thread/sleep 50)
+        (reset! headers-received? true)
+        ;; Wait for the full TTFT window to pass plus a margin so we'd
+        ;; have observed an interrupt by now if the watchdog misbehaved.
+        (let [interrupted? (try (Thread/sleep (+ ttft-ms 200)) false
+                                (catch InterruptedException _ true))]
+          (.interrupt ^Thread t)
+          (expect (false? interrupted?))
+          (expect (false? @ttft-fired?)))))))

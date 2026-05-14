@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Time-to-first-token watchdog as a sibling of the idle-stream watchdog.
+  New `:ttft-timeout-ms` option on `chat-completion` / `ask!` / `ask-code!`
+  / `abstract!` / `eval!` / `refine!` / `sample!` / `routed-chat-completion`
+  bounds the pre-headers phase (before `http/post` returns and the body
+  `InputStream` becomes available). On fire it interrupts the calling
+  thread inside `HttpClient.send -> CompletableFuture.get` and surfaces
+  typed `:svar.core/stream-ttft-timeout`. Default 90 s
+  (`router/DEFAULT_TTFT_TIMEOUT_MS`), matching Anthropic SDK PR #959.
+
+  Two distinct phases, two distinct watchdogs:
+  - TTFT covers "upstream accepts TCP+TLS, never sends response headers"
+    — the iter-7 reproduction class. Idle watchdog cannot reach this
+    phase because it needs the body stream to operate on.
+  - Idle covers "headers received, then stream wedges mid-flight".
+
+  Both keys flow through the same precedence chain (caller `opts` >
+  router `:network` > package default) thanks to the new `LLM_PASSTHROUGH_KEYS`
+  membership; passing an explicit `nil` per call disables each
+  independently. `routed-chat-completion` now reads router defaults via
+  the same helper, so direct callers get unified handling without
+  re-implementing the precedence chain.
+
+### Changed
+- Watchdog tick-resolution capped at 5 s. Previously
+  `start-idle-stream-watchdog!` used `(quot idle-timeout-ms 4)` as the
+  per-tick sleep, which meant a 120 s default idle timeout parked the
+  daemon thread for 30 s between checks — callers waiting on shutdown
+  could sit for up to 30 s after the read loop ended. Clamped to
+  `[100, 5000]` ms so caller-side shutdown latency is at most 5 s while
+  the firing precision still tracks the configured deadline closely.
+  `start-ttft-watchdog!` converted from a single `Thread/sleep
+  ttft-timeout-ms` to a poll loop with the same clamp, eliminating a
+  long-lived thread parked past caller completion.
+
 - Idle-stream watchdog for streaming HTTP responses. New
   `:idle-timeout-ms` option on `chat-completion` / `ask!` / `ask-code!`
   closes the SSE `InputStream` if no bytes arrive within the window and

@@ -519,6 +519,28 @@
    Reasoning models (e.g. glm-5-turbo) may need extended time for chain-of-thought."
   300000)
 
+(def DEFAULT_TTFT_TIMEOUT_MS
+  "Default time-to-first-token timeout (ms) for streaming HTTP responses.
+   Bounds the wait between sending the HTTP request and receiving response
+   headers (i.e. the moment `http/post` returns and the body `InputStream`
+   becomes available). On fire, raises `:svar.core/stream-ttft-timeout`.
+
+   Distinct from `DEFAULT_IDLE_TIMEOUT_MS`: TTFT covers the pre-body
+   phase, idle covers the post-headers stream. A dead upstream that
+   accepts the TCP+TLS connection and then sends no response headers
+   (real repro: z.ai glm-5.1 on JDK 25 + HTTP/2, where the JDK's own
+   `HttpRequest.timeout` failed to fire) will sit inside
+   `HttpClient.send -> CompletableFuture.get` until something kicks it.
+   The idle watchdog can't reach this phase because it needs the body
+   stream to operate on; TTFT uses `Thread.interrupt()` on the caller
+   instead, which unparks the `CompletableFuture.get` cleanly.
+
+   90s matches Anthropic SDK PR #959's chosen default. Tight enough to
+   catch dead connects in seconds, generous enough for cold reasoning
+   queues (o1-style models can legitimately take 30-60s before the first
+   byte). Disable per-call with `:ttft-timeout-ms nil`."
+  90000)
+
 (def DEFAULT_IDLE_TIMEOUT_MS
   "Default idle-stream timeout (ms) for streaming HTTP responses. If no
    SSE bytes arrive for this long the underlying `InputStream` is closed
@@ -1302,6 +1324,7 @@
       :budget-state           (when budget (atom {:total-tokens 0 :total-cost 0.0}))
       :network                (merge DEFAULT_RETRY
                                 {:timeout-ms      DEFAULT_TIMEOUT_MS
+                                 :ttft-timeout-ms DEFAULT_TTFT_TIMEOUT_MS
                                  :idle-timeout-ms DEFAULT_IDLE_TIMEOUT_MS}
                                 (:network opts))
       :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
