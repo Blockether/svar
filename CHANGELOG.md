@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Idle-stream watchdog for streaming HTTP responses. New
+  `:idle-timeout-ms` option on `chat-completion` / `ask!` / `ask-code!`
+  closes the SSE `InputStream` if no bytes arrive within the window and
+  surfaces a typed `:svar.core/stream-idle-timeout` ex-info. Default is
+  `router/DEFAULT_IDLE_TIMEOUT_MS` (60s); pass `:idle-timeout-ms nil` to
+  disable. Distinct from the existing `:timeout-ms` (whole-request cap):
+  the idle watchdog doesn't kill legitimate long reasoning responses
+  — those emit content / keepalive frames regularly — only truly dead
+  upstream connections. Motivation: on JDK 25 + HTTP/2 streaming bodies
+  `HttpRequest.Builder.timeout` doesn't reliably fire when the upstream
+  sends headers and then stalls without body frames (real repro: 11-minute
+  hang on z.ai glm-5.1 past the 5-min request timeout, never raised).
+  The watchdog is signal-driven so stalls surface in seconds regardless
+  of the JDK timer's mood.
+- `::stream-started` and `::stream-headers` trove logs around the
+  streaming HTTP boundary, paired with the existing `::stream-finalized`.
+  Closes the observability gap that made mid-call stalls invisible
+  (previously only `:stop`-shaped events were emitted).
+
 ## [v0.5.3] - 2026-05-13
 
 ### Changed

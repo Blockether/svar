@@ -123,7 +123,7 @@
         (with-redefs [llm/chat-completion (mock-chat-completion {} calls)]
           (svar/ask-code! (test-router)
             {:lang "clojure" :messages [(svar/user "first thing")
-                        (svar/user "second thing")]}))
+                                        (svar/user "second thing")]}))
         (let [msgs (:messages (first @calls))
               users (user-msgs msgs)
               last-u (last users)

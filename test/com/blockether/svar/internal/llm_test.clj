@@ -226,7 +226,7 @@
                     [:input :cached-input :output
                      :input-over-272k :cached-input-over-272k :output-over-272k])))
         (expect (= 272000 (:context model)))
-        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _idle-timeout-ms _delta-fn on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
                                                    {:content "{\"answer\":\"ok\"}"
                                                     :reasoning nil
@@ -266,7 +266,7 @@
                        :api-key "sk-test"
                        :llm-headers {"chatgpt-account-id" "acct_123"}
                        :models [{:name "gpt-5.5"}]}])]
-        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _idle-timeout-ms _delta-fn on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
                                                    {:content "```clojure\n(+ 1 1)\n```"
                                                     :reasoning nil
@@ -297,7 +297,7 @@
                        :api-key "sk-test"
                        :llm-headers {"chatgpt-account-id" "acct_123"}
                        :models [{:name "gpt-5.5"}]}])]
-        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn _on-delta]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _idle-timeout-ms _delta-fn _on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers})
                                                    {:content "```clojure\n(+ 1 1)\n```"
                                                     :reasoning nil
@@ -326,7 +326,7 @@
                             svar/TYPE svar/TYPE_STRING
                             svar/CARDINALITY svar/CARDINALITY_ONE
                             svar/DESCRIPTION "answer"))]
-        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn _on-delta]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _idle-timeout-ms _delta-fn _on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers})
                                                    {:content "{\"answer\":\"ok\"}"
                                                     :reasoning nil
@@ -441,7 +441,7 @@
     (it "GitHub Copilot chat forces SSE streaming"
       (let [calls (atom [])
             messages [(svar/user "hi")]]
-        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn on-delta]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _idle-timeout-ms _delta-fn on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
                                                    {:content "ok"
                                                     :reasoning nil
@@ -484,7 +484,7 @@
                         :thinking-signature (json/write-json-str raw-reasoning-item)
                         :redacted? false}
                        {:type "text" :text "(+ 1 1)"}]}]
-        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _delta-fn _on-delta]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url body headers _timeout-ms _idle-timeout-ms _delta-fn _on-delta]
                                                    (swap! calls conj {:url url :body body :headers headers})
                                                    {:content "```clojure\n(+ 1 1)\n```"
                                                     :reasoning nil
@@ -508,8 +508,8 @@
                                                                     :status 200}})}
           (fn []
             (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Continue")
-                                                            prior-assistant-message
-                                                            (svar/user "now what?")]})
+                                                                            prior-assistant-message
+                                                                            (svar/user "now what?")]})
                   {:keys [body]} (first @calls)]
               ;; Reasoning input entry sits right before its parent
               ;; assistant message in :input, encrypted_content intact.
@@ -678,7 +678,7 @@
                      [{:id :openai-codex
                        :api-key "sk-test"
                        :models [{:name "gpt-5.5"}]}])]
-        (with-redefs-fn {#'sut/http-post-stream! (fn [url _body _headers _timeout-ms _delta-fn _on-delta]
+        (with-redefs-fn {#'sut/http-post-stream! (fn [url _body _headers _timeout-ms _idle-timeout-ms _delta-fn _on-delta]
                                                    {:content "```clojure\n```"
                                                     :reasoning nil
                                                     :api-usage {:prompt_tokens 10

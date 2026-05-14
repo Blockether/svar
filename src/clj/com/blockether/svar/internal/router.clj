@@ -519,6 +519,18 @@
    Reasoning models (e.g. glm-5-turbo) may need extended time for chain-of-thought."
   300000)
 
+(def DEFAULT_IDLE_TIMEOUT_MS
+  "Default idle-stream timeout (ms) for streaming HTTP responses. If no SSE
+   bytes arrive for this duration the underlying `InputStream` is closed and
+   the call surfaces `:svar.core/stream-idle-timeout`. Distinct from
+   `DEFAULT_TIMEOUT_MS` (whole-request cap): an idle timer doesn't kill
+   legitimate long reasoning responses—those emit content/keepalive frames
+   regularly—only truly dead upstream connections (TCP open, no body
+   bytes ever sent, or stream wedged mid-flight). 60s is comfortably above
+   any real inter-chunk gap on Anthropic/OpenAI/Google streams. Set to
+   `nil` per call (via `:idle-timeout-ms nil`) to disable."
+  60000)
+
 (def DEFAULT_RETRY
   "Default retry policy for transient HTTP errors."
   {:max-retries 5
@@ -1273,7 +1285,8 @@
       :budget                 budget
       :budget-state           (when budget (atom {:total-tokens 0 :total-cost 0.0}))
       :network                (merge DEFAULT_RETRY
-                                {:timeout-ms DEFAULT_TIMEOUT_MS}
+                                {:timeout-ms      DEFAULT_TIMEOUT_MS
+                                 :idle-timeout-ms DEFAULT_IDLE_TIMEOUT_MS}
                                 (:network opts))
       :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
                                                  (if (some? cc) cc true))

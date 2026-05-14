@@ -1493,9 +1493,10 @@
 
    Returns same normalized shape as `chat-completion`:
    {:content :reasoning :provider-state :api-usage :http-response}"
-  [request-body {:keys [api-key base-url responses-path headers timeout-ms on-chunk]
+  [request-body {:keys [api-key base-url responses-path headers timeout-ms idle-timeout-ms on-chunk]
                  :or   {responses-path "/responses"
-                        timeout-ms router/DEFAULT_TIMEOUT_MS}}]
+                        timeout-ms router/DEFAULT_TIMEOUT_MS
+                        idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS}}]
   (let [url           (responses-url base-url responses-path)
         model         (:model request-body)
         codex?        (= "/codex/responses" responses-path)
@@ -1512,11 +1513,12 @@
                  :data (log-data {:model model
                                   :url url
                                   :timeout-ms timeout-ms
+                                  :idle-timeout-ms idle-timeout-ms
                                   :stream? (boolean stream?)})
                  :msg "responses request dispatched"})
     (try
       (if stream?
-        (http-post-stream! url request-body http-headers timeout-ms extract-stream-delta
+        (http-post-stream! url request-body http-headers timeout-ms idle-timeout-ms extract-stream-delta
           (when on-chunk
             (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
               (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
@@ -1810,10 +1812,48 @@
   [is]
   (try (slurp is) (catch Exception _ nil)))
 
+(defn- start-idle-stream-watchdog!
+  "Daemon thread. Closes `stream` if `last-byte-ns-atom` stale > idle-ms.
+   Reader loop bumps the atom every line; when wall-clock gap exceeds the
+   threshold the close kicks the parked `.readLine` with an `IOException`
+   and the surrounding catch re-throws as `:svar.core/stream-idle-timeout`.
+   On normal completion the caller flips `alive?-atom` to false and
+   interrupts the thread—the watchdog exits without touching the stream.
+
+   Why a separate timer, not `HttpRequest.timeout`: the JDK request timeout
+   covers headers + total wall-clock, doesn't fire on a mid-stream idle
+   (HTTP/2 frames open, no body delta), and on JDK 25 + streaming bodies
+   is known to miss entirely. The idle watchdog is signal-driven: stalls
+   surface fast, slow-but-progressing reasoning streams (which emit deltas
+   every few seconds) keep flowing.
+
+   `on-fire` called once with elapsed-ms before the close; lets the caller
+   stamp telemetry. Returns the thread for shutdown."
+  [^java.io.InputStream stream idle-timeout-ms last-byte-ns-atom alive?-atom on-fire]
+  (let [check-ms (max 100 (long (/ (long idle-timeout-ms) 4)))
+        runnable (fn []
+                   (try
+                     (loop []
+                       (Thread/sleep (long check-ms))
+                       (when @alive?-atom
+                         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
+                           (if (>= elapsed-ms (long idle-timeout-ms))
+                             (do
+                               (try (on-fire elapsed-ms) (catch Throwable _ nil))
+                               (try (.close stream) (catch Throwable _ nil)))
+                             (recur)))))
+                     (catch InterruptedException _ nil)
+                     (catch Throwable _ nil)))
+        thread   (doto (Thread. ^Runnable runnable "svar-idle-stream-watchdog")
+                   (.setDaemon true)
+                   (.start))]
+    thread))
+
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
    for each. `headers` - HTTP headers map. `delta-fn` - extracts delta
-   from parsed SSE chunk.
+   from parsed SSE chunk. `idle-timeout-ms` - optional inter-chunk idle
+   ceiling (nil/0 disables).
 
    Returns an envelope:
      {:content :reasoning :api-usage
@@ -1822,8 +1862,14 @@
    downstream callers destructure uniformly. There is no `:raw-body` on
    streaming paths - the SSE chunks are consumed incrementally, so the
    accumulated `:content` / `:reasoning` are the closest analogues."
-  [url body headers timeout-ms delta-fn on-delta]
-  (let [response (try
+  [url body headers timeout-ms idle-timeout-ms delta-fn on-delta]
+  (let [_ (trove/log! {:level :info :id ::stream-started
+                       :data  (log-data {:url url
+                                         :timeout-ms timeout-ms
+                                         :idle-timeout-ms idle-timeout-ms})
+                       :msg   "stream HTTP POST dispatched"})
+        request-start-ns (System/nanoTime)
+        response (try
                    (http/post url
                      {:headers headers
                       :body (json/write-json-str body)
@@ -1838,6 +1884,11 @@
                                 (cond-> (dissoc ed :body)
                                   body-str (assoc :body body-str))
                                 (ex-cause e))))))
+        _ (trove/log! {:level :debug :id ::stream-headers
+                       :data (log-data {:url url
+                                        :status (:status response)
+                                        :headers-elapsed-ms (long (/ (- (System/nanoTime) request-start-ns) 1000000))})
+                       :msg "stream headers received"})
         input-stream (:body response)
         content-acc (StringBuilder.)
         reasoning-acc (StringBuilder.)
@@ -1847,11 +1898,33 @@
         terminal-event (atom nil)
         last-event-type (atom nil)
         last-finish-reason (atom nil)
-        incomplete-response (atom nil)]
+        incomplete-response (atom nil)
+        last-byte-ns (atom (System/nanoTime))
+        idle-fired? (atom false)
+        watchdog-alive? (atom true)
+        watchdog (when (and (number? idle-timeout-ms) (pos? (long idle-timeout-ms)))
+                   (start-idle-stream-watchdog!
+                     input-stream
+                     idle-timeout-ms
+                     last-byte-ns
+                     watchdog-alive?
+                     (fn [elapsed-ms]
+                       (reset! idle-fired? true)
+                       (trove/log! {:level :warn :id ::stream-idle-timeout
+                                    :data (log-data {:url url
+                                                     :idle-timeout-ms idle-timeout-ms
+                                                     :elapsed-ms elapsed-ms
+                                                     :content-acc-len (.length content-acc)
+                                                     :reasoning-acc-len (.length reasoning-acc)})
+                                    :msg "stream idle, closing"}))))]
     (try
       (with-open [reader (BufferedReader. (InputStreamReader. ^java.io.InputStream input-stream "UTF-8"))]
         (loop []
           (let [line (.readLine reader)]
+            ;; Reset the idle clock on every line we observe — SSE
+            ;; keepalive comments (`: ...`) and blank separators also
+            ;; count as liveness signals, which is what we want.
+            (reset! last-byte-ns (System/nanoTime))
             (when (some? line)
               (when (str/starts-with? line "data: ")
                 (let [data-str (subs line 6)
@@ -1987,9 +2060,14 @@
                                        :last-finish-reason @last-finish-reason
                                        :content-acc content-acc
                                        :reasoning-acc reasoning-acc
-                                       :response response})]
-            (throw (ex-info (str "Stream connection error: " (ex-message e))
-                     {:type :svar.core/http-error :stream? true :url url
+                                       :response response})
+                idle?               @idle-fired?]
+            (throw (ex-info (if idle?
+                              (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
+                              (str "Stream connection error: " (ex-message e)))
+                     {:type (if idle? :svar.core/stream-idle-timeout :svar.core/http-error)
+                      :stream? true :url url
+                      :idle-timeout-ms (when idle? idle-timeout-ms)
                       :cause-class (.getName (class e))
                       :stream-finalization stream-finalization
                       :content-acc-len (.length content-acc)
@@ -2004,20 +2082,32 @@
                                      :last-finish-reason @last-finish-reason
                                      :content-acc content-acc
                                      :reasoning-acc reasoning-acc
-                                     :response response})]
-          (throw (ex-info (str "Stream connection error: " (ex-message e))
-                   {:type :svar.core/http-error :stream? true :url url
+                                     :response response})
+              idle?               @idle-fired?]
+          (throw (ex-info (if idle?
+                            (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
+                            (str "Stream connection error: " (ex-message e)))
+                   {:type (if idle? :svar.core/stream-idle-timeout :svar.core/http-error)
+                    :stream? true :url url
+                    :idle-timeout-ms (when idle? idle-timeout-ms)
                     :cause-class (.getName (class e))
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
                     :partial-content (when (pos? (.length content-acc)) (str content-acc))}
-                   e)))))))
+                   e))))
+      (finally
+        ;; Always stop the watchdog — reset alive? first so a racing
+        ;; check sees the flag, then interrupt the sleep loop. Idempotent
+        ;; if no watchdog was started (nil thread).
+        (reset! watchdog-alive? false)
+        (when watchdog
+          (try (.interrupt ^Thread watchdog) (catch Throwable _ nil)))))))
 
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
-  [messages model api-key base-url retry-opts timeout-ms extra-body on-chunk api-style]
+  [messages model api-key base-url retry-opts timeout-ms idle-timeout-ms extra-body on-chunk api-style]
   (let [api-style    (or api-style :openai-compatible-chat)
         provider-id  (:provider-id retry-opts)
         llm-headers  (:llm-headers retry-opts)
@@ -2037,7 +2127,7 @@
         ;; Other providers stay on the stateless extractor.
         delta-fn     (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
     (try
-      (http-post-stream! chat-url request-body headers timeout-ms delta-fn
+      (http-post-stream! chat-url request-body headers timeout-ms idle-timeout-ms delta-fn
         (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
           (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                      :provider-state provider-state
@@ -2069,7 +2159,13 @@
    `api-key` - String. Bearer token.
    `base-url` - String. API base URL.
    `opts` - Map, optional:
-     - :timeout-ms - Integer. Request timeout (default: router/DEFAULT_TIMEOUT_MS).
+     - :timeout-ms      - Integer. Whole-request timeout (default:
+                          router/DEFAULT_TIMEOUT_MS).
+     - :idle-timeout-ms - Integer. Inter-chunk idle timeout for streaming
+                          responses (default: router/DEFAULT_IDLE_TIMEOUT_MS).
+                          Closes the SSE stream if no bytes arrive for this
+                          long; surfaces `:svar.core/stream-idle-timeout`.
+                          Pass `nil` to disable.
      - :extra-body - Map. Additional params for the API request body.
      - :on-chunk - Function. When provided, enables SSE streaming. Callback receives
                    accumulated text string after each chunk.
@@ -2080,7 +2176,12 @@
   ([messages model api-key base-url]
    (chat-completion messages model api-key base-url {}))
   ([messages model api-key base-url opts]
-   (let [timeout-ms     (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
+   (let [timeout-ms      (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
+         ;; `contains?` (not `get` with default) so a caller can pass
+         ;; `:idle-timeout-ms nil` to explicitly disable the watchdog.
+         idle-timeout-ms (if (contains? opts :idle-timeout-ms)
+                           (:idle-timeout-ms opts)
+                           router/DEFAULT_IDLE_TIMEOUT_MS)
          extra-body     (:extra-body opts)
          on-chunk       (or (:on-chunk opts)
                           (when (copilot-stream-required? (:provider-id opts) base-url)
@@ -2099,15 +2200,16 @@
      (if (= api-style :openai-compatible-responses)
        (openai-responses-completion
          (build-openai-responses-request-body messages model extra-body)
-         {:api-key        api-key
-          :base-url       base-url
-          :responses-path (or responses-path "/responses")
-          :headers        headers
-          :timeout-ms     timeout-ms
-          :on-chunk       on-chunk})
+         {:api-key         api-key
+          :base-url        base-url
+          :responses-path  (or responses-path "/responses")
+          :headers         headers
+          :timeout-ms      timeout-ms
+          :idle-timeout-ms idle-timeout-ms
+          :on-chunk        on-chunk})
        (if on-chunk
          (chat-completion-streaming
-           messages model api-key base-url opts timeout-ms extra-body on-chunk api-style)
+           messages model api-key base-url opts timeout-ms idle-timeout-ms extra-body on-chunk api-style)
          (chat-completion-with-retry
            messages model api-key base-url opts timeout-ms extra-body api-style))))))
 
@@ -2269,7 +2371,7 @@
    AND the LLM_PASSTHROUGH_KEYS verbatim, so internal helpers can
    `(merge (llm-passthrough resolved-opts) ...)` and have the new opts
    propagate without enumerating them at every call site."
-  [router {:keys [model timeout-ms check-context? output-reserve api-key
+  [router {:keys [model timeout-ms idle-timeout-ms check-context? output-reserve api-key
                   base-url provider-id api-style extra-body provider-state cache-system?
                   format-retries format-retry-on on-format-error
                   responses-path llm-headers verbosity]
@@ -2285,6 +2387,13 @@
                          default-context-limits)]
     (cond-> {:model model
              :timeout-ms (or timeout-ms (:timeout-ms network) router/DEFAULT_TIMEOUT_MS)
+             ;; Idle-stream timeout: caller > router > package default.
+             ;; `contains?` (not `or`) at each step so an explicit nil
+             ;; disables the watchdog without falling through.
+             :idle-timeout-ms (cond
+                                (contains? opts :idle-timeout-ms)    idle-timeout-ms
+                                (contains? network :idle-timeout-ms) (:idle-timeout-ms network)
+                                :else                                router/DEFAULT_IDLE_TIMEOUT_MS)
              :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
              :output-reserve (or output-reserve (:output-reserve tokens))
              :api-key api-key
@@ -2780,7 +2889,7 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
   [router {:keys [spec messages humanizer cache-system? schema-tail-pointer?] :as opts}]
-  (let [{:keys [model api-key base-url api-style timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
+  (let [{:keys [model api-key base-url api-style timeout-ms idle-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
@@ -2890,7 +2999,10 @@
                        (:json-object-mode? opts)
                        (not (contains? caller-extra-body :response_format)))
                      (assoc :response_format {:type "json_object"}))
-        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
+        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
+                                           ;; See `ask-code!*`: carry resolved idle-timeout-ms
+                                           ;; verbatim so an explicit nil disables the watchdog.
+                                           :idle-timeout-ms idle-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      (seq extra-body) (assoc :extra-body extra-body)
@@ -3159,7 +3271,7 @@
             ;; strictly on this tag; without it we don't know what to keep.
             (anomaly/incorrect! ":lang is required on ask-code! and must be a non-blank string"
               {:type :svar.core/invalid-lang :lang lang}))
-        {:keys [model api-key base-url api-style timeout-ms output-reserve
+        {:keys [model api-key base-url api-style timeout-ms idle-timeout-ms output-reserve
                 check-context? network pricing context-limits responses-path llm-headers]}
         (resolve-opts router opts)
         provider-id (:provider-id opts)
@@ -3216,7 +3328,12 @@
                                               :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                                               :done?     false})))))
         caller-extra-body (or (:extra-body opts) {})
-        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style})
+        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
+                                           ;; Carry the resolved idle-timeout-ms explicitly
+                                           ;; (incl. an explicit nil from the caller) so
+                                           ;; `chat-completion` sees the post-`resolve-opts`
+                                           ;; precedence, not whatever raw `network` had.
+                                           :idle-timeout-ms idle-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      (seq caller-extra-body) (assoc :extra-body caller-extra-body)
