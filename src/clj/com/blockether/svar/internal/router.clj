@@ -520,16 +520,32 @@
   300000)
 
 (def DEFAULT_IDLE_TIMEOUT_MS
-  "Default idle-stream timeout (ms) for streaming HTTP responses. If no SSE
-   bytes arrive for this duration the underlying `InputStream` is closed and
-   the call surfaces `:svar.core/stream-idle-timeout`. Distinct from
-   `DEFAULT_TIMEOUT_MS` (whole-request cap): an idle timer doesn't kill
-   legitimate long reasoning responses—those emit content/keepalive frames
-   regularly—only truly dead upstream connections (TCP open, no body
-   bytes ever sent, or stream wedged mid-flight). 60s is comfortably above
-   any real inter-chunk gap on Anthropic/OpenAI/Google streams. Set to
-   `nil` per call (via `:idle-timeout-ms nil`) to disable."
-  60000)
+  "Default idle-stream timeout (ms) for streaming HTTP responses. If no
+   SSE bytes arrive for this long the underlying `InputStream` is closed
+   and the call surfaces `:svar.core/stream-idle-timeout`. Distinct from
+   `DEFAULT_TIMEOUT_MS` (whole-request cap): the idle watchdog tolerates
+   arbitrarily long total durations as long as the stream keeps emitting
+   bytes (content deltas, SSE `: ping` keepalives, or even blank
+   separators — the watchdog resets on every `.readLine`, so it's
+   ping-aware for free).
+
+   2 minutes (120000 ms) is the considered sweet spot:
+     - Matches Anthropic's own SDK proposal (anthropics/anthropic-sdk-
+       typescript#867 suggests `120_000` per-request, #959 ships 90s
+       default with ping-reset).
+     - ~4× Anthropic's published `ping` interval (15-30 s) for safety.
+     - Catches real hangs (e.g. z.ai glm streams that simply stop
+       sending body frames after headers) in 2 minutes instead of
+       forever — the original 5-minute `DEFAULT_TIMEOUT_MS` doesn't
+       reliably fire on JDK 25 + HTTP/2 streaming.
+     - Anthropic's documented worst case for legitimate extended
+       thinking on Opus 4.5 is ~185 s with zero events (see
+       anthropics/claude-agent-sdk-typescript#44). Callers running
+       extended-thinking workloads should bump this to 240-300 s, or
+       pass `:idle-timeout-ms nil` to disable.
+
+   Disable per-call: `(svar/ask-code! router {... :idle-timeout-ms nil})`."
+  120000)
 
 (def DEFAULT_RETRY
   "Default retry policy for transient HTTP errors."

@@ -12,11 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `:idle-timeout-ms` option on `chat-completion` / `ask!` / `ask-code!`
   closes the SSE `InputStream` if no bytes arrive within the window and
   surfaces a typed `:svar.core/stream-idle-timeout` ex-info. Default is
-  `router/DEFAULT_IDLE_TIMEOUT_MS` (60s); pass `:idle-timeout-ms nil` to
-  disable. Distinct from the existing `:timeout-ms` (whole-request cap):
-  the idle watchdog doesn't kill legitimate long reasoning responses
-  — those emit content / keepalive frames regularly — only truly dead
-  upstream connections. Motivation: on JDK 25 + HTTP/2 streaming bodies
+  `router/DEFAULT_IDLE_TIMEOUT_MS` (120s / 2 min, matching Anthropic's
+  own SDK proposal `anthropics/anthropic-sdk-typescript#867` for the
+  per-request override). Pass `:idle-timeout-ms nil` to disable; bump
+  to 240-300 s for Opus extended-thinking workloads (anthropics/claude-
+  agent-sdk-typescript#44 documents ~185 s legitimate silences). Distinct
+  from the existing `:timeout-ms` (whole-request cap): the idle watchdog
+  tolerates arbitrarily long total durations as long as the stream keeps
+  emitting bytes (content deltas, SSE `: ping` keepalives, or blank
+  separators — every `.readLine` resets the timer, so the watchdog is
+  ping-aware for free). Motivation: on JDK 25 + HTTP/2 streaming bodies
   `HttpRequest.Builder.timeout` doesn't reliably fire when the upstream
   sends headers and then stalls without body frames (real repro: 11-minute
   hang on z.ai glm-5.1 past the 5-min request timeout, never raised).
