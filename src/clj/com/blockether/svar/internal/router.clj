@@ -525,13 +525,14 @@
    headers. On fire, raises `:svar.core/stream-ttft-timeout` and the caller
    thread's interrupt unparks the underlying `CompletableFuture.get`.
 
-   10 s default — aggressive on purpose. The original 90 s allowed stuck
-   provider connections to burn a whole autoresearch iteration before the
-   watchdog fired. With 10 s the failure surfaces fast and the caller
-   (Vis loop) gets to retry / move on quickly. Disable per-call with
-   `:ttft-timeout-ms nil`; pass a larger value when you know you're
-   talking to a slow reasoning model."
-  10000)
+   30 s default. Tight enough to surface stuck provider connections
+   inside one iteration (the original 90 s default sometimes wasted a
+   whole autoresearch iter waiting for headers), generous enough for
+   real reasoning cold starts — z.ai glm-5.1 has been observed sending
+   first headers between 8 and 22 s. Disable per-call with
+   `:ttft-timeout-ms nil`; pass a larger value for slow reasoning
+   models with long pre-stream queues."
+  30000)
 
 (def DEFAULT_IDLE_TIMEOUT_MS
   "Default idle-stream timeout (ms) for streaming HTTP responses. If no
@@ -560,10 +561,12 @@
 
    Disable per-call: `(svar/ask-code! router {... :idle-timeout-ms nil})`.
 
-   10 s default — mirrors the TTFT cap. Streaming providers that hang
-   mid-response (no SSE bytes, no keepalive pings) surface as
-   `:svar.core/stream-idle-timeout` in 10 s instead of 2 minutes."
-  10000)
+   45 s default. Catches genuinely hung streams (no SSE bytes, no
+   keepalive pings) in well under a minute while still allowing the
+   provider to take up to ~40 s between tokens during extended
+   reasoning. The original 120 s default let timeouts blow the whole
+   per-task budget."
+  45000)
 
 (def DEFAULT_RETRY
   "Default retry policy for transient HTTP errors."
