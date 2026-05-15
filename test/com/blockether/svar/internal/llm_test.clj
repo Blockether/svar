@@ -9,7 +9,7 @@
    [com.blockether.svar.internal.codes :as codes]
    [com.blockether.svar.internal.llm :as sut])
   (:import
-   (java.io ByteArrayInputStream)))
+   (java.io ByteArrayInputStream InputStream)))
 
 ;;; ── Test fixtures ──────────────────────────────────────────────────────
 
@@ -31,6 +31,32 @@
 (defn- selected-model [router prefs]
   (when-let [[_ model-map] (sut/select-provider router prefs)]
     (:name model-map)))
+
+(defn- slow-heartbeat-stream []
+  (let [closed? (atom false)
+        payload (.getBytes ": ping\n\n" "UTF-8")
+        idx (atom 0)
+        next-byte (fn []
+                    (let [i @idx]
+                      (swap! idx #(mod (inc %) (alength payload)))
+                      (bit-and (aget payload i) 0xff)))]
+    (proxy [InputStream] []
+      (read
+        ([]
+         (if @closed?
+           -1
+           (do
+             (Thread/sleep 5)
+             (next-byte))))
+        ([buf off len]
+         (if @closed?
+           -1
+           (do
+             (Thread/sleep 5)
+             (aset-byte buf off (unchecked-byte (next-byte)))
+             1))))
+      (close []
+        (reset! closed? true)))))
 
 ;;; ── Tests ──────────────────────────────────────────────────────────────
 
@@ -567,6 +593,59 @@
                                    :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
           (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]})]
             (expect (= "(v/cat p {:max-lines 260})" (-> result :blocks first :source)))))))
+
+    (it "ask-code! parses SSE event fields, tabbed data, multiline data, and unicode"
+      (let [router (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "sk-test"
+                       :models [{:name "gpt-5.5"}]}])
+            stream (str
+                     "event: response.output_text.delta\n"
+                     "data:\t" (json/write-json-str {:delta "```clojure\n(println \"hereé\t中文\")"}) "\n\n"
+                     "data: {\"type\":\"response.output_text.delta\",\n"
+                     "data: \"delta\":\"\\n```\"}\n\n"
+                     "data:[DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]})]
+            (expect (= "(println \"hereé\t中文\")" (-> result :blocks first :source)))))))
+
+    (it "ask-code! accepts finish_reason stop as terminal without DONE"
+      (let [router (svar/make-router
+                     [{:id :zai-coding
+                       :api-key "sk-test"
+                       :base-url "https://example.invalid/v1"
+                       :models [{:name "glm-5.1"}]}])
+            stream (str
+                     "data: {\"choices\":[{\"delta\":{\"content\":\"```clojure\\n(+ 1 2)\\n```\"}}]}\n\n"
+                     "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (svar/ask-code! router {:lang "clojure" :messages [(svar/user "Return code")]
+                                               :on-chunk (constantly nil)})]
+            (expect (= "(+ 1 2)" (-> result :blocks first :source)))
+            (expect (= :finish-reason (get-in result [:stream-finalization :terminal-kind])))))))
+
+    (it "ask-code! raises semantic timeout when only SSE heartbeats arrive"
+      (let [router (svar/make-router
+                     [{:id :zai-coding
+                       :api-key "sk-test"
+                       :base-url "https://example.invalid/v1"
+                       :models [{:name "glm-5.1"}]}])]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (slow-heartbeat-stream)})]
+          (try
+            (svar/ask-code! router {:lang "clojure"
+                                    :messages [(svar/user "Return code")]
+                                    :on-chunk (constantly nil)
+                                    :idle-timeout-ms 1000
+                                    :semantic-timeout-ms 30})
+            (expect false)
+            (catch clojure.lang.ExceptionInfo e
+              (expect (= :svar.core/stream-semantic-timeout (:type (ex-data e)))))))))
 
     (it "ask-code! preserves whitespace-only OpenAI-chat reasoning deltas like content deltas"
       (let [router (svar/make-router

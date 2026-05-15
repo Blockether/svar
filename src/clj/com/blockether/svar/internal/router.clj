@@ -568,6 +568,18 @@
    per-task budget."
   45000)
 
+(def DEFAULT_SEMANTIC_TIMEOUT_MS
+  "Default semantic-stream timeout (ms) for streaming HTTP responses.
+   Nil by default: disabled unless caller opts in. If enabled and bytes
+   keep arriving (SSE pings/comments) but no model/progress event arrives
+   for this long, the stream is closed and surfaced as
+   `:svar.core/stream-semantic-timeout`.
+
+   Distinct from `DEFAULT_IDLE_TIMEOUT_MS`: idle watches transport
+   liveness; semantic watches model progress. Enable per-call with e.g.
+   `:semantic-timeout-ms 180000`."
+  nil)
+
 (def DEFAULT_RETRY
   "Default retry policy for transient HTTP errors."
   {:max-retries 5
@@ -1322,9 +1334,10 @@
       :budget                 budget
       :budget-state           (when budget (atom {:total-tokens 0 :total-cost 0.0}))
       :network                (merge DEFAULT_RETRY
-                                {:timeout-ms      DEFAULT_TIMEOUT_MS
-                                 :ttft-timeout-ms DEFAULT_TTFT_TIMEOUT_MS
-                                 :idle-timeout-ms DEFAULT_IDLE_TIMEOUT_MS}
+                                {:timeout-ms         DEFAULT_TIMEOUT_MS
+                                 :ttft-timeout-ms    DEFAULT_TTFT_TIMEOUT_MS
+                                 :idle-timeout-ms    DEFAULT_IDLE_TIMEOUT_MS
+                                 :semantic-timeout-ms DEFAULT_SEMANTIC_TIMEOUT_MS}
                                 (:network opts))
       :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
                                                  (if (some? cc) cc true))

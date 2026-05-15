@@ -1478,9 +1478,13 @@
        (str normalized (subs path (count parent)))
        :else (str normalized path)))))
 
+(def ^:dynamic *stream-semantic-timeout-ms*
+  router/DEFAULT_SEMANTIC_TIMEOUT_MS)
+
 (def ^:private stream-finalization-error-types
   #{:svar.core/stream-incomplete
-    :svar.core/stream-truncated})
+    :svar.core/stream-truncated
+    :svar.core/stream-semantic-timeout})
 
 (defn- stream-finalization-error? [e]
   (contains? stream-finalization-error-types (:type (ex-data e))))
@@ -1504,11 +1508,12 @@
 
    Returns same normalized shape as `chat-completion`:
    {:content :reasoning :provider-state :api-usage :http-response}"
-  [request-body {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms idle-timeout-ms on-chunk]
+  [request-body {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms on-chunk]
                  :or   {responses-path "/responses"
                         timeout-ms router/DEFAULT_TIMEOUT_MS
                         ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS
-                        idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS}}]
+                        idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS
+                        semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS}}]
   (let [url           (responses-url base-url responses-path)
         model         (:model request-body)
         codex?        (= "/codex/responses" responses-path)
@@ -1527,16 +1532,18 @@
                                   :timeout-ms timeout-ms
                                   :ttft-timeout-ms ttft-timeout-ms
                                   :idle-timeout-ms idle-timeout-ms
+                                  :semantic-timeout-ms semantic-timeout-ms
                                   :stream? (boolean stream?)})
                  :msg "responses request dispatched"})
     (try
       (if stream?
-        (http-post-stream! url request-body http-headers timeout-ms ttft-timeout-ms idle-timeout-ms extract-stream-delta
-          (when on-chunk
-            (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
-              (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
-                         :provider-state provider-state
-                         :api-usage api-usage :done? false}))))
+        (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
+          (http-post-stream! url request-body http-headers timeout-ms ttft-timeout-ms idle-timeout-ms extract-stream-delta
+            (when on-chunk
+              (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
+                (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
+                           :provider-state provider-state
+                           :api-usage api-usage :done? false})))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
       (catch Exception e
         (if (stream-finalization-error? e)
@@ -1633,7 +1640,7 @@
 (def ^:private sse-done ::sse-done)
 
 (defn- parse-sse-data
-  "Parses a single SSE data line. Returns parsed JSON map, `sse-done`, or nil."
+  "Parses an SSE data payload. Returns parsed JSON map, `sse-done`, or nil."
   [^String data-str]
   (let [trimmed (str/trim data-str)]
     (cond
@@ -1643,6 +1650,32 @@
       (try
         (json/read-json trimmed :key-fn keyword)
         (catch Exception _ nil)))))
+
+(defn- sse-field-line
+  "Parses one SSE line into `{:field f :value v}`. Comments return nil.
+   Per SSE spec, only one optional ASCII space after `:` is stripped;
+   tabs are preserved."
+  [^String line]
+  (when-not (str/starts-with? line ":")
+    (let [idx (.indexOf line ":")]
+      (if (neg? idx)
+        {:field line :value ""}
+        (let [raw (subs line (inc idx))]
+          {:field (subs line 0 idx)
+           :value (if (str/starts-with? raw " ") (subs raw 1) raw)})))))
+
+(defn- parse-sse-event
+  "Parses aggregated SSE event fields. Joins multi-line `data:` with LF
+   and injects `event:` as `:type` when provider data omits one."
+  [event-type data-lines]
+  (when (seq data-lines)
+    (let [parsed (parse-sse-data (str/join "\n" data-lines))]
+      (cond
+        (= sse-done parsed) sse-done
+        (and (map? parsed) (seq event-type))
+        (cond-> (assoc parsed :sse-event-type event-type)
+          (nil? (:type parsed)) (assoc :type event-type))
+        :else parsed))))
 
 (defn- stream-event-type
   [chunk]
@@ -1657,6 +1690,26 @@
     (get-in chunk [:choices 0 :finish-reason])
     (get-in chunk [:response :status])
     (:status chunk)))
+
+(defn- stream-semantic-event?
+  "True when parsed stream event means model/progress, not transport keepalive."
+  [parsed extracted content-piece reasoning-piece]
+  (let [event-type (stream-event-type parsed)
+        finish-reason (stream-finish-reason parsed)]
+    (boolean
+      (or content-piece
+        reasoning-piece
+        finish-reason
+        (:provider-state extracted)
+        (:api-usage extracted)
+        (:terminal? extracted)
+        (:incomplete? extracted)
+        (and event-type
+          (not (contains? #{"ping" "heartbeat" "keepalive"} event-type))
+          (or (str/starts-with? event-type "response.")
+            (str/includes? event-type ".delta")
+            (str/includes? event-type ".done")
+            (str/includes? event-type "message")))))))
 
 (defn- stream-finalization-summary
   [{:keys [terminal incomplete last-event-type last-finish-reason
@@ -1914,6 +1967,29 @@
                    (.start))]
     thread))
 
+(defn- start-semantic-stream-watchdog!
+  "Daemon thread. Closes `stream` if model/progress events stop while
+   transport may still emit pings/comments."
+  [^java.io.InputStream stream semantic-timeout-ms last-semantic-ns-atom alive?-atom on-fire]
+  (let [check-ms (-> (long semantic-timeout-ms) (quot 4) (max 100) (min 5000))
+        runnable (fn []
+                   (try
+                     (loop []
+                       (Thread/sleep (long check-ms))
+                       (when @alive?-atom
+                         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
+                           (if (>= elapsed-ms (long semantic-timeout-ms))
+                             (do
+                               (try (on-fire elapsed-ms) (catch Throwable _ nil))
+                               (try (.close stream) (catch Throwable _ nil)))
+                             (recur)))))
+                     (catch InterruptedException _ nil)
+                     (catch Throwable _ nil)))
+        thread   (doto (Thread. ^Runnable runnable "svar-semantic-stream-watchdog")
+                   (.setDaemon true)
+                   (.start))]
+    thread))
+
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
    for each. `headers` - HTTP headers map. `delta-fn` - extracts delta
@@ -1934,7 +2010,8 @@
                        :data  (log-data {:url url
                                          :timeout-ms timeout-ms
                                          :ttft-timeout-ms ttft-timeout-ms
-                                         :idle-timeout-ms idle-timeout-ms})
+                                         :idle-timeout-ms idle-timeout-ms
+                                         :semantic-timeout-ms *stream-semantic-timeout-ms*})
                        :msg   "stream HTTP POST dispatched"})
         request-start-ns  (System/nanoTime)
         caller-thread     (Thread/currentThread)
@@ -2020,8 +2097,11 @@
         last-finish-reason (atom nil)
         incomplete-response (atom nil)
         last-byte-ns (atom (System/nanoTime))
+        last-semantic-ns (atom (System/nanoTime))
         idle-fired? (atom false)
+        semantic-fired? (atom false)
         watchdog-alive? (atom true)
+        semantic-timeout-ms *stream-semantic-timeout-ms*
         watchdog (when (and (number? idle-timeout-ms) (pos? (long idle-timeout-ms)))
                    (start-idle-stream-watchdog!
                      input-stream
@@ -2036,27 +2116,36 @@
                                                      :elapsed-ms elapsed-ms
                                                      :content-acc-len (.length content-acc)
                                                      :reasoning-acc-len (.length reasoning-acc)})
-                                    :msg "stream idle, closing"}))))]
+                                    :msg "stream idle, closing"}))))
+        semantic-watchdog (when (and (number? semantic-timeout-ms) (pos? (long semantic-timeout-ms)))
+                            (start-semantic-stream-watchdog!
+                              input-stream
+                              semantic-timeout-ms
+                              last-semantic-ns
+                              watchdog-alive?
+                              (fn [elapsed-ms]
+                                (reset! semantic-fired? true)
+                                (trove/log! {:level :warn :id ::stream-semantic-timeout
+                                             :data (log-data {:url url
+                                                              :semantic-timeout-ms semantic-timeout-ms
+                                                              :elapsed-ms elapsed-ms
+                                                              :content-acc-len (.length content-acc)
+                                                              :reasoning-acc-len (.length reasoning-acc)})
+                                             :msg "stream semantic timeout, closing"}))))]
     (try
       (with-open [reader (BufferedReader. (InputStreamReader. ^java.io.InputStream input-stream "UTF-8"))]
-        (loop []
-          (let [line (.readLine reader)]
-            ;; Reset the idle clock on every line we observe — SSE
-            ;; keepalive comments (`: ...`) and blank separators also
-            ;; count as liveness signals, which is what we want.
-            (reset! last-byte-ns (System/nanoTime))
-            (when (some? line)
-              (when (str/starts-with? line "data: ")
-                (let [data-str (subs line 6)
-                      parsed (parse-sse-data data-str)]
+        (letfn [(handle-parsed! [parsed]
                   (cond
                     (= sse-done parsed)
-                    (reset! terminal-event {:kind :done-marker})
+                    (do
+                      (reset! terminal-event {:kind :done-marker})
+                      (reset! last-semantic-ns (System/nanoTime)))
 
                     parsed
                     (let [parsed (enrich-responses-reasoning-event current-reasoning-item parsed)
                           {:keys [content-delta reasoning-delta content-fallback reasoning-fallback
-                                  provider-state api-usage terminal? incomplete? incomplete-reason]}
+                                  provider-state api-usage terminal? incomplete? incomplete-reason]
+                           :as extracted}
                           (delta-fn parsed)
                           content-piece   (or content-delta
                                             (when (zero? (.length content-acc))
@@ -2067,12 +2156,18 @@
                       (when-let [event-type (stream-event-type parsed)]
                         (reset! last-event-type event-type))
                       (when-let [finish-reason (stream-finish-reason parsed)]
-                        (reset! last-finish-reason finish-reason))
+                        (reset! last-finish-reason finish-reason)
+                        (when (and (not @terminal-event)
+                                (not (contains? #{"in_progress" "queued" "running"} finish-reason)))
+                          (reset! terminal-event {:kind :finish-reason
+                                                  :event-type (stream-event-type parsed)})))
                       (when terminal?
                         (reset! terminal-event {:kind :terminal-event
                                                 :event-type (stream-event-type parsed)}))
                       (when incomplete?
                         (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
+                      (when (stream-semantic-event? parsed extracted content-piece reasoning-piece)
+                        (reset! last-semantic-ns (System/nanoTime)))
                       (when content-piece (.append content-acc content-piece))
                       (when reasoning-piece (.append reasoning-acc reasoning-piece))
                       (when provider-state
@@ -2084,46 +2179,101 @@
                                    :content-acc (str content-acc)
                                    :reasoning-acc (str reasoning-acc)
                                    :provider-state @provider-state-atom
-                                   :api-usage api-usage}))))))
-              (recur))))
-        (when-let [incomplete @incomplete-response]
-          (let [stream-finalization (stream-finalization-summary
-                                      {:terminal @terminal-event
-                                       :incomplete incomplete
-                                       :last-event-type @last-event-type
-                                       :last-finish-reason @last-finish-reason
-                                       :content-acc content-acc
-                                       :reasoning-acc reasoning-acc
-                                       :response response})]
-            (throw (ex-info "Stream ended with incomplete response."
-                     {:type :svar.core/stream-incomplete
-                      :stream? true
-                      :url url
-                      :reason (:reason incomplete)
-                      :stream-finalization stream-finalization
-                      :content-acc-len (.length content-acc)
-                      :reasoning-acc-len (.length reasoning-acc)
-                      :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
-        (when-not @terminal-event
-          (let [stream-finalization (stream-finalization-summary
-                                      {:terminal nil
-                                       :incomplete nil
-                                       :last-event-type @last-event-type
-                                       :last-finish-reason @last-finish-reason
-                                       :content-acc content-acc
-                                       :reasoning-acc reasoning-acc
-                                       :response response})]
-            (throw (ex-info "Stream ended before terminal marker."
-                     {:type :svar.core/stream-truncated
-                      :stream? true
-                      :url url
-                      :stream-finalization stream-finalization
-                      :content-acc-len (.length content-acc)
-                      :reasoning-acc-len (.length reasoning-acc)
-                      :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
-        (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
-              final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
-              ps              @provider-state-atom
+                                   :api-usage api-usage})))))
+                (dispatch-event! [event-type data-lines]
+                  (when-let [parsed (parse-sse-event event-type data-lines)]
+                    (handle-parsed! parsed)))]
+          (loop [event-type nil
+                 data-lines []]
+            (let [line (.readLine reader)]
+              ;; Reset idle on every observed line: comments, blank
+              ;; separators, and data all prove transport liveness.
+              (reset! last-byte-ns (System/nanoTime))
+              (when (some? line)
+                (if (str/blank? line)
+                  (do
+                    (dispatch-event! event-type data-lines)
+                    (recur nil []))
+                  (let [{:keys [field value]} (sse-field-line line)]
+                    (case field
+                      "event" (recur value data-lines)
+                      "data"  (recur event-type (conj data-lines value))
+                      (recur event-type data-lines)))))))))
+      (when @semantic-fired?
+        (let [stream-finalization (stream-finalization-summary
+                                    {:terminal @terminal-event
+                                     :incomplete @incomplete-response
+                                     :last-event-type @last-event-type
+                                     :last-finish-reason @last-finish-reason
+                                     :content-acc content-acc
+                                     :reasoning-acc reasoning-acc
+                                     :response response})]
+          (throw (ex-info (str "Stream semantic timeout (" semantic-timeout-ms
+                            "ms without model/progress event).")
+                   {:type :svar.core/stream-semantic-timeout
+                    :stream? true
+                    :url url
+                    :semantic-timeout-ms semantic-timeout-ms
+                    :stream-finalization stream-finalization
+                    :content-acc-len (.length content-acc)
+                    :reasoning-acc-len (.length reasoning-acc)
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+      (when @idle-fired?
+        (let [stream-finalization (stream-finalization-summary
+                                    {:terminal @terminal-event
+                                     :incomplete @incomplete-response
+                                     :last-event-type @last-event-type
+                                     :last-finish-reason @last-finish-reason
+                                     :content-acc content-acc
+                                     :reasoning-acc reasoning-acc
+                                     :response response})]
+          (throw (ex-info (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes).")
+                   {:type :svar.core/stream-idle-timeout
+                    :stream? true
+                    :url url
+                    :idle-timeout-ms idle-timeout-ms
+                    :stream-finalization stream-finalization
+                    :content-acc-len (.length content-acc)
+                    :reasoning-acc-len (.length reasoning-acc)
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+      (when-let [incomplete @incomplete-response]
+        (let [stream-finalization (stream-finalization-summary
+                                    {:terminal @terminal-event
+                                     :incomplete incomplete
+                                     :last-event-type @last-event-type
+                                     :last-finish-reason @last-finish-reason
+                                     :content-acc content-acc
+                                     :reasoning-acc reasoning-acc
+                                     :response response})]
+          (throw (ex-info "Stream ended with incomplete response."
+                   {:type :svar.core/stream-incomplete
+                    :stream? true
+                    :url url
+                    :reason (:reason incomplete)
+                    :stream-finalization stream-finalization
+                    :content-acc-len (.length content-acc)
+                    :reasoning-acc-len (.length reasoning-acc)
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+      (when-not @terminal-event
+        (let [stream-finalization (stream-finalization-summary
+                                    {:terminal nil
+                                     :incomplete nil
+                                     :last-event-type @last-event-type
+                                     :last-finish-reason @last-finish-reason
+                                     :content-acc content-acc
+                                     :reasoning-acc reasoning-acc
+                                     :response response})]
+          (throw (ex-info "Stream ended before terminal marker."
+                   {:type :svar.core/stream-truncated
+                    :stream? true
+                    :url url
+                    :stream-finalization stream-finalization
+                    :content-acc-len (.length content-acc)
+                    :reasoning-acc-len (.length reasoning-acc)
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+      (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
+            final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
+            ps              @provider-state-atom
               ;; Each provider has a dedicated extract-assistant-message
               ;; helper that maps its accumulated provider-state shape
               ;; to svar's canonical assistant message. Anthropic
@@ -2136,40 +2286,40 @@
               ;; canonical message from the streamed visible text plus
               ;; the accumulated reasoning_content channel so callers
               ;; round-trip through the same shape as non-streaming.
-              assistant-msg   (case (:provider ps)
-                                :anthropic
-                                (when (seq (:blocks ps))
-                                  {:role "assistant"
-                                   :content (vec (:blocks ps))})
+            assistant-msg   (case (:provider ps)
+                              :anthropic
+                              (when (seq (:blocks ps))
+                                {:role "assistant"
+                                 :content (vec (:blocks ps))})
 
-                                :openai-responses
-                                (responses-extract-assistant-message
-                                  (:reasoning-items ps) final-content)
+                              :openai-responses
+                              (responses-extract-assistant-message
+                                (:reasoning-items ps) final-content)
 
-                                (openai-chat-canonical-assistant-message
-                                  {:content final-content
-                                   :reasoning-content final-reasoning}))
-              stream-finalization (stream-finalization-summary
-                                    {:terminal @terminal-event
-                                     :incomplete nil
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})]
-          (trove/log! {:level :debug :id ::stream-finalized
-                       :data  (log-data (assoc stream-finalization :url url))
-                       :msg   "stream finalized"})
-          (cond-> {:content        final-content
-                   :reasoning      final-reasoning
-                   :provider-state ps
-                   :api-usage      @usage-atom
-                   :stream-finalization stream-finalization
-                   :http-response  {:url        url
-                                    :streaming? true
-                                    :status     (:status response)
-                                    :stream-finalization stream-finalization}}
-            assistant-msg (assoc :assistant-message assistant-msg))))
+                              (openai-chat-canonical-assistant-message
+                                {:content final-content
+                                 :reasoning-content final-reasoning}))
+            stream-finalization (stream-finalization-summary
+                                  {:terminal @terminal-event
+                                   :incomplete nil
+                                   :last-event-type @last-event-type
+                                   :last-finish-reason @last-finish-reason
+                                   :content-acc content-acc
+                                   :reasoning-acc reasoning-acc
+                                   :response response})]
+        (trove/log! {:level :debug :id ::stream-finalized
+                     :data  (log-data (assoc stream-finalization :url url))
+                     :msg   "stream finalized"})
+        (cond-> {:content        final-content
+                 :reasoning      final-reasoning
+                 :provider-state ps
+                 :api-usage      @usage-atom
+                 :stream-finalization stream-finalization
+                 :http-response  {:url        url
+                                  :streaming? true
+                                  :status     (:status response)
+                                  :stream-finalization stream-finalization}}
+          assistant-msg (assoc :assistant-message assistant-msg)))
       (catch clojure.lang.ExceptionInfo e
         (if (stream-finalization-error? e)
           (throw e)
@@ -2181,13 +2331,19 @@
                                        :content-acc content-acc
                                        :reasoning-acc reasoning-acc
                                        :response response})
-                idle?               @idle-fired?]
-            (throw (ex-info (if idle?
-                              (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
-                              (str "Stream connection error: " (ex-message e)))
-                     {:type (if idle? :svar.core/stream-idle-timeout :svar.core/http-error)
+                idle?               @idle-fired?
+                semantic?           @semantic-fired?]
+            (throw (ex-info (cond
+                              semantic? (str "Stream semantic timeout (" semantic-timeout-ms
+                                          "ms without model/progress event): " (ex-message e))
+                              idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
+                              :else     (str "Stream connection error: " (ex-message e)))
+                     {:type (cond semantic? :svar.core/stream-semantic-timeout
+                                  idle?     :svar.core/stream-idle-timeout
+                                  :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
+                      :semantic-timeout-ms (when semantic? semantic-timeout-ms)
                       :cause-class (.getName (class e))
                       :stream-finalization stream-finalization
                       :content-acc-len (.length content-acc)
@@ -2203,13 +2359,19 @@
                                      :content-acc content-acc
                                      :reasoning-acc reasoning-acc
                                      :response response})
-              idle?               @idle-fired?]
-          (throw (ex-info (if idle?
-                            (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
-                            (str "Stream connection error: " (ex-message e)))
-                   {:type (if idle? :svar.core/stream-idle-timeout :svar.core/http-error)
+              idle?               @idle-fired?
+              semantic?           @semantic-fired?]
+          (throw (ex-info (cond
+                            semantic? (str "Stream semantic timeout (" semantic-timeout-ms
+                                        "ms without model/progress event): " (ex-message e))
+                            idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
+                            :else     (str "Stream connection error: " (ex-message e)))
+                   {:type (cond semantic? :svar.core/stream-semantic-timeout
+                                idle?     :svar.core/stream-idle-timeout
+                                :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
+                    :semantic-timeout-ms (when semantic? semantic-timeout-ms)
                     :cause-class (.getName (class e))
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
@@ -2222,12 +2384,14 @@
         ;; if no watchdog was started (nil thread).
         (reset! watchdog-alive? false)
         (when watchdog
-          (try (.interrupt ^Thread watchdog) (catch Throwable _ nil)))))))
+          (try (.interrupt ^Thread watchdog) (catch Throwable _ nil)))
+        (when semantic-watchdog
+          (try (.interrupt ^Thread semantic-watchdog) (catch Throwable _ nil)))))))
 
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
-  [messages model api-key base-url retry-opts timeout-ms ttft-timeout-ms idle-timeout-ms extra-body on-chunk api-style]
+  [messages model api-key base-url retry-opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style]
   (let [api-style    (or api-style :openai-compatible-chat)
         provider-id  (:provider-id retry-opts)
         llm-headers  (:llm-headers retry-opts)
@@ -2247,11 +2411,12 @@
         ;; Other providers stay on the stateless extractor.
         delta-fn     (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
     (try
-      (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
-        (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
-          (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
-                     :provider-state provider-state
-                     :api-usage api-usage :done? false})))
+      (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
+        (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
+          (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
+            (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
+                       :provider-state provider-state
+                       :api-usage api-usage :done? false}))))
       (catch Exception e
         (if (stream-finalization-error? e)
           (throw e)
@@ -2293,6 +2458,10 @@
                           Closes the SSE stream if no bytes arrive for this
                           long; surfaces `:svar.core/stream-idle-timeout`.
                           Pass `nil` to disable.
+     - :semantic-timeout-ms - Integer. Model/progress timeout for streaming
+                              responses while transport bytes still arrive.
+                              Surfaces `:svar.core/stream-semantic-timeout`.
+                              Pass `nil` to disable.
      - :extra-body - Map. Additional params for the API request body.
      - :on-chunk - Function. When provided, enables SSE streaming. Callback receives
                    accumulated text string after each chunk.
@@ -2313,6 +2482,9 @@
          idle-timeout-ms (if (contains? opts :idle-timeout-ms)
                            (:idle-timeout-ms opts)
                            router/DEFAULT_IDLE_TIMEOUT_MS)
+         semantic-timeout-ms (if (contains? opts :semantic-timeout-ms)
+                               (:semantic-timeout-ms opts)
+                               router/DEFAULT_SEMANTIC_TIMEOUT_MS)
          extra-body     (:extra-body opts)
          on-chunk       (or (:on-chunk opts)
                           (when (copilot-stream-required? (:provider-id opts) base-url)
@@ -2338,10 +2510,11 @@
           :timeout-ms      timeout-ms
           :ttft-timeout-ms ttft-timeout-ms
           :idle-timeout-ms idle-timeout-ms
+          :semantic-timeout-ms semantic-timeout-ms
           :on-chunk        on-chunk})
        (if on-chunk
          (chat-completion-streaming
-           messages model api-key base-url opts timeout-ms ttft-timeout-ms idle-timeout-ms extra-body on-chunk api-style)
+           messages model api-key base-url opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style)
          (chat-completion-with-retry
            messages model api-key base-url opts timeout-ms extra-body api-style))))))
 
@@ -2474,8 +2647,8 @@
      - routing-resolved fields (`:model`, `:api-key`, `:base-url`,
        `:api-style`, `:provider-id`)
      - LLM tuning (`:extra-body`, `:timeout-ms`, `:ttft-timeout-ms`,
-       `:idle-timeout-ms`, `:check-context?`, `:output-reserve`,
-       `:cache-system?`)
+       `:idle-timeout-ms`, `:semantic-timeout-ms`, `:check-context?`,
+       `:output-reserve`, `:cache-system?`)
      - format-noise hardening (`:format-retries`, `:format-retry-on`,
        `:json-object-mode?`, `:on-format-error`)
    Used by `abstract!*`, `eval!*`, `refine!*`, `sample!*`, and the CoVe
@@ -2485,7 +2658,7 @@
    package default instead of the caller's value."
   [:model :api-key :base-url :api-style :provider-id
    :extra-body :provider-state
-   :timeout-ms :ttft-timeout-ms :idle-timeout-ms
+   :timeout-ms :ttft-timeout-ms :idle-timeout-ms :semantic-timeout-ms
    :check-context? :output-reserve :cache-system?
    :format-retries :format-retry-on :json-object-mode? :on-format-error
    :responses-path :llm-headers :verbosity])
@@ -2507,7 +2680,7 @@
    AND the LLM_PASSTHROUGH_KEYS verbatim, so internal helpers can
    `(merge (llm-passthrough resolved-opts) ...)` and have the new opts
    propagate without enumerating them at every call site."
-  [router {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms check-context? output-reserve api-key
+  [router {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve api-key
                   base-url provider-id api-style extra-body provider-state cache-system?
                   format-retries format-retry-on on-format-error
                   responses-path llm-headers verbosity]
@@ -2535,6 +2708,10 @@
                                 (contains? opts :idle-timeout-ms)    idle-timeout-ms
                                 (contains? network :idle-timeout-ms) (:idle-timeout-ms network)
                                 :else                                router/DEFAULT_IDLE_TIMEOUT_MS)
+             :semantic-timeout-ms (cond
+                                    (contains? opts :semantic-timeout-ms)    semantic-timeout-ms
+                                    (contains? network :semantic-timeout-ms) (:semantic-timeout-ms network)
+                                    :else                                    router/DEFAULT_SEMANTIC_TIMEOUT_MS)
              :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
              :output-reserve (or output-reserve (:output-reserve tokens))
              :api-key api-key
@@ -2663,8 +2840,8 @@
    layer so an explicit `nil` from the caller disables the watchdog
    without falling through to the router default.
 
-   `k` is one of `:timeout-ms`, `:ttft-timeout-ms`, `:idle-timeout-ms`.
-   `default` is `router/DEFAULT_*_MS`. Mirrors what `resolve-opts` /
+   `k` is one of `:timeout-ms`, `:ttft-timeout-ms`, `:idle-timeout-ms`,
+   `:semantic-timeout-ms`. `default` is `router/DEFAULT_*_MS`. Mirrors what `resolve-opts` /
    `ask-code!*` / `ask!*` already do internally; lifted here so every
    public entrypoint (`routed-chat-completion`, `chat-completion`,
    `ask!`, `ask-code!`, `abstract!`, `eval!`, `refine!`, `sample!`)
@@ -2689,6 +2866,9 @@
      - :idle-timeout-ms — inter-chunk idle ceiling for streaming. Closes
                           the SSE `InputStream` if no bytes arrive within
                           the window. Raises `:svar.core/stream-idle-timeout`.
+     - :semantic-timeout-ms — model/progress ceiling for streaming while
+                              transport pings may continue. Raises
+                              `:svar.core/stream-semantic-timeout`.
 
    Precedence per key: caller `opts` > router `:network` > package
    default. Pass an explicit `nil` to disable the corresponding watchdog."
@@ -2697,7 +2877,8 @@
         network  (:network router)
         timeout-ms      (resolved-network-timeout opts network :timeout-ms      router/DEFAULT_TIMEOUT_MS)
         ttft-timeout-ms (resolved-network-timeout opts network :ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS)
-        idle-timeout-ms (resolved-network-timeout opts network :idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS)]
+        idle-timeout-ms (resolved-network-timeout opts network :idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS)
+        semantic-timeout-ms (resolved-network-timeout opts network :semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS)]
     (router/with-provider-fallback router (:prefs resolved)
       (fn [provider model-map]
         (let [{:keys [extra-body api-style responses-path llm-headers]}
@@ -2709,7 +2890,8 @@
                      :api-style       api-style
                      :timeout-ms      timeout-ms
                      :ttft-timeout-ms ttft-timeout-ms
-                     :idle-timeout-ms idle-timeout-ms}
+                     :idle-timeout-ms idle-timeout-ms
+                     :semantic-timeout-ms semantic-timeout-ms}
               (:id provider)     (assoc :provider-id (:id provider))
               (:on-chunk opts)   (assoc :on-chunk (:on-chunk opts))
               responses-path     (assoc :responses-path responses-path)
@@ -3091,7 +3273,7 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
   [router {:keys [spec messages humanizer cache-system? schema-tail-pointer?] :as opts}]
-  (let [{:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
+  (let [{:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
@@ -3202,10 +3384,11 @@
                        (not (contains? caller-extra-body :response_format)))
                      (assoc :response_format {:type "json_object"}))
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
-                                           ;; See `ask-code!*`: carry resolved TTFT + idle
-                                           ;; verbatim so an explicit nil disables either.
+                                           ;; See `ask-code!*`: carry resolved streaming
+                                           ;; timeouts verbatim so explicit nil disables any.
                                            :ttft-timeout-ms ttft-timeout-ms
-                                           :idle-timeout-ms idle-timeout-ms})
+                                           :idle-timeout-ms idle-timeout-ms
+                                           :semantic-timeout-ms semantic-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      (seq extra-body) (assoc :extra-body extra-body)
@@ -3474,7 +3657,7 @@
             ;; strictly on this tag; without it we don't know what to keep.
             (anomaly/incorrect! ":lang is required on ask-code! and must be a non-blank string"
               {:type :svar.core/invalid-lang :lang lang}))
-        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms output-reserve
+        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms output-reserve
                 check-context? network pricing context-limits responses-path llm-headers]}
         (resolve-opts router opts)
         provider-id (:provider-id opts)
@@ -3532,12 +3715,12 @@
                                               :done?     false})))))
         caller-extra-body (or (:extra-body opts) {})
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
-                                           ;; Carry resolved TTFT + idle timeouts verbatim
-                                           ;; (incl. an explicit nil from the caller) so
-                                           ;; `chat-completion` sees the post-`resolve-opts`
-                                           ;; precedence, not whatever raw `network` had.
+                                           ;; Carry resolved streaming timeouts verbatim
+                                           ;; (incl. explicit nil) so `chat-completion`
+                                           ;; sees post-`resolve-opts` precedence.
                                            :ttft-timeout-ms ttft-timeout-ms
-                                           :idle-timeout-ms idle-timeout-ms})
+                                           :idle-timeout-ms idle-timeout-ms
+                                           :semantic-timeout-ms semantic-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      (seq caller-extra-body) (assoc :extra-body caller-extra-body)
