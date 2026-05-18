@@ -20,7 +20,7 @@
      ModelType)
    (java.io ByteArrayInputStream)
    (java.net HttpURLConnection URI)
-   (java.util Base64 Locale)
+   (java.util Base64 Locale UUID)
    (javax.imageio ImageIO ImageReader)
    (javax.imageio.stream ImageInputStream)))
 
@@ -587,6 +587,13 @@
    :max-delay-ms 60000
    :multiplier 2.0})
 
+(def DEFAULT_RATE_LIMIT_ROUTING
+  "Default router-owned 429 policy. Delays are before same-provider retries."
+  {:same-provider-delays-ms [2000 3000 6000]
+   :fallback-after-ms 30000
+   :respect-retry-after? true
+   :fallback-provider? true})
+
 (def DEFAULT_OUTPUT_RESERVE
   "Default number of tokens to reserve for model output.
    0 means no reservation — let the API handle overflow naturally."
@@ -811,6 +818,7 @@
    :cooldown-ms            60000
    :max-wait-ms            30000
    :transient-status-codes #{429 500 502 503 504}
+   :rate-limit DEFAULT_RATE_LIMIT_ROUTING
    ;; Circuit breaker defaults
    :failure-threshold   5
    :recovery-ms         60000})
@@ -1169,22 +1177,166 @@
           retry-set (or (:format-retry-on prefs) DEFAULT_FORMAT_ERROR_TYPES)]
       (contains? retry-set t))))
 
+(defn- routing-event
+  [router event-type data]
+  (assoc data
+    :event/id (str (UUID/randomUUID))
+    :event/type event-type
+    :at-ms (router-now-ms router)))
+
+(defn- emit-routing-event!
+  [prefs event]
+  (when-let [on-chunk (:on-chunk prefs)]
+    (on-chunk event))
+  event)
+
+(defn- append-routing-event!
+  [trace prefs event]
+  (swap! trace conj event)
+  (emit-routing-event! prefs event))
+
+(defn- stream-content-started?
+  [e]
+  (let [data (ex-data e)]
+    (or (pos? (long (or (:content-acc-len data) 0)))
+      (some? (:partial-content data)))))
+
+(defn- retry-after-header-ms
+  [e]
+  (let [headers (:headers (ex-data e))
+        retry-after (or (get headers "retry-after")
+                      (get headers "Retry-After")
+                      (get headers :retry-after)
+                      (get headers :Retry-After))]
+    (when retry-after
+      (try
+        (* 1000 (Long/parseLong (str/trim (str retry-after))))
+        (catch Exception _ nil)))))
+
+(defn- rate-limit-delay-ms
+  "Raw delay candidate for the next same-provider retry, in ms.
+
+   Combines (in order of precedence):
+     - `Retry-After` HTTP header (when `:respect-retry-after?` is true);
+     - `:same-provider-delays-ms[attempt-index]` from policy.
+
+   Returns nil once the configured delay schedule is exhausted (caller
+   then consults `:fallback-after-ms` for budget padding before falling
+   back to the next provider)."
+  [router e attempt-index]
+  (let [policy (:rate-limit router)
+        configured (nth (vec (:same-provider-delays-ms policy)) attempt-index nil)
+        retry-after (when (:respect-retry-after? policy)
+                      (retry-after-header-ms e))]
+    (when (some? configured)
+      (long (or retry-after configured)))))
+
+(defn- provider-label
+  [provider]
+  (some-> (:id provider) name))
+
+(defn- handle-rate-limit-retries
+  "Same-provider retry loop for 429 before any streamed content.
+
+   Policy keys consulted:
+     - `:same-provider-delays-ms` — vector of pre-retry sleeps;
+     - `:fallback-after-ms`       — wall-clock budget for the whole 429
+                                    phase (measured from `start-ms`,
+                                    which is when the first 429 was
+                                    caught for this provider attempt);
+     - `:respect-retry-after?`    — let server-side `Retry-After` header
+                                    override the configured delay;
+     - `:fallback-provider?`      — gate on whether a budget-exhausted
+                                    rate-limit error may fall through
+                                    to the next provider.
+
+   Budget semantics (`:fallback-after-ms` is a HARD CAP on the
+   same-provider phase, not a minimum wait):
+     1. each configured delay is clamped to remaining budget so the
+        loop never overshoots `:fallback-after-ms`;
+     2. once the configured delay vector is exhausted OR `elapsed
+        ≥ :fallback-after-ms`, we return `:rate-limit-budget-exhausted?`
+        immediately so the outer fallback fires with no extra wait;
+     3. when `:fallback-after-ms` is 0 we fall back without any
+        same-provider retry, regardless of `:same-provider-delays-ms`.
+
+   Returns either `{:success ...}` (next call after sleep succeeded) or
+   `{:error e :rate-limit-budget-exhausted? true :fallback-provider? ?
+     :elapsed-ms N}` so the caller can emit a fallback event with the
+   measured wall-clock elapsed."
+  [router prefs trace provider model-map f e start-ms]
+  (let [policy   (:rate-limit router)
+        budget   (some-> (:fallback-after-ms policy) long)
+        budget?  (some? budget)
+        elapsed* #(- (long (router-now-ms router)) (long start-ms))
+        remain*  #(if budget? (max 0 (- (long budget) (long (elapsed*)))) Long/MAX_VALUE)
+        budget-exhausted-result
+        (fn [last-error]
+          {:error last-error
+           :rate-limit-budget-exhausted? true
+           :fallback-provider? (:fallback-provider? policy)
+           :elapsed-ms (long (elapsed*))})]
+    (loop [retry-index 0
+           last-error e]
+      (let [raw      (rate-limit-delay-ms router last-error retry-index)
+            remain   (long (remain*))
+            ;; Clamp configured delay to remaining budget so the same-provider
+            ;; phase never overshoots `:fallback-after-ms`.
+            delay-ms (when (and (some? raw) (or (not budget?) (pos? remain)))
+                       (long (if budget? (min (long raw) remain) (long raw))))]
+        (cond
+          ;; A retry is still in budget — sleep, then re-invoke `f`.
+          (some? delay-ms)
+          (do
+            (append-routing-event! trace prefs
+              (routing-event router :llm.routing/provider-retry
+                {:status (:status (ex-data last-error))
+                 :reason :rate-limit
+                 :provider (provider-label provider)
+                 :model (:name model-map)
+                 :attempt (inc retry-index)
+                 :delay-ms delay-ms
+                 :elapsed-ms (long (elapsed*))
+                 :error (ex-message last-error)}))
+            (when (pos? (long delay-ms))
+              (async/<!! (async/timeout (long delay-ms))))
+            (let [outcome (try
+                            {:success (f provider model-map)}
+                            (catch Exception next-error
+                              {:error next-error}))]
+              (if (and (:error outcome)
+                    (= 429 (:status (ex-data (:error outcome))))
+                    (router-transient-error? router (:error outcome)))
+                (if (stream-content-started? (:error outcome))
+                  (throw (:error outcome))
+                  (recur (inc retry-index) (:error outcome)))
+                ;; Non-429 outcome (success OR different transient).
+                ;; Forward as-is so the outer handler labels the reason
+                ;; correctly (a 503 after a 429 retry is `:transient-error`,
+                ;; NOT `:rate-limit-budget-exhausted`). Attach `:elapsed-ms`
+                ;; on the error path so the fallback event still carries
+                ;; the wall-time the same-provider phase consumed.
+                (cond-> outcome
+                  (:error outcome) (assoc :elapsed-ms (long (elapsed*)))))))
+
+          ;; Configured schedule exhausted OR budget gone — fall back
+          ;; now. No extra padding; `:fallback-after-ms` is a cap, not
+          ;; a target.
+          :else
+          (budget-exhausted-result last-error))))))
+
 (defn with-provider-fallback [router prefs f]
   (budget-check! router)
   (let [tried (atom #{})
         format-failed (atom #{})
-        ;; Last format-error caught — surfaced verbatim (with envelope) when
-        ;; no remaining providers can take the call. Lets callers see the
-        ;; original `:svar.spec/schema-rejected` ex-data instead of an
-        ;; opaque `:svar.llm/all-providers-exhausted`.
+        ;; Last format-error caught — surfaced verbatim when no provider can
+        ;; take call. Keeps schema-rejected ex-data, not opaque exhaustion.
         last-format-error (atom nil)
-        fallback-trace (atom [])
+        trace (atom [])
+        selected (atom nil)
+        pending-fallback (atom nil)
         max-wait-ms (:max-wait-ms router)]
     (loop [attempts 0]
-      ;; Each iteration honors the current set of format-failed providers.
-      ;; Once a provider produces an unrecoverable format error in this call,
-      ;; we exclude it from selection so we don't burn tokens re-trying the
-      ;; same broken combo.
       (let [iter-prefs (cond-> prefs
                          (seq @format-failed) (update :exclude-providers
                                                 (fnil into #{}) @format-failed))]
@@ -1192,64 +1344,49 @@
           (let [pid (:id provider)
                 start-ms (router-now-ms router)]
             (swap! tried conj pid)
-            (let [result (try (f provider model-map)
-                              (catch Exception e
-                                (cond
-                                  (router-transient-error? router e)
-                                  (do (trove/log! {:level :warn
-                                                   :id ::provider-retry
-                                                   :data {:provider-id pid
-                                                          :error (ex-message e)}
-                                                   :msg "retrying with fallback provider"})
-                                      (swap! fallback-trace conj
-                                        {:provider-id pid
-                                         :model (:name model-map)
-                                         :error (ex-message e)
-                                         :status (:status (ex-data e))
-                                         :reason :transient-error})
-                                      (cb-record-failure! router pid
-                                        (= 429 (:status (ex-data e))))
-                                      (when-let [on-chunk (:on-chunk prefs)]
-                                        (on-chunk {:reset? true
-                                                   :reason :provider-fallback
-                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                                   :new-provider nil}))
-                                      ::transient-error)
+            (when-not @selected
+              (reset! selected {:provider (provider-label provider)
+                                :model (:name model-map)}))
+            (when-let [{:keys [from-provider from-model status reason error elapsed-ms]} @pending-fallback]
+              (append-routing-event! trace prefs
+                (routing-event router
+                  (if (= reason :format-error) :llm.routing/format-fallback :llm.routing/provider-fallback)
+                  (cond-> {:status status
+                           :reason (if (= reason :rate-limit) :rate-limit-budget-exhausted reason)
+                           :from-provider (name from-provider)
+                           :from-model from-model
+                           :to-provider (provider-label provider)
+                           :to-model (:name model-map)
+                           :error error}
+                    (some? elapsed-ms) (assoc :elapsed-ms (long elapsed-ms)))))
+              (reset! pending-fallback nil))
+            (let [result (try
+                           {:success (f provider model-map)}
+                           (catch Exception e
+                             (cond
+                               (and (router-transient-error? router e)
+                                 (stream-content-started? e))
+                               (throw e)
 
-                                  (format-error? prefs e)
-                                  (do (trove/log! {:level :warn
-                                                   :id ::format-error-fallback
-                                                   :data {:provider-id pid
-                                                          :model (:name model-map)
-                                                          :ex-type (:type (ex-data e))}
-                                                   :msg "format error: trying next provider"})
-                                      (swap! format-failed conj pid)
-                                      (reset! last-format-error e)
-                                      (swap! fallback-trace conj
-                                        {:provider-id pid
-                                         :model (:name model-map)
-                                         :error (ex-message e)
-                                         :ex-type (:type (ex-data e))
-                                         :reason :format-error})
-                                      (when-let [on-chunk (:on-chunk prefs)]
-                                        (on-chunk {:reset? true
-                                                   :reason :format-error-fallback
-                                                   :failed-provider {:id pid :model (:name model-map) :error (ex-message e)}
-                                                   :new-provider nil}))
-                                      ::format-error)
+                               (and (= 429 (:status (ex-data e)))
+                                 (router-transient-error? router e))
+                               (handle-rate-limit-retries router prefs trace provider model-map f e start-ms)
 
-                                  :else (throw e))))]
+                               (router-transient-error? router e)
+                               {:error e}
+
+                               (format-error? prefs e)
+                               {:format-error e}
+
+                               :else (throw e))))]
               (cond
-                (or (= result ::transient-error)
-                  (= result ::format-error))
-                (recur (inc attempts))
-
-                :else
-                (let [token-count (or (get-in result [:api-usage :total_tokens])
+                (:success result)
+                (let [result (:success result)
+                      token-count (or (get-in result [:api-usage :total_tokens])
                                     (get-in result [:tokens :total])
                                     0)
                       latency-ms (- (router-now-ms router) start-ms)
-                      trace @fallback-trace]
+                      trace-value @trace]
                   (record-tokens! router pid token-count)
                   (cb-record-success! router pid)
                   (record-cumulative! router pid token-count latency-ms)
@@ -1257,18 +1394,60 @@
                   (cond-> (assoc result
                             :routed/provider-id pid
                             :routed/model (:name model-map)
-                            :routed/base-url (:base-url provider))
-                    (seq trace) (assoc :routed/fallback-trace trace))))))
-          ;; No selectable provider. If we got here AFTER at least one format
-          ;; error and the fleet is now empty (modulo excluded), surface the
-          ;; LAST format error verbatim with envelope + fallback-trace.
-          ;; Otherwise fall through to the existing "all providers exhausted"
-          ;; / wait-and-retry logic.
+                            :routed/base-url (:base-url provider)
+                            :routed/selected @selected
+                            :routed/actual {:provider (provider-label provider)
+                                            :model (:name model-map)}
+                            :routed/fallback? (boolean (seq (filter #(not= :llm.routing/provider-retry (:event/type %)) trace-value))))
+                    (seq trace-value) (assoc :routed/trace trace-value)))
+
+                (:format-error result)
+                (let [e (:format-error result)]
+                  (trove/log! {:level :warn
+                               :id ::format-error-fallback
+                               :data {:provider-id pid
+                                      :model (:name model-map)
+                                      :ex-type (:type (ex-data e))}
+                               :msg "format error: trying next provider"})
+                  (swap! format-failed conj pid)
+                  (reset! last-format-error e)
+                  (reset! pending-fallback {:from-provider pid
+                                            :from-model (:name model-map)
+                                            :status (:status (ex-data e))
+                                            :reason :format-error
+                                            :error (ex-message e)})
+                  (recur (inc attempts)))
+
+                (:error result)
+                (let [e (:error result)
+                      status (:status (ex-data e))
+                      reason (cond
+                               (:rate-limit-budget-exhausted? result) :rate-limit
+                               (= 429 status) :rate-limit
+                               :else :transient-error)]
+                  (trove/log! {:level :warn
+                               :id ::provider-retry
+                               :data {:provider-id pid
+                                      :error (ex-message e)}
+                               :msg "provider attempt failed"})
+                  (cb-record-failure! router pid (= 429 status))
+                  (if (and (= reason :rate-limit)
+                        (false? (:fallback-provider? result)))
+                    (throw e)
+                    (do
+                      (reset! pending-fallback
+                        (cond-> {:from-provider pid
+                                 :from-model (:name model-map)
+                                 :status status
+                                 :reason reason
+                                 :error (ex-message e)}
+                          (some? (:elapsed-ms result)) (assoc :elapsed-ms (:elapsed-ms result))))
+                      (recur (inc attempts))))))))
           (if (and @last-format-error (seq @format-failed))
             (let [e @last-format-error]
               (throw (ex-info (ex-message e)
                        (merge (ex-data e)
-                         {:routed/fallback-trace @fallback-trace
+                         {:routed/trace @trace
                           :tried @tried
                           :format-failed @format-failed})
                        e)))
@@ -1284,7 +1463,7 @@
                          {:type :svar.llm/all-providers-exhausted
                           :prefs iter-prefs :tried @tried
                           :format-failed @format-failed
-                          :fallback-trace @fallback-trace}))))))))))
+                          :routed/trace @trace}))))))))))
 
 ;; =============================================================================
 ;; Router creation
@@ -1303,6 +1482,7 @@
      :network   - {:timeout-ms N :max-retries N ...} router-level network defaults
      :tokens    - {:check-context? bool :pricing {} :context-limits {}} token defaults
      :budget    - {:max-tokens N :max-cost N} spend limits (nil = no limit)
+     :rate-limit - {:same-provider-delays-ms [...] :fallback-after-ms N ...}
      :failure-threshold - Int. Failures before circuit opens (default: 5)
      :recovery-ms       - Int. Ms before open→half-open (default: 60000)
 
@@ -1350,6 +1530,7 @@
       :window-ms              (:window-ms merged)
       :cooldown-ms            (:cooldown-ms merged)
       :max-wait-ms            (:max-wait-ms merged)
+      :rate-limit             (merge DEFAULT_RATE_LIMIT_ROUTING (:rate-limit merged))
       :failure-threshold   (:failure-threshold merged)
       :recovery-ms         (:recovery-ms merged)
       :transient-status-codes (:transient-status-codes merged)})))
@@ -1371,7 +1552,7 @@
    cost-cheapest model happens to be non-reasoning."
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning
-                on-format-error format-retry-on]} routing-opts
+                on-format-error format-retry-on on-chunk]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
         base-prefs (cond
@@ -1410,7 +1591,13 @@
                 ;; treated as transient and the next provider/model in the
                 ;; fleet (excluding the offender) is tried.
                 on-format-error     (assoc :on-format-error on-format-error)
-                format-retry-on     (assoc :format-retry-on format-retry-on))]
+                format-retry-on     (assoc :format-retry-on format-retry-on)
+                ;; Routing trace events fire live through this callback
+                ;; (same map shape later present in `:routed/trace`).
+                ;; Without this passthrough, routing events surface only
+                ;; in the final result — caller/TUI sees no progress
+                ;; during multi-second 429 retry sleeps.
+                on-chunk            (assoc :on-chunk on-chunk))]
     {:prefs prefs
      :error-strategy error-strategy}))
 

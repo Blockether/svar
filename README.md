@@ -360,7 +360,7 @@ providers. Caller's `:extra-body :response_format` always wins; pass
 **`:on-format-error :fallback-provider`** — if the chosen model fails
 format parsing, treat it as a transient error and try the next provider
 in the fleet, excluding the offender. When all providers fail, svar
-throws the LAST format error's full envelope with `:routed/fallback-trace`
+throws the LAST format error's full envelope with `:routed/trace`
 and `:format-failed` merged into ex-data. Default is `:fail`.
 
 #### Forensic envelope on every error

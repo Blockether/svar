@@ -806,7 +806,7 @@
    Throws:
    ExceptionInfo if all retries exhausted."
   ([f] (with-retry f {}))
-  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier]
+  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier router-handles-rate-limit?]
        :or {max-retries 5
             initial-delay-ms 1000
             max-delay-ms 60000
@@ -818,7 +818,9 @@
                     (catch Exception e
                       (let [ex-data-map (ex-data e)
                             status (:status ex-data-map)
-                            retryable-status? (contains? RETRYABLE_STATUS_CODES status)
+                            retryable-status? (and (contains? RETRYABLE_STATUS_CODES status)
+                                                (not (and router-handles-rate-limit?
+                                                       (= 429 status))))
                             retryable-conn? (retryable-exception? e)
                             can-retry? (< attempt (long max-retries))]
                         (if (and (or retryable-status? retryable-conn?) can-retry?)
@@ -2775,13 +2777,20 @@
      - `:reasoning`         → implies `:require-reasoning? true`
      - `:on-format-error`   → enables format-error provider fallback
      - `:format-retry-on`   → customises the format-error type set
+     - `:on-chunk`          → surfaced to the router so routing events
+                              (`:llm.routing/provider-retry`/`-fallback`/
+                              `-format-fallback`) fire live alongside
+                              streaming content chunks. Without this
+                              passthrough, callers see no progress during
+                              multi-second 429 retry sleeps.
    Returns the augmented `:routing` map. Called by every routed entrypoint
    before `resolve-routing`."
   [opts]
   (cond-> (or (:routing opts) {})
-    (:reasoning opts)        (assoc :reasoning (:reasoning opts))
-    (:on-format-error opts)  (assoc :on-format-error (:on-format-error opts))
-    (:format-retry-on opts)  (assoc :format-retry-on (:format-retry-on opts))))
+    (:reasoning opts)            (assoc :reasoning (:reasoning opts))
+    (:on-format-error opts)      (assoc :on-format-error (:on-format-error opts))
+    (:format-retry-on opts)      (assoc :format-retry-on (:format-retry-on opts))
+    (contains? opts :on-chunk)   (assoc :on-chunk (:on-chunk opts))))
 
 (defn- inject-routed-params
   "Injects router-chosen `[provider model-map]` + caller opts into the opts map
@@ -2827,6 +2836,7 @@
         :base-url (:base-url provider)
         :api-style (or (:api-style model-map) (:api-style provider))
         :provider-id (:id provider)
+        :router-handles-rate-limit? true
         :json-object-mode? json-object-mode?
         :extra-body merged-body)
       (cond-> (some? (:responses-path provider))
@@ -2957,7 +2967,7 @@
          :fallback-provider  - treat the failure as transient and try the
             next provider/model in the fleet, excluding the offender. The
             final exception (when all providers fail) is the LAST format
-            error seen, with `:routed/fallback-trace` and `:format-failed`
+            error seen, with `:routed/trace` and `:format-failed`
             merged into ex-data. Pairs well with `:format-retries N` per
             provider - retries first absorb prose-leaks locally, fallback
             kicks in only when the whole model is broken for this spec.

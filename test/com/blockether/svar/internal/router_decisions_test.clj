@@ -108,7 +108,22 @@
 
     (it "absent `:reasoning` leaves `:require-reasoning?` unset"
       (let [{:keys [prefs]} (router/resolve-routing router {:optimize :cost})]
-        (expect (nil? (:require-reasoning? prefs)))))))
+        (expect (nil? (:require-reasoning? prefs)))))
+
+    (it "`:on-chunk` is threaded into prefs so live routing events surface"
+      ;; Caller's `:on-chunk` (set by every routed entrypoint like
+      ;; `ask-code!`) must reach `with-provider-fallback`'s prefs map
+      ;; verbatim; otherwise routing events fire only in the final
+      ;; `:routed/trace` and the TUI sees no progress during 429 retry
+      ;; sleeps. Regression guard for LLM_SPEC "emitted live to caller".
+      (let [cb (fn [_e])
+            {:keys [prefs]} (router/resolve-routing router
+                              {:optimize :cost :on-chunk cb})]
+        (expect (identical? cb (:on-chunk prefs)))))
+
+    (it "absent `:on-chunk` leaves prefs without one"
+      (let [{:keys [prefs]} (router/resolve-routing router {:optimize :cost})]
+        (expect (not (contains? prefs :on-chunk)))))))
 
 ;; =============================================================================
 ;; Tier 1 — with-provider-fallback happy/sad paths
@@ -134,7 +149,7 @@
       (expect (= :solo (:routed/provider-id result)))
       (expect (= "m1"  (:routed/model result)))
       (expect (= "http://solo" (:routed/base-url result)))
-      (expect (nil? (:routed/fallback-trace result)))
+      (expect (nil? (:routed/trace result)))
       ;; Top-level totals
       (expect (= 1   (get-in stats [:total :requests])))
       (expect (= 150 (get-in stats [:total :tokens])))
@@ -166,15 +181,237 @@
                        :p2 (success-result 100))))]
       (expect (= 2 @calls))
       (expect (= :p2 (:routed/provider-id result)))
-      (let [trace (:routed/fallback-trace result)]
+      (let [trace (:routed/trace result)]
         (expect (vector? trace))
         (expect (= 1 (count trace)))
-        (expect (= :p1 (get-in trace [0 :provider-id])))
+        (expect (= :llm.routing/provider-fallback (get-in trace [0 :event/type])))
+        (expect (= "p1" (get-in trace [0 :from-provider])))
+        (expect (= "p2" (get-in trace [0 :to-provider])))
         (expect (= 503 (get-in trace [0 :status])))))))
+
+(defdescribe with-provider-fallback-rate-limit-trace-test
+  "429 retries are router-owned trace events, not hidden llm/with-retry logs."
+
+  (it "retries same provider, then falls back with one event shape"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [0 0]
+                            ;; budget > 0 so the configured delays fire;
+                            ;; `:fallback-after-ms 0` means "fallback now"
+                            ;; per LLM_SPEC step 4 and is covered below.
+                            :fallback-after-ms 60000
+                            :respect-retry-after? true
+                            :fallback-provider? true}})
+          calls (atom [])
+          live-events (atom [])
+          result (router/with-provider-fallback r {:on-chunk #(swap! live-events conj %)}
+                   (fn [provider _model]
+                     (swap! calls conj (:id provider))
+                     (case (:id provider)
+                       :p1 (transient-error 429)
+                       :p2 (success-result 100))))]
+      (expect (= [:p1 :p1 :p1 :p2] @calls))
+      (expect (= :p2 (:routed/provider-id result)))
+      (let [trace (:routed/trace result)]
+        (expect (= trace @live-events))
+        (expect (= [:llm.routing/provider-retry
+                    :llm.routing/provider-retry
+                    :llm.routing/provider-fallback]
+                  (mapv :event/type trace)))
+        (expect (= [1 2] (mapv :attempt (take 2 trace))))
+        (expect (= "p1" (:from-provider (last trace))))
+        (expect (= "p2" (:to-provider (last trace)))))))
+
+  (it "`:fallback-after-ms 0` falls back immediately without same-provider retries"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [0 0 0]
+                            :fallback-after-ms 0
+                            :fallback-provider? true}})
+          calls (atom [])
+          result (router/with-provider-fallback r {}
+                   (fn [provider _model]
+                     (swap! calls conj (:id provider))
+                     (case (:id provider)
+                       :p1 (transient-error 429)
+                       :p2 (success-result 100))))]
+      (expect (= [:p1 :p2] @calls))
+      (let [trace (:routed/trace result)]
+        (expect (= [:llm.routing/provider-fallback] (mapv :event/type trace)))
+        (expect (some? (:elapsed-ms (first trace)))))))
+
+  (it "`:respect-retry-after?` lets `Retry-After` header override the configured delay"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [10000 10000]
+                            :fallback-after-ms 60000
+                            :respect-retry-after? true
+                            :fallback-provider? true}})
+          ;; `Retry-After: 0` from the server clamps the 10s configured
+          ;; delay to 0ms; the test would hang for ~20s otherwise.
+          retry-after-error #(throw (ex-info "HTTP 429"
+                                      {:type :svar.core/http-error
+                                       :status 429
+                                       :headers {"retry-after" "0"}}))
+          calls (atom [])
+          result (router/with-provider-fallback r {}
+                   (fn [provider _model]
+                     (swap! calls conj (:id provider))
+                     (case (:id provider)
+                       :p1 (retry-after-error)
+                       :p2 (success-result 100))))]
+      (expect (= [:p1 :p1 :p1 :p2] @calls))
+      (let [trace (:routed/trace result)
+            retries (filter #(= :llm.routing/provider-retry (:event/type %)) trace)]
+        (expect (= 2 (count retries)))
+        ;; Header-driven delay should clamp configured 10000ms to 0ms.
+        (expect (every? #(zero? (long (:delay-ms %))) retries)))))
+
+  (it "`:respect-retry-after? false` ignores `Retry-After` header"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [0 0]
+                            :fallback-after-ms 60000
+                            ;; header ignored → configured 0ms delays win
+                            :respect-retry-after? false
+                            :fallback-provider? true}})
+          retry-after-error #(throw (ex-info "HTTP 429"
+                                      {:type :svar.core/http-error
+                                       :status 429
+                                       :headers {"retry-after" "9999"}}))
+          calls (atom [])
+          result (router/with-provider-fallback r {}
+                   (fn [provider _model]
+                     (swap! calls conj (:id provider))
+                     (case (:id provider)
+                       :p1 (retry-after-error)
+                       :p2 (success-result 100))))]
+      (expect (= [:p1 :p1 :p1 :p2] @calls))
+      (let [retries (filter #(= :llm.routing/provider-retry (:event/type %)) (:routed/trace result))]
+        (expect (every? #(zero? (long (:delay-ms %))) retries)))))
+
+  (it "does not retry or fallback after streamed content starts"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :rate-limit {:same-provider-delays-ms [0]
+                            :fallback-after-ms 60000
+                            :fallback-provider? true}})
+          calls (atom [])
+          thrown (try
+                   (router/with-provider-fallback r {}
+                     (fn [provider _model]
+                       (swap! calls conj (:id provider))
+                       (throw (ex-info "stream failed after content"
+                                {:type :svar.core/http-error
+                                 :status 429
+                                 :content-acc-len 1
+                                 :partial-content "x"}))))
+                   ::no-throw
+                   (catch clojure.lang.ExceptionInfo e e))]
+      (expect (not= ::no-throw thrown))
+      (expect (= [:p1] @calls))
+      (expect (= 1 (:content-acc-len (ex-data thrown))))))
+
+  (it "`:fallback-after-ms` caps the same-provider phase — delays clamp, no padding"
+    ;; LLM_SPEC step 4: hard cap on same-provider wall time. Configured
+    ;; delay schedule has 100ms entries but budget is 50ms; the first
+    ;; delay clamps to 50ms, then the next iteration sees remain=0 and
+    ;; falls back — NO extra padding, even though delay[1] is configured.
+    ;;
+    ;; Uses a controllable clock that ticks forward by the requested
+    ;; sleep so elapsed/remain track delays without burning real wall
+    ;; time. (The router's `async/<!! timeout` still sleeps, but we
+    ;; advance the clock manually before each retry attempt.)
+    (let [clock-atom (atom 0)
+          budget-ms 50
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock (fn [] @clock-atom)
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [100 100]
+                            :fallback-after-ms budget-ms
+                            :fallback-provider? true}})
+          calls (atom [])
+          result (router/with-provider-fallback r {}
+                   (fn [provider _model]
+                     (swap! calls conj (:id provider))
+                     ;; Simulate the configured delay having already
+                     ;; elapsed on subsequent retries by advancing the
+                     ;; mock clock from the SECOND p1 call onward. The
+                     ;; first call captures start-ms at clock=0 so the
+                     ;; first retry is in budget; the second call lands
+                     ;; with elapsed=budget so the retry loop falls back.
+                     (when (and (= (:id provider) :p1) (> (count @calls) 1))
+                       (swap! clock-atom + budget-ms))
+                     (case (:id provider)
+                       :p1 (transient-error 429)
+                       :p2 (success-result 100))))]
+      (expect (= [:p1 :p1 :p2] @calls))
+      ;; one retry fired with the clamped delay (≤ budget), then fallback.
+      (let [retries (filter #(= :llm.routing/provider-retry (:event/type %)) (:routed/trace result))
+            fb     (first (filter #(= :llm.routing/provider-fallback (:event/type %)) (:routed/trace result)))]
+        (expect (= 1 (count retries)))
+        (expect (<= (long (:delay-ms (first retries))) budget-ms))
+        ;; fallback event carries elapsed-ms measured against the router clock.
+        (expect (some? (:elapsed-ms fb)))
+        (expect (>= (long (:elapsed-ms fb)) budget-ms)))))
+
+  (it "`:on-chunk` from caller opts surfaces routing events live through `ask-code!`"
+    ;; Regression for LLM_SPEC "emitted live to caller/TUI when available".
+    ;; Without `:on-chunk` passthrough in `resolve-routing` /
+    ;; `routing-opts-with-reasoning`, retry/fallback events only land in
+    ;; the final `:routed/trace` — the TUI sees a multi-second hang.
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [0]
+                            :fallback-after-ms 60000
+                            :fallback-provider? true}})
+          live-events (atom [])
+          attempts (atom 0)]
+      (with-redefs [llm/ask-code!* (fn [_r opts]
+                                     (swap! attempts inc)
+                                     (case (:provider-id opts)
+                                       :p1 (transient-error 429)
+                                       :p2 {:raw "ok"
+                                            :blocks []
+                                            :api-usage {:prompt_tokens 1 :completion_tokens 1 :total_tokens 2}}))]
+        (llm/ask-code! r {:lang "clojure"
+                          :messages [{:role "user" :content "hi"}]
+                          :on-chunk #(swap! live-events conj %)}))
+      (let [types (mapv :event/type @live-events)]
+        (expect (= [:llm.routing/provider-retry
+                    :llm.routing/provider-fallback]
+                  types))
+        (expect (= "p1" (:provider (first @live-events))))
+        (expect (= "p2" (:to-provider (last @live-events))))))))
 
 (defdescribe with-provider-fallback-all-exhausted-test
   "Every provider returns a transient error → `:svar.llm/all-providers-exhausted`
-   with `:tried` and `:fallback-trace` populated."
+   with `:tried` and `:routed/trace` populated."
 
   (it "throws when every provider fails transiently"
     (let [[clock _] (mock-clock)
@@ -213,11 +450,11 @@
               :p1 (transient-error 503)
               :p2 (success-result 10)))))
       ;; P1's CB should now be open; the next call should skip P1 entirely
-      ;; and go straight to P2 with no fallback trace.
+      ;; and go straight to P2 with no routing trace.
       (let [result (router/with-provider-fallback r {:strategy :root}
                      (fn [_ _] (success-result 10)))]
         (expect (= :p2 (:routed/provider-id result)))
-        (expect (nil? (:routed/fallback-trace result)))))))
+        (expect (nil? (:routed/trace result)))))))
 
 (defdescribe circuit-breaker-half-open-cycle-test
   "After `:recovery-ms` elapses the CB effectively reports `:half-open`; a

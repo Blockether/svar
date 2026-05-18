@@ -337,13 +337,13 @@
             (expect (= "recovered" (get-in result [:result :answer])))
             ;; Routed model should be the fallback, not the offender
             (expect (= "claude-haiku-4-5" (:routed/model result)))
-            ;; Fallback trace records the format-error stop
-            (let [trace (:routed/fallback-trace result)]
-              (expect (some #(= :format-error (:reason %)) trace))
-              (expect (some #(= :openai (:provider-id %)) trace))))))))
+            ;; Routing trace records same event shape consumers persist/render.
+            (let [trace (:routed/trace result)]
+              (expect (some #(= :llm.routing/format-fallback (:event/type %)) trace))
+              (expect (some #(= "openai" (:from-provider %)) trace))))))))
 
   (describe ":on-format-error :fallback-provider with all providers failing"
-    (it "throws the LAST format error verbatim with envelope + fallback-trace"
+    (it "throws the LAST format error verbatim with envelope + routing trace"
       (let [calls (atom [])
             r (svar/make-router
                 [{:id :openai
@@ -372,9 +372,9 @@
               ;; The original format-error type is preserved (not wrapped
               ;; under :svar.llm/all-providers-exhausted).
               (expect (= :svar.spec/schema-rejected (:type data)))
-              ;; Fallback-trace records BOTH attempts as :format-error
-              (expect (= 2 (count (filter #(= :format-error (:reason %))
-                                    (:routed/fallback-trace data)))))
+              ;; Routing trace records provider changes, not a second shape.
+              (expect (= 1 (count (filter #(= :llm.routing/format-fallback (:event/type %))
+                                    (:routed/trace data)))))
               ;; format-failed set lists both providers
               (expect (= #{:openai :anthropic} (:format-failed data)))))))))
 

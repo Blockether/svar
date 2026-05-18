@@ -408,7 +408,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current behavior; `:fallback-provider` treats schema/format-typed errors
   as transient and tries the next provider/model in the fleet, excluding
   the offender. The terminal exception (when all providers fail) carries
-  the LAST format error's full envelope plus `:routed/fallback-trace` and
+  the LAST format error's full envelope plus `:routed/trace` and
   `:format-failed`.
 - Schema-rejection and `:svar.llm/empty-content` exceptions now carry the
   full forensic envelope (`:model`, `:api-style`, `:chat-url`,
