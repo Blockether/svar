@@ -588,9 +588,30 @@
    :multiplier 2.0})
 
 (def DEFAULT_RATE_LIMIT_ROUTING
-  "Default router-owned 429 policy. Delays are before same-provider retries."
+  "Default router-owned 429 policy.
+
+   `:same-provider-delays-ms` — sleep schedule for same-provider retries.
+   `:fallback-after-ms`       — hard cap on wall time the 429 phase can
+                                consume (measured from the FIRST 429
+                                caught). When the configured delay vector
+                                is exhausted OR elapsed ≥ budget, the
+                                router falls back to the next provider.
+                                Each delay clamps to remaining budget so
+                                the loop never overshoots.
+   `:respect-retry-after?`    — honor server `Retry-After` header value
+                                in place of the configured delay; the
+                                clamp to remaining budget still applies.
+   `:fallback-provider?`      — when budget is exhausted, fall back to
+                                the next provider/model. Set false to
+                                surface the rate-limit error to the
+                                caller instead.
+
+   The 60 000 ms (60 s) default tolerates Anthropic / OpenAI / z.ai
+   Retry-After values that can land between 30-60 s under quota
+   pressure on reasoning-heavy workloads, while still bounding the
+   wait so a single user request cannot hang for minutes."
   {:same-provider-delays-ms [2000 3000 6000]
-   :fallback-after-ms 30000
+   :fallback-after-ms 60000
    :respect-retry-after? true
    :fallback-provider? true})
 
