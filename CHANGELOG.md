@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.5.4] - 2026-05-19
 
 ### Changed
+- chore: release v0.5.4
+- feat(router): bump :fallback-after-ms default 30s -> 60s; drop 2 flaky live tests
+- feat(router): hard-cap fallback-after-ms + on-chunk passthrough + spec-aligned :routed/trace
+- feat: harden SSE stream parsing
+- svar: TTFT 10s->30s, idle 10s->45s
+- svar: drop virtual threads; TTFT/idle default to 10s
+- feat(llm): TTFT watchdog + unified streaming-timeout opts across public API
+- fix(llm): raise DEFAULT_IDLE_TIMEOUT_MS 60s -> 120s
+- feat(llm): idle-stream watchdog for streaming HTTP responses
+- release: update version files for v0.5.3, bump to next dev version
+
+
+## [v0.5.4] - 2026-05-19
+
+### Changed
 - `DEFAULT_RATE_LIMIT_ROUTING :fallback-after-ms` default bumped from
   30 000 ms to **60 000 ms**. Anthropic, OpenAI, and z.ai routinely emit
   `Retry-After` headers in the 30-60 s range under quota pressure on
@@ -903,7 +918,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.4...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -938,3 +953,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.5.0]: https://github.com/Blockether/svar/releases/tag/v0.5.0
 [v0.5.1]: https://github.com/Blockether/svar/releases/tag/v0.5.1
 [v0.5.2]: https://github.com/Blockether/svar/releases/tag/v0.5.2
+[v0.5.4]: https://github.com/Blockether/svar/releases/tag/v0.5.4
