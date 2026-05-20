@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.5] - 2026-05-19
+
+### Added
+- `ask-code!` / `ask-code!*` return maps and `:done? true` chunks now
+  carry three extra observation keys alongside the existing
+  `:blocks`:
+  - `:all-blocks`  — the pre-`select-blocks` vec (every fence
+    extracted, regardless of lang); callers diagnose wrong-lang or
+    untagged drops via `(> (count :all-blocks) (count :blocks))`.
+  - `:saw-fence?` — boolean; true when the raw response contained at
+    least one fence-shaped line. Lets callers distinguish the
+    fenceless-fallback path (`:saw-fence? false` plus one `:lang
+    nil` block) from a clean fenced response.
+  - `:malformed?` — boolean; true when the fence parser flagged a
+    torn boundary (glued close+open or unclosed terminal fence). Use
+    this to attach a more specific recovery hint than "parse failed".
+- `codes/extract-code-blocks-detail` — new internal helper that
+  returns the full parser observation `{:blocks :saw-fence?
+  :malformed?}`. The public `codes/extract-code-blocks` keeps its
+  bare-vec contract by delegating.
+
+### Changed
+- `code-tail-pointer-text` shrunk from a 4-bullet `Rules:` block to a
+  single-line directive: `"Reply with \`\`\`lang … \`\`\` fenced blocks;
+  untagged or other-lang fences are DROPPED."`. The retired bullets
+  (opener/closer on own line, blank line between blocks, no prose,
+  no glued boundaries) were either over-prescription or already
+  handled by the FenceNormalizer. Saves ~40 tokens per `ask-code!`
+  call without weakening the strict-lang contract; the warning that
+  untagged or wrong-lang fences are silently dropped stays explicit.
+
 ## [v0.5.4] - 2026-05-19
 
 ### Changed
