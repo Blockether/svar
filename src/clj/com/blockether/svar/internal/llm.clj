@@ -3128,7 +3128,7 @@
    strict-lang warning stays explicit so a model emitting untagged ```
    fences sees why its code never reached the runtime."
   [lang]
-  (str "Reply with ```" lang " … ``` fenced blocks; untagged or other-lang fences are DROPPED."))
+  (str "Reply with exactly one ```" lang " … ``` fenced block; untagged or other-lang fences are DROPPED."))
 
 (defn- append-code-tail-pointer
   "`append-schema-tail-pointer` for the `ask-code!*` path. Appends the
