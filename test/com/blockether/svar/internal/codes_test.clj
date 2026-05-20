@@ -1,10 +1,58 @@
 (ns com.blockether.svar.internal.codes-test
   "Tests for fenced code-block extraction (codes/extract-code-blocks,
-   codes/select-blocks, codes/concat-sources)."
+   codes/extract-code-blocks-detail, codes/select-blocks,
+   codes/concat-sources)."
   (:require
    [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
    [com.blockether.svar.internal.codes :as sut]))
+
+(defdescribe extract-code-blocks-detail-test
+  "extract-code-blocks-detail surfaces the parser's :saw-fence? /
+   :malformed? flags alongside the same :blocks vec the public
+   `extract-code-blocks` returns."
+
+  (describe "shape"
+    (it "returns a map with :blocks, :saw-fence?, :malformed?"
+      (let [d (sut/extract-code-blocks-detail "```clojure\n(+ 1 2)\n```")]
+        (expect (vector? (:blocks d)))
+        (expect (boolean? (:saw-fence? d)))
+        (expect (boolean? (:malformed? d)))))
+
+    (it ":blocks matches what extract-code-blocks would return"
+      (let [raw "```python\nx=1\n```\nprose\n```clojure\n(+ 1 2)\n```"
+            d   (sut/extract-code-blocks-detail raw)]
+        (expect (= (sut/extract-code-blocks raw) (:blocks d))))))
+
+  (describe ":saw-fence?"
+    (it "is true when raw contains a fence"
+      (expect (true? (:saw-fence? (sut/extract-code-blocks-detail
+                                    "```clojure\n(+ 1 2)\n```")))))
+
+    (it "is false when raw is plain text without fences (fenceless fallback)"
+      (let [d (sut/extract-code-blocks-detail "just prose, no fences")]
+        (expect (false? (:saw-fence? d)))
+        ;; fallback still produces one untagged block
+        (expect (= 1 (count (:blocks d))))
+        (expect (nil? (:lang (first (:blocks d)))))))
+
+    (it "is false for empty / blank input"
+      (expect (false? (:saw-fence? (sut/extract-code-blocks-detail ""))))
+      (expect (false? (:saw-fence? (sut/extract-code-blocks-detail "   \n\n  "))))))
+
+  (describe ":malformed?"
+    (it "is false on a clean tagged fence"
+      (expect (false? (:malformed? (sut/extract-code-blocks-detail
+                                     "```clojure\n(+ 1 2)\n```"))))))
+
+  (describe "all-lang surface for callers diagnosing dropped fences"
+    (it "reports every fence regardless of lang"
+      ;; Caller compares (count :blocks) here with (count (select-blocks
+      ;; blocks lang)) downstream to detect wrong-lang drops.
+      (let [d (sut/extract-code-blocks-detail
+                "```python\nx=1\n```\n```clojure\n(+ 1 2)\n```")]
+        (expect (= 2 (count (:blocks d))))
+        (expect (= #{"python" "clojure"} (set (map :lang (:blocks d)))))))))
 
 (defdescribe extract-code-blocks-test
   "extract-code-blocks parses fenced and unfenced text."

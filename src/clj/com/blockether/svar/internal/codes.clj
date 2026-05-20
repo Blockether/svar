@@ -47,6 +47,34 @@
     (cond-> {:blocks blocks :saw-fence? (.sawFence result)}
       (.malformed result) (assoc :malformed? true))))
 
+(defn extract-code-blocks-detail
+  "Like `extract-code-blocks` but returns the full parser observation:
+
+   `{:blocks      [{:lang :source} ...]
+     :saw-fence?  <bool>     ; raw contained at least one fence-shaped line
+     :malformed?  <bool>     ; parser saw glued close+open or unclosed terminal fence
+   }`
+
+   Callers that need to diagnose multi-fence emission, wrong-lang fences,
+   or torn fence boundaries read this instead of the bare vec. The
+   fenceless-fallback path still surfaces a single `:lang nil` block; in
+   that case `:saw-fence?` is `false`."
+  [raw]
+  (let [s (normalize-fences raw)
+        {:keys [blocks saw-fence? malformed?]} (parse-fenced-blocks s)
+        final-blocks
+        (if (seq blocks)
+          blocks
+          (let [trimmed (str/trim s)]
+            (cond
+              (str/blank? trimmed) []
+              saw-fence? []
+              (str/includes? trimmed "```") []
+              :else [{:lang nil :source trimmed}])))]
+    {:blocks      final-blocks
+     :saw-fence?  (boolean saw-fence?)
+     :malformed?  (boolean malformed?)}))
+
 (defn extract-code-blocks
   "Parse fenced code blocks from `raw` text.
 
@@ -61,18 +89,12 @@
 
    NOTE: untagged blocks (`:lang nil`) — including the fenceless-fallback —
    are dropped by `select-blocks`. Pre-select consumers see them; routed
-   `ask-code!` callers do not."
+   `ask-code!` callers do not.
+
+   Use `extract-code-blocks-detail` when you also need `:saw-fence?` /
+   `:malformed?` (e.g. for multi-fence diagnostics)."
   [raw]
-  (let [s (normalize-fences raw)
-        {:keys [blocks saw-fence?]} (parse-fenced-blocks s)]
-    (if (seq blocks)
-      blocks
-      (let [trimmed (str/trim s)]
-        (cond
-          (str/blank? trimmed) []
-          saw-fence? []
-          (str/includes? trimmed "```") []
-          :else [{:lang nil :source trimmed}])))))
+  (:blocks (extract-code-blocks-detail raw)))
 
 (defn select-blocks
   "Filter `blocks` to those whose `:lang` STRICTLY equals `lang`

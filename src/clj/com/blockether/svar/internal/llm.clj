@@ -3116,24 +3116,19 @@
                :content [{:type "text" :text SCHEMA_TAIL_POINTER}]}))))
 
 (defn- code-tail-pointer-text
-  "Short code-format reminder appended as the last text block of the last
+  "One-line format reminder appended as the last text block of the last
    user message in `ask-code!*`. Mirrors `SCHEMA_TAIL_POINTER` for the
    plain-text-with-fenced-code path: nudges the model back to the format
-   contract right before generation, restoring recency-driven adherence on
-   long transcripts. Parameterised by `lang` so the reminder names the
-   tag the caller asked `ask-code!` to extract.
+   contract right before generation, restoring recency-driven adherence
+   on long transcripts.
 
-   The reminder also states the strict-lang contract explicitly: untagged
-   fences (```…```) and fences tagged with any OTHER lang are DROPPED
-   silently by `select-blocks`. Without this in-prompt warning, a model
-   that emits ``` without a tag would be punished invisibly — its code
-   never reaches the runtime and it has no way to learn why."
+   Kept to ONE line on purpose: the contract is one rule (tag the fence
+   with `lang`, otherwise the block is dropped). Longer reminders waste
+   per-call tokens and dilute the immediately-preceding task text. The
+   strict-lang warning stays explicit so a model emitting untagged ```
+   fences sees why its code never reached the runtime."
   [lang]
-  (str "Rules:\n"
-    "- One or more ```" lang " Markdown code blocks. Untagged or other-lang blocks are DROPPED.\n"
-    "- Opener ```" lang " and closer ``` each on their own line.\n"
-    "- Exactly one blank line between Markdown code blocks.\n"
-    "- No prose, commentary, or glued Markdown code blocks."))
+  (str "Reply with ```" lang " … ``` fenced blocks; untagged or other-lang fences are DROPPED."))
 
 (defn- append-code-tail-pointer
   "`append-schema-tail-pointer` for the `ask-code!*` path. Appends the
@@ -3768,7 +3763,8 @@
                          :stream-finalization stream-finalization
                          :provider-id provider-id})
                  :type :svar.llm/empty-content))))
-    (let [blocks      (codes/extract-code-blocks content)
+    (let [{:keys [blocks saw-fence? malformed?]}
+          (codes/extract-code-blocks-detail content)
           selected    (->> (codes/select-blocks blocks lang)
                         (remove #(str/blank? (:source %)))
                         vec)
@@ -3781,6 +3777,9 @@
           cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
       (when on-chunk
         (on-chunk {:blocks    selected
+                   :all-blocks blocks
+                   :saw-fence? saw-fence?
+                   :malformed? malformed?
                    :raw       content
                    :reasoning reasoning
                    :provider-state provider-state
@@ -3789,6 +3788,15 @@
                    :cost      cost
                    :done?     true}))
       (cond-> {:blocks      selected
+               ;; `:all-blocks` is the pre-`select-blocks` vec. Callers
+               ;; diagnose wrong-lang fences via `(count :all-blocks) >
+               ;; (count :blocks)` and multi-fence emission via the same
+               ;; count plus `:saw-fence?` / `:malformed?`. svar itself
+               ;; only routes the lang-filtered `:blocks`; these extras
+               ;; are observational.
+               :all-blocks  blocks
+               :saw-fence?  saw-fence?
+               :malformed?  malformed?
                :raw         content
                :tokens      tokens
                :cost        cost

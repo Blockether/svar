@@ -83,16 +83,18 @@
         (let [msgs (:messages (first @calls))
               last-user (last (user-msgs msgs))
               tail-text (joined-text last-user)]
-          ;; Pointer is present — compact rules format
-          (expect (re-find #"Rules:" tail-text))
-          (expect (re-find #"Markdown code blocks" tail-text))
+          ;; Pointer is present — minimised single-line contract
+          (expect (re-find #"Reply with" tail-text))
+          (expect (re-find #"fenced blocks" tail-text))
           (expect (re-find #"DROPPED" tail-text))
-          (expect (re-find #"Opener " tail-text))
-          (expect (re-find #"closer " tail-text))
-          (expect (re-find #"own line" tail-text))
-          (expect (re-find #"blank line between Markdown code blocks" tail-text))
-          (expect (re-find #"No prose" tail-text))
-          (expect (re-find #"glued Markdown code blocks" tail-text))
+          ;; Removed verbosity: no "Rules:" header, no per-rule bullets,
+          ;; no opener/closer/blank-line/no-prose/glued prose. The strict
+          ;; contract is a single sentence; everything else was overhead.
+          (expect (not (re-find #"Rules:" tail-text)))
+          (expect (not (re-find #"Opener " tail-text)))
+          (expect (not (re-find #"blank line" tail-text)))
+          (expect (not (re-find #"No prose" tail-text)))
+          (expect (not (re-find #"glued" tail-text)))
           ;; Original user content preserved
           (expect (re-find #"\(answer \"ok\"\)" tail-text)))))
 
@@ -129,10 +131,10 @@
               last-u (last users)
               blocks (text-blocks last-u)]
           ;; Pointer attached to the LAST user, not earlier ones
-          (expect (re-find #"Markdown code blocks" (joined-text last-u)))
-          (expect (not (re-find #"Markdown code blocks" (joined-text (first users)))))
+          (expect (re-find #"fenced blocks" (joined-text last-u)))
+          (expect (not (re-find #"fenced blocks" (joined-text (first users)))))
           ;; Pointer is the LAST block of last-user content.
-          (expect (re-find #"Markdown code blocks" (:text (last blocks)))))))))
+          (expect (re-find #"fenced blocks" (:text (last blocks)))))))))
 
 ;; =============================================================================
 ;; Opt-out \u2014 :code-tail-pointer? false sends user message verbatim
@@ -151,7 +153,7 @@
               last-user (last (user-msgs msgs))
               tail-text (joined-text last-user)]
           (expect (= "Reply with (answer \"ok\")." tail-text))
-          (expect (not (re-find #"Markdown code blocks" tail-text))))))
+          (expect (not (re-find #"fenced blocks" tail-text))))))
 
     (it "treats nil/missing as ON (only literal `false` opts out)"
       (let [calls (atom [])]
@@ -161,7 +163,7 @@
              :code-tail-pointer? nil}))
         (let [msgs (:messages (first @calls))
               last-user (last (user-msgs msgs))]
-          (expect (re-find #"Markdown code blocks" (joined-text last-user))))))))
+          (expect (re-find #"fenced blocks" (joined-text last-user))))))))
 
 ;; =============================================================================
 ;; Multimodal preservation \u2014 pointer added as text block, images untouched
@@ -187,7 +189,7 @@
           (expect (vector? content))
           (expect (some #(= "image_url" %) types))
           (expect (= "text" (:type (last content))))
-          (expect (re-find #"Markdown code blocks" (:text (last content))))
+          (expect (re-find #"fenced blocks" (:text (last content))))
           ;; Original prompt text still present
           (expect (some #(= "describe this" (:text %))
                     (filter #(= "text" (:type %)) content))))))))
@@ -208,4 +210,4 @@
         (let [msgs (:messages (first @calls))
               users (user-msgs msgs)]
           (expect (= 1 (count users)))
-          (expect (re-find #"Markdown code blocks" (joined-text (first users)))))))))
+          (expect (re-find #"fenced blocks" (joined-text (first users)))))))))
