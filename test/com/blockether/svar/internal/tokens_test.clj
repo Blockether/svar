@@ -24,7 +24,12 @@
       (expect (= 1047576 (sut/context-limit "gpt-4.1"))))
 
     (it "returns Copilot provider context for claude-sonnet-4.6"
-      (expect (= 1000000 (sut/context-limit "claude-sonnet-4.6"))))
+      ;; Pre-fix this row claimed 1M context — Anthropic-native value
+      ;; copy-pasted into the `:github-copilot` overlay. Copilot proxy
+      ;; actually caps Claude-sonnet-4.6 at 200K context (128K input,
+      ;; 32K output per models.dev). The overlay now omits `:context`
+      ;; entirely so the models.dev catalog supplies the real number.
+      (expect (= 200000 (sut/context-limit "claude-sonnet-4.6"))))
 
     (it "returns Anthropic provider context for claude-sonnet-4-6"
       (expect (= 200000 (sut/context-limit "claude-sonnet-4-6"))))

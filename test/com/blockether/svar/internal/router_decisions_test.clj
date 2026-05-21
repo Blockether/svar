@@ -970,3 +970,97 @@
       ;; the filter excludes cheap-dumb and pricey-smart wins despite being
       ;; ~25x more expensive.
       (expect (= "pricey-smart" (:model @captured))))))
+
+(defdescribe rate-limited-provider-not-replayed-as-fallback-test
+  ;; Regression: before this fix `with-provider-fallback` only tracked
+  ;; `:exclude-providers` from format-errors. A rate-limit-budget-exhausted
+  ;; provider stayed in the chain, so `select-and-claim!` would pick it
+  ;; again on the next iteration and the trace showed bogus
+  ;; `provider-fallback: codex/gpt-5.3 → codex/gpt-5.3` events.
+  ;; Production sample (Vis conversation 2026-05-21):
+  ;;   * Recap: Provider retry: openai-codex/gpt-5.3-codex — 429
+  ;;   * Recap: Provider fallback: openai-codex/gpt-5.3-codex →
+  ;;             openai-codex/gpt-5.3-codex — Exceptional status code: 429
+  (it "excludes a rate-limit-exhausted provider on the next fallback iteration"
+    (let [[clock-fn clock-atom] (mock-clock)
+          calls (atom 0)
+          f-429 (fn [_p _m]
+                  (swap! calls inc)
+                  (advance! clock-atom 1)
+                  (throw (ex-info "rate-limited"
+                           {:type :svar.core/http-error :status 429})))
+          r (llm/make-router
+              [{:id :test :api-key "k" :base-url "http://x"
+                :models [{:name "only-model"}]}]
+              {:clock clock-fn
+               :rate-limit {:same-provider-delays-ms [1]
+                            :fallback-after-ms 5
+                            :fallback-provider? true
+                            :respect-retry-after? false}})
+          result (try
+                   (router/with-provider-fallback r {} f-429)
+                   (catch Exception e {:thrown-type (:type (ex-data e))
+                                       :tried       (:tried (ex-data e))}))]
+      (expect (= :svar.llm/all-providers-exhausted (:thrown-type result)))
+      ;; The offending provider must show up in `:tried` exactly once,
+      ;; not be replayed back into the chain.
+      (expect (= #{:test} (:tried result)))
+      ;; Bounded retry count: configured delay schedule + cooldown wait,
+      ;; not an infinite same-provider loop. Pre-fix this could blow past
+      ;; 30+ calls on a single-model chain.
+      (expect (< @calls 20)))))
+
+(defdescribe rate-limit-retry-respects-thread-interrupt-test
+  ;; Regression: pre-fix `handle-rate-limit-retries` slept on
+  ;; `(async/<!! (async/timeout N))` and the surrounding `catch Exception`
+  ;; swallowed `InterruptedException`, classifying the wake as the next
+  ;; transient failure. User-driven cancellation (Vis `Esc`) therefore
+  ;; failed to break out of the retry loop — reproduced live in the same
+  ;; 2026-05-21 codex incident where pressing Esc had no visible effect.
+  (it "propagates InterruptedException out of the retry sleep instead of treating it as a retryable error"
+    (let [worker-thread (atom nil)
+          slow-f (fn [_p _m]
+                   (reset! worker-thread (Thread/currentThread))
+                   (throw (ex-info "slow"
+                            {:type :svar.core/http-error :status 429})))
+          r (llm/make-router
+              [{:id :slow :api-key "k" :base-url "http://x"
+                :models [{:name "m"}]}]
+              ;; Long delays + long budget so the retry loop WOULD sleep
+              ;; for tens of seconds if interrupts were swallowed.
+              {:rate-limit {:same-provider-delays-ms [60000]
+                            :fallback-after-ms 120000
+                            :fallback-provider? true
+                            :respect-retry-after? false}})
+          start (System/currentTimeMillis)
+          worker (future
+                   (try
+                     (router/with-provider-fallback r {} slow-f)
+                     :no-exception
+                     (catch InterruptedException _ :interrupted)
+                     (catch Exception e
+                       {:class (.getSimpleName (class e))
+                        :has-interrupt-cause?
+                        (boolean
+                          (loop [^Throwable t (.getCause e)]
+                            (cond
+                              (nil? t) false
+                              (instance? InterruptedException t) true
+                              :else (recur (.getCause t)))))})))]
+      ;; Wait briefly for the worker to enter the retry sleep.
+      (loop [n 0]
+        (cond
+          (some? @worker-thread) :ready
+          (>= n 50) (throw (ex-info "worker never started" {}))
+          :else (do (Thread/sleep 20) (recur (inc n)))))
+      ;; Interrupt the carrier; the retry loop must wake immediately,
+      ;; not consume the full 60s sleep budget.
+      (.interrupt ^Thread @worker-thread)
+      (let [outcome (deref worker 3000 :timeout)
+            elapsed (- (System/currentTimeMillis) start)]
+        (expect (not= :timeout outcome))
+        (expect (not= :no-exception outcome))
+        ;; <2s = orders of magnitude under the 60s configured retry sleep,
+        ;; so we know the interrupt escaped the loop instead of being
+        ;; absorbed.
+        (expect (< elapsed 2000))))))

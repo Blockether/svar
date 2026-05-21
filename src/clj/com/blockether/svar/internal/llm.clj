@@ -25,6 +25,39 @@
    When bound, all HTTP logs include this context."
   nil)
 
+(def ^:private stream-line-trace-enabled?
+  "True when -Dsvar.stream.trace=true (or =1) was passed at JVM start.
+   Reads the system property ONCE at load time so the hot per-line
+   trace branch reduces to a single cached boolean check; no
+   property lookup per SSE line.
+
+   When enabled, the SSE reader loop emits one
+   `::stream-line-trace` log entry per N lines (and ALWAYS when the
+   inter-line gap is >= STREAM_LINE_TRACE_GAP_MS), carrying:
+     :line-count, :gap-ms, :line-preview (capped),
+     :content-acc-len, :reasoning-acc-len, :last-event-type.
+   Use to prove whether a long-running stream is (a) silent
+   server-side, (b) producing periodic pings only, or (c) producing
+   real model deltas - the three cases the watchdogs treat
+   differently."
+  (let [v (some-> (System/getProperty "svar.stream.trace") str/lower-case)]
+    (contains? #{"true" "1" "yes" "on"} v)))
+
+(def ^:private ^:const STREAM_LINE_TRACE_EVERY_N
+  "Periodic-summary line interval when stream-line-trace is on."
+  25)
+
+(def ^:private ^:const STREAM_LINE_TRACE_GAP_MS
+  "Force a stream-line-trace log when inter-line gap >= this many ms,
+   regardless of the periodic interval. Catches 'real thinking pause'
+   moments where N consecutive lines arrive in <1ms and then nothing
+   for seconds."
+  2000)
+
+(def ^:private ^:const STREAM_LINE_TRACE_PREVIEW_CHARS
+  "Cap on :line-preview length carried in each trace log."
+  240)
+
 (defn- log-data
   "Merges optional log context into structured log data."
   [data]
@@ -2186,21 +2219,48 @@
                   (when-let [parsed (parse-sse-event event-type data-lines)]
                     (handle-parsed! parsed)))]
           (loop [event-type nil
-                 data-lines []]
-            (let [line (.readLine reader)]
+                 data-lines []
+                 line-count 0
+                 last-line-ns (System/nanoTime)]
+            (let [line (.readLine reader)
+                  now-ns (System/nanoTime)
+                  gap-ms (long (/ (- now-ns last-line-ns) 1000000))]
               ;; Reset idle on every observed line: comments, blank
               ;; separators, and data all prove transport liveness.
-              (reset! last-byte-ns (System/nanoTime))
+              (reset! last-byte-ns now-ns)
+              ;; Optional per-line trace. Gated on the cached boolean
+              ;; so the disabled path is a single branch with zero
+              ;; allocations - measurable improvement at high event
+              ;; rates (anthropic delta storms peak >2000 lines/s).
+              (when (and stream-line-trace-enabled?
+                      (or (>= gap-ms STREAM_LINE_TRACE_GAP_MS)
+                        (zero? (mod line-count STREAM_LINE_TRACE_EVERY_N))))
+                (trove/log! {:level :info :id ::stream-line-trace
+                             :data (log-data
+                                     {:url url
+                                      :line-count line-count
+                                      :gap-ms gap-ms
+                                      :line-len (when line (count line))
+                                      :line-preview (when line
+                                                      (subs line 0
+                                                        (min STREAM_LINE_TRACE_PREVIEW_CHARS
+                                                          (count line))))
+                                      :line-eof? (nil? line)
+                                      :pending-event-type event-type
+                                      :last-event-type @last-event-type
+                                      :content-acc-len (.length content-acc)
+                                      :reasoning-acc-len (.length reasoning-acc)})
+                             :msg "sse line"}))
               (when (some? line)
                 (if (str/blank? line)
                   (do
                     (dispatch-event! event-type data-lines)
-                    (recur nil []))
+                    (recur nil [] (inc line-count) now-ns))
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
-                      "event" (recur value data-lines)
-                      "data"  (recur event-type (conj data-lines value))
-                      (recur event-type data-lines)))))))))
+                      "event" (recur value data-lines (inc line-count) now-ns)
+                      "data"  (recur event-type (conj data-lines value) (inc line-count) now-ns)
+                      (recur event-type data-lines (inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
                                     {:terminal @terminal-event
@@ -2814,7 +2874,20 @@
    - `:llm-headers` merges provider defaults with caller headers; caller wins."
   [opts provider model-map]
   (let [ctx (long (or (:context model-map) 8192))
-        auto-params {:max_tokens (long (* 0.25 ctx))}
+        ;; Quarter of the input context is a reasonable headroom for a
+        ;; single response; the rest stays for the prompt + tool
+        ;; outputs. But some providers cap output independently of
+        ;; context (Copilot caps Claude-sonnet-4.6 at 32K output even
+        ;; though context is 200K, models.dev `:limit.output`). When
+        ;; the merged model-map carries an explicit `:output-limit`,
+        ;; clamp the auto budget to it so requests do not advertise a
+        ;; max_tokens the provider will silently truncate — that's the
+        ;; failure mode behind the empty-content / comment-only loop
+        ;; in session 52983a42 once `auto-params` started producing
+        ;; >output-cap budgets.
+        output-cap (some-> (:output-limit model-map) long)
+        quarter (long (* 0.25 ctx))
+        auto-params {:max_tokens (if output-cap (min quarter output-cap) quarter)}
         api-style (or (:api-style model-map) (:api-style provider))
         reasoning-params (router/reasoning-extra-body
                            api-style model-map (:reasoning opts)
@@ -3750,19 +3823,57 @@
                                    (assoc :stream-finalization stream-finalization)))
                  :msg "ask-code! HTTP response received"})
     (when (str/blank? content)
-      (throw (ex-info
-               (str "The model produced reasoning but no content. "
-                 "`ask-code!` needs textual content with code fences.")
-               (assoc (envelope-data
-                        {:model model :api-style api-style :chat-url chat-url
-                         :duration-ms duration-ms :api-usage api-usage
-                         :reasoning reasoning :content content
-                         :provider-state provider-state
-                         :assistant-message assistant-message
-                         :http-response http-response
-                         :stream-finalization stream-finalization
-                         :provider-id provider-id})
-                 :type :svar.llm/empty-content))))
+      ;; Distinguish max_tokens cap from genuine empty-content. Both
+      ;; arrive here with `:content blank`, but the failure modes are
+      ;; different:
+      ;;   :svar.llm/max-tokens-exceeded — model burnt the entire
+      ;;     output budget on hidden reasoning before opening a code
+      ;;     fence. Provider reports `finish_reason: \"length\"`.
+      ;;     Retry path: bump `:extra-body {:max_tokens N}` 2× and try
+      ;;     once more. Reasoning length is real evidence to show the
+      ;;     user / log: model was thinking, just couldn't ship.
+      ;;   :svar.llm/empty-content — model returned nothing useful with
+      ;;     `finish_reason: \"stop\"` or no reason at all (rare; e.g.
+      ;;     prompt confused the model). Retry path: caller-level
+      ;;     `:format-retry-on` opt-in only; svar does NOT auto-retry
+      ;;     because the next call would emit the same blank.
+      ;;
+      ;; Surfaces a dedicated `:retry-hint` payload so callers can
+      ;; either (a) bump max_tokens directly or (b) re-route to a
+      ;; longer-output model. `:reasoning-length` lets the UI render a
+      ;; \"model spent ~2K tokens reasoning before timing out\" line
+      ;; instead of the generic \"no content\" placeholder.
+      (let [finish-reason (some-> stream-finalization :finish-reason str)
+            length-cap? (= "length" finish-reason)
+            reasoning-len (long (or (some-> reasoning count) 0))
+            output-tokens (long (or (:completion_tokens api-usage) 0))
+            base-envelope (envelope-data
+                            {:model model :api-style api-style :chat-url chat-url
+                             :duration-ms duration-ms :api-usage api-usage
+                             :reasoning reasoning :content content
+                             :provider-state provider-state
+                             :assistant-message assistant-message
+                             :http-response http-response
+                             :stream-finalization stream-finalization
+                             :provider-id provider-id})]
+        (if length-cap?
+          (throw (ex-info
+                   (str "Stream truncated at max_tokens (" output-tokens
+                     " output tokens consumed, " reasoning-len
+                     " went to hidden reasoning, 0 to visible content). "
+                     "Raise `:extra-body {:max_tokens N}` for this call "
+                     "or shorten input/reasoning so the model has room "
+                     "to emit content.")
+                   (assoc base-envelope
+                     :type :svar.llm/max-tokens-exceeded
+                     :finish-reason finish-reason
+                     :reasoning-length reasoning-len
+                     :output-tokens output-tokens
+                     :retry-hint :raise-max-tokens)))
+          (throw (ex-info
+                   (str "The model produced reasoning but no content. "
+                     "`ask-code!` needs textual content with code fences.")
+                   (assoc base-envelope :type :svar.llm/empty-content))))))
     (let [{:keys [blocks saw-fence? malformed?]}
           (codes/extract-code-blocks-detail content)
           selected    (->> (codes/select-blocks blocks lang)

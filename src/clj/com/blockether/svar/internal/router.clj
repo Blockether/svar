@@ -53,6 +53,15 @@
                  :pricing-source :zai
                  :provider-model-source :zai
                  :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
+   ;; Z.ai Coding Plan runtime alias. Vis registers this as
+   ;; `:zai-coding-plan` (see `vis-provider-zai`); without the alias the
+   ;; catalog miss reproduces the same `max_tokens = 2048` bug observed
+   ;; on Copilot. Same policy as `:zai-coding`; keep both keys in sync.
+   :zai-coding-plan
+   {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
+    :pricing-source :zai
+    :provider-model-source :zai
+    :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
    :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000
@@ -68,6 +77,30 @@
                                       "gpt-5" "gpt-5-mini" "gpt-5.1"
                                       "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
                     :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
+   ;; Copilot plan tiers — runtime provider IDs (one per OAuth plan) that
+   ;; INHERIT policy from `:github-copilot` via `:provider-model-source`.
+   ;; `known-provider` merges the base entry under each tier-specific
+   ;; override so `:exclude-models`, `:min-gpt-version`, `:llm-headers`,
+   ;; etc. apply uniformly; only `:base-url` differs per tier so token
+   ;; exchange points at the right host. Without these aliases the
+   ;; model catalog (`KNOWN_PROVIDER_MODELS :github-copilot`) was
+   ;; invisible to plan-tier providers — every registration fell back
+   ;; to bare `KNOWN_MODEL_METADATA` (capabilities + intelligence only),
+   ;; lost `:context` / `:api-style` / `:reasoning-style`, and
+   ;; `auto-params` produced `max_tokens = 0.25 * 8192 = 2048` per
+   ;; request. Observed symptom on session 52983a42 (2026-05-20):
+   ;; claude-sonnet-4.6 burning the whole 2048-token budget on hidden
+   ;; reasoning and surfacing `:svar.llm/empty-content` /
+   ;; `:vis/comment-only-block` errors mid-turn.
+   :github-copilot-individual
+   {:base-url "https://api.individual.githubcopilot.com"
+    :provider-model-source :github-copilot}
+   :github-copilot-business
+   {:base-url "https://api.business.githubcopilot.com"
+    :provider-model-source :github-copilot}
+   :github-copilot-enterprise
+   {:base-url "https://api.enterprise.githubcopilot.com"
+    :provider-model-source :github-copilot}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
                   :env-keys [] :api-style :openai-compatible-responses
                   ;; Keep Codex GPT models at gpt-5.3+ only.
@@ -188,7 +221,8 @@
    Sub-key semantics:
      `:openai-effort`      → flat top-level `:reasoning_effort` string.
                              Used by GPT-5.x, o-series, Gemini 2.5 via OpenAI gateway,
-                             DeepSeek Reasoner, Copilot, and most OpenAI-compatible reasoners.
+                             DeepSeek Reasoner, Copilot GPT-5+, and most
+                             OpenAI-compatible reasoners.
      `:anthropic-thinking` → Claude thinking controls.
                              Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 use
                              adaptive thinking + output_config.effort. Older
@@ -198,10 +232,27 @@
                              `:quick` disables, `:balanced`/`:deep` enable.
                              See also `:preserved-thinking?` below for the
                              `clear_thinking: false` flag that keeps reasoning
-                             across assistant turns."
-  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled"}
-   :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"}
-   :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"}})
+                             across assistant turns.
+     `:server-managed`     → explicit no-op style for proxies that gate
+                             reasoning server-side and reject (or silently
+                             mis-route) client-supplied `reasoning_effort`
+                             / `thinking` fields. Modeled on pi-ai's
+                             `compat.supportsReasoningEffort: false` flag
+                             for Copilot Claude / Gemini / Grok: every
+                             entry in `REASONING_LEVELS` resolves to nil,
+                             so `reasoning-extra-body` returns nil and the
+                             wire body carries no reasoning field at all.
+                             Without this style, the May 2026 Copilot Claude
+                             switch from `:api-style :anthropic` (Anthropic
+                             /messages with thinking blocks) to
+                             `:openai-compatible-chat` (with `reasoning_effort`)
+                             made Copilot proxy bias Claude into excessive
+                             autonomous reasoning loops — observable on
+                             session 52983a42 / 831cedee as 5K-8K output
+                             tokens per iteration burned on hidden thinking."
+  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled" :server-managed nil}
+   :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"  :server-managed nil}
+   :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"  :server-managed nil}})
 
 (defn normalize-reasoning-level
   "Coerce any accepted spelling to a canonical :quick|:balanced|:deep keyword.
@@ -367,13 +418,43 @@
    ;; Copilot /models reports total context for GPT reasoning models, but the
    ;; prompt/input budget is smaller because 128K output is reserved. svar's
    ;; `:context` is input budget for pre-flight checks.
-   {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0} :context 1000000 :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
-    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :openai-effort}
+   ;; Claude on Copilot routes Anthropic models through the chat
+   ;; completions endpoint, but the proxy refuses (or silently mis-routes)
+   ;; client-supplied `reasoning_effort` / `thinking` fields — Anthropic
+   ;; models manage extended thinking server-side. Until May 2026 svar
+   ;; routed these through `:api-style :anthropic` (native /messages with
+   ;; signed thinking blocks); commit 33e2f0fc73 switched to
+   ;; `:openai-compatible-chat` so we use Copilot's canonical Claude
+   ;; surface, and commit 30e03c1258 then attached `:reasoning-style
+   ;; :openai-effort` to keep reasoning hints flowing. In practice that
+   ;; second move regressed agent loops: Copilot proxy receives
+   ;; `reasoning_effort: medium`, biases Claude into excessive autonomous
+   ;; thinking (4-8K hidden reasoning tokens per iteration) and burns
+   ;; iterations on self-recovery patches — see sessions 52983a42 and
+   ;; 831cedee for the 14-iteration spiral.
+   ;;
+   ;; Mirror pi-ai's `compat.supportsReasoningEffort: false` for every
+   ;; Claude entry: `:reasoning-style :server-managed` resolves to nil
+   ;; in REASONING_LEVELS so `reasoning-extra-body` emits no field at
+   ;; all. Claude continues to think on its own (visible in
+   ;; `delta.reasoning_text` deltas); we just stop pushing on the lever.
+   {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    ;; Both `claude-opus-4.6` and `claude-sonnet-4.6` carried `:context
+    ;; 1000000` here; that was Anthropic-native context copied verbatim
+    ;; (models.dev `:anthropic` table) and does NOT apply to the
+    ;; Copilot proxy, which caps Claude-sonnet-4.6 at 200K context /
+    ;; 128K input / 32K output and Claude-opus-4.6 at 144K context /
+    ;; 128K input / 64K output. With the inflated value `auto-params`
+    ;; was producing 250K max_tokens requests that Copilot accepted
+    ;; (clamped) but distorted budget pre-flight checks. Dropping the
+    ;; `:context` override here lets the models.dev catalog overlay
+    ;; supply the real Copilot limits instead.
+    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
 
     "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
@@ -398,11 +479,17 @@
 
     "gpt-4.1"                   {:pricing {:input 0.0 :output 0.0} :context 128000}
     "gpt-4o"                    {:pricing {:input 0.0 :output 0.0} :context 128000}
-    "gemini-2.5-pro"            {:pricing {:input 0.0 :output 0.0} :context 128000}
-    "gemini-3-flash-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000}
-    "gemini-3-pro-preview"      {:pricing {:input 0.0 :output 0.0} :context 128000}
-    "gemini-3.1-pro-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000}
-    "grok-code-fast-1"          {:pricing {:input 0.0 :output 0.0} :context 128000}}
+    ;; Gemini + Grok on Copilot also gate reasoning server-side
+    ;; (pi-ai `compat.supportsReasoningEffort: false`). The proxy
+    ;; routes these to their upstream backends — Anthropic for Claude,
+    ;; Google for Gemini, xAI for Grok — and the upstream APIs do not
+    ;; accept a top-level `reasoning_effort`. Match Claude's policy:
+    ;; flag reasoning capability but stop pushing client-side hints.
+    "gemini-2.5-pro"            {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
+    "gemini-3-flash-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
+    "gemini-3-pro-preview"      {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
+    "gemini-3.1-pro-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
+    "grok-code-fast-1"          {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}}
 
    :openrouter
    {"gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
@@ -427,12 +514,42 @@
 ;; Derived compatibility maps
 ;; =============================================================================
 
+(defn- known-provider
+  "Resolve a runtime provider id to its `KNOWN_PROVIDERS` config,
+   following the `:provider-model-source` redirect so plan-tier
+   providers (`:github-copilot-individual` / `-business` / `-enterprise`
+   of `:github-copilot`; `:anthropic-coding-plan` of `:anthropic`;
+   `:zai-coding-plan` / `:zai-coding` of `:zai` for model catalog) all
+   pick up `:exclude-models`, `:min-gpt-version`, `:llm-headers`,
+   `:rpm`, `:tpm`, etc. from the shared base entry instead of having
+   the tier alias re-state them.
+
+   Merge order: the source entry sits UNDER the alias entry so an
+   alias may override a single field (e.g. unique `:base-url` per
+   Copilot tier) without dropping the rest of the shared policy.
+
+   Without this resolver, alias entries that only carry a
+   `:provider-model-source` pointer would silently lose every
+   `(get KNOWN_PROVIDERS pid)` lookup result outside the explicit
+   `provider-model-source` / `provider-pricing-source` accessors
+   below — the exact failure mode behind session 52983a42's looping
+   claude-sonnet-4.6 turn: tier registration found no `:context`, fell
+   back to the 8192 default, and capped `max_tokens` at 2048.
+
+   Returns nil when `provider-id` is unknown so callers can still
+   distinguish 'unknown' from 'known with empty policy'."
+  [provider-id]
+  (when-let [direct (get KNOWN_PROVIDERS provider-id)]
+    (if-let [source (:provider-model-source direct)]
+      (merge (get KNOWN_PROVIDERS source) direct)
+      direct)))
+
 (defn- pid-visible? [pid model-name]
   (letfn [(parse-gpt-version [model-name]
             (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
               [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
           (version< [a b] (neg? (compare (vec a) (vec b))))]
-    (let [known (get KNOWN_PROVIDERS pid)
+    (let [known (known-provider pid)
           excluded (set (:exclude-models known))
           version (parse-gpt-version model-name)
           min-version (:min-gpt-version known)]
@@ -691,9 +808,12 @@
 (defn provider-excluded-model?
   "True when a provider-scoped catalog marks a model unavailable.
    Provider config may add `:exclude-models` as exact model names and/or
-   `:min-gpt-version` such as [5 3] to hide older GPT family models."
+   `:min-gpt-version` such as [5 3] to hide older GPT family models.
+   Uses `known-provider` so plan-tier aliases inherit exclusion lists
+   from their base entry (e.g. all three Copilot tiers honour the same
+   `:exclude-models #{gpt-4o ...}` defined on `:github-copilot`)."
   [provider-id model-name]
-  (let [known (get KNOWN_PROVIDERS provider-id)
+  (let [known (known-provider provider-id)
         excluded (set (:exclude-models known))
         version (parse-gpt-version model-name)
         min-version (:min-gpt-version known)]
@@ -706,6 +826,12 @@
   (not (provider-excluded-model? provider-id model-name)))
 
 (defn- provider-model-source
+  "Catalog id used to look up `KNOWN_PROVIDER_MODELS` (the svar wire/policy
+   overlay) for a given runtime provider id. Honours
+   `:provider-model-source` so plan tiers inherit their model overlay
+   from the base provider — keeps the resolver one-liner intentional
+   (we don't want `known-provider`'s recursive merge here; the
+   models.dev lookup wants the bare catalog key)."
   [provider-id]
   (or (get-in KNOWN_PROVIDERS [provider-id :provider-model-source]) provider-id))
 
@@ -764,10 +890,15 @@
     - resolves :base-url from KNOWN_PROVIDERS if not provided
     - derives :priority from vector index
     - derives :root from first model
-    - merges provider-independent model metadata with provider-scoped pricing/context"
+    - merges provider-independent model metadata with provider-scoped pricing/context
+
+   Uses `known-provider` for the policy lookup so plan-tier aliases
+   inherit `:exclude-models`, `:llm-headers`, `:rpm`/`:tpm`, default
+   models, and any other shared field from their base entry; only the
+   tier-local overrides (`:base-url`, ...) win on conflict."
   [idx provider-map]
   (let [id (:id provider-map)
-        known (get KNOWN_PROVIDERS id)
+        known (known-provider id)
         base-url (or (:base-url provider-map) (:base-url known))
         rpm (or (:rpm provider-map) (:rpm known) 500)
         tpm (or (:tpm provider-map) (:tpm known) 2000000)
@@ -967,7 +1098,13 @@
           pricing-map   {model-name (provider-model-pricing provider-id model-name)}
           cost          (estimate-cost model-name input-tokens output-tokens pricing-map
                           {:api-usage api-usage
-                           :cache-tokens-in-input? (not= :anthropic (get-in KNOWN_PROVIDERS [provider-id :api-style]))})]
+                           ;; Use `known-provider` so plan-tier aliases
+                           ;; pick up `:api-style :anthropic` from the
+                           ;; base entry (e.g. `:anthropic-coding-plan`
+                           ;; inherits via `:provider-model-source`).
+                           ;; Without it Anthropic-on-OAuth budget rows
+                           ;; would double-count cached input tokens.
+                           :cache-tokens-in-input? (not= :anthropic (:api-style (known-provider provider-id)))})]
       (swap! (:budget-state router)
         (fn [bs]
           (-> bs
@@ -1256,6 +1393,23 @@
   [provider]
   (some-> (:id provider) name))
 
+(defn- propagate-interrupt!
+  "Re-throw an `InterruptedException` (or any cause that wraps one)
+   immediately. Retry / fallback loops MUST NOT swallow interrupts —
+   that defeats user cancellation (Vis `Esc`), turning an explicit
+   abort into another retry slot. The `catch Exception` clauses below
+   call this first so cancellation walks the stack cleanly instead of
+   being mistaken for a transient provider failure."
+  [^Throwable e]
+  (when (or (instance? InterruptedException e)
+          (some #(instance? InterruptedException %)
+            (take-while some? (iterate (fn [^Throwable t] (.getCause t)) (.getCause e)))))
+    ;; Restore interrupt status — we caught it once; the next blocking
+    ;; call up the stack should see the flag again so its own
+    ;; cancellation paths fire.
+    (.interrupt (Thread/currentThread))
+    (throw e)))
+
 (defn- handle-rate-limit-retries
   "Same-provider retry loop for 429 before any streamed content.
 
@@ -1319,11 +1473,23 @@
                  :delay-ms delay-ms
                  :elapsed-ms (long (elapsed*))
                  :error (ex-message last-error)}))
+            ;; Plain `Thread/sleep` instead of `(async/<!! (async/timeout
+            ;; ...))` so a Vis-side `Esc` (= thread interrupt) wakes the
+            ;; loop immediately with an `InterruptedException`. Core.async
+            ;; parks block on a CountDownLatch whose interrupt semantics
+            ;; vary by version; `Thread/sleep` is the contract we want.
             (when (pos? (long delay-ms))
-              (async/<!! (async/timeout (long delay-ms))))
+              (Thread/sleep (long delay-ms)))
             (let [outcome (try
                             {:success (f provider model-map)}
                             (catch Exception next-error
+                              ;; Cancellation MUST escape the retry loop —
+                              ;; otherwise an interrupted sleep gets
+                              ;; classified as `next-error` and the loop
+                              ;; spins on every subsequent Esc tick (vis
+                              ;; user-reported regression: \"clicking Esc
+                              ;; over and over, nothing happens\").
+                              (propagate-interrupt! next-error)
                               {:error next-error}))]
               (if (and (:error outcome)
                     (= 429 (:status (ex-data (:error outcome))))
@@ -1349,6 +1515,14 @@
 (defn with-provider-fallback [router prefs f]
   (budget-check! router)
   (let [tried (atom #{})
+        ;; Providers that hit a non-format failure (rate-limit budget
+        ;; exhausted, transient 5xx, etc.) get added here so the next
+        ;; `select-and-claim!` skips them. Without this guard the loop
+        ;; would pick the SAME provider again and emit a bogus
+        ;; `provider-fallback: codex/gpt-5.3 → codex/gpt-5.3` event —
+        ;; observed in production when a single-model chain hits 429
+        ;; repeatedly (every fallback resolved back to the offender).
+        rate-limited (atom #{})
         format-failed (atom #{})
         ;; Last format-error caught — surfaced verbatim when no provider can
         ;; take call. Keeps schema-rejected ex-data, not opaque exhaustion.
@@ -1360,7 +1534,9 @@
     (loop [attempts 0]
       (let [iter-prefs (cond-> prefs
                          (seq @format-failed) (update :exclude-providers
-                                                (fnil into #{}) @format-failed))]
+                                                (fnil into #{}) @format-failed)
+                         (seq @rate-limited)  (update :exclude-providers
+                                                (fnil into #{}) @rate-limited))]
         (if-let [[provider model-map] (select-and-claim! router iter-prefs)]
           (let [pid (:id provider)
                 start-ms (router-now-ms router)]
@@ -1384,6 +1560,8 @@
             (let [result (try
                            {:success (f provider model-map)}
                            (catch Exception e
+                             ;; Cancellation MUST escape — see propagate-interrupt!.
+                             (propagate-interrupt! e)
                              (cond
                                (and (router-transient-error? router e)
                                  (stream-content-started? e))
@@ -1452,6 +1630,11 @@
                                       :error (ex-message e)}
                                :msg "provider attempt failed"})
                   (cb-record-failure! router pid (= 429 status))
+                  ;; Mark this provider as rate-limited / transient so the
+                  ;; next `select-and-claim!` skips it. Otherwise a chain
+                  ;; with a single model would loop forever resolving the
+                  ;; offender right back into itself.
+                  (swap! rate-limited conj pid)
                   (if (and (= reason :rate-limit)
                         (false? (:fallback-provider? result)))
                     (throw e)
@@ -1478,7 +1661,8 @@
                   (when (pos? wait-ms)
                     (trove/log! {:level :info :data {:wait-ms wait-ms :prefs iter-prefs}
                                  :msg "All providers busy, waiting"})
-                    (async/<!! (async/timeout wait-ms)))
+                    ;; Interruptible sleep — see comment in handle-rate-limit-retries.
+                    (Thread/sleep (long wait-ms)))
                   (recur (inc attempts)))
                 (throw (ex-info "All providers exhausted"
                          {:type :svar.llm/all-providers-exhausted
