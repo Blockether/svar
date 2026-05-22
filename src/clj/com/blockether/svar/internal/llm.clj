@@ -182,7 +182,7 @@
                     :timeout timeout-ms})
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                      (catch Exception _ nil))]
+                   (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -351,7 +351,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-          (assoc body :max_tokens required-min))
+        (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -774,15 +774,15 @@
           (case (:type delta)
             "text_delta"
             (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic also emits input_json_delta for tool_use blocks;
             ;; svar doesn't use Anthropic tool_use today, but keep the
@@ -790,7 +790,7 @@
             ;; through under a synthetic :partial_json key.
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -1142,7 +1142,7 @@
   [{:keys [thinking thinking-signature]}]
   (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
         (try (json/read-json thinking-signature :key-fn keyword)
-             (catch Exception _ nil)))
+          (catch Exception _ nil)))
     (when (and (string? thinking) (not (str/blank? thinking)))
       {:type "reasoning"
        :summary [{:type "summary_text" :text thinking}]})))
@@ -1402,6 +1402,34 @@
     (when (seq parts)
       (str/join "\n" parts))))
 
+(defn- echo-reasoning-disabled?
+  "Read once at request-build time. When `SVAR_DISABLE_REASONING_ECHO`
+   env is set to a truthy value (\"1\", \"true\", \"yes\"), svar drops the
+   client-side `reasoning_content` echo entirely — prior assistant
+   thinking is stripped from the wire body, and nothing is hoisted into
+   the `reasoning_content` field.
+
+   Intended for **debugging only**. Empirical A/B sweep on Z.ai
+   coding plan / GLM-5.1 (vis E2E-C, n=3 per condition):
+     :all (default)  6.67 iter mean, 5,624 thinking chars mean
+     :none           7.00 iter mean, 6,622 thinking chars mean
+   = no measurable speed-up from disabling echo (within variance), and
+   ~15% MORE thinking compute per run because the model re-derives
+   context every turn instead of carrying it forward. Keep `:all` on
+   in production; flip the flag only when you need to bisect a model
+   regression that you suspect involves stale carryover.
+
+   Earlier experiments also tried a `SVAR_REASONING_ECHO_LAST_N=K`
+   partial-echo knob (\"keep only last N thinking turns\"). It made
+   things WORSE — a chopped reasoning chain confused the model more
+   than either full echo or no echo (E2E-C / GLM-5.1: last-1 = 14
+   iter, last-2 = 10 iter, last-3 = 8 iter, full = 6-8 iter). The
+   knob was removed; do not reintroduce."
+  []
+  (boolean
+    (when-let [v (System/getenv "SVAR_DISABLE_REASONING_ECHO")]
+      (contains? #{"1" "true" "yes" "on"} (str/lower-case v)))))
+
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
 
@@ -1416,6 +1444,13 @@
    preserved-thinking convention (z.ai GLM, OpenRouter) keep the
    model's thinking session active across calls.
 
+   ESCAPE HATCH: setting `SVAR_DISABLE_REASONING_ECHO=1` skips the
+   thinking-block hoisting entirely — prior reasoning is dropped from
+   the wire, useful when comparing weaker reasoning models with vs
+   without preserved thinking (a glm-5.1 turn carrying 5K tokens of its
+   own stale rumination drifts; the same turn without echo stays
+   focused).
+
    Params:
    `messages` - Vector. Chat messages.
    `model` - String. Model name.
@@ -1424,14 +1459,15 @@
   ([messages model]
    (build-request-body messages model nil))
   ([messages model extra-body]
-   (let [processed (mapv (fn [{:keys [role content] :as m}]
+   (let [echo-off? (echo-reasoning-disabled?)
+         processed (mapv (fn [{:keys [role content] :as m}]
                            (let [normalized (normalize-content content)
                                  [thinking-blocks rest-blocks]
                                  (if (= role "assistant")
                                    (openai-chat-split-thinking normalized)
                                    [nil normalized])
                                  reasoning-content
-                                 (when (seq thinking-blocks)
+                                 (when (and (not echo-off?) (seq thinking-blocks))
                                    (openai-chat-reasoning-content thinking-blocks))
                                  base (-> m
                                         (assoc :content (openai-content rest-blocks))
@@ -2401,8 +2437,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                  idle?     :svar.core/stream-idle-timeout
-                                  :else     :svar.core/http-error)
+                              idle?     :svar.core/stream-idle-timeout
+                              :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -2429,8 +2465,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                idle?     :svar.core/stream-idle-timeout
-                                :else     :svar.core/http-error)
+                            idle?     :svar.core/stream-idle-timeout
+                            :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -3439,7 +3475,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
+                                                 (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -4438,8 +4474,8 @@
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                    :else {:strategy :root})]
+                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                :else {:strategy :root})]
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]
