@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.9] - 2026-05-23
+
+### Fixed
+- llm: `http-error-message` helper guarantees the `:svar.core/http-error`
+  ex-info's message is never nil/blank. babashka's HttpClient can
+  surface low-level exceptions (stream finalisation, connection edge)
+  with nil message; svar used to pipe that straight into
+  `anomaly/fault!`, producing `ExceptionInfo: null` traces with
+  `:com.blockether.anomaly.core/message nil` and no actionable signal
+  for downstream consumers (Vis conv c8dc39b1).
+
 ## [v0.5.8] - 2026-05-23
 
 ### Fixed
@@ -982,7 +993,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.8...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.9...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1022,3 +1033,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.5.6]: https://github.com/Blockether/svar/releases/tag/v0.5.6
 [v0.5.7]: https://github.com/Blockether/svar/releases/tag/v0.5.7
 [v0.5.8]: https://github.com/Blockether/svar/releases/tag/v0.5.8
+[v0.5.9]: https://github.com/Blockether/svar/releases/tag/v0.5.9
