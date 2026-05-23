@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.8] - 2026-05-23
+
+### Fixed
+- fence parser: nest inner lang-tagged samples inside open block. Fixes
+  Vis conv 11d4f817 / t12/i1 where a `(done {:answer "…```clojure
+  (deftest …) ```…"})` form was torn by the inner sample's bare
+  ` ``` ` closing the outer `` ```clojure `` fence early. Outer block
+  now closes only when nesting depth returns to zero.
+
 ## [v0.5.7] - 2026-05-23
 
 ### Changed
@@ -973,7 +982,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.7...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.8...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1012,3 +1021,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.5.5]: https://github.com/Blockether/svar/releases/tag/v0.5.5
 [v0.5.6]: https://github.com/Blockether/svar/releases/tag/v0.5.6
 [v0.5.7]: https://github.com/Blockether/svar/releases/tag/v0.5.7
+[v0.5.8]: https://github.com/Blockether/svar/releases/tag/v0.5.8
