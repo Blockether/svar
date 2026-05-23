@@ -456,6 +456,38 @@
    max-error-body documented limit."
   8192)
 
+(defn- http-error-message
+  "Construct a non-nil, human-readable message for an `:svar.core/http-error`
+   ex-info from the original exception. Falls back through several signals
+   so the downstream `(ex-message …)` is never nil:
+
+     1. `(ex-message e)` when set
+     2. `(.getMessage (ex-cause e))` when set
+     3. summary built from ex-data `:status` / `:url` (e.g. `HTTP 503 at
+        https://api.anthropic.com/v1/messages`)
+     4. exception class name (e.g. `java.net.http.HttpTimeoutException`)
+     5. literal fallback `\"HTTP request failed\"`
+
+   Pre-fix: babashka's HttpClient occasionally surfaces low-level
+   `IOException` / `HttpTimeoutException` with nil message, and svar
+   blindly piped that into `anomaly/fault!`, producing the
+   user-hostile `ExceptionInfo: null` trace (Vis conv c8dc39b1: model
+   saw `:com.blockether.anomaly.core/message nil` and could not even
+   pattern-match on the failure to retry intelligently)."
+  [^Throwable e]
+  (let [direct (some-> (ex-message e) (#(when-not (str/blank? %) %)))
+        cause  (some-> (ex-cause e) ex-message (#(when-not (str/blank? %) %)))
+        data   (ex-data e)
+        status (:status data)
+        url    (:url data)
+        klass  (-> e class .getName)
+        from-data (cond
+                    (and status url) (str "HTTP " status " at " url)
+                    status           (str "HTTP " status)
+                    url              (str "request to " url " failed")
+                    :else            nil)]
+    (or direct cause from-data klass "HTTP request failed")))
+
 (defn- truncate-error-body
   "Returns a short string suitable for `:body` / `:body-snippet` on
    `:svar.core/http-error` ex-data. Stringifies non-string bodies
@@ -1622,9 +1654,10 @@
           (let [ex-data-map   (ex-data e)
                 response-body (when (string? (:body ex-data-map)) (:body ex-data-map))
                 api-key-error (detect-api-key-error response-body)
+                base-message  (http-error-message e)
                 error-message (if api-key-error
-                                (str api-key-error " (Original: " (ex-message e) ")")
-                                (ex-message e))]
+                                (str api-key-error " (Original: " base-message ")")
+                                base-message)]
             (when api-key-error
               (trove/log! {:level :error :id ::api-key-error
                            :data (log-data {:api-key-error api-key-error
@@ -1690,9 +1723,10 @@
                                  :api-key-length (count api-key)
                                  :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))
                                  :messages (sanitize-messages-for-logging messages)}
+              base-message  (http-error-message e)
               error-message (if api-key-error
-                              (str api-key-error " (Original: " (ex-message e) ")")
-                              (ex-message e))]
+                              (str api-key-error " (Original: " base-message ")")
+                              base-message)]
           (when api-key-error
             (trove/log! {:level :error :id ::api-key-error
                          :data (log-data {:api-key-error api-key-error
@@ -2522,9 +2556,10 @@
                 response-body (let [b (:body ex-data-map)]
                                 (when (string? b) b))
                 api-key-error (detect-api-key-error response-body)
+                base-message  (http-error-message e)
                 error-message (if api-key-error
-                                (str api-key-error " (Original: " (ex-message e) ")")
-                                (ex-message e))]
+                                (str api-key-error " (Original: " base-message ")")
+                                base-message)]
             (anomaly/fault! error-message
               (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
                                                          :llm-request {:model model :base-url base-url}})

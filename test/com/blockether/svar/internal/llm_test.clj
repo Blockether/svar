@@ -989,3 +989,47 @@
             (expect (= "passes I continue" (:reasoning result)))
             (expect (= "pass 2" (:content (last @events))))
             (expect (= "passes I continue" (:reasoning (last @events))))))))))
+
+(defdescribe http-error-message-test
+  ;; Vis conv c8dc39b1: babashka's HttpClient surfaced a low-level
+  ;; exception with nil message, svar piped that straight into
+  ;; anomaly/fault!, and downstream observers saw the unhelpful
+  ;; `ExceptionInfo: null` trace with `:com.blockether.anomaly.core/message nil`.
+  ;; `http-error-message` synthesises a usable message from whatever
+  ;; signal IS available so the final ex-info message is never nil.
+  (let [fmt @(ns-resolve 'com.blockether.svar.internal.llm 'http-error-message)]
+    (describe "http-error-message"
+      (it "prefers the direct ex-message when set"
+        (let [e (ex-info "real boom" {})]
+          (expect (= "real boom" (fmt e)))))
+
+      (it "skips blank direct messages and falls back to ex-cause's message"
+        (let [cause (Exception. "cause says it")
+              e     (ex-info "" {} cause)]
+          (expect (= "cause says it" (fmt e)))))
+
+      (it "synthesises HTTP <status> at <url> from ex-data when neither message is set"
+        (let [e (ex-info nil {:status 503 :url "https://api.anthropic.com/v1/messages"})]
+          (expect (= "HTTP 503 at https://api.anthropic.com/v1/messages" (fmt e)))))
+
+      (it "uses just the status when url is absent"
+        (let [e (ex-info nil {:status 429})]
+          (expect (= "HTTP 429" (fmt e)))))
+
+      (it "uses just the url when status is absent"
+        (let [e (ex-info nil {:url "https://x.invalid/y"})]
+          (expect (= "request to https://x.invalid/y failed" (fmt e)))))
+
+      (it "falls back to the exception class name when nothing else helps"
+        (let [e (Exception.)]
+          (expect (= "java.lang.Exception" (fmt e)))))
+
+      (it "final-fallback string is never nil or blank"
+        ;; ExceptionInfo with nil message AND no ex-data AND no cause:
+        ;; class name still wins. The literal `\"HTTP request failed\"`
+        ;; only ever fires if class is also somehow nil, but contract
+        ;; guarantees non-nil + non-blank.
+        (let [e (ex-info nil {})
+              m (fmt e)]
+          (expect (string? m))
+          (expect (not (clojure.string/blank? m))))))))
