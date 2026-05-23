@@ -76,6 +76,21 @@ public final class FenceBlocksParser {
         int bodyEnd = -1;     // index one past the last body char (just before the closer's leading '\n')
         boolean sawFence = false;
 
+        // LLM-friendly fence nesting. CommonMark fenced blocks do not
+        // nest, but coding-agent models routinely emit code samples
+        // *inside* an outer ```clojure block — typically inside a string
+        // argument to (done {:answer "… ```clojure (deftest …) ``` …"}).
+        // Without nesting, the inner sample's bare ``` closes the outer
+        // block early (Vis conv 11d4f817 / t12/i1: torn (done …) form,
+        // dropped trailer keys, model retry burns a whole iteration).
+        //
+        // Rule: while in-block, a tagged-opener fence line of equal
+        // backtick length is treated as PUSH (an inner sample opening);
+        // the next bare closer of equal-or-greater length POPS instead
+        // of closing the outer block. The outer block closes only when
+        // nesting depth returns to zero.
+        int innerDepth = 0;
+
         int lineStart = 0;
         for (int i = 0; i <= n; i++) {
             if (i == n || s.charAt(i) == '\n') {
@@ -89,20 +104,35 @@ public final class FenceBlocksParser {
                     bodyStart = i + 1;
                     bodyEnd = i + 1; // empty body until the next body line is seen
                     sawFence = true;
-                } else if (inBlock && fl != null && fl.lang == null && fl.ticks >= openLen) {
-                    blocks.add(new Block(openLang, sliceBody(s, bodyStart, bodyEnd)));
-                    inBlock = false;
-                    openLen = 0;
-                    openLang = null;
-                    bodyStart = -1;
-                    bodyEnd = -1;
+                } else if (inBlock && fl != null && fl.lang != null
+                             && fl.ticks == openLen) {
+                    // Inner tagged opener inside same-length outer fence:
+                    // push nesting and keep the line as body content.
+                    innerDepth++;
+                    bodyEnd = lineEnd;
                     sawFence = true;
+                } else if (inBlock && fl != null && fl.lang == null && fl.ticks >= openLen) {
+                    if (innerDepth > 0) {
+                        // Pop nested sample close; line stays inside body.
+                        innerDepth--;
+                        bodyEnd = lineEnd;
+                        sawFence = true;
+                    } else {
+                        blocks.add(new Block(openLang, sliceBody(s, bodyStart, bodyEnd)));
+                        inBlock = false;
+                        openLen = 0;
+                        openLang = null;
+                        bodyStart = -1;
+                        bodyEnd = -1;
+                        sawFence = true;
+                    }
                 } else if (inBlock && fl != null && fl.lang != null && fl.ticks >= openLen + 3) {
                     blocks.add(new Block(openLang, sliceBody(s, bodyStart, bodyEnd)));
                     openLen = fl.ticks - openLen;
                     openLang = fl.lang;
                     bodyStart = i + 1;
                     bodyEnd = i + 1;
+                    innerDepth = 0;
                     sawFence = true;
                 } else {
                     if (inBlock) {
@@ -123,8 +153,15 @@ public final class FenceBlocksParser {
             // EOF after opener. LLM streams often lose only final ``` closer.
             // Treat non-empty, fence-free body as implicitly closed; drop bad
             // final body but keep earlier complete blocks for recovery.
+            //
+            // `containsStandaloneFenceLine` rejects bodies that look like
+            // they have unmatched inner fences — but with nesting enabled
+            // a body that contains a balanced inner ```lang … ``` pair is
+            // legitimate (a code sample inside an :answer string), so we
+            // first attempt to fold matched inner pairs out of the body
+            // before checking for leftover standalone fence lines.
             String source = sliceBody(s, bodyStart, bodyEnd);
-            if (!isBlank(source) && !containsStandaloneFenceLine(source)) {
+            if (!isBlank(source) && !hasUnpairedInnerFenceLine(source)) {
                 blocks.add(new Block(openLang, source));
             } else {
                 return new Result(blocks, true, true);
@@ -138,6 +175,35 @@ public final class FenceBlocksParser {
         }
 
         return new Result(blocks, sawFence, false);
+    }
+
+    /**
+     * True when the body contains a fence line that does not pair into
+     * a tagged-open + bare-close span. Allows balanced inner samples
+     * (e.g. ```clojure … ``` inside a string) while still flagging a
+     * lone trailing fence as torn.
+     */
+    private static boolean hasUnpairedInnerFenceLine(String source) {
+        if (source == null || source.isEmpty()) return false;
+        int n = source.length();
+        int depth = 0;
+        int lineStart = 0;
+        for (int i = 0; i <= n; i++) {
+            if (i == n || source.charAt(i) == '\n') {
+                FenceLine fl = recognizeFenceLine(source, lineStart, i);
+                if (fl != null) {
+                    if (fl.lang != null) {
+                        depth++;
+                    } else if (depth > 0) {
+                        depth--;
+                    } else {
+                        return true; // bare close with nothing to close
+                    }
+                }
+                lineStart = i + 1;
+            }
+        }
+        return depth != 0; // tagged opener with no matching close
     }
 
     /** Materialize the contiguous body slice. Empty when start >= end. */

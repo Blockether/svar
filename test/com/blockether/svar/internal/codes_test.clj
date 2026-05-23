@@ -259,6 +259,63 @@
       (expect (= [] selected))
       (expect (= "" (sut/concat-sources selected))))))
 
+(defdescribe nested-fence-in-clojure-string-test
+  ;; Regression for Vis conv 11d4f817 (t12/i1). The model emitted:
+  ;;
+  ;;   ```clojure
+  ;;   (done
+  ;;     {:answer "## Status\n\n```clojure\n(deftest x …)\n```"
+  ;;      :trailer-drop ["…"]})
+  ;;   ```
+  ;;
+  ;; The nested ```clojure / ``` inside the :answer STRING used to close
+  ;; the outer ```clojure fence early, producing a torn (done … block,
+  ;; followed by stray (deftest …) and trailing-key garbage blocks.
+  ;; Recovery (vis loop/recover-direct-answer-blocks) only handled the
+  ;; `:answer`-as-sole-key shape and silently dropped sibling keys.
+  ;;
+  ;; The fix nests tagged openers inside an already-open block: a
+  ;; `\`\`\`clojure` line seen INSIDE a `\`\`\`clojure` body pushes a
+  ;; nesting counter, and the matching bare `\`\`\`` closer pops it
+  ;; instead of closing the outer block. The outer block only closes
+  ;; when nesting depth returns to zero.
+  (describe "tagged opener nested inside an already-open same-lang block"
+    (it "keeps the outer (done {…}) form whole when an inner ```clojure sample appears inside an :answer string"
+      ;; Mirrors what the LLM actually streamed (Vis conv 11d4f817 t12/i1):
+      ;; the :answer string carries REAL newlines, and the embedded
+      ;; ```clojure / ``` sit on their own lines inside the string.
+      (let [raw (str "```clojure\n"
+                  "(task-set! :foo {:status :done})\n"
+                  "(done\n"
+                  "  {:answer \"## Status\n"
+                  "\n"
+                  "Example:\n"
+                  "\n"
+                  "```clojure\n"
+                  "(deftest x (is (= 1 1)))\n"
+                  "```\n"
+                  "\n"
+                  "End.\"\n"
+                  "   :trailer-drop [\"t1/i1\"]})\n"
+                  "```")
+            d   (sut/extract-code-blocks-detail raw)]
+        (expect (= 1 (count (:blocks d))))
+        (expect (false? (:malformed? d)))
+        (let [src (:source (first (:blocks d)))]
+          (expect (str/includes? src "(task-set! :foo"))
+          (expect (str/includes? src "(done"))
+          (expect (str/includes? src ":trailer-drop"))
+          (expect (str/includes? src "(deftest x")))))
+
+    (it "handles multiple nested sample fences in one outer block"
+      (let [raw (str "```clojure\n"
+                  "(done {:answer \"a```clojure\nx\n```b```bash\nls\n```c\"})\n"
+                  "```")
+            d   (sut/extract-code-blocks-detail raw)]
+        (expect (= 1 (count (:blocks d))))
+        (expect (false? (:malformed? d)))
+        (expect (str/includes? (:source (first (:blocks d))) ":answer"))))))
+
 (defdescribe extract-code-blocks-perf-test
   ;; Regression for Vis conv 0c8188ac: `normalize-fence-closers` used to
   ;; run a `(?m)…$` regex over the entire buffer. Combined with the LLM
