@@ -182,7 +182,7 @@
                     :timeout timeout-ms})
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                   (catch Exception _ nil))]
+                      (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -351,7 +351,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-        (assoc body :max_tokens required-min))
+          (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -774,15 +774,15 @@
           (case (:type delta)
             "text_delta"
             (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
-              {:content-delta nil :reasoning-delta nil :api-usage nil})
+                {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic also emits input_json_delta for tool_use blocks;
             ;; svar doesn't use Anthropic tool_use today, but keep the
@@ -790,7 +790,7 @@
             ;; through under a synthetic :partial_json key.
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-              {:content-delta nil :reasoning-delta nil :api-usage nil})
+                {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -1142,7 +1142,7 @@
   [{:keys [thinking thinking-signature]}]
   (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
         (try (json/read-json thinking-signature :key-fn keyword)
-          (catch Exception _ nil)))
+             (catch Exception _ nil)))
     (when (and (string? thinking) (not (str/blank? thinking)))
       {:type "reasoning"
        :summary [{:type "summary_text" :text thinking}]})))
@@ -2256,7 +2256,7 @@
                     (handle-parsed! parsed)))]
           (loop [event-type nil
                  data-lines []
-                 line-count 0
+                 line-count (long 0)
                  last-line-ns (System/nanoTime)]
             (let [line (.readLine reader)
                   now-ns (System/nanoTime)
@@ -2270,7 +2270,7 @@
               ;; rates (anthropic delta storms peak >2000 lines/s).
               (when (and stream-line-trace-enabled?
                       (or (>= gap-ms STREAM_LINE_TRACE_GAP_MS)
-                        (zero? (mod line-count STREAM_LINE_TRACE_EVERY_N))))
+                        (== 0 (Math/floorMod line-count (long STREAM_LINE_TRACE_EVERY_N)))))
                 (trove/log! {:level :info :id ::stream-line-trace
                              :data (log-data
                                      {:url url
@@ -2291,12 +2291,12 @@
                 (if (str/blank? line)
                   (do
                     (dispatch-event! event-type data-lines)
-                    (recur nil [] (inc line-count) now-ns))
+                    (recur nil [] (unchecked-inc line-count) now-ns))
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
-                      "event" (recur value data-lines (inc line-count) now-ns)
-                      "data"  (recur event-type (conj data-lines value) (inc line-count) now-ns)
-                      (recur event-type data-lines (inc line-count) now-ns)))))))))
+                      "event" (recur value data-lines (unchecked-inc line-count) now-ns)
+                      "data"  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns)
+                      (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
                                     {:terminal @terminal-event
@@ -2437,8 +2437,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                              idle?     :svar.core/stream-idle-timeout
-                              :else     :svar.core/http-error)
+                                  idle?     :svar.core/stream-idle-timeout
+                                  :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -2465,8 +2465,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                            idle?     :svar.core/stream-idle-timeout
-                            :else     :svar.core/http-error)
+                                idle?     :svar.core/stream-idle-timeout
+                                :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -2923,7 +2923,7 @@
         ;; >output-cap budgets.
         output-cap (some-> (:output-limit model-map) long)
         quarter (long (* 0.25 ctx))
-        auto-params {:max_tokens (if output-cap (min quarter output-cap) quarter)}
+        auto-params {:max_tokens (if output-cap (min quarter (long output-cap)) quarter)}
         api-style (or (:api-style model-map) (:api-style provider))
         reasoning-params (router/reasoning-extra-body
                            api-style model-map (:reasoning opts)
@@ -3475,7 +3475,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                 (catch Exception _ partial-map)))]
+                                                    (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -4474,8 +4474,8 @@
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                :else {:strategy :root})]
+                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                    :else {:strategy :root})]
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]

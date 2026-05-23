@@ -38,6 +38,17 @@
   (throw (ex-info (str "HTTP " status)
            {:type :svar.core/http-error :status status})))
 
+(defn- stream-truncated-error
+  "Throws the zero-content SSE EOF failure seen when a provider closes
+   stream after an error event but before a terminal marker."
+  ([] (stream-truncated-error 0))
+  ([content-len]
+   (throw (ex-info "Stream ended before terminal marker."
+            (cond-> {:type :svar.core/stream-truncated
+                     :stream? true
+                     :content-acc-len content-len}
+              (pos? (long content-len)) (assoc :partial-content "x"))))))
+
 ;; =============================================================================
 ;; Tier 1 — resolve-routing branches
 ;; =============================================================================
@@ -188,6 +199,30 @@
         (expect (= "p1" (get-in trace [0 :from-provider])))
         (expect (= "p2" (get-in trace [0 :to-provider])))
         (expect (= 503 (get-in trace [0 :status])))))))
+
+(defdescribe with-provider-fallback-stream-truncated-test
+  (it "falls through to P2 on zero-content stream truncation"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :failure-threshold 1})
+          calls (atom [])
+          result (router/with-provider-fallback r {}
+                   (fn [provider _model]
+                     (swap! calls conj (:id provider))
+                     (case (:id provider)
+                       :p1 (stream-truncated-error)
+                       :p2 (success-result 100))))]
+      (expect (= [:p1 :p2] @calls))
+      (expect (= :p2 (:routed/provider-id result)))
+      (let [trace (:routed/trace result)]
+        (expect (= 1 (count trace)))
+        (expect (= :llm.routing/provider-fallback (get-in trace [0 :event/type])))
+        (expect (= :transient-error (get-in trace [0 :reason])))
+        (expect (= "p1" (get-in trace [0 :from-provider])))
+        (expect (= "p2" (get-in trace [0 :to-provider])))))))
 
 (defdescribe with-provider-fallback-rate-limit-trace-test
   "429 retries are router-owned trace events, not hidden llm/with-retry logs."

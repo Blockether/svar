@@ -5,7 +5,6 @@
    Extracted from defaults.clj (provider/model metadata) and llm.clj (routing logic)
    to provide a single cohesive namespace for all routing concerns."
   (:require
-   [clojure.core.async :as async]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.modelsdev :as modelsdev]
@@ -1303,14 +1302,24 @@
       (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
 
 (defn- router-transient-error? [router e]
-  (let [status (:status (ex-data e))
-        etype (:type (ex-data e))
+  (let [data (ex-data e)
+        status (:status data)
+        etype (:type data)
         codes (:transient-status-codes router)
         msg (ex-message e)]
     (boolean
       (or (and status (contains? codes status))
         (and (= etype :svar.core/http-error)
           (some-> msg (str/includes? "timed out")))
+        ;; SSE EOF before provider terminal marker and before any
+        ;; visible content is a transport/provider failure, not a model
+        ;; answer. Route around it instead of burning caller iterations
+        ;; retrying the same provider. If content already started, keep
+        ;; the existing guard below and throw: caller may have useful
+        ;; partial output and replaying could duplicate work.
+        (and (= etype :svar.core/stream-truncated)
+          (zero? (long (or (:content-acc-len data) 0)))
+          (nil? (:partial-content data)))
         (instance? java.net.ConnectException e)
         (instance? java.net.SocketTimeoutException e)
         (some-> (.getCause ^Throwable e)
