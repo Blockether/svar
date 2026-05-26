@@ -1088,22 +1088,22 @@
 (declare estimate-cost)
 
 (defn- budget-record!
-  "Records token usage and cost against the router's budget."
-  [router provider-id model-name api-usage]
+  "Records token usage and cost against the router's budget.
+
+   Reads the Phase A canonical usage shape —
+   `{:input-tokens N :output-tokens N :input-tokens-details {...}
+   :total-tokens N}` — where `:input-tokens` is ALWAYS TOTAL (inclusive
+   across providers). No provider branching needed any more."
+  [router _provider-id model-name api-usage]
   (when (:budget-state router)
-    (let [input-tokens  (long (or (:prompt_tokens api-usage) 0))
-          output-tokens (long (or (:completion_tokens api-usage) 0))
-          total-tokens  (+ input-tokens output-tokens)
-          pricing-map   {model-name (provider-model-pricing provider-id model-name)}
-          cost          (estimate-cost model-name input-tokens output-tokens pricing-map
-                          {:api-usage api-usage
-                           ;; Use `known-provider` so plan-tier aliases
-                           ;; pick up `:api-style :anthropic` from the
-                           ;; base entry (e.g. `:anthropic-coding-plan`
-                           ;; inherits via `:provider-model-source`).
-                           ;; Without it Anthropic-on-OAuth budget rows
-                           ;; would double-count cached input tokens.
-                           :cache-tokens-in-input? (not= :anthropic (:api-style (known-provider provider-id)))})]
+    (let [input-tokens  (long (or (:input-tokens api-usage) 0))
+          output-tokens (long (or (:output-tokens api-usage) 0))
+          total-tokens  (long (or (:total-tokens api-usage)
+                                (+ input-tokens output-tokens)))
+          pricing-map   {model-name (provider-model-pricing _provider-id model-name)}
+          cost          (estimate-cost model-name input-tokens output-tokens
+                          pricing-map
+                          {:api-usage api-usage})]
       (swap! (:budget-state router)
         (fn [bs]
           (-> bs
@@ -1590,7 +1590,7 @@
               (cond
                 (:success result)
                 (let [result (:success result)
-                      token-count (or (get-in result [:api-usage :total_tokens])
+                      token-count (or (get-in result [:api-usage :total-tokens])
                                     (get-in result [:tokens :total])
                                     0)
                       latency-ms (- (router-now-ms router) start-ms)
@@ -1598,7 +1598,10 @@
                   (record-tokens! router pid token-count)
                   (cb-record-success! router pid)
                   (record-cumulative! router pid token-count latency-ms)
-                  (budget-record! router pid (:name model-map) (or (:api-usage result) {:prompt_tokens 0 :completion_tokens 0}))
+                  (budget-record! router pid (:name model-map)
+                    (or (:api-usage result)
+                      {:input-tokens 0 :output-tokens 0 :total-tokens 0
+                       :input-tokens-details {:regular 0 :cache-write 0 :cache-read 0}}))
                   (cond-> (assoc result
                             :routed/provider-id pid
                             :routed/model (:name model-map)
@@ -2076,39 +2079,37 @@
     (or (:cache-write-5m pricing) (:cache-write pricing) (:input pricing))))
 
 (defn- usage-cache-tokens
+  "Pull cache-read / cache-write tokens out of the Phase A canonical
+   `:input-tokens-details` shape. Returns 0 / 0 when the shape is
+   absent."
   [api-usage]
-  {:cached-tokens (long (or (get-in api-usage [:prompt_tokens_details :cached_tokens])
-                          (get-in api-usage [:prompt_tokens_details :input_cached_tokens])
-                          0))
-   :cache-creation-tokens (long (or (get-in api-usage [:prompt_tokens_details :cache_creation_tokens])
-                                  (get-in api-usage [:prompt_tokens_details :cache_write_tokens])
-                                  0))})
+  (let [details (:input-tokens-details api-usage)]
+    {:cached-tokens (long (or (:cache-read details) 0))
+     :cache-creation-tokens (long (or (:cache-write details) 0))}))
 
 (defn estimate-cost
   "Estimates USD cost with separate uncached input, cached input, cache
    creation, and output components. Rates are USD per 1M tokens.
 
-   `input-tokens` normally means provider prompt/input tokens. For OpenAI,
-   Z.ai, Gemini, and OpenRouter this includes cached-read tokens, so cached
-   reads are subtracted before normal input cost. For Anthropic normalized
-   usage, `input_tokens` excludes cache read/write tokens; pass
-   `{:cache-tokens-in-input? false}` to keep base input intact."
+   Since svar 0.6.0 the canonical usage shape is INCLUSIVE —
+   `:input-tokens` is always the TOTAL prompt tokens regardless of
+   provider (Anthropic-additive raw values are summed at the canonical
+   normalizer boundary). Cached and cache-creation tokens are
+   SUBSETS of `:input-tokens`, so they're subtracted to compute the
+   uncached-regular portion before pricing. No more
+   `:cache-tokens-in-input?` flag — the meaning is uniform."
   ([model input-tokens output-tokens]
    (estimate-cost model input-tokens output-tokens MODEL_PRICING))
   ([model input-tokens output-tokens pricing-map]
    (estimate-cost model input-tokens output-tokens pricing-map {}))
   ([model input-tokens output-tokens pricing-map opts]
    (let [pricing (get-model-pricing model pricing-map)
-         {:keys [cached-tokens cache-creation-tokens]} (merge (usage-cache-tokens (:api-usage opts))
-                                                         (select-keys opts [:cached-tokens :cache-creation-tokens]))
-         cached-tokens (long (or cached-tokens 0))
+         {:keys [cached-tokens cache-creation-tokens]}
+         (merge (usage-cache-tokens (:api-usage opts))
+           (select-keys opts [:cached-tokens :cache-creation-tokens]))
+         cached-tokens         (long (or cached-tokens 0))
          cache-creation-tokens (long (or cache-creation-tokens 0))
-         cache-tokens-in-input? (if (contains? opts :cache-tokens-in-input?)
-                                  (:cache-tokens-in-input? opts)
-                                  true)
-         input-uncached-tokens (if cache-tokens-in-input?
-                                 (max 0 (- (long input-tokens) cached-tokens cache-creation-tokens))
-                                 (long input-tokens))
+         input-uncached-tokens (max 0 (- (long input-tokens) cached-tokens cache-creation-tokens))
          input-rate (tier-rate pricing :input input-tokens)
          cached-rate (or (tier-rate pricing :cached-input input-tokens) input-rate)
          output-rate (tier-rate pricing :output input-tokens)
@@ -2161,27 +2162,29 @@
    uncached input, cached-read input, cache-write input, output, and total."
   ([^String model messages ^String output-text]
    (count-and-estimate model messages output-text {}))
-  ([^String model messages ^String output-text {:keys [pricing input-tokens api-usage api-style
+  ([^String model messages ^String output-text {:keys [pricing input-tokens api-usage
                                                        cache-creation-ttl]
                                                 :as opts}]
-   (let [input-tokens (long (or (:prompt_tokens api-usage) input-tokens (count-messages model messages)))
-         output-tokens (long (or (:completion_tokens api-usage) (count-tokens model output-text)))
-         reasoning-tokens (long (or (get-in api-usage [:completion_tokens_details :reasoning_tokens]) 0))
-         cached-tokens (long (or (get-in api-usage [:prompt_tokens_details :cached_tokens]) 0))
-         cache-creation-tokens (long (or (get-in api-usage [:prompt_tokens_details :cache_creation_tokens])
-                                       (get-in api-usage [:prompt_tokens_details :cache_write_tokens])
-                                       0))
-         total-tokens (+ input-tokens output-tokens)
-         cache-tokens-in-input? (not= api-style :anthropic)
+   (let [;; Canonical shape (Phase A): :input-tokens is TOTAL,
+         ;; :input-tokens-details holds subset breakdown.
+         input-tokens   (long (or (:input-tokens api-usage)
+                                input-tokens
+                                (count-messages model messages)))
+         output-tokens  (long (or (:output-tokens api-usage)
+                                (count-tokens model output-text)))
+         reasoning-tokens (long (or (get-in api-usage [:output-tokens-details :reasoning])
+                                  0))
+         details        (:input-tokens-details api-usage)
+         cached-tokens  (long (or (:cache-read details) 0))
+         cache-creation-tokens (long (or (:cache-write details) 0))
+         total-tokens   (+ input-tokens output-tokens)
          cost (estimate-cost model input-tokens output-tokens
                 (or pricing MODEL_PRICING)
-                (merge {:api-usage api-usage
-                        :cached-tokens cached-tokens
-                        :cache-creation-tokens cache-creation-tokens
-                        :cache-creation-ttl (or cache-creation-ttl
-                                              (messages-cache-creation-ttl messages))
-                        :cache-tokens-in-input? cache-tokens-in-input?}
-                  (select-keys opts [:cache-tokens-in-input?])))]
+                {:api-usage api-usage
+                 :cached-tokens cached-tokens
+                 :cache-creation-tokens cache-creation-tokens
+                 :cache-creation-ttl (or cache-creation-ttl
+                                       (messages-cache-creation-ttl messages))})]
      {:input-tokens input-tokens
       :output-tokens output-tokens
       :reasoning-tokens reasoning-tokens

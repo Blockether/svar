@@ -256,10 +256,10 @@
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
                                                    {:content "{\"answer\":\"ok\"}"
                                                     :reasoning nil
-                                                    :api-usage {:prompt_tokens 10
-                                                                :completion_tokens 5
-                                                                :total_tokens 15
-                                                                :prompt_tokens_details {:cached_tokens 7}}
+                                                    :api-usage {:input-tokens 10
+                                                                :output-tokens 5
+                                                                :total-tokens 15
+                                                                :input-tokens-details {:cache-read 7}}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -296,10 +296,10 @@
                                                    (swap! calls conj {:url url :body body :headers headers :on-delta on-delta})
                                                    {:content "```clojure\n(+ 1 1)\n```"
                                                     :reasoning nil
-                                                    :api-usage {:prompt_tokens 10
-                                                                :completion_tokens 5
-                                                                :total_tokens 15
-                                                                :prompt_tokens_details {:cached_tokens 7}}
+                                                    :api-usage {:input-tokens 10
+                                                                :output-tokens 5
+                                                                :total-tokens 15
+                                                                :input-tokens-details {:cache-read 7}}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -327,9 +327,9 @@
                                                    (swap! calls conj {:url url :body body :headers headers})
                                                    {:content "```clojure\n(+ 1 1)\n```"
                                                     :reasoning nil
-                                                    :api-usage {:prompt_tokens 10
-                                                                :completion_tokens 5
-                                                                :total_tokens 15}
+                                                    :api-usage {:input-tokens 10
+                                                                :output-tokens 5
+                                                                :total-tokens 15}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -356,9 +356,9 @@
                                                    (swap! calls conj {:url url :body body :headers headers})
                                                    {:content "{\"answer\":\"ok\"}"
                                                     :reasoning nil
-                                                    :api-usage {:prompt_tokens 10
-                                                                :completion_tokens 5
-                                                                :total_tokens 15}
+                                                    :api-usage {:input-tokens 10
+                                                                :output-tokens 5
+                                                                :total-tokens 15}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -526,9 +526,9 @@
                                                                                    :thinking-signature (json/write-json-str raw-reasoning-item)
                                                                                    :redacted? false}
                                                                                   {:type "text" :text "(+ 1 1)"}]}
-                                                    :api-usage {:prompt_tokens 10
-                                                                :completion_tokens 5
-                                                                :total_tokens 15}
+                                                    :api-usage {:input-tokens 10
+                                                                :output-tokens 5
+                                                                :total-tokens 15}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -760,9 +760,9 @@
         (with-redefs-fn {#'sut/http-post-stream! (fn [url _body _headers _timeout-ms _ttft-timeout-ms _idle-timeout-ms _delta-fn _on-delta]
                                                    {:content "```clojure\n```"
                                                     :reasoning nil
-                                                    :api-usage {:prompt_tokens 10
-                                                                :completion_tokens 3
-                                                                :total_tokens 13}
+                                                    :api-usage {:input-tokens 10
+                                                                :output-tokens 3
+                                                                :total-tokens 13}
                                                     :http-response {:url url
                                                                     :streaming? true
                                                                     :status 200}})}
@@ -807,7 +807,7 @@
             (expect (= "{\"answer\":\"ok\"}" (:content result)))
             (expect (= "plan first" (:reasoning result)))
             (expect (= "plan first" (get-in result [:provider-state :reasoning-items 0 :summary-text])))
-            (expect (= 11 (get-in result [:api-usage :prompt_tokens])))
+            (expect (= 11 (get-in result [:api-usage :input-tokens])))
             (expect (= 200 (get-in result [:http-response :status]))))))))
 
   (describe "stream response fallback"
@@ -845,7 +845,7 @@
                           :on-chunk #(swap! events conj %)})]
             (expect (= "(def x 1)" (:content result)))
             (expect (= "plan first" (:reasoning result)))
-            (expect (= 5 (get-in result [:api-usage :prompt_tokens])))
+            (expect (= 5 (get-in result [:api-usage :input-tokens])))
             (expect (= "(def x 1)" (:content (first @events))))
             (expect (nil? (:reasoning (first @events))))
             (expect (= "plan first" (:reasoning (second @events))))

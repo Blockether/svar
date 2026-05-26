@@ -29,7 +29,7 @@
   "Canned LLM response that `with-provider-fallback`'s `f` can return."
   [token-count]
   {:result {:answer "ok"}
-   :api-usage {:prompt_tokens 10 :completion_tokens 20 :total_tokens token-count}
+   :api-usage {:input-tokens 10 :output-tokens 20 :total_tokens token-count}
    :tokens {:total token-count}})
 
 (defn- transient-error
@@ -433,7 +433,7 @@
                                        :p1 (transient-error 429)
                                        :p2 {:raw "ok"
                                             :blocks []
-                                            :api-usage {:prompt_tokens 1 :completion_tokens 1 :total_tokens 2}}))]
+                                            :api-usage {:input-tokens 1 :output-tokens 1 :total-tokens 2}}))]
         (llm/ask-code! r {:lang "clojure"
                           :messages [{:role "user" :content "hi"}]
                           :on-chunk #(swap! live-events conj %)}))
@@ -851,7 +851,7 @@
               (fn [_ _]
                 ;; 1000 prompt + 2000 completion, total matches
                 {:result {:answer "ok"}
-                 :api-usage {:prompt_tokens 1000 :completion_tokens 2000 :total_tokens 3000}}))
+                 :api-usage {:input-tokens 1000 :output-tokens 2000 :total-tokens 3000}}))
           spent @(:budget-state r)]
       ;; Tokens: sum of prompt + completion = 3000
       (expect (= 3000 (:total-tokens spent)))
@@ -867,8 +867,8 @@
               {:clock clock :budget {:max-tokens 5000 :max-cost 1.0}})
           _ (router/with-provider-fallback r {:strategy :root}
               (fn [_ _] {:result {}
-                         :api-usage {:prompt_tokens 100 :completion_tokens 50
-                                     :total_tokens 150}}))
+                         :api-usage {:input-tokens 100 :output-tokens 50
+                                     :total-tokens 150}}))
           stats (router/router-stats r)]
       (expect (= {:max-tokens 5000 :max-cost 1.0} (get-in stats [:budget :limit])))
       (expect (= 150 (get-in stats [:budget :spent :total-tokens])))
@@ -997,7 +997,7 @@
       (with-redefs [llm/ask!* (fn [_r opts]
                                 (reset! captured opts)
                                 {:result {:answer "ok"}
-                                 :api-usage {:prompt_tokens 1 :completion_tokens 1 :total_tokens 2}})]
+                                 :api-usage {:input-tokens 1 :output-tokens 1 :total-tokens 2}})]
         (llm/ask! r {:spec {} :messages [{:role "user" :content "hi"}]
                      :routing {:optimize :cost}
                      :reasoning :deep}))
