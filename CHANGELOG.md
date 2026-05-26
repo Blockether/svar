@@ -7,6 +7,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.6.0] - 2026-05-26
+
+### BREAKING — canonical usage shape + auto-cache by default
+
+**Hard cut.** Legacy `:prompt_tokens` / `:completion_tokens` /
+`:prompt_tokens_details` / `:completion_tokens_details` / `:total_tokens`
+keys are GONE from every `:api-usage` return. Single canonical shape
+emitted by both Anthropic and OpenAI / Codex / Z.ai normalizers:
+
+```clojure
+{:input-tokens          <long>   ;; TOTAL prompt tokens (always inclusive)
+ :output-tokens         <long>   ;; TOTAL completion tokens
+ :input-tokens-details  {:regular     <long>   ;; not cached, not written
+                         :cache-write <long>   ;; written this request
+                         :cache-read  <long>}  ;; served from cache
+ :output-tokens-details {:reasoning   <long>}  ;; subset of output-tokens
+ :total-tokens          <long>   ;; = input + output
+ :raw                   <map>}   ;; original provider envelope
+```
+
+Invariant: `regular + cache-write + cache-read = input-tokens` at
+every layer. New ns `com.blockether.svar.internal.usage` is the
+single source of truth.
+
+Caller-facing `:tokens` projection keeps historical key names with
+updated TOTAL semantics:
+
+```clojure
+{:input          <total prompt tokens, ALWAYS inclusive>
+ :output         <total completion tokens>
+ :reasoning      <subset of :output>
+ :total          <:input + :output>
+ :cached         <subset of :input, served from cache>
+ :cache-created  <subset of :input, written to cache>
+ :input-regular  <NEW: not cached, not written>}
+```
+
+Industry alignment: Vercel AI SDK V3 spec (vercel/ai#9921),
+OpenTelemetry `gen_ai.usage.input_tokens` (≥ v1.37), Claude Code
+statusline JSON. Reject the additive convention (litellm #23342)
+which leaves totals inconsistent.
+
+### Auto-cache always on (single chokepoint)
+
+`apply-llm-opts` runs once per direct LLM call (`ask!*` and
+`ask-code!*`). Wrappers (`abstract!*`, `eval!*`, `refine!*`,
+`sample!*`) inherit by virtue of delegating to `ask!*`. No
+parity matrix, no parity regression test — the middleware is the
+only code path.
+
+Effects on every call (no caller opt needed):
+
+- `:role :system` (keyword) normalized to `"system"` (string).
+  Fixes Anthropic HTTP 400 on keyword roles. (Bug S2)
+- Top-level `:system` opt prepended as first system message.
+  Pre-fix it was silently dropped: input-tokens 54 vs expected
+  ~5300 for a 5249-token system prompt. (Bug S1)
+- Last block of last system message auto-tagged `:svar/cache true`.
+  Anthropic emits `cache_control: ephemeral` on the wire; OpenAI /
+  Z.ai / Gemini strip the marker. (Bug S3)
+- `:cache-key` opt forwarded as `:prompt_cache_key` in `:extra-body`
+  for OpenAI / Responses / openai-compatible api-styles. Anthropic
+  body strips the field before wire send (would 400). (Bug S5)
+- When caller omits `:cache-key` AND api-style is OpenAI-compatible
+  AND there's system content: AUTO-GENERATE a stable
+  `svar-auto-<sha1-prefix>` key from the system prompt. Codex
+  specifically refuses to surface `cached_tokens` in
+  `response.completed` without `prompt_cache_key` — auto-key fixes
+  that. (Bug S7)
+- When ANY block carries `:svar/cache-ttl :1h`,
+  `extended-cache-ttl-2025-04-11` beta header is auto-appended to
+  the anthropic-beta header so the 1h TTL actually takes effect.
+  Pre-fix Anthropic silently degraded `ttl: "1h"` to 5min. (Bug S6)
+
+Telemere `::cache-decision` debug log line fires once per call with
+the final cache-related decisions (api-style, final-cache-key,
+auto-key?, auto-cache-marker-added?). Trace surface via the
+standard log handler — no atoms, no bindings, no ad-hoc prints.
+
+### Live verification (May 2026)
+
+Anthropic `claude-haiku-4-5` (anthropic-coding-plan):
+```
+Call 1: tokens {:input ~14K, :cache-created ~6K, :cached 0}
+Call 2: tokens {:input ~14K, :cached 6023, :cache-created 0}
+         ⇒ zero caller boilerplate, full cache hit.
+```
+
+Z.AI `glm-5.1` (zai-coding-plan):
+```
+Call 1: tokens {:input 8444, :cached 0}
+Call 2: tokens {:input 8444, :cached 8384}
+         ⇒ ~99% cache hit on identical prompt.
+```
+
+OpenAI Codex `gpt-5.4` (openai-codex, requires :cache-key for visibility):
+```
+Call 1: tokens {:input 8443, :cached 0,    latency 3.24s}
+Call 2: tokens {:input 8443, :cached 7936, latency varies}
+         ⇒ codex now surfaces cached_tokens once auto-key pins routing.
+```
+
+### Breaking change migration
+
+Downstream consumers that read `:api-usage` directly migrate keys:
+
+```
+Old key                                  -> New key
+-----------------------------------------    -----------------------------------------
+(:prompt_tokens api-usage)               -> (:input-tokens api-usage)
+(:completion_tokens api-usage)           -> (:output-tokens api-usage)
+(:total_tokens api-usage)                -> (:total-tokens api-usage)
+(get-in [... :prompt_tokens_details])    -> (get-in [... :input-tokens-details])
+  .cached_tokens                            .cache-read
+  .cache_creation_tokens                    .cache-write
+(get-in [... :completion_tokens_details]) -> (get-in [... :output-tokens-details])
+  .reasoning_tokens                         .reasoning
+```
+
+`:cache-tokens-in-input?` opt on `estimate-cost` is GONE —
+`:input-tokens` is always TOTAL inclusive now, no per-provider
+branching needed.
+
+Callers that pass top-level `:system` to `ask!` / `ask-code!` etc.
+will now see that value HONORED (it was silently dropped pre-0.6).
+If you accidentally passed `:system` AND duplicated it in
+`:messages`, you'll now get two system blocks. Audit.
+
+Anthropic api-style requests now always emit `cache_control` on
+the system block when ANY system content is present and the prompt
+is above the model's cacheable minimum (4096 for Opus/Haiku, 1024
+for Sonnet). Below the minimum Anthropic silently ignores the
+marker — zero penalty for over-tagging.
+
+### Tests
+
+338 tests pass (193 pre-existing + 145 new/migrated). Key new
+coverage: `apply-llm-opts` invariants, wire-body shape per
+api-style, S6 1h beta header, auto-key generation determinism,
+canonical shape invariant assertions.
+
 ## [v0.5.10] - 2026-05-26
 
 ### Changed
