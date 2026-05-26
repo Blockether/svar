@@ -91,7 +91,7 @@
         (expect (str/includes? (:body captured) "request_id")))))
 
   (describe "streaming chat-completion"
-    (it "retries connection-closed stream failures before visible content"
+    (it "retries connection-closed stream failures before any emitted stream output"
       (let [calls (atom 0)
             result (with-redefs-fn
                      {#'com.blockether.svar.internal.llm/http-post-stream!
@@ -101,8 +101,7 @@
                                    {:type :svar.core/http-error
                                     :stream? true
                                     :content-acc-len 0
-                                    :reasoning-acc-len 12
-                                    :reasoning "thinking..."}
+                                    :reasoning-acc-len 0}
                                    (java.io.IOException. "closed")))
                           {:content "ok"
                            :reasoning nil
@@ -118,6 +117,36 @@
                           :initial-delay-ms 0})))]
         (expect (= 2 @calls))
         (expect (= "ok" (:content result)))))
+
+    (it "does not retry after reasoning started"
+      (let [calls (atom 0)
+            captured (with-redefs-fn
+                       {#'com.blockether.svar.internal.llm/http-post-stream!
+                        (fn [& _]
+                          (swap! calls inc)
+                          (throw (ex-info "Stream connection error: closed"
+                                   {:type :svar.core/http-error
+                                    :stream? true
+                                    :content-acc-len 0
+                                    :reasoning-acc-len 12
+                                    :reasoning "thinking..."}
+                                   (java.io.IOException. "closed"))))}
+                       (fn []
+                         (try
+                           (sut/chat-completion
+                             [{:role "user" :content "hi"}]
+                             "glm-5.1"
+                             "sk-fake"
+                             "https://example.test/v1"
+                             {:on-chunk (constantly nil)
+                              :max-retries 3
+                              :initial-delay-ms 0})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             (ex-data e)))))]
+        (expect (= 1 @calls))
+        (expect (= :svar.core/http-error (:type captured)))
+        (expect (= "thinking..." (:reasoning captured)))))
 
     (it "does not retry after visible content started"
       (let [calls (atom 0)

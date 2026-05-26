@@ -1044,10 +1044,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-              (assoc ps
-                :cb-state :open
-                :cb-failures new-failures
-                :cb-open-until (+ now recovery-ms)))
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1059,7 +1059,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1223,8 +1223,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                    (keyword? prefer) [prefer]
-                    :else nil)
+                        (keyword? prefer) [prefer]
+                        :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))]
     (fn [[p m]] [(model-score m) (:priority p 0)])))
@@ -1309,7 +1309,9 @@
         msg (ex-message e)
         msg-lower (str/lower-case (or msg ""))
         stream-output-started? (or (pos? (long (or (:content-acc-len data) 0)))
-                                 (some? (:partial-content data)))]
+                                 (pos? (long (or (:reasoning-acc-len data) 0)))
+                                 (some? (:partial-content data))
+                                 (some? (:reasoning data)))]
     (boolean
       (or (and status (contains? codes status))
         (and (= etype :svar.core/http-error)
@@ -1327,8 +1329,7 @@
         ;; the existing guard below and throw: caller may have useful
         ;; partial output and replaying could duplicate work.
         (and (= etype :svar.core/stream-truncated)
-          (zero? (long (or (:content-acc-len data) 0)))
-          (nil? (:partial-content data)))
+          (not stream-output-started?))
         (instance? java.net.ConnectException e)
         (instance? java.net.SocketTimeoutException e)
         (some-> (.getCause ^Throwable e)
@@ -2172,8 +2173,7 @@
   ([^String model messages ^String output-text]
    (count-and-estimate model messages output-text {}))
   ([^String model messages ^String output-text {:keys [pricing input-tokens api-usage
-                                                       cache-creation-ttl]
-                                                :as opts}]
+                                                       cache-creation-ttl]}]
    (let [;; Canonical shape (Phase A): :input-tokens is TOTAL,
          ;; :input-tokens-details holds subset breakdown.
          input-tokens   (long (or (:input-tokens api-usage)

@@ -14,6 +14,7 @@
 
    Pure-data tests only \u2014 no LLM calls."
   (:require
+   [clojure.string]
    [lazytest.core :refer [defdescribe expect it]]
    [com.blockether.svar.internal.llm :as sut]))
 
