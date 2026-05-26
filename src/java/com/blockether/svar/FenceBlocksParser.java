@@ -213,7 +213,20 @@ public final class FenceBlocksParser {
     }
 
     // ---------------------------------------------------------------------
-    // Line classifier: ^([ \t]*)(`{3,})([A-Za-z0-9_+\-]*)[ \t]*$
+    // Line classifier: ^([ \t]*)(`{3,})([A-Za-z0-9_+\-]*)[ \t]*(.*)$
+    //
+    // CommonMark says the trailing region must be whitespace-only, but
+    // coding LLMs routinely emit a clean closer followed by stray
+    // punctuation/dashes on the same line (e.g. "```        -   -    ").
+    // Vis session b94052f0 froze for ~870 ms per paint because that
+    // trailing run leaked into the body, then edamame read the bare
+    // ``` as three nested syntax-quote reader macros wrapping the
+    // junk → ~1 KB macroexpansion fed into zprint on every render.
+    //
+    // Pragmatic relaxation: BARE closers (no lang chars at all) accept
+    // any trailing chars after the ticks+whitespace. Tagged openers stay
+    // strict so a body line like "```clojure noise" remains body, not a
+    // bogus opener that would steal the rest of the response.
     // ---------------------------------------------------------------------
     private static final class FenceLine {
         final int ticks;
@@ -232,8 +245,13 @@ public final class FenceBlocksParser {
         while (i < end && isLangChar(s.charAt(i))) i++;
         int langEnd = i;
         while (i < end && isHorizontalWs(s.charAt(i))) i++;
-        if (i != end) return null; // trailing junk after lang → not a fence line
-        String lang = (langEnd > langStart) ? lowerAscii(s, langStart, langEnd) : null;
+        boolean hasLang = (langEnd > langStart);
+        // Tagged opener: trailing junk after lang+ws disqualifies (keeps
+        // body lines that happen to start with ```name word safe).
+        if (hasLang && i != end) return null;
+        // Bare closer: any trailing content after ticks+ws is tolerated.
+        // (When `i == end` the rule is unchanged — still a closer.)
+        String lang = hasLang ? lowerAscii(s, langStart, langEnd) : null;
         return new FenceLine(ticks, lang);
     }
 

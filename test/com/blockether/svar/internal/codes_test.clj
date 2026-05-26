@@ -155,7 +155,38 @@
                 (sut/extract-code-blocks "```clojure\n(def x 1)\n```\n\n```clojure\n(def y 2)"))))
 
     (it "returns [] for a short next opener instead of guessing"
-      (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)```` ``clojure\n(def y 2)\n```")))))
+      (expect (= [] (sut/extract-code-blocks "```clojure\n(def x 1)```` ``clojure\n(def y 2)\n```"))))
+
+    ;; Vis session b94052f0 (TUI froze after a 3-iter turn). The model
+    ;; emitted a clean ``` closer followed by trailing junk on the same
+    ;; line: "```        -   -       ". The Java line classifier only
+    ;; matches ``` + optional lang + horizontal-ws + EOL, so the line
+    ;; was NOT recognized as a closer → it leaked into the body. The
+    ;; downstream Clojure parser (edamame) then read the bare ``` as
+    ;; three nested syntax-quote reader macros wrapping the trailing `-`,
+    ;; producing a ~1 KB (clojure.core/sequence (clojure.core/seq …))
+    ;; macroexpansion that froze the TUI for ~870 ms on every zprint
+    ;; pass. A closer with trailing non-lang junk MUST close the block.
+    (describe "closer with trailing junk on the same line (Vis b94052f0)"
+      (it "closes the block when the closer is followed by whitespace + non-lang chars"
+        (let [raw "```clojure\n(done {:answer \"hi\"})\n```        -   -       "
+              blocks (sut/extract-code-blocks raw)]
+          (expect (= 1 (count blocks)))
+          (expect (= "(done {:answer \"hi\"})" (:source (first blocks))))))
+
+      (it "closes the block when the closer is followed by a single non-lang char"
+        (let [raw "```clojure\n(+ 1 2)\n``` ?"
+              blocks (sut/extract-code-blocks raw)]
+          (expect (= 1 (count blocks)))
+          (expect (= "(+ 1 2)" (:source (first blocks))))))
+
+      (it "still rejects a non-fence line that merely contains backticks mid-line"
+        ;; A real body line `foo ``` bar` should NOT close — only lines
+        ;; whose first non-whitespace token is the backtick run count.
+        (let [raw "```clojure\nfoo ``` bar\n```"
+              blocks (sut/extract-code-blocks raw)]
+          (expect (= 1 (count blocks)))
+          (expect (= "foo ``` bar" (:source (first blocks))))))))
 
   (describe "empty input"
     (it "returns [] for nil"
