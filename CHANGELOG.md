@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.5.10] - 2026-05-26
 
+### Changed
+- release: v0.5.10 — fence parser tolerates trailing junk on bare closers
+- fence parser: bare closer with trailing junk closes the block
+- release: v0.5.9 — http-error message never nil/blank
+- llm: never throw http-error with nil message
+- release: v0.5.8 — fence parser nests inner lang-tagged samples
+- fence parser: nest inner lang-tagged samples inside open block
+- release: update version files for v0.5.7, bump to next dev version
+
+
+## [v0.5.10] - 2026-05-26
+
 ### Fixed
 - fence parser: bare closer with trailing junk on the same line now
   closes the block. Tagged openers stay strict. Fixes Vis session
@@ -1005,7 +1017,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.9...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.5.10...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1046,3 +1058,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.5.7]: https://github.com/Blockether/svar/releases/tag/v0.5.7
 [v0.5.8]: https://github.com/Blockether/svar/releases/tag/v0.5.8
 [v0.5.9]: https://github.com/Blockether/svar/releases/tag/v0.5.9
+[v0.5.10]: https://github.com/Blockether/svar/releases/tag/v0.5.10
