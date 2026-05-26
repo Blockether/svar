@@ -543,16 +543,71 @@
               (update blocks (dec n) assoc :svar/cache true)))))
       messages)))
 
+(defn- stable-hash-of-system
+  "Deterministic short hex hash of every `:role \"system\"` message's
+   text content. Used as a fallback `:cache-key` when the caller did
+   not provide one — ensures OpenAI / Codex / Z.ai requests with the
+   SAME stable system prompt land on the same inference engine across
+   calls (boosts cache hit-rate AND makes Codex surface
+   `cached_tokens`, which it otherwise reports as 0 even when the
+   cache fires server-side).
+
+   Returns nil when no system content is present — keep auto-routing."
+  [messages]
+  (let [sys-text (->> messages
+                   (filter #(= "system" (some-> (:role %) name)))
+                   (mapcat (fn [m]
+                             (let [c (:content m)]
+                               (cond
+                                 (string? c) [c]
+                                 (sequential? c) (keep :text c)
+                                 :else []))))
+                   (str/join "\n")
+                   not-empty)]
+    (when sys-text
+      ;; SHA-1 over the first 4096 chars is enough — OpenAI's routing
+      ;; hash itself only consumes ~first 256 tokens of the prompt.
+      ;; Stable across processes; idempotent for identical content.
+      (let [bytes (.getBytes ^String
+                    (subs sys-text 0 (min 4096 (count sys-text)))
+                    "UTF-8")
+            md    (doto (java.security.MessageDigest/getInstance "SHA-1")
+                    (.update bytes))
+            digest (.digest md)]
+        (str "svar-auto-"
+          (apply str (take 16 (map #(format "%02x" (bit-and % 0xff))
+                                (vec digest)))))))))
+
+(defn- openai-style? [api-style]
+  (or (= api-style :openai-compatible-chat)
+    (= api-style :openai-compatible-responses)))
+
 (defn- apply-cache-key-opt
   "Forward the caller's `:cache-key` opt onto `:extra-body` as
-   `:prompt_cache_key`. The Anthropic body builder strips the field
-   before wire send (Anthropic 400s on unknown fields), so this is
-   safe to apply unconditionally regardless of api-style — the
-   downstream builder decides whether to keep or drop."
-  [opts]
-  (if-let [k (:cache-key opts)]
-    (update opts :extra-body (fn [eb] (assoc (or eb {}) :prompt_cache_key k)))
-    opts))
+   `:prompt_cache_key`. When the caller did NOT pass `:cache-key`
+   AND the api-style is OpenAI / Responses / Z.ai (openai-compatible-*),
+   AUTO-GENERATE a stable key derived from the system-prompt SHA-1
+   prefix. Codex specifically refuses to surface `cached_tokens` in
+   `response.completed` unless `prompt_cache_key` is on the wire, so
+   the auto-key turns Codex cache hits from invisible (latency-only
+   evidence) into reported (canonical-shape `:cached` field non-zero).
+
+   The Anthropic body builder strips `:prompt_cache_key` before wire
+   send (Anthropic 400s on unknown fields), so it's safe to set the
+   field unconditionally regardless of api-style — the downstream
+   builder decides keep-or-drop. Net effect: every Anthropic call
+   silently ignores the field, every OpenAI / Codex / Z.ai call gets
+   sticky routing + cache visibility for free."
+  [messages opts]
+  (let [k (or (:cache-key opts)
+            ;; Only auto-generate for openai-style. Anthropic doesn't
+            ;; need it (caching is marker-based) and the field is
+            ;; stripped from the wire anyway, so spending a hash on a
+            ;; doomed value is wasted work.
+            (when (openai-style? (:api-style opts))
+              (stable-hash-of-system messages)))]
+    (cond-> opts
+      k (update :extra-body (fn [eb] (assoc (or eb {}) :prompt_cache_key k))))))
 
 (defn apply-llm-opts
   "Single chokepoint where caller opts that affect the WIRE BODY get
@@ -560,15 +615,31 @@
    call (`ask!*` and `ask-code!*`); wrappers inherit by virtue of
    passing opts through `ask!*`.
 
-   Returns `[messages opts]`."
+   Returns `[messages opts]`.
+
+   Telemere `::cache-decision` debug log fires once per call with the
+   final cache-related decisions (`:api-style`, `:final-cache-key`,
+   `:auto-key?`, `:auto-cache-marker-added?`). Trace surface for
+   cache-bisection debugging — read the log handler output instead
+   of adding ad-hoc prints."
   [messages opts]
-  (let [msgs (-> messages
-               vec
-               (->> (mapv normalize-role))
-               (merge-top-level-system (:system opts))
-               auto-cache-last-system-block)
-        opts (apply-cache-key-opt opts)]
-    [msgs opts]))
+  (let [msgs0 (-> messages
+                vec
+                (->> (mapv normalize-role))
+                (merge-top-level-system (:system opts)))
+        msgs  (auto-cache-last-system-block msgs0)
+        opts' (apply-cache-key-opt msgs opts)]
+    (trove/log!
+      {:level :debug
+       :id ::cache-decision
+       :data {:api-style                (:api-style opts')
+              :explicit-cache-key       (:cache-key opts)
+              :final-cache-key          (get-in opts' [:extra-body :prompt_cache_key])
+              :auto-key?                (and (nil? (:cache-key opts))
+                                          (some? (get-in opts' [:extra-body :prompt_cache_key])))
+              :auto-cache-marker-added? (not= msgs0 msgs)
+              :system-msg-count         (count (filter #(= "system" (some-> (:role %) name)) msgs))}})
+    [msgs opts']))
 
 (defn- messages-have-1h-cache?
   "True when any content block in `messages` is tagged for the 1-hour

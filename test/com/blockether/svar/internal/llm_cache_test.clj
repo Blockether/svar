@@ -276,11 +276,55 @@
       (expect (= 0.3 (-> opts :extra-body :temperature)))
       (expect (= "k" (-> opts :extra-body :prompt_cache_key)))))
 
-  (it "S5: no :cache-key → :extra-body untouched"
+  (it "S5: no :cache-key, NO api-style → :extra-body untouched"
     (let [[_ opts] (sut/apply-llm-opts
                      [{:role "user" :content "hi"}]
                      {:extra-body {:temperature 0.3}})]
-      (expect (= {:temperature 0.3} (:extra-body opts))))))
+      (expect (= {:temperature 0.3} (:extra-body opts)))))
+
+  (it "S5/S7: no :cache-key + openai-style + system content → AUTO-GEN cache key"
+    ;; Codex specifically refuses to surface cached_tokens in
+    ;; response.completed unless prompt_cache_key is on the wire.
+    ;; svar 0.6.0 auto-generates a stable system-prompt-SHA1-derived
+    ;; key when the caller didn't pass one AND api-style is
+    ;; openai-compatible-*. Anthropic ignores the field (stripped at
+    ;; wire-build time) so we skip the auto-gen there to save work.
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "system" :content "stable system prompt"}
+                      {:role "user" :content "hi"}]
+                     {:api-style :openai-compatible-responses})]
+      (let [key (get-in opts [:extra-body :prompt_cache_key])]
+        (expect (string? key))
+        (expect (clojure.string/starts-with? key "svar-auto-")))))
+
+  (it "S7: auto-gen key is DETERMINISTIC — same system prompt across calls produces same key"
+    (let [run #(get-in (second (sut/apply-llm-opts
+                                 [{:role "system" :content "identical"}
+                                  {:role "user" :content %}]
+                                 {:api-style :openai-compatible-chat}))
+                  [:extra-body :prompt_cache_key])]
+      (expect (= (run "call 1") (run "call 2") (run "call 3")))))
+
+  (it "S7: explicit :cache-key wins over auto-gen"
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "system" :content "some system"}
+                      {:role "user" :content "hi"}]
+                     {:api-style :openai-compatible-chat
+                      :cache-key "my-explicit-key"})]
+      (expect (= "my-explicit-key" (get-in opts [:extra-body :prompt_cache_key])))))
+
+  (it "S7: openai-style + NO system content → no auto-key (nothing stable to hash)"
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "user" :content "hi"}]
+                     {:api-style :openai-compatible-chat})]
+      (expect (nil? (get-in opts [:extra-body :prompt_cache_key])))))
+
+  (it "S7: anthropic api-style does NOT auto-generate (field would be stripped anyway)"
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "system" :content "some system"}
+                      {:role "user" :content "hi"}]
+                     {:api-style :anthropic})]
+      (expect (nil? (get-in opts [:extra-body :prompt_cache_key]))))))
 
 (defdescribe apply-llm-opts-anthropic-wire-test
   (it "S3 wire: anthropic body emits cache_control on auto-tagged system"
