@@ -222,14 +222,18 @@
       (expect (< (Math/abs (- 0.005 (:output-cost cost))) 1.0E-12))
       (expect (< (Math/abs (- 0.0064 (:total-cost cost))) 1.0E-12))))
 
-  (it "prices Anthropic cache writes separately when input_tokens excludes cache tokens"
+  (it "prices Anthropic cache writes separately (Phase A: input-tokens is TOTAL inclusive)"
+    ;; Pre-Phase-A this test asserted input=700 was the uncached prompt size
+    ;; via `:cache-tokens-in-input? false`. After Phase A canonical input-tokens
+    ;; is ALWAYS the TOTAL (anthropic-additive raw values are summed at the
+    ;; canonical-normalizer boundary), so the caller passes input=1000 (uncached
+    ;; 700 + cache-read 100 + cache-write 200) and uncached is computed inside.
     (let [pricing {"claude-sonnet-4-6" {:input 3.00 :cached-input 0.30
                                         :cache-write-5m 3.75 :cache-write-1h 6.00
                                         :output 15.00}}
-          cost (sut/estimate-cost "claude-sonnet-4-6" 700 50 pricing
+          cost (sut/estimate-cost "claude-sonnet-4-6" 1000 50 pricing
                  {:cached-tokens 100
-                  :cache-creation-tokens 200
-                  :cache-tokens-in-input? false})]
+                  :cache-creation-tokens 200})]
       (expect (= 700 (:input-uncached-tokens cost)))
       (expect (= 100 (:input-cached-tokens cost)))
       (expect (= 200 (:input-cache-write-tokens cost)))
@@ -257,14 +261,15 @@
       (expect (map? (:cost result)))
       (expect (pos? (get-in result [:cost :total-cost])))))
 
-  (it "passes cached and cache-creation usage into cost breakdown"
+  (it "passes cached and cache-creation usage into cost breakdown (Phase A canonical shape)"
     (let [messages [{:role "system" :content [{:type "text" :text "stable"
                                                :svar/cache true}]}
                     {:role "user" :content "Hello!"}]
-          api-usage {:prompt_tokens 1000
-                     :completion_tokens 100
-                     :prompt_tokens_details {:cached_tokens 300
-                                             :cache_creation_tokens 200}}
+          ;; Phase A canonical shape: :input-tokens TOTAL, details split out.
+          api-usage {:input-tokens         1000
+                     :output-tokens        100
+                     :input-tokens-details {:regular 500 :cache-write 200 :cache-read 300}
+                     :total-tokens         1100}
           pricing {"gpt-4o" {:input 2.00 :cached-input 0.50
                              :cache-write-5m 2.50 :output 10.00}}
           result (sut/count-and-estimate "gpt-4o" messages "ok"

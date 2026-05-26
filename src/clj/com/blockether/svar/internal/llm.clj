@@ -11,7 +11,8 @@
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
-   [taoensso.trove :as trove])
+   [taoensso.trove :as trove]
+   [com.blockether.svar.internal.usage :as usage])
   (:import
    (java.io BufferedReader InputStreamReader)))
 
@@ -986,28 +987,11 @@
         canonical-msg  (anthropic-canonical-assistant-message content-blocks)]
     (cond-> {:content       visible
              :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
-             :api-usage     (when usage
-                              (let [cache-read   (:cache_read_input_tokens usage)
-                                    cache-create (:cache_creation_input_tokens usage)]
-                                (cond-> {:prompt_tokens     (:input_tokens usage)
-                                         :completion_tokens (:output_tokens usage)}
-                                  (or cache-read cache-create)
-                                  (assoc :prompt_tokens_details
-                                    (cond-> {}
-                                      cache-read   (assoc :cached_tokens cache-read)
-                                      cache-create (assoc :cache_creation_tokens cache-create))))))
+             ;; Phase A canonical usage shape — :input-tokens always
+             ;; TOTAL (anthropic-additive raw values are summed here).
+             :api-usage     (usage/anthropic-canonical usage)
              :http-response envelope}
       canonical-msg (assoc :assistant-message canonical-msg))))
-
-(defn- anthropic-stream-usage [u]
-  (when u
-    (let [cr (:cache_read_input_tokens u)
-          cc (:cache_creation_input_tokens u)]
-      (cond-> {:prompt_tokens (:input_tokens u) :completion_tokens (:output_tokens u)}
-        (or cr cc) (assoc :prompt_tokens_details
-                     (cond-> {}
-                       cr (assoc :cached_tokens cr)
-                       cc (assoc :cache_creation_tokens cc)))))))
 
 (defn- make-anthropic-stream-delta-fn
   "Builds a stateful one-arg delta-fn closure for Anthropic SSE streams.
@@ -1079,10 +1063,10 @@
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
         "message_delta"
-        {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (:usage chunk))}
+        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (:usage chunk))}
 
         "message_start"
-        {:content-delta nil :reasoning-delta nil :api-usage (anthropic-stream-usage (get-in chunk [:message :usage]))}
+        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (get-in chunk [:message :usage]))}
 
         "message_stop"
         {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
@@ -1349,31 +1333,14 @@
       {:provider :openai-responses
        :reasoning-items items})))
 
-(defn- normalize-openai-usage [usage]
-  (when usage
-    (let [input-details  (:input_tokens_details usage)
-          output-details (:output_tokens_details usage)]
-      (if (or (contains? usage :input_tokens)
-            (contains? usage :output_tokens))
-        (let [prompt-details (cond-> {}
-                               (:cached_tokens input-details)
-                               (assoc :cached_tokens (:cached_tokens input-details))
-
-                               (:cache_creation_tokens input-details)
-                               (assoc :cache_creation_tokens (:cache_creation_tokens input-details))
-
-                               (:cache_write_tokens input-details)
-                               (assoc :cache_write_tokens (:cache_write_tokens input-details)))]
-          (cond-> {:prompt_tokens     (:input_tokens usage)
-                   :completion_tokens (:output_tokens usage)
-                   :total_tokens      (:total_tokens usage)}
-            (seq prompt-details)
-            (assoc :prompt_tokens_details prompt-details)
-
-            (:reasoning_tokens output-details)
-            (assoc :completion_tokens_details
-              {:reasoning_tokens (:reasoning_tokens output-details)})))
-        usage))))
+(defn- normalize-openai-usage
+  "Phase A: alias of `usage/openai-canonical`. Kept as a private name
+   so the dozens of `:api-usage (normalize-openai-usage ...)` call
+   sites can stay one-liners. Every entry point now emits the canonical
+   `{:input-tokens TOTAL :input-tokens-details {:regular :cache-write
+   :cache-read} ...}` shape."
+  [usage]
+  (usage/openai-canonical usage))
 
 ;; =============================================================================
 ;; LLM API
@@ -3578,17 +3545,26 @@
     provider-id (assoc :provider-id provider-id)))
 
 (defn- api-usage->tokens
+  "Project canonical api-usage shape (Phase A) onto the flat caller-facing
+   `:tokens` map returned by ask! / ask-code!.
+
+   The canonical shape carries :input-tokens / :input-tokens-details /
+   :output-tokens / :output-tokens-details / :total-tokens / :raw.
+   This projection flattens onto the historical keys with TOTAL semantics:
+
+     {:input         <input-tokens, TOTAL across providers>
+      :output        <output-tokens>
+      :reasoning     <output-tokens-details.reasoning>
+      :total         <total-tokens>
+      :cached        <input-tokens-details.cache-read>
+      :cache-created <input-tokens-details.cache-write>
+      :input-regular <input-tokens-details.regular>}
+
+   `:input` now ALWAYS means TOTAL prompt tokens — Anthropic-additive
+   raw values are summed at the canonical-normalizer boundary, so vis
+   loop / TUI footer / Telegram tagline read one consistent value."
   [api-usage]
-  (when api-usage
-    (let [cached (get-in api-usage [:prompt_tokens_details :cached_tokens])
-          cache-created (or (get-in api-usage [:prompt_tokens_details :cache_creation_tokens])
-                          (get-in api-usage [:prompt_tokens_details :cache_write_tokens]))]
-      (cond-> {:input     (:prompt_tokens api-usage)
-               :output    (:completion_tokens api-usage)
-               :reasoning (get-in api-usage [:completion_tokens_details :reasoning_tokens])
-               :total     (:total_tokens api-usage)}
-        (some? cached) (assoc :cached cached)
-        (some? cache-created) (assoc :cache-created cache-created)))))
+  (usage/canonical->tokens api-usage))
 
 (defn- token-stats->tokens
   [token-stats]
@@ -3659,17 +3635,9 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
   [router opts0]
-  (let [;; Caller-opt → wire-body chokepoint. Runs ONCE per call so
-        ;; role normalisation / top-level :system / auto-cache /
-        ;; :cache-key forwarding all land in one place regardless of
-        ;; entry point. Wrappers (abstract!*, eval!*, refine!*,
-        ;; sample!*) inherit by virtue of merging caller opts into
-        ;; their inner ask!* call.
-        [messages opts1] (apply-llm-opts (:messages opts0) opts0)
-        opts             (assoc opts1 :messages messages)
-        {:keys [spec humanizer cache-system? schema-tail-pointer?]} opts
-        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
-        provider-id (:provider-id opts)
+  (let [{:keys [spec humanizer cache-system? schema-tail-pointer?] :as opts0} opts0
+        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts0)
+        provider-id (:provider-id opts0)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
         ;; Schema placement: full schema body is inlined into the SYSTEM
@@ -3688,7 +3656,13 @@
         ;;    but degraded adherence. This is both.
         ;;  - `:schema-tail-pointer? false` opts out (head-only mode) for
         ;;    quirky models that double-emit on reminders.
-        in-msgs   (vec messages)
+        ;; Step 1: schema injection FIRST so that auto-cache can tag
+        ;; the actual last block (schema-prompt) after we've added it.
+        ;; Running apply-llm-opts before schema injection would tag the
+        ;; ORIGINAL last block, but then schema-injection appends a new
+        ;; block past the marker — cache breakpoint lands on the
+        ;; pre-schema block, schema body falls outside the cache prefix.
+        in-msgs   (vec (:messages opts0))
         sys-idx   (->> in-msgs
                     (map-indexed vector)
                     (some (fn [[i m]] (when (= "system" (some-> (:role m) name)) i))))
@@ -3701,12 +3675,14 @@
                     (into [{:role "system"
                             :content [{:type "text" :text schema-prompt}]}]
                       in-msgs))
-        ;; `:cache-system? true` is now a no-op alias: `apply-llm-opts`
-        ;; already auto-tagged the LAST system block before we got here.
-        ;; The legacy `cache-system?` opt remains accepted to keep
-        ;; older caller code from crashing on the destructure, but its
-        ;; effect is identical to the new always-on default.
-        with-cache with-spec
+        ;; Step 2: caller-opt → wire-body chokepoint. Runs ONCE per call
+        ;; so role normalisation / top-level :system / auto-cache /
+        ;; :cache-key forwarding all land in one place. With schema
+        ;; already injected, auto-cache tags the last block which is
+        ;; the schema prompt itself — exactly what we want.
+        ;; Wrappers (abstract!*, eval!*, refine!*, sample!*) inherit by
+        ;; merging caller opts into their inner ask!* call.
+        [with-cache opts] (apply-llm-opts with-spec opts0)
         ;; Tail pointer ON by default - only skipped when caller passes
         ;; an explicit `false`. `nil`/missing → ON.
         with-tail (if (false? schema-tail-pointer?)
@@ -3737,12 +3713,11 @@
                                (let [tokens (api-usage->tokens api-usage)
                                      cost (when api-usage
                                             (router/estimate-cost model
-                                              (or (:prompt_tokens api-usage) 0)
-                                              (or (:completion_tokens api-usage) 0)
+                                              (or (:input-tokens api-usage) 0)
+                                              (or (:output-tokens api-usage) 0)
                                               pricing
                                               {:api-usage api-usage
-                                               :api-style api-style
-                                               :cache-tokens-in-input? (not= api-style :anthropic)}))
+                                               :api-style api-style}))
                                      partial-map (jsonish/parse-partial content)
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
@@ -3794,8 +3769,8 @@
             (trove/log! {:level :info
                          :data (log-data {:model model
                                           :duration-ms attempt-duration-ms
-                                          :input-tokens (:prompt_tokens api-usage)
-                                          :output-tokens (:completion_tokens api-usage)
+                                          :input-tokens (:input-tokens api-usage)
+                                          :output-tokens (:output-tokens api-usage)
                                           ;; nil distinguishes "no field in response" from
                                           ;; "field present but empty" - crucial for triaging
                                           ;; provider quirks where content is omitted entirely
@@ -4091,12 +4066,11 @@
                                (let [tokens (api-usage->tokens api-usage)
                                      cost (when api-usage
                                             (router/estimate-cost model
-                                              (or (:prompt_tokens api-usage) 0)
-                                              (or (:completion_tokens api-usage) 0)
+                                              (or (:input-tokens api-usage) 0)
+                                              (or (:output-tokens api-usage) 0)
                                               pricing
                                               {:api-usage api-usage
-                                               :api-style api-style
-                                               :cache-tokens-in-input? (not= api-style :anthropic)}))]
+                                               :api-style api-style}))]
                                  (when (or (not (str/blank? (or reasoning "")))
                                          (not (str/blank? (or content ""))))
                                    (on-chunk {:blocks    nil
@@ -4128,8 +4102,8 @@
     (trove/log! {:level :info
                  :data (log-data (cond-> {:model model
                                           :duration-ms duration-ms
-                                          :input-tokens (:prompt_tokens api-usage)
-                                          :output-tokens (:completion_tokens api-usage)
+                                          :input-tokens (:input-tokens api-usage)
+                                          :output-tokens (:output-tokens api-usage)
                                           :reasoning-length (when reasoning (count reasoning))
                                           :content-length   (when content (count content))
                                           :content-preview  (when content
@@ -4161,7 +4135,7 @@
       (let [finish-reason (some-> stream-finalization :finish-reason str)
             length-cap? (= "length" finish-reason)
             reasoning-len (long (or (some-> reasoning count) 0))
-            output-tokens (long (or (:completion_tokens api-usage) 0))
+            output-tokens (long (or (:output-tokens api-usage) 0))
             base-envelope (envelope-data
                             {:model model :api-style api-style :chat-url chat-url
                              :duration-ms duration-ms :api-usage api-usage

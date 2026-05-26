@@ -34,9 +34,9 @@
           (fn [_provider _model]
             (swap! clock + 10)
             {:result {:ok true}
-             :api-usage {:prompt_tokens 10
-                         :completion_tokens 20
-                         :total_tokens 30}
+             :api-usage {:input-tokens 10
+                         :output-tokens 20
+                         :total-tokens 30}
              :tokens {:total 30}}))
         (let [limits (ext/provider-limits r)]
           (expect (= 60000 (:window-ms limits)))

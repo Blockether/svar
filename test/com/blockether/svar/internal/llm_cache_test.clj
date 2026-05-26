@@ -129,55 +129,69 @@
       (expect (vector? (:content user-msg)))
       (expect (every? #(nil? (:svar/cache %)) (:content user-msg))))))
 
-;;; ── OpenAI usage normalization (cache token surface) ─────────────────
+(defdescribe openai-canonical-usage-test
+  ;; Phase A: normalize-openai-usage emits canonical shape — :input-tokens
+  ;; TOTAL inclusive, :input-tokens-details split into regular/cache-write/
+  ;; cache-read. Invariant: regular + cache-write + cache-read = input-tokens.
 
-(defdescribe openai-usage-cache-tokens-test
-  (it "preserves Chat Completions prompt_tokens_details.cached_tokens"
+  (it "Chat Completions: surfaces total + cache-read split"
     (let [usage (#'sut/normalize-openai-usage
                  {:prompt_tokens 100
                   :completion_tokens 10
                   :total_tokens 110
                   :prompt_tokens_details {:cached_tokens 80}})]
-      (expect (= 100 (:prompt_tokens usage)))
-      (expect (= 10 (:completion_tokens usage)))
-      (expect (= 80 (get-in usage [:prompt_tokens_details :cached_tokens])))))
+      (expect (= 100 (:input-tokens usage)))
+      (expect (= 10  (:output-tokens usage)))
+      (expect (= 110 (:total-tokens usage)))
+      (let [d (:input-tokens-details usage)]
+        (expect (= 80 (:cache-read d)))
+        (expect (= 0  (:cache-write d)))
+        (expect (= 20 (:regular d))))))
 
-  (it "maps Responses input_tokens_details.cached_tokens to prompt_tokens_details.cached_tokens"
+  (it "Responses API: same canonical shape from input_tokens_details"
     (let [usage (#'sut/normalize-openai-usage
                  {:input_tokens 100
                   :output_tokens 10
                   :total_tokens 110
                   :input_tokens_details {:cached_tokens 80}})]
-      (expect (= 100 (:prompt_tokens usage)))
-      (expect (= 10 (:completion_tokens usage)))
-      (expect (= 80 (get-in usage [:prompt_tokens_details :cached_tokens]))))))
+      (expect (= 100 (:input-tokens usage)))
+      (expect (= 80  (get-in usage [:input-tokens-details :cache-read]))))))
 
-;;; ── Anthropic usage normalization (cache token surface) ───────────────
+(defdescribe anthropic-canonical-usage-test
+  ;; Anthropic raw input_tokens excludes cached + cache-creation. Phase A
+  ;; canonical sums all three to TOTAL, splits onto :input-tokens-details.
 
-(defdescribe anthropic-usage-cache-tokens-test
-  (it "surfaces cache_read_input_tokens as :prompt_tokens_details/:cached_tokens"
+  (it "sums uncached + cache-read into TOTAL"
     (let [envelope {:parsed {:content [{:type "text" :text "hi"}]
                              :usage   {:input_tokens             100
                                        :output_tokens            10
                                        :cache_read_input_tokens  80}}}
           {:keys [api-usage]} (#'sut/extract-anthropic-response-data envelope)]
-      (expect (= 100 (:prompt_tokens api-usage)))
-      (expect (= 10 (:completion_tokens api-usage)))
-      (expect (= 80 (get-in api-usage [:prompt_tokens_details :cached_tokens])))))
+      (expect (= 180 (:input-tokens api-usage)))
+      (expect (= 10  (:output-tokens api-usage)))
+      (let [d (:input-tokens-details api-usage)]
+        (expect (= 100 (:regular d)))
+        (expect (= 80  (:cache-read d)))
+        (expect (= 0   (:cache-write d))))))
 
-  (it "surfaces cache_creation_input_tokens as :cache_creation_tokens"
+  (it "surfaces cache_creation_input_tokens as :cache-write"
     (let [envelope {:parsed {:content [{:type "text" :text "hi"}]
                              :usage   {:input_tokens                100
                                        :output_tokens               10
                                        :cache_creation_input_tokens 90}}}
           {:keys [api-usage]} (#'sut/extract-anthropic-response-data envelope)]
-      (expect (= 90 (get-in api-usage [:prompt_tokens_details :cache_creation_tokens])))))
+      (expect (= 190 (:input-tokens api-usage)))
+      (expect (= 90 (get-in api-usage [:input-tokens-details :cache-write])))))
 
-  (it "omits :prompt_tokens_details when neither cache field is present"
+  (it "still produces canonical shape when neither cache field is present"
     (let [envelope {:parsed {:content [{:type "text" :text "hi"}]
                              :usage   {:input_tokens 100 :output_tokens 10}}}
           {:keys [api-usage]} (#'sut/extract-anthropic-response-data envelope)]
-      (expect (nil? (:prompt_tokens_details api-usage))))))
+      (expect (= 100 (:input-tokens api-usage)))
+      (let [d (:input-tokens-details api-usage)]
+        (expect (= 100 (:regular d)))
+        (expect (= 0   (:cache-read d)))
+        (expect (= 0   (:cache-write d)))))))
 
 ;;; ── Content normalization edge cases ──────────────────────────────────
 
