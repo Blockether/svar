@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.6.1] - 2026-05-26
+
+### Fixed — v0.6.0 jar was published from stale main
+
+No functional changes vs the v0.6.0 tag content. The CI release
+workflow uploaded a jar built from the pre-Phase-0 main branch
+(`resources/VERSION 0.5.11`), so `svar-0.6.0.jar` on Clojars does
+NOT contain the Phase 0 / Phase A code described in the v0.6.0
+changelog entry below. v0.6.1 republishes from main now that the
+cherry-picked Phase 0 + Phase A commits actually landed on main.
+
 ## [v0.6.0] - 2026-05-26
 
 ### Changed
