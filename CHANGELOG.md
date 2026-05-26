@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.6.1] - 2026-05-26
 
+### Changed
+- release: v0.6.1 — republish from main (v0.6.0 jar was built from stale main)
+- Phase A — canonical usage shape: INCLUSIVE :input-tokens + details split (BREAKING)
+- Phase 0 — auto-generate :cache-key for OpenAI-style when caller omits (S7)
+- Phase 0 — auto-cache by default + fix 6 cache-related bugs (BREAKING)
+- release: update version files for v0.6.0, bump to next dev version
+- release: update version files for v0.6.0, bump to next dev version
+
+
+## [v0.6.1] - 2026-05-26
+
 ### Fixed — v0.6.0 jar was published from stale main
 
 No functional changes vs the v0.6.0 tag content. The CI release
@@ -1047,7 +1058,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.6.1...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1090,3 +1101,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.5.9]: https://github.com/Blockether/svar/releases/tag/v0.5.9
 [v0.5.10]: https://github.com/Blockether/svar/releases/tag/v0.5.10
 [v0.6.0]: https://github.com/Blockether/svar/releases/tag/v0.6.0
+[v0.6.1]: https://github.com/Blockether/svar/releases/tag/v0.6.1
