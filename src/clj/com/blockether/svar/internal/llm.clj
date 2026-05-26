@@ -296,15 +296,43 @@
     (string? base-url)
     (boolean (re-find #"(?i)(proxy|api)\.(individual|business|enterprise)\.githubcopilot\.com" base-url))))
 
+(declare messages-have-1h-cache?)
+
+(defn- append-anthropic-beta
+  "Append `value` to the comma-separated `anthropic-beta` header on
+   `headers`. No-op when the value is already present."
+  [headers value]
+  (if-let [existing (get headers "anthropic-beta")]
+    (let [tokens (->> (str/split (str existing) #",\s*")
+                   (remove str/blank?)
+                   set)]
+      (if (contains? tokens value)
+        headers
+        (assoc headers "anthropic-beta"
+          (str/join "," (conj (vec (sort tokens)) value)))))
+    (assoc headers "anthropic-beta" value)))
+
 (defn- request-headers [api-style api-key provider-id messages llm-headers]
-  (merge (make-llm-headers api-style api-key provider-id)
-    (when (= :github-copilot provider-id)
-      (copilot-static-headers))
-    (when (= :github-copilot provider-id)
-      (copilot-dynamic-headers messages))
+  (cond-> (make-llm-headers api-style api-key provider-id)
+    (= :github-copilot provider-id)
+    (merge (copilot-static-headers))
+
+    (= :github-copilot provider-id)
+    (merge (copilot-dynamic-headers messages))
+
+    ;; Auto-add the 1h-cache beta header when any block in this
+    ;; request opts into the 1-hour cache tier. Without this header
+    ;; Anthropic silently degrades `cache_control.ttl: "1h"` to the
+    ;; 5-minute tier; cache writes still succeed but expire much
+    ;; sooner than the caller asked for. Live wire-body inspection
+    ;; (svar 0.5.10) confirmed the gap. Bug S6 in vis PLAN.md.
+    (and (= api-style :anthropic) (messages-have-1h-cache? messages))
+    (append-anthropic-beta "extended-cache-ttl-2025-04-11")
+
     ;; Caller headers win. Lets apps force Copilot X-Initiator through
     ;; :llm-headers when auto inference is wrong for internal calls.
-    llm-headers))
+    :always
+    (merge llm-headers)))
 
 (defn- make-chat-url
   "Builds the chat endpoint URL for the given API style.
@@ -425,6 +453,136 @@
    wire formats that don't speak our markers (OpenAI etc)."
   [block]
   (into {} (remove (fn [[k _]] (and (keyword? k) (= "svar" (namespace k))))) block))
+
+;; ====================================================================
+;; Caller-opt → wire-body chokepoint (Phase 0 / svar 0.6.0).
+;;
+;; `apply-llm-opts` runs once per call from both `ask!*` and `ask-code!*`
+;; (the only two direct LLM call paths). Wrapper helpers (`abstract!*` /
+;; `eval!*` / `refine!*` / `sample!*`) delegate to `ask!*` so they
+;; inherit the same transformations through the existing
+;; `llm-passthrough` merge.
+;;
+;; Effects — every one is silently a no-op on api-styles that don't care:
+;;   - `:role :system` (keyword) normalises to `"system"` (string).
+;;   - Top-level `:system` opt becomes a leading `{:role "system"}`
+;;     message ahead of any caller-supplied system messages.
+;;   - When no block already carries `:svar/cache true`, auto-tag the
+;;     LAST block of the LAST system message so Anthropic gets exactly
+;;     one cache breakpoint without caller boilerplate. (`anthropic-block`
+;;     emits the `cache_control` marker; OpenAI / Z.ai / Gemini bodies
+;;     strip the `:svar/*` keys via `strip-svar-keys`.)
+;;   - `:cache-key` opt lifts to `:extra-body {:prompt_cache_key key}`
+;;     for `:openai-compatible-chat` / `:openai-compatible-responses`
+;;     api-styles. Boosts OpenAI's hash-of-first-256-tokens cache
+;;     routing stickiness (per OpenAI docs: 60% → 87% hit-rate).
+(defn- normalize-role
+  "Turn `:role :system` (keyword) into `:role \"system\"` (string) so
+   downstream filters that string-compare match either input. Idempotent."
+  [msg]
+  (if (keyword? (:role msg))
+    (update msg :role name)
+    msg))
+
+(defn- merge-top-level-system
+  "Prepend the top-level `:system` opt (string OR vec-of-content-blocks)
+   as the FIRST `:role \"system\"` message. Caller-supplied role-system
+   messages append after. Returns the (possibly augmented) messages vec."
+  [messages system-arg]
+  (if (or (nil? system-arg)
+        (and (string? system-arg) (str/blank? system-arg))
+        (and (sequential? system-arg) (empty? system-arg)))
+    messages
+    (vec (cons {:role "system" :content system-arg} messages))))
+
+(defn- any-block-marker?
+  "True when any content block in `messages` carries `:svar/cache true`.
+   Used to skip auto-cache when the caller did manual placement —
+   anthropic's 4-breakpoint budget shouldn't burn two slots on the
+   same position."
+  [messages]
+  (boolean
+    (some (fn [m]
+            (let [content (:content m)]
+              (cond
+                (vector? content)     (some :svar/cache content)
+                (sequential? content) (some :svar/cache content)
+                :else                 false)))
+      messages)))
+
+(defn- last-system-index
+  "Return the index of the LAST `:role \"system\"` message in the vec,
+   or nil if no system message is present."
+  [messages]
+  (->> messages
+    (map-indexed vector)
+    (filter (fn [[_ m]] (= "system" (some-> (:role m) name))))
+    last
+    first))
+
+(defn- auto-cache-last-system-block
+  "Tag the LAST content block of the LAST system message with
+   `:svar/cache true`. No-op when no system message exists OR when any
+   block already carries the marker (manual placement wins).
+
+   This implements the auto-cache default: callers get the Anthropic
+   cache hit for free. `anthropic-block` translates the marker to the
+   wire `cache_control` field; other api-styles strip it via
+   `strip-svar-keys`."
+  [messages]
+  (if (any-block-marker? messages)
+    messages
+    (if-let [idx (last-system-index messages)]
+      (let [sys-msg (nth messages idx)
+            blocks  (vec (normalize-content (:content sys-msg)))
+            n       (count blocks)]
+        (if (zero? n)
+          messages
+          (assoc messages idx
+            (assoc sys-msg :content
+              (update blocks (dec n) assoc :svar/cache true)))))
+      messages)))
+
+(defn- apply-cache-key-opt
+  "Forward the caller's `:cache-key` opt onto `:extra-body` as
+   `:prompt_cache_key`. The Anthropic body builder strips the field
+   before wire send (Anthropic 400s on unknown fields), so this is
+   safe to apply unconditionally regardless of api-style — the
+   downstream builder decides whether to keep or drop."
+  [opts]
+  (if-let [k (:cache-key opts)]
+    (update opts :extra-body (fn [eb] (assoc (or eb {}) :prompt_cache_key k)))
+    opts))
+
+(defn apply-llm-opts
+  "Single chokepoint where caller opts that affect the WIRE BODY get
+   applied to the messages vec + opts map. Called once per direct LLM
+   call (`ask!*` and `ask-code!*`); wrappers inherit by virtue of
+   passing opts through `ask!*`.
+
+   Returns `[messages opts]`."
+  [messages opts]
+  (let [msgs (-> messages
+               vec
+               (->> (mapv normalize-role))
+               (merge-top-level-system (:system opts))
+               auto-cache-last-system-block)
+        opts (apply-cache-key-opt opts)]
+    [msgs opts]))
+
+(defn- messages-have-1h-cache?
+  "True when any content block in `messages` is tagged for the 1-hour
+   cache TTL tier. Used to auto-append the `extended-cache-ttl-2025-04-11`
+   beta header on Anthropic so the API actually honors the `ttl: \"1h\"`
+   field instead of silently degrading to 5min."
+  [messages]
+  (boolean
+    (some (fn [m]
+            (let [content (:content m)]
+              (cond
+                (sequential? content) (some #(= :1h (:svar/cache-ttl %)) content)
+                :else false)))
+      messages)))
 
 (defn- anthropic-block
   "Translate one canonical block → Anthropic wire shape, attaching
@@ -657,8 +815,12 @@
   ([messages model extra-body]
    (build-anthropic-request-body messages model extra-body nil))
   ([messages model extra-body {:keys [anthropic-oauth?]}]
-   (let [sys-blocks  (cond-> (vec (mapcat #(normalize-content (:content %))
-                                    (filter #(= "system" (:role %)) messages)))
+   ;; S2 fix: accept both `:role :system` (keyword) and `:role "system"`
+   ;; (string). Anthropic only accepts string role names; we normalise
+   ;; here so callers can pass either.
+   (let [system-role? (fn [m] (= "system" (some-> (:role m) name)))
+         sys-blocks  (cond-> (vec (mapcat #(normalize-content (:content %))
+                                    (filter system-role? messages)))
                        anthropic-oauth? (->> (into [{:type "text"
                                                      :text "You are Claude Code, Anthropic's official CLI for Claude."
                                                      :svar/cache true}])
@@ -669,14 +831,18 @@
                        any-cache?          (mapv anthropic-block sys-blocks)
                        :else               (str/join "\n" (map :text sys-blocks)))
          non-system  (->> messages
-                       (remove #(= "system" (:role %)))
+                       (remove system-role?)
                        (mapv (fn [{:keys [role] :as msg}]
-                               {:role role
+                               {:role (some-> role name)
                                 :content (anthropic-message-content msg)})))
          max-tokens  (or (:max_tokens extra-body) 4096)
+         ;; Drop fields Anthropic does NOT recognise (would 400 on
+         ;; unknown). `:stream_options` is OpenAI-only;
+         ;; `:prompt_cache_key` is OpenAI-only routing-stickiness key.
+         anthropic-extra (dissoc extra-body :stream_options :prompt_cache_key)
          body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
                        system-wire (assoc :system system-wire)
-                       (seq extra-body) (merge (dissoc extra-body :stream_options)))]
+                       (seq anthropic-extra) (merge anthropic-extra))]
     ;; Re-assert system after merge so extra-body can't clobber it,
     ;; then apply the thinking-aware max_tokens clamp.
      (-> (cond-> body system-wire (assoc :system system-wire))
@@ -3421,8 +3587,17 @@
    :api-style, :chat-url, :duration-ms, :api-usage, :reasoning, :content,
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
-  [router {:keys [spec messages humanizer cache-system? schema-tail-pointer?] :as opts}]
-  (let [{:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
+  [router opts0]
+  (let [;; Caller-opt → wire-body chokepoint. Runs ONCE per call so
+        ;; role normalisation / top-level :system / auto-cache /
+        ;; :cache-key forwarding all land in one place regardless of
+        ;; entry point. Wrappers (abstract!*, eval!*, refine!*,
+        ;; sample!*) inherit by virtue of merging caller opts into
+        ;; their inner ask!* call.
+        [messages opts1] (apply-llm-opts (:messages opts0) opts0)
+        opts             (assoc opts1 :messages messages)
+        {:keys [spec humanizer cache-system? schema-tail-pointer?]} opts
+        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         schema-prompt (spec/spec->prompt spec)
@@ -3445,7 +3620,7 @@
         in-msgs   (vec messages)
         sys-idx   (->> in-msgs
                     (map-indexed vector)
-                    (some (fn [[i m]] (when (= "system" (:role m)) i))))
+                    (some (fn [[i m]] (when (= "system" (some-> (:role m) name)) i))))
         with-spec (if sys-idx
                     (update in-msgs sys-idx
                       (fn [{:keys [content] :as m}]
@@ -3455,21 +3630,12 @@
                     (into [{:role "system"
                             :content [{:type "text" :text schema-prompt}]}]
                       in-msgs))
-        ;; `:cache-system? true` flips the `:svar/cache` flag on the LAST
-        ;; block of the system message (now schema-prompt). On Anthropic
-        ;; the whole system message becomes one cache breakpoint covering
-        ;; caller-system + schema. On other styles the marker is stripped.
-        with-cache (if cache-system?
-                     (let [si (->> with-spec
-                                (map-indexed vector)
-                                (some (fn [[i m]] (when (= "system" (:role m)) i))))]
-                       (update with-spec si
-                         (fn [{:keys [content] :as m}]
-                           (let [blocks (normalize-content content)
-                                 last-i (dec (count blocks))]
-                             (assoc m :content
-                               (update blocks last-i assoc :svar/cache true))))))
-                     with-spec)
+        ;; `:cache-system? true` is now a no-op alias: `apply-llm-opts`
+        ;; already auto-tagged the LAST system block before we got here.
+        ;; The legacy `cache-system?` opt remains accepted to keep
+        ;; older caller code from crashing on the destructure, but its
+        ;; effect is identical to the new always-on default.
+        with-cache with-spec
         ;; Tail pointer ON by default - only skipped when caller passes
         ;; an explicit `false`. `nil`/missing → ON.
         with-tail (if (false? schema-tail-pointer?)
@@ -3799,8 +3965,15 @@
   "Low-level ask-code - calls the LLM directly without routing. Use `ask-code!`.
 
    See `ask-code!` for the full param + return contract."
-  [router {:keys [messages on-chunk code-tail-pointer?] :as opts}]
-  (let [lang (:lang opts)
+  [router opts0]
+  (let [;; Caller-opt → wire-body chokepoint. Runs ONCE per call so
+        ;; role normalisation / top-level :system / auto-cache /
+        ;; :cache-key forwarding all land in one place regardless of
+        ;; entry point.
+        [messages opts1] (apply-llm-opts (:messages opts0) opts0)
+        opts             (assoc opts1 :messages messages)
+        {:keys [on-chunk code-tail-pointer?]} opts
+        lang (:lang opts)
         _ (when-not (and (string? lang) (not (str/blank? lang)))
             ;; `:lang` is REQUIRED. No default. `select-blocks` filters
             ;; strictly on this tag; without it we don't know what to keep.

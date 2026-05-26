@@ -204,3 +204,144 @@
       (expect (= 2 (count out)))
       (expect (true? (-> out first :svar/cache)))
       (expect (nil? (-> out second :svar/cache))))))
+
+;;; ── apply-llm-opts middleware (Phase 0 / svar 0.6.0) ─────────────────────
+;;
+;; The single chokepoint runs once per direct LLM call. These tests
+;; pin every wire-body-affecting behaviour so the call paths from
+;; ask!* / ask-code!* (and the wrappers that delegate to ask!*) all
+;; produce the same shape regardless of caller-side opt phrasing.
+;;
+;; Bug-tracking ids match vis PLAN.md.
+
+(defdescribe apply-llm-opts-test
+  (it "S1: top-level :system opt becomes the first :role system message"
+    ;; The middleware also runs auto-cache (S3), so the content gets
+    ;; normalised into a block vector with `:svar/cache true` on the
+    ;; last block. Assert SHAPE of the result, not the bare string
+    ;; the caller passed.
+    (let [[msgs _] (sut/apply-llm-opts
+                     [{:role "user" :content "hi"}]
+                     {:system "TOP-LEVEL"})]
+      (expect (= "system" (-> msgs first :role)))
+      (expect (= "TOP-LEVEL" (-> msgs first :content first :text)))
+      (expect (true? (-> msgs first :content last :svar/cache)))))
+
+  (it "S2: keyword :role :system is normalised to string"
+    (let [[msgs _] (sut/apply-llm-opts
+                     [{:role :system :content "x"}
+                      {:role :user :content "hi"}]
+                     {})]
+      (expect (= "system" (-> msgs first :role)))
+      (expect (= "user"   (-> msgs second :role)))))
+
+  (it "S3: auto-cache marker added to LAST block of LAST system message"
+    (let [[msgs _] (sut/apply-llm-opts
+                     [{:role "system" :content "stable"}
+                      {:role "user" :content "hi"}]
+                     {})]
+      (let [sys-content (-> msgs first :content)]
+        (expect (vector? sys-content))
+        (expect (true? (-> sys-content last :svar/cache))))))
+
+  (it "S3: auto-cache is NO-OP when caller already tagged a block manually"
+    (let [in [{:role "system"
+               :content [{:type "text" :text "a"}
+                         {:type "text" :text "b" :svar/cache true}]}
+              {:role "user" :content "hi"}]
+          [msgs _] (sut/apply-llm-opts in {})]
+      ;; First block stays unmarked; second keeps the caller's marker;
+      ;; auto-mode does NOT add a third marker to the same position.
+      (let [sys-content (-> msgs first :content)]
+        (expect (nil?  (-> sys-content first  :svar/cache)))
+        (expect (true? (-> sys-content second :svar/cache))))))
+
+  (it "S3: no system message → no-op (does not invent one)"
+    (let [[msgs _] (sut/apply-llm-opts
+                     [{:role "user" :content "hi"}]
+                     {})]
+      (expect (= 1 (count msgs)))
+      (expect (= "user" (-> msgs first :role)))))
+
+  (it "S5: :cache-key opt forwards to :extra-body :prompt_cache_key"
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "user" :content "hi"}]
+                     {:cache-key "session-abc"})]
+      (expect (= "session-abc" (-> opts :extra-body :prompt_cache_key)))))
+
+  (it "S5: existing :extra-body keys preserved alongside :prompt_cache_key"
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "user" :content "hi"}]
+                     {:cache-key "k" :extra-body {:temperature 0.3}})]
+      (expect (= 0.3 (-> opts :extra-body :temperature)))
+      (expect (= "k" (-> opts :extra-body :prompt_cache_key)))))
+
+  (it "S5: no :cache-key → :extra-body untouched"
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "user" :content "hi"}]
+                     {:extra-body {:temperature 0.3}})]
+      (expect (= {:temperature 0.3} (:extra-body opts))))))
+
+(defdescribe apply-llm-opts-anthropic-wire-test
+  (it "S3 wire: anthropic body emits cache_control on auto-tagged system"
+    (let [[msgs _] (sut/apply-llm-opts
+                     [{:role "system" :content "stable"}
+                      {:role "user" :content "hi"}]
+                     {})
+          body (#'sut/build-anthropic-request-body msgs "claude-haiku-4-5" {})]
+      (expect (= [{:type "text" :text "stable" :cache_control {:type "ephemeral"}}]
+                (:system body)))))
+
+  (it "S2 wire: anthropic accepts keyword :role :system thanks to normalisation"
+    ;; Pre-fix this throws HTTP 400 on Anthropic. Post-fix the message
+    ;; reaches `:system` and `:messages` is untouched.
+    (let [[msgs _] (sut/apply-llm-opts
+                     [{:role :system :content "sys text"}
+                      {:role :user   :content "hi"}]
+                     {})
+          body (#'sut/build-anthropic-request-body msgs "claude-haiku-4-5" {})]
+      (expect (some? (:system body)))
+      (expect (= [{:role "user" :content "hi"}] (:messages body)))))
+
+  (it "S5 wire: anthropic body STRIPS :prompt_cache_key (OpenAI-only field)"
+    ;; Caller passes :cache-key; apply-llm-opts lifts it into
+    ;; :extra-body :prompt_cache_key; anthropic body builder MUST drop
+    ;; it before send (Anthropic 400s on unknown wire fields).
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "user" :content "hi"}]
+                     {:cache-key "k"})
+          body (#'sut/build-anthropic-request-body [{:role "user" :content "hi"}]
+                 "claude-haiku-4-5" (:extra-body opts))]
+      (expect (not (contains? body :prompt_cache_key))))))
+
+(defdescribe apply-llm-opts-1h-beta-header-test
+  (it "S6: :1h cache-ttl marker triggers extended-cache-ttl-2025-04-11 beta header"
+    (let [msgs [{:role "system"
+                 :content [{:type "text" :text "x"
+                            :svar/cache true :svar/cache-ttl :1h}]}
+                {:role "user" :content "hi"}]
+          headers (#'sut/request-headers :anthropic "sk-x" :anthropic-coding-plan
+                    msgs nil)]
+      (expect (= "extended-cache-ttl-2025-04-11"
+                (get headers "anthropic-beta")))))
+
+  (it "S6: :5min (default) cache-ttl does NOT trigger the 1h beta header"
+    (let [msgs [{:role "system"
+                 :content [{:type "text" :text "x" :svar/cache true}]}
+                {:role "user" :content "hi"}]
+          headers (#'sut/request-headers :anthropic "sk-x" :anthropic-coding-plan
+                    msgs nil)]
+      (expect (not= "extended-cache-ttl-2025-04-11"
+                (get headers "anthropic-beta")))))
+
+  (it "S6: 1h beta header coexists with the OAuth claude-code beta header"
+    (let [msgs [{:role "system"
+                 :content [{:type "text" :text "x"
+                            :svar/cache true :svar/cache-ttl :1h}]}]
+          ;; OAuth-style anthropic key prefix triggers the static beta
+          ;; header in `make-llm-headers`.
+          headers (#'sut/request-headers :anthropic "sk-ant-oat01-xxxx"
+                    :anthropic-coding-plan msgs nil)
+          beta    (get headers "anthropic-beta")]
+      (expect (re-find #"extended-cache-ttl-2025-04-11" beta))
+      (expect (re-find #"claude-code-20250219" beta)))))
