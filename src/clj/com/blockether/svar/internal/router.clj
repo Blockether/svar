@@ -1044,10 +1044,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1059,7 +1059,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1223,8 +1223,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
+                    (keyword? prefer) [prefer]
+                    :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))]
     (fn [[p m]] [(model-score m) (:priority p 0)])))
@@ -1306,11 +1306,20 @@
         status (:status data)
         etype (:type data)
         codes (:transient-status-codes router)
-        msg (ex-message e)]
+        msg (ex-message e)
+        msg-lower (str/lower-case (or msg ""))
+        stream-output-started? (or (pos? (long (or (:content-acc-len data) 0)))
+                                 (some? (:partial-content data)))]
     (boolean
       (or (and status (contains? codes status))
         (and (= etype :svar.core/http-error)
-          (some-> msg (str/includes? "timed out")))
+          (or (some-> msg (str/includes? "timed out"))
+            (and (:stream? data)
+              (not stream-output-started?)
+              (or (str/includes? msg-lower "stream connection error")
+                (str/includes? msg-lower "connection reset")
+                (str/includes? msg-lower "connection closed")
+                (str/includes? msg-lower "closed")))))
         ;; SSE EOF before provider terminal marker and before any
         ;; visible content is a transport/provider failure, not a model
         ;; answer. Route around it instead of burning caller iterations

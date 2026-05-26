@@ -316,7 +316,7 @@
                                  [{:role "system" :content "identical"}
                                   {:role "user" :content %}]
                                  {:api-style :openai-compatible-chat}))
-                  [:extra-body :prompt_cache_key])]
+                 [:extra-body :prompt_cache_key])]
       (expect (= (run "call 1") (run "call 2") (run "call 3")))))
 
   (it "S7: explicit :cache-key wins over auto-gen"
@@ -369,7 +369,7 @@
                      [{:role "user" :content "hi"}]
                      {:cache-key "k"})
           body (#'sut/build-anthropic-request-body [{:role "user" :content "hi"}]
-                 "claude-haiku-4-5" (:extra-body opts))]
+                                                   "claude-haiku-4-5" (:extra-body opts))]
       (expect (not (contains? body :prompt_cache_key))))))
 
 (defdescribe apply-llm-opts-1h-beta-header-test
@@ -379,7 +379,7 @@
                             :svar/cache true :svar/cache-ttl :1h}]}
                 {:role "user" :content "hi"}]
           headers (#'sut/request-headers :anthropic "sk-x" :anthropic-coding-plan
-                    msgs nil)]
+                                         msgs nil)]
       (expect (= "extended-cache-ttl-2025-04-11"
                 (get headers "anthropic-beta")))))
 
@@ -388,7 +388,7 @@
                  :content [{:type "text" :text "x" :svar/cache true}]}
                 {:role "user" :content "hi"}]
           headers (#'sut/request-headers :anthropic "sk-x" :anthropic-coding-plan
-                    msgs nil)]
+                                         msgs nil)]
       (expect (not= "extended-cache-ttl-2025-04-11"
                 (get headers "anthropic-beta")))))
 
@@ -399,7 +399,7 @@
           ;; OAuth-style anthropic key prefix triggers the static beta
           ;; header in `make-llm-headers`.
           headers (#'sut/request-headers :anthropic "sk-ant-oat01-xxxx"
-                    :anthropic-coding-plan msgs nil)
+                                         :anthropic-coding-plan msgs nil)
           beta    (get headers "anthropic-beta")]
       (expect (re-find #"extended-cache-ttl-2025-04-11" beta))
       (expect (re-find #"claude-code-20250219" beta)))))

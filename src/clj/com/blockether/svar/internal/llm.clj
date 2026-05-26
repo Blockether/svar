@@ -74,6 +74,14 @@
   "HTTP status codes that should trigger a retry."
   #{429 502 503 504})
 
+(defn- stream-output-started?
+  "True when a failed stream already emitted visible assistant content.
+   Reasoning-only streams may be retried: no tool/code content reached caller."
+  [^Exception e]
+  (let [data (ex-data e)]
+    (or (pos? (long (or (:content-acc-len data) 0)))
+      (some? (:partial-content data)))))
+
 (defn- retryable-exception?
   "Returns true if the exception represents a transient connection/read error
    that should be retried (e.g., proxy dropping connection mid-response).
@@ -82,8 +90,11 @@
    or the connection was reset before a complete response was received."
   [^Exception e]
   (let [msg (or (ex-message e) "")
+        msg-lower (str/lower-case msg)
+        data (ex-data e)
         cause (ex-cause e)
-        cause-msg (when cause (or (ex-message cause) ""))]
+        cause-msg (when cause (or (ex-message cause) ""))
+        cause-lower (str/lower-case (or cause-msg ""))]
     (or
      ;; charred.api/read-json fails on truncated response body
       (str/includes? msg "EOF reached while reading")
@@ -95,6 +106,14 @@
       (instance? java.net.SocketTimeoutException cause)
       (and cause-msg (str/includes? cause-msg "Connection reset"))
       (and cause-msg (str/includes? cause-msg "EOF"))
+      (and (:stream? data)
+        (or (str/includes? msg-lower "stream connection error")
+          (str/includes? msg-lower "connection reset")
+          (str/includes? msg-lower "connection closed")
+          (str/includes? msg-lower "closed")
+          (str/includes? cause-lower "connection reset")
+          (str/includes? cause-lower "connection closed")
+          (str/includes? cause-lower "closed")))
      ;; babashka.http-client wraps errors in ExceptionInfo
       (and (instance? clojure.lang.ExceptionInfo e)
         (some-> cause retryable-exception?)))))
@@ -183,7 +202,7 @@
                     :timeout timeout-ms})
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                      (catch Exception _ nil))]
+                   (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -380,7 +399,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-          (assoc body :max_tokens required-min))
+        (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -1027,15 +1046,15 @@
           (case (:type delta)
             "text_delta"
             (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic also emits input_json_delta for tool_use blocks;
             ;; svar doesn't use Anthropic tool_use today, but keep the
@@ -1043,7 +1062,7 @@
             ;; through under a synthetic :partial_json key.
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -1107,7 +1126,8 @@
                             retryable-status? (and (contains? RETRYABLE_STATUS_CODES status)
                                                 (not (and router-handles-rate-limit?
                                                        (= 429 status))))
-                            retryable-conn? (retryable-exception? e)
+                            retryable-conn? (and (not (stream-output-started? e))
+                                              (retryable-exception? e))
                             can-retry? (< attempt (long max-retries))]
                         (if (and (or retryable-status? retryable-conn?) can-retry?)
                           {:retry true :error e :status status
@@ -1378,7 +1398,7 @@
   [{:keys [thinking thinking-signature]}]
   (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
         (try (json/read-json thinking-signature :key-fn keyword)
-             (catch Exception _ nil)))
+          (catch Exception _ nil)))
     (when (and (string? thinking) (not (str/blank? thinking)))
       {:type "reasoning"
        :summary [{:type "summary_text" :text thinking}]})))
@@ -2553,7 +2573,8 @@
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when @idle-fired?
         (let [stream-finalization (stream-finalization-summary
                                     {:terminal @terminal-event
@@ -2571,7 +2592,8 @@
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when-let [incomplete @incomplete-response]
         (let [stream-finalization (stream-finalization-summary
                                     {:terminal @terminal-event
@@ -2589,7 +2611,8 @@
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when-not @terminal-event
         (let [stream-finalization (stream-finalization-summary
                                     {:terminal nil
@@ -2606,7 +2629,8 @@
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}))))
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
             final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
             ps              @provider-state-atom
@@ -2675,8 +2699,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                  idle?     :svar.core/stream-idle-timeout
-                                  :else     :svar.core/http-error)
+                              idle?     :svar.core/stream-idle-timeout
+                              :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -2684,7 +2708,8 @@
                       :stream-finalization stream-finalization
                       :content-acc-len (.length content-acc)
                       :reasoning-acc-len (.length reasoning-acc)
-                      :partial-content (when (pos? (.length content-acc)) (str content-acc))}
+                      :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                      :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
                      e)))))
       (catch Exception e
         (let [stream-finalization (stream-finalization-summary
@@ -2703,8 +2728,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                idle?     :svar.core/stream-idle-timeout
-                                :else     :svar.core/http-error)
+                            idle?     :svar.core/stream-idle-timeout
+                            :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -2712,7 +2737,8 @@
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))}
+                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
                    e))))
       (finally
         ;; Always stop the watchdog — reset alive? first so a racing
@@ -2747,12 +2773,15 @@
         ;; Other providers stay on the stateless extractor.
         delta-fn     (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
     (try
-      (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
-        (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
-          (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
-            (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
-                       :provider-state provider-state
-                       :api-usage api-usage :done? false}))))
+      (with-retry
+        (fn []
+          (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
+            (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
+              (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
+                (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
+                           :provider-state provider-state
+                           :api-usage api-usage :done? false})))))
+        retry-opts)
       (catch Exception e
         (if (stream-finalization-error? e)
           (throw e)
@@ -3635,7 +3664,7 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
   [router opts0]
-  (let [{:keys [spec humanizer cache-system? schema-tail-pointer?] :as opts0} opts0
+  (let [{:keys [spec humanizer schema-tail-pointer?] :as opts0} opts0
         {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts0)
         provider-id (:provider-id opts0)
         chat-url (make-chat-url base-url api-style)
@@ -3722,7 +3751,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
+                                                 (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -4727,8 +4756,8 @@
    Accepts `:reasoning :quick|:balanced|:deep` (translated per api-style)."
   [router opts]
   (let [prefs (cond (:strategy opts) (select-keys opts [:strategy])
-                    (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
-                    :else {:strategy :root})]
+                (:prefer opts) (select-keys opts [:prefer :capabilities :exclude-model])
+                :else {:strategy :root})]
     (router/with-provider-fallback
       router prefs
       (fn [provider model-map]

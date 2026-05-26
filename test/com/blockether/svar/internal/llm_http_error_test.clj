@@ -88,4 +88,89 @@
         (expect (= 400 (:status captured)))
         (expect (string? (:body captured)))
         (expect (str/includes? (:body captured) "Invalid `signature` in `thinking` block"))
-        (expect (str/includes? (:body captured) "request_id"))))))
+        (expect (str/includes? (:body captured) "request_id")))))
+
+  (describe "streaming chat-completion"
+    (it "retries connection-closed stream failures before visible content"
+      (let [calls (atom 0)
+            result (with-redefs-fn
+                     {#'com.blockether.svar.internal.llm/http-post-stream!
+                      (fn [_url _body _headers _timeout-ms _ttft-ms _idle-ms _delta-fn _on-delta]
+                        (if (= 1 (swap! calls inc))
+                          (throw (ex-info "Stream connection error: closed"
+                                   {:type :svar.core/http-error
+                                    :stream? true
+                                    :content-acc-len 0
+                                    :reasoning-acc-len 12
+                                    :reasoning "thinking..."}
+                                   (java.io.IOException. "closed")))
+                          {:content "ok"
+                           :reasoning nil
+                           :http-response {:status 200 :streaming? true}}))}
+                     (fn []
+                       (sut/chat-completion
+                         [{:role "user" :content "hi"}]
+                         "glm-5.1"
+                         "sk-fake"
+                         "https://example.test/v1"
+                         {:on-chunk (constantly nil)
+                          :max-retries 2
+                          :initial-delay-ms 0})))]
+        (expect (= 2 @calls))
+        (expect (= "ok" (:content result)))))
+
+    (it "does not retry after visible content started"
+      (let [calls (atom 0)
+            captured (with-redefs-fn
+                       {#'com.blockether.svar.internal.llm/http-post-stream!
+                        (fn [& _]
+                          (swap! calls inc)
+                          (throw (ex-info "Stream connection error: reset"
+                                   {:type :svar.core/http-error
+                                    :stream? true
+                                    :content-acc-len 4
+                                    :partial-content "code"}
+                                   (java.net.SocketException. "Connection reset"))))}
+                       (fn []
+                         (try
+                           (sut/chat-completion
+                             [{:role "user" :content "hi"}]
+                             "glm-5.1"
+                             "sk-fake"
+                             "https://example.test/v1"
+                             {:on-chunk (constantly nil)
+                              :max-retries 3
+                              :initial-delay-ms 0})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             (ex-data e)))))]
+        (expect (= 1 @calls))
+        (expect (= :svar.core/http-error (:type captured)))
+        (expect (= "code" (:partial-content captured)))))
+
+    (it "preserves partial reasoning on final stream failure"
+      (let [captured (with-redefs-fn
+                       {#'com.blockether.svar.internal.llm/http-post-stream!
+                        (fn [& _]
+                          (throw (ex-info "Stream connection error: closed"
+                                   {:type :svar.core/http-error
+                                    :stream? true
+                                    :content-acc-len 0
+                                    :reasoning-acc-len 18
+                                    :reasoning "reasoning survived"}
+                                   (java.io.IOException. "closed"))))}
+                       (fn []
+                         (try
+                           (sut/chat-completion
+                             [{:role "user" :content "hi"}]
+                             "glm-5.1"
+                             "sk-fake"
+                             "https://example.test/v1"
+                             {:on-chunk (constantly nil)
+                              :max-retries 1
+                              :initial-delay-ms 0})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             (ex-data e)))))]
+        (expect (= :svar.core/http-error (:type captured)))
+        (expect (= "reasoning survived" (:reasoning captured)))))))
