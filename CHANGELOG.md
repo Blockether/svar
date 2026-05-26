@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.5.10] - 2026-05-26
+
+### Fixed
+- fence parser: bare closer with trailing junk on the same line now
+  closes the block. Tagged openers stay strict. Fixes Vis session
+  b94052f0 where a model emitted `` ```        -   -       `` after a
+  clean closer; the line slipped past the classifier, leaked into the
+  body, then edamame read the bare ` ``` ` as three nested syntax-quote
+  reader macros wrapping the trailing junk → ~1 KB
+  `(clojure.core/sequence (clojure.core/seq …))` macroexpansion that
+  froze the Vis TUI for ~870 ms per zprint pass.
+
 ## [v0.5.9] - 2026-05-23
 
 ### Fixed
