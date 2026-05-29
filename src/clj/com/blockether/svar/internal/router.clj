@@ -39,7 +39,7 @@
     ;; OAuth coding plan: use retail Anthropic pricing for honest metering
     ;; once the included quota is exhausted (see internal/modelsdev).
     :pricing-source :anthropic
-    :default-models [{:name "claude-opus-4-7"}]
+    :default-models [{:name "claude-opus-4-8"}]
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/paas/v4"        :rpm 500 :tpm 2000000
                  :env-keys ["ZAI_API_KEY"]}
@@ -171,6 +171,7 @@
    "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── Anthropic Claude 4.x (extended thinking, budget_tokens) ─────────────
+   "claude-opus-4-8"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-7"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
@@ -223,7 +224,7 @@
                              DeepSeek Reasoner, Copilot GPT-5+, and most
                              OpenAI-compatible reasoners.
      `:anthropic-thinking` → Claude thinking controls.
-                             Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6 use
+                             Claude Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 4.6 use
                              adaptive thinking + output_config.effort. Older
                              Claude 4 models use manual budget_tokens.
      `:zai-thinking`       → binary `:thinking {:type \"enabled\"|\"disabled\"}` on
@@ -284,13 +285,13 @@
     (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
 
 (defn- anthropic-adaptive-thinking-model?
-  "Claude Opus 4.7 rejects manual budget_tokens. Opus 4.6 and Sonnet 4.6
+  "Claude Opus 4.8 / 4.7 reject manual budget_tokens. Opus 4.6 and Sonnet 4.6
    still accept manual thinking today, but Anthropic marks it deprecated.
-   Use adaptive thinking for all three families. Accept dot/dash aliases so
+   Use adaptive thinking for all four families. Accept dot/dash aliases so
    Copilot-style names do not regress if routed through Anthropic style."
   [model-name]
   (boolean
-    (re-find #"(?i)^claude-(?:opus-4[-.][67]|sonnet-4[-.]6)(?:$|-)"
+    (re-find #"(?i)^claude-(?:opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
       (str model-name))))
 
 (defn- anthropic-thinking-extra-body
@@ -388,7 +389,8 @@
                                            :output-over-272k 45.00}}}
 
    :anthropic
-   {"claude-opus-4-7"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
+   {"claude-opus-4-8"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
+    "claude-opus-4-7"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
     "claude-opus-4-6"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
     "claude-opus-4-5"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
     "claude-sonnet-4"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
@@ -437,17 +439,13 @@
    ;; in REASONING_LEVELS so `reasoning-extra-body` emits no field at
    ;; all. Claude continues to think on its own (visible in
    ;; `delta.reasoning_text` deltas); we just stop pushing on the lever.
-   {"claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
-    ;; Both `claude-opus-4.6` and `claude-sonnet-4.6` carried `:context
-    ;; 1000000` here; that was Anthropic-native context copied verbatim
-    ;; (models.dev `:anthropic` table) and does NOT apply to the
-    ;; Copilot proxy, which caps Claude-sonnet-4.6 at 200K context /
-    ;; 128K input / 32K output and Claude-opus-4.6 at 144K context /
-    ;; 128K input / 64K output. With the inflated value `auto-params`
-    ;; was producing 250K max_tokens requests that Copilot accepted
-    ;; (clamped) but distorted budget pre-flight checks. Dropping the
-    ;; `:context` override here lets the models.dev catalog overlay
-    ;; supply the real Copilot limits instead.
+   {"claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    "claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    ;; Several Claude rows once carried Anthropic-native context copied
+    ;; verbatim (`:context 1000000`) or stale Copilot caps (`144000`).
+    ;; Both distort `auto-params` and pre-flight checks. Let refreshed
+    ;; models.dev supply Copilot limits (currently 200K total / 168K
+    ;; input for Opus 4.8 / 4.7 / 4.6 / Sonnet 4.6).
     "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
     "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
     "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
@@ -968,7 +966,7 @@
   {:window-ms              60000
    :cooldown-ms            60000
    :max-wait-ms            30000
-   :transient-status-codes #{429 500 502 503 504}
+   :transient-status-codes #{429 500 502 503 504 529}
    :rate-limit DEFAULT_RATE_LIMIT_ROUTING
    ;; Circuit breaker defaults
    :failure-threshold   5

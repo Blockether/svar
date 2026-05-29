@@ -34,6 +34,9 @@
     (it "returns Anthropic provider context for claude-sonnet-4-6"
       (expect (= 200000 (sut/context-limit "claude-sonnet-4-6"))))
 
+    (it "returns 1000000 for claude-opus-4-8"
+      (expect (= 1000000 (sut/context-limit "claude-opus-4-8"))))
+
     (it "returns 1000000 for claude-opus-4-6"
       (expect (= 1000000 (sut/context-limit "claude-opus-4-6"))))
 
@@ -201,7 +204,7 @@
     (expect (= {:input 5.00 :cached-input 0.50
                 :cache-write-5m 6.25 :cache-write-1h 10.00
                 :output 25.00}
-              (select-keys (:pricing (sut/estimate-cost "claude-opus-4-7" 1 1))
+              (select-keys (:pricing (sut/estimate-cost "claude-opus-4-8" 1 1))
                 [:input :cached-input :cache-write-5m :cache-write-1h :output])))
     (expect (= {:input 1.25 :cached-input 0.125 :output 10.00
                 :input-over-200k 2.50 :cached-input-over-200k 0.25

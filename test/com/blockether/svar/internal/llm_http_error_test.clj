@@ -26,6 +26,7 @@
 ;;; ── helper ─────────────────────────────────────────────────────────────
 
 (def ^:private truncate-error-body @#'sut/truncate-error-body)
+(def ^:private with-retry @#'sut/with-retry)
 (def ^:private MAX-CHARS @#'sut/MAX_HTTP_ERROR_BODY_CHARS)
 
 (defdescribe truncate-error-body-test
@@ -48,6 +49,21 @@
 
     (it "stringifies non-string bodies (defensive)"
       (expect (= "42" (truncate-error-body 42))))))
+
+;;; ── retry policy ────────────────────────────────────────────────────────
+
+(defdescribe retry-policy-test
+  (it "retries Anthropic 529 overloaded responses"
+    (let [calls (atom 0)
+          result (with-retry
+                   (fn []
+                     (if (= 1 (swap! calls inc))
+                       (throw (ex-info "Exceptional status code: 529" {:status 529}))
+                       :ok))
+                   {:max-retries 2
+                    :initial-delay-ms 0})]
+      (expect (= :ok result))
+      (expect (= 2 @calls)))))
 
 ;;; ── ex-data round-trip ─────────────────────────────────────────────────
 

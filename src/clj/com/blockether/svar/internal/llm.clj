@@ -72,7 +72,7 @@
 
 (def ^:private RETRYABLE_STATUS_CODES
   "HTTP status codes that should trigger a retry."
-  #{429 502 503 504})
+  #{429 502 503 504 529})
 
 (defn- stream-output-started?
   "True when a failed stream already emitted anything to the caller.
@@ -1098,7 +1098,7 @@
 (defn- with-retry
   "Executes a function with exponential backoff retry for transient errors.
 
-   Retries on HTTP status codes 429, 502, 503, 504.
+   Retries on HTTP status codes 429, 502, 503, 504, 529.
 
    Params:
    `f` - Function to execute (no args).

@@ -168,8 +168,8 @@
       (expect (pos? (get-in stats [:providers :solo :cumulative :avg-latency-ms]))))))
 
 (defdescribe with-provider-fallback-transient-then-success-test
-  "P1 returns a transient error (e.g. 503), router retries and eventually
-   succeeds on P2 once P1's CB opens.
+  "P1 returns a transient error (e.g. 503 / Anthropic 529 overload), router
+   retries and eventually succeeds on P2 once P1's CB opens.
 
    Note: `with-provider-fallback` does NOT exclude previously-tried providers
    from subsequent `select-and-claim!` calls — it relies on the circuit
@@ -177,28 +177,29 @@
    single P1 failure opens the CB and P2 wins immediately."
 
   (it "falls through to P2 and trace includes P1's error"
-    (let [[clock _] (mock-clock)
-          r (llm/make-router
-              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
-               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
-              {:clock clock
-               :failure-threshold 1})   ;; open CB on first failure
-          calls (atom 0)
-          result (router/with-provider-fallback r {}
-                   (fn [provider _model]
-                     (swap! calls inc)
-                     (case (:id provider)
-                       :p1 (transient-error 503)
-                       :p2 (success-result 100))))]
-      (expect (= 2 @calls))
-      (expect (= :p2 (:routed/provider-id result)))
-      (let [trace (:routed/trace result)]
-        (expect (vector? trace))
-        (expect (= 1 (count trace)))
-        (expect (= :llm.routing/provider-fallback (get-in trace [0 :event/type])))
-        (expect (= "p1" (get-in trace [0 :from-provider])))
-        (expect (= "p2" (get-in trace [0 :to-provider])))
-        (expect (= 503 (get-in trace [0 :status])))))))
+    (doseq [status [503 529]]
+      (let [[clock _] (mock-clock)
+            r (llm/make-router
+                [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                 {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                {:clock clock
+                 :failure-threshold 1})   ;; open CB on first failure
+            calls (atom 0)
+            result (router/with-provider-fallback r {}
+                     (fn [provider _model]
+                       (swap! calls inc)
+                       (case (:id provider)
+                         :p1 (transient-error status)
+                         :p2 (success-result 100))))]
+        (expect (= 2 @calls))
+        (expect (= :p2 (:routed/provider-id result)))
+        (let [trace (:routed/trace result)]
+          (expect (vector? trace))
+          (expect (= 1 (count trace)))
+          (expect (= :llm.routing/provider-fallback (get-in trace [0 :event/type])))
+          (expect (= "p1" (get-in trace [0 :from-provider])))
+          (expect (= "p2" (get-in trace [0 :to-provider])))
+          (expect (= status (get-in trace [0 :status]))))))))
 
 (defdescribe with-provider-fallback-stream-truncated-test
   (it "falls through to P2 on zero-content stream truncation"
@@ -598,15 +599,15 @@
         (expect (= :openai (:id provider)))))))
 
 (defdescribe anthropic-coding-plan-default-model-test
-  (it "prepends Claude Opus 4.7 to existing subscription provider configs"
+  (it "prepends Claude Opus 4.8 to existing subscription provider configs"
     (let [r (llm/make-router
               [{:id :anthropic-coding-plan
                 :api-key "sk-ant-oat01-test"
                 :models [{:name "claude-opus-4-6"}
                          {:name "claude-sonnet-4-6"}]}])
           provider (first (:providers r))]
-      (expect (= "claude-opus-4-7" (:root provider)))
-      (expect (= ["claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6"]
+      (expect (= "claude-opus-4-8" (:root provider)))
+      (expect (= ["claude-opus-4-8" "claude-opus-4-6" "claude-sonnet-4-6"]
                 (mapv :name (:models provider))))
       (expect (= :anthropic (:api-style provider)))
       (expect (= {:input 5.0
@@ -617,8 +618,8 @@
                 (select-keys (get-in provider [:models 0 :pricing])
                   [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
 
-  (it "does not claim nonexistent Claude Sonnet 4.7 catalog metadata"
-    (expect (nil? (router/provider-model-entry :anthropic-coding-plan "claude-sonnet-4-7")))))
+  (it "does not claim nonexistent Claude Sonnet 4.8 catalog metadata"
+    (expect (nil? (router/provider-model-entry :anthropic-coding-plan "claude-sonnet-4-8")))))
 
 ;; =============================================================================
 ;; Tier 3 — `:reasoning` integrates with routing (selection filter)

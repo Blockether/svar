@@ -77,8 +77,9 @@
         (expect (= {:thinking {:type "enabled" :budget_tokens 24000}}
                   (router/reasoning-extra-body :anthropic claude :deep)))))
 
-    (it "uses adaptive thinking for Claude Opus 4.7 / Opus 4.6 / Sonnet 4.6"
-      (doseq [[model level effort] [["claude-opus-4-7" :balanced "medium"]
+    (it "uses adaptive thinking for Claude Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 4.6"
+      (doseq [[model level effort] [["claude-opus-4-8" :balanced "medium"]
+                                    ["claude-opus-4-7" :balanced "medium"]
                                     ["claude-opus-4-6" :deep "high"]
                                     ["claude-sonnet-4-6" :quick "low"]]]
         (let [out (router/reasoning-extra-body :anthropic
@@ -217,6 +218,7 @@
     (expect (nil? (get router/KNOWN_MODEL_METADATA "o4-mini"))))
 
   (it "flags Claude 4.x family as reasoning-capable"
+    (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-8"))))
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-5"))))
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-sonnet-4-5"))))
     (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-haiku-4-5")))))
