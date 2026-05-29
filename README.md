@@ -45,7 +45,8 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 ## Quick Start
 
 ```clojure
-;; deps.edn
+;; deps.edn — note: the leading quote is only so this self-testing README
+;; can evaluate the block; in a real deps.edn drop it: com.blockether/svar {...}
 {:deps {'com.blockether/svar {:mvn/version "0.7.0"}}}
 ```
 
