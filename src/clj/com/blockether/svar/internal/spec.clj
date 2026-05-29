@@ -325,17 +325,14 @@
         prompt; the validator treats both forms identically.
    `::target` - Keyword or vector of keywords, optional. Required when ::type is :spec.type/ref.
        Single keyword for simple ref, vector for union types (e.g., [:Heading :Paragraph :Image]).
-    `::humanize?` - Boolean, optional. When true, marks this field for humanization
-       when a :humanizer fn is passed to ask!. Defaults to false.
-    
+
     Returns:
     Map. Field definition with keys ::name, ::type, ::cardinality, ::description,
-    and optionally ::union (for optional fields), ::values (for enums), ::target (for refs),
-    and ::humanize? (for humanization marking)."
+    and optionally ::union (for optional fields), ::values (for enums), ::target (for refs)."
   [& {the-name ::name the-type ::type the-cardinality ::cardinality
       the-description ::description the-required ::required the-values ::values
-      the-target ::target the-humanize? ::humanize?
-      :or {the-required true the-humanize? false}}]
+      the-target ::target
+      :or {the-required true}}]
   (validate-field-options the-name the-type the-cardinality the-description the-target)
   (cond-> {::name the-name
            ::type the-type
@@ -343,8 +340,7 @@
            ::description the-description}
     (not the-required) (assoc ::union #{::nil})
     the-values (assoc ::values (process-values the-values))
-    the-target (assoc ::target the-target)
-    the-humanize? (assoc ::humanize? true)))
+    the-target (assoc ::target the-target)))
 
 (defn spec
   "Creates a spec from field definitions.

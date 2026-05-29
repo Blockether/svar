@@ -3,46 +3,25 @@
 
    SVAR = Structured Validated Automated Reasoning
 
-    Provides main functions:
+    Scope: structured LLM output + provider routing. Main functions:
     - `ask!` - Structured output using the spec DSL
-    - `abstract!` - Text summarization using Chain of Density prompting
-    - `eval!` - LLM self-evaluation for reliability and accuracy assessment
-    - `refine!` - Iterative refinement using decomposition and verification
+    - `ask-code!` - Plain-text completion + fenced code-block extraction
     - `models!` - Fetch available models from the LLM API
-    - `sample!` - Generate test data samples matching a spec
 
-    Guardrails:
-    - `static-guard` - Pattern-based prompt injection detection
-    - `moderation-guard` - LLM-based content moderation
-    - `guard` - Run one or more guards on input
-
-    Humanization:
-    - `humanize-string` - Strip AI-style phrases from text
-    - `humanize-data` - Humanize string values in data structures
-    - `humanizer` - Create a reusable humanizer function
-
-     Re-exports spec DSL (`field`, `spec`, `str->data`, `str->data-with-spec`,
-     `data->str`, `validate-data`, `spec->prompt`, `build-ref-registry`),
-     and `make-router` so users can require only this namespace.
+     Re-exports the spec DSL (`field`, `spec`, `str->data`, `str->data-with-spec`,
+     `data->str`, `validate-data`, `spec->prompt`, `build-ref-registry`) and
+     `make-router` so users can require only this namespace.
 
    Configuration:
-   LLM calls route automatically via the default router.
+   LLM calls route automatically via the router.
 
     Example:
-     (ask! {:spec my-spec
-            :messages [(system \"Help the user.\")
-                       (user \"What is 2+2?\")]
-            :model \"gpt-4o\"})
-
-   References:
-   - Chain of Density: https://arxiv.org/abs/2309.04269
-   - LLM Self-Evaluation: https://learnprompting.org/docs/reliability/lm_self_eval
-   - DuTy: https://learnprompting.org/docs/advanced/decomposition/duty-distinct-chain-of-thought
-   - CoVe: https://learnprompting.org/docs/advanced/self_criticism/chain_of_verification"
+     (ask! router {:spec my-spec
+                   :messages [(system \"Help the user.\")
+                              (user \"What is 2+2?\")]
+                   :model \"gpt-4o\"})"
   (:require
    [com.blockether.svar.internal.codes :as codes]
-   [com.blockether.svar.internal.guard :as guard]
-   [com.blockether.svar.internal.humanize :as humanize]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]))
@@ -102,7 +81,6 @@
 (def TARGET "Field option: Reference target for :spec.type/ref fields." ::spec/target)
 (def UNION "Field option: Set of allowed nil types." ::spec/union)
 (def KEY-NS "Spec option: Namespace prefix to add to keys during parsing." ::spec/key-ns)
-(def HUMANIZE "Field option: When true, marks field for humanization." ::spec/humanize?)
 
 ;; Base types
 (def TYPE_STRING "Type: String value." :spec.type/string)
@@ -125,26 +103,6 @@
 ;; Cardinality
 (def CARDINALITY_ONE "Cardinality: Single value." :spec.cardinality/one)
 (def CARDINALITY_MANY "Cardinality: Vector of values." :spec.cardinality/many)
-
-;; =============================================================================
-;; Humanize
-;; =============================================================================
-
-(def humanize-string "Removes AI-style phrases from text." humanize/humanize-string)
-(def humanize-data "Recursively humanizes all strings in a data structure." humanize/humanize-data)
-(def humanizer "Creates a humanization function with optional custom patterns." humanize/humanizer)
-(def HUMANIZE_SAFE_PATTERNS "Safe humanization patterns: AI identity, refusal, knowledge, punctuation." humanize/SAFE_PATTERNS)
-(def HUMANIZE_AGGRESSIVE_PATTERNS "Aggressive humanization patterns: hedging, overused verbs/adjectives/nouns." humanize/AGGRESSIVE_PATTERNS)
-
-;; =============================================================================
-;; Guards
-;; =============================================================================
-
-(def static-guard "Creates a guard function that checks for prompt injection patterns." guard/static)
-(def moderation-guard "Creates a guard function that uses LLM to check content against policies." guard/moderation)
-(def guard "Runs guard(s) on input." guard/guard)
-(def GUARD_DEFAULT_INJECTION_PATTERNS "Default patterns for prompt injection detection." guard/DEFAULT_INJECTION_PATTERNS)
-(def GUARD_DEFAULT_MODERATION_POLICIES "Default OpenAI moderation policies to check." guard/DEFAULT_MODERATION_POLICIES)
 
 ;; =============================================================================
 ;; LLM client
@@ -170,8 +128,4 @@
    {:lang <str-or-nil> :source <str>}. Lenient+: when no fences found,
    treats the whole input as one untagged block."
   codes/extract-code-blocks)
-(def abstract! "Creates a dense, entity-rich summary using Chain of Density prompting." llm/abstract!)
-(def eval! "Evaluates an LLM output using LLM self-evaluation." llm/eval!)
-(def refine! "Iteratively refines LLM output using decomposition and verification." llm/refine!)
 (def models! "Fetches available models from the LLM API." llm/models!)
-(def sample! "Generates test data samples matching a spec with self-correction." llm/sample!)

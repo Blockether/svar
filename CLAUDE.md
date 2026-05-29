@@ -6,7 +6,7 @@
 
 Blockether One = live LLM endpoint. Always available. Rules:
 
-1. **README examples must execute** — `(svar/ask! ...)`, `(svar/abstract! ...)`, etc. No `(comment ...)` wrappers.
+1. **README examples must execute** — `(svar/ask! ...)`, `(svar/ask-code! ...)`, etc. No `(comment ...)` wrappers.
 2. **No `lazytest/skip=true`** — all test blocks runnable. Never add skip.
 3. **Config creation only exception** — `(def config ...)` → `(comment ...)` OK (API keys env-specific). Downstream code runs.
 
@@ -74,6 +74,7 @@ Logs → `.verification/<step>.log`. Exit codes → `.verification/<step>.code`.
 
 svar = **structured LLM output + routing**. Nothing DB-shaped, nothing agent-shaped.
 
-Public API surface: `ask!`, `abstract!`, `eval!`, `refine!`, `sample!`, `models!`, spec DSL, guards, humanizers.
+Public API surface: `ask!`, `ask-code!`, `models!`, spec DSL (`field`/`spec`/`str->data`/`validate-data`/`spec->prompt`/…), message constructors, routing (`make-router`/…).
 
 RLM / PageIndex / git ingestion / benchmarks → moved to `../vis`. Do NOT pull them back.
+abstract! / eval! / refine! (CoD/CoVe) / sample! / guards / humanizers were REMOVED (agent-shaped / out of scope) — do NOT re-add here.
