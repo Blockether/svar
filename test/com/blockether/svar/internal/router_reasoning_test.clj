@@ -265,43 +265,50 @@
     (let [resolved (router/infer-model-metadata {:name "gpt-4o"})]
       (expect (not (:reasoning? resolved))))))
 
-(it "flags GitHub Copilot known models with provider-specific API styles"
-  (let [provider (router/normalize-provider 0 {:id :github-copilot
-                                               :api-key "test"
-                                               :models [{:name "claude-sonnet-4.6"}
-                                                        {:name "gpt-5.4"}
-                                                        {:name "gpt-5.5"}
-                                                        {:name "gpt-5.3-codex"}
-                                                        {:name "gpt-4o"}]})
-        by-name (zipmap (map :name (:models provider)) (:models provider))]
-    (expect (= #{"claude-sonnet-4.6" "gpt-5.4" "gpt-5.5" "gpt-5.3-codex"}
-              (set (keys by-name))))
-    (expect (= :openai-compatible-chat (:api-style (get by-name "claude-sonnet-4.6"))))
-    (expect (= :openai-effort (:reasoning-style (get by-name "claude-sonnet-4.6"))))
-    (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.4"))))
-    (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.5"))))
-    (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.3-codex"))))
-    (expect (= :openai-effort (:reasoning-style (get by-name "gpt-5.4"))))
-    (expect (= :openai-effort (:reasoning-style (get by-name "gpt-5.5"))))
-    (expect (= 272000 (:context (get by-name "gpt-5.4"))))
-    (expect (= 272000 (:context (get by-name "gpt-5.5"))))
-    (expect (nil? (get by-name "gpt-4o")))
-    (expect (= {:effort "medium" :summary "detailed"}
-              (get-in by-name ["gpt-5.4" :extra-body :reasoning])))))
+(defdescribe provider-model-filter-test
+  "Provider-scoped model filters."
 
-(it "filters OpenAI Codex GPT models below GPT-5.3"
-  (let [provider (router/normalize-provider 0 {:id :openai-codex
-                                               :api-key "test"
-                                               :models [{:name "gpt-5"}
-                                                        {:name "gpt-5.1"}
-                                                        {:name "gpt-5.1-codex"}
-                                                        {:name "gpt-5.3-codex"}
-                                                        {:name "gpt-5.4"}
-                                                        {:name "gpt-5.5"}]})]
-    (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
-              (mapv :name (:models provider))))
-    (expect (router/provider-model-visible? :openai-codex "gpt-5.3-codex"))
-    (expect (not (router/provider-model-visible? :openai-codex "gpt-5.1-codex")))))
+  (it "flags GitHub Copilot known models with provider-specific API styles"
+    (let [provider (router/normalize-provider 0 {:id :github-copilot
+                                                 :api-key "test"
+                                                 :models [{:name "claude-sonnet-4.6"}
+                                                          {:name "gpt-5.4"}
+                                                          {:name "gpt-5.5"}
+                                                          {:name "gpt-5.3-codex"}
+                                                          {:name "grok-code-fast-1"}
+                                                          {:name "gpt-4o"}]})
+          by-name (zipmap (map :name (:models provider)) (:models provider))]
+      (expect (= #{"claude-sonnet-4.6" "gpt-5.4" "gpt-5.5" "gpt-5.3-codex"}
+                (set (keys by-name))))
+      (expect (= :openai-compatible-chat (:api-style (get by-name "claude-sonnet-4.6"))))
+      (expect (= :server-managed (:reasoning-style (get by-name "claude-sonnet-4.6"))))
+      (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.4"))))
+      (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.5"))))
+      (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.3-codex"))))
+      (expect (= :openai-effort (:reasoning-style (get by-name "gpt-5.4"))))
+      (expect (= :openai-effort (:reasoning-style (get by-name "gpt-5.5"))))
+      (expect (= 272000 (:context (get by-name "gpt-5.4"))))
+      (expect (= 272000 (:context (get by-name "gpt-5.5"))))
+      (expect (nil? (get by-name "gpt-4o")))
+      (expect (nil? (get by-name "grok-code-fast-1")))
+      (expect (not (router/provider-model-visible? :github-copilot "grok-code-fast-1")))
+      (expect (not (router/provider-model-visible? :github-copilot-individual "grok-code-fast-1")))
+      (expect (= {:effort "medium" :summary "detailed"}
+                (get-in by-name ["gpt-5.4" :extra-body :reasoning])))))
+
+  (it "filters OpenAI Codex GPT models below GPT-5.3"
+    (let [provider (router/normalize-provider 0 {:id :openai-codex
+                                                 :api-key "test"
+                                                 :models [{:name "gpt-5"}
+                                                          {:name "gpt-5.1"}
+                                                          {:name "gpt-5.1-codex"}
+                                                          {:name "gpt-5.3-codex"}
+                                                          {:name "gpt-5.4"}
+                                                          {:name "gpt-5.5"}]})]
+      (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
+                (mapv :name (:models provider))))
+      (expect (router/provider-model-visible? :openai-codex "gpt-5.3-codex"))
+      (expect (not (router/provider-model-visible? :openai-codex "gpt-5.1-codex"))))))
 
 (defdescribe anthropic-thinking-max-tokens-clamp-test
   "Anthropic's API requires max_tokens > thinking.budget_tokens (thinking +

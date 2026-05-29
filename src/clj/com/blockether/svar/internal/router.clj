@@ -74,7 +74,12 @@
                     :min-gpt-version [5 3]
                     :exclude-models #{"gpt-4o" "gpt-4.1"
                                       "gpt-5" "gpt-5-mini" "gpt-5.1"
-                                      "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
+                                      "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
+                                      ;; Copilot advertises this on some accounts,
+                                      ;; then rejects inference with
+                                      ;; `400 model_not_supported`. Keep it out of
+                                      ;; cost routing until endpoint support is real.
+                                      "grok-code-fast-1"}
                     :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
    ;; Copilot plan tiers — runtime provider IDs (one per OAuth plan) that
    ;; INHERIT policy from `:github-copilot` via `:provider-model-source`.
@@ -1042,10 +1047,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1057,7 +1062,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1231,8 +1236,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
+                    (keyword? prefer) [prefer]
+                    :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))]
     (fn [[p m]] [(model-score m) (:priority p 0)])))
