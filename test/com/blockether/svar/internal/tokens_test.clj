@@ -106,8 +106,10 @@
     (let [tokens (sut/count-tokens "gpt-4o" "")]
       (expect (zero? tokens))))
 
-  (it "falls back to cl100k_base for unknown models"
-    ;; Should not throw, should use fallback encoding
+  (it "falls back to o200k_base for unknown models"
+    ;; Should not throw, should use fallback encoding (o200k_base — closer
+    ;; than cl100k to Claude/Gemini/GLM and newer OpenAI models; see
+    ;; router/model->encoding).
     (let [tokens (sut/count-tokens "unknown-model-xyz" "Hello world")]
       (expect (pos? tokens)))))
 

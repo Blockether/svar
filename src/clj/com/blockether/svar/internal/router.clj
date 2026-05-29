@@ -1836,13 +1836,38 @@
 
 (defn- model->encoding
   "Gets the encoding for a given model name.
-   Falls back to cl100k_base for unknown models."
+
+   jtokkit only ships OpenAI (tiktoken) encodings. When a model is in
+   jtokkit's `ModelType` table (e.g. `gpt-4o` → o200k_base, `gpt-4` →
+   cl100k_base) we use that exact mapping. Everything else — Claude,
+   Gemini, GLM, and newer OpenAI models not yet in this jtokkit version
+   (`gpt-5.x`) — falls back to o200k_base.
+
+   o200k_base is the right fallback, NOT cl100k_base. This is the only
+   place token counts are ESTIMATED; the real per-call counts always come
+   from the provider's `usage` (see `count-and-estimate`, which prefers
+   `:api-usage`). The estimate is used for pre-flight context checks and
+   `truncate-text`. Measured against live provider `usage.prompt_tokens`
+   on a 674-char mixed English/Polish/code/unicode prompt:
+
+     model           provider  cl100k   o200k
+     gpt-4o            230      +4.3%   -3.0%
+     gemini-2.5-pro    219      +9.6%   +1.8%
+     glm-4.7           231      +3.9%   -3.5%
+
+   o200k is closer for EVERY provider measured (Gemini dramatically so),
+   and ties cl100k on plain English/code while cutting overcount ~18-23%
+   on diacritics/CJK/emoji. Fixed per-family multipliers are deliberately
+   avoided: Anthropic re-tokenizes between model versions (Opus 4.6→4.7
+   shifted 1.0-1.35×), so any hard-coded factor goes stale. Callers who
+   need exact Claude/Gemini counts should use the provider count_tokens
+   API; this fallback is a fast, dependency-free, version-stable estimate."
   ^Encoding [^String model-name]
   (try
     (let [^ModelType model-type (.orElseThrow (ModelType/fromName model-name))]
       (.getEncodingForModel registry model-type))
     (catch Exception _
-      (.getEncoding registry EncodingType/CL100K_BASE))))
+      (.getEncoding registry EncodingType/O200K_BASE))))
 
 ;; =============================================================================
 ;; Token Input Limits
@@ -2253,15 +2278,47 @@
 ;; Pre-flight Context Checking
 ;; =============================================================================
 
+(def ^:const CONTEXT_REFINE_UTILIZATION
+  "Utilization threshold above which an offline tiktoken estimate is no
+   longer trustworthy enough to decide the overflow verdict. When the
+   offline estimate puts a prompt at or above this fraction of the input
+   budget AND the caller supplied an `:exact-count-fn` (e.g. Anthropic's
+   `count_tokens` API), `check-context-limit` re-counts exactly. Below it
+   the offline estimate already decides correctly, so no exact count is
+   fetched — this is the policy that keeps a network round-trip off the
+   hot path for the common small-prompt case."
+  0.85)
+
 (defn check-context-limit
-  "Checks if messages fit within model context limit."
+  "Checks if messages fit within model context limit.
+
+   Token-count sources, in priority order:
+
+   1. `:input-tokens` (optional) — a pre-counted value used verbatim.
+   2. `:exact-count-fn` (optional) — a 0-arg thunk returning an exact
+      count (long) or nil. Called ONLY when the offline estimate's
+      utilization is at/above `CONTEXT_REFINE_UTILIZATION`, i.e. near the
+      limit where precision flips the verdict; nil result falls back to
+      the offline estimate. This is where the refinement *policy* lives —
+      callers (e.g. the Anthropic `count_tokens` path) inject only the
+      *transport*.
+   3. Offline `count-messages` tiktoken estimate."
   ([^String model messages]
    (check-context-limit model messages {}))
-  ([^String model messages {:keys [output-reserve throw? context-limits] :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
+  ([^String model messages {:keys [output-reserve throw? context-limits input-tokens exact-count-fn]
+                            :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
    (let [ctx-limit (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
          effective-reserve (long output-reserve)
          max-input (- ctx-limit effective-reserve)
-         input-tokens (count-messages model messages)
+         offline-tokens (long (or input-tokens (count-messages model messages)))
+         ;; Refine near the limit: only when the cheap estimate says we're
+         ;; close enough that its imprecision could change ok?/overflow.
+         refine? (and exact-count-fn
+                   (nil? input-tokens)
+                   (>= (/ (double offline-tokens) (double max-input))
+                     CONTEXT_REFINE_UTILIZATION))
+         input-tokens (long (or (when refine? (exact-count-fn))
+                              offline-tokens))
          ok? (<= input-tokens max-input)
          overflow (if ok? 0 (- input-tokens max-input))
          result {:ok? ok?

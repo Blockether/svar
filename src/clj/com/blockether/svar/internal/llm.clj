@@ -942,6 +942,62 @@
      (-> (cond-> body system-wire (assoc :system system-wire))
        clamp-anthropic-thinking-max-tokens))))
 
+(def ^:private ^:const ANTHROPIC_COUNT_TOKENS_TIMEOUT_MS
+  "Pre-flight count is a fast metadata call; cap it tight so a slow
+   count_tokens never delays the real request. On timeout we fall back to
+   the offline estimate."
+  10000)
+
+(defn- anthropic-count-tokens
+  "Anthropic-native pre-flight token count: POST `{base-url}/messages/count_tokens`.
+
+   When the resolved provider is the DIRECT Anthropic API (`:api-style
+   :anthropic`), svar asks Anthropic itself how many input tokens a
+   request will consume instead of approximating with the offline tiktoken
+   estimate. Reuses the SAME message→Anthropic-body conversion as the real
+   call, so the count reflects exactly what gets sent — system blocks,
+   `:svar/cache` markers, echoed prior thinking blocks, tools. The endpoint
+   is FREE and rate-limited separately from message creation.
+
+   Returns `input_tokens` (long) on HTTP 200, or nil on any non-200 /
+   timeout / parse failure so the caller falls back to the offline
+   estimate. NEVER throws: an accurate-count outage must not break the
+   actual LLM call.
+
+   Proxied Claude (OpenRouter / LiteLLM, `:openai-compatible-chat`) does
+   NOT expose this endpoint, so the caller gates this on `:anthropic`
+   api-style."
+  [messages model {:keys [api-key base-url provider-id llm-headers]}]
+  (try
+    (let [body    (-> (build-anthropic-request-body messages model nil)
+                    ;; count_tokens takes the message-creation inputs minus
+                    ;; generation params. Drop max_tokens/stream so the
+                    ;; endpoint doesn't choke on fields it doesn't model.
+                    (dissoc :max_tokens :stream :stream_options))
+          headers (cond-> (make-llm-headers :anthropic api-key provider-id)
+                    (seq llm-headers) (merge llm-headers))
+          url     (str (str/replace base-url #"/+$" "") "/messages/count_tokens")
+          {:keys [parsed status]} (http-post! url body headers ANTHROPIC_COUNT_TOKENS_TIMEOUT_MS)]
+      (when (= 200 (long (or status 0)))
+        (some-> (:input_tokens parsed) long)))
+    (catch Exception e
+      (trove/log! {:level :debug :id ::anthropic-count-tokens-failed
+                   :data {:model model :error (ex-message e)}
+                   :msg "count_tokens unavailable; offline estimate fallback"})
+      nil)))
+
+(defn- anthropic-exact-count-fn
+  "Returns a 0-arg thunk that fetches the exact Anthropic `count_tokens`
+   value for `messages`/`model`, or nil for non-Anthropic api-styles (which
+   have no such endpoint). The router's `check-context-limit` decides
+   WHETHER to call the thunk (near the limit only) — this just supplies the
+   transport. nil ⇒ pure offline estimate."
+  [messages model {:keys [api-style api-key base-url provider-id llm-headers]}]
+  (when (= api-style :anthropic)
+    (fn [] (anthropic-count-tokens messages model
+             {:api-key api-key :base-url base-url
+              :provider-id provider-id :llm-headers llm-headers}))))
+
 (defn- anthropic-wire->canonical-block
   "Translates one Anthropic wire content block to svar's canonical
    shape. `text` blocks become `{:type \"text\" :text str}`; `thinking`
@@ -3625,7 +3681,11 @@
      - :model - String, required. LLM model to use.
      - :humanizer - Function, optional. Applied to ::spec/humanize? fields.
      - :output-reserve - Integer, optional.
-     - :check-context? - Boolean, optional.
+     - :check-context? - Boolean, optional. When on (default), DIRECT
+       Anthropic providers (`:api-style :anthropic`) auto-refine the
+       pre-flight estimate with Anthropic's free exact `count_tokens` API
+       near the context limit (>= `router/CONTEXT_REFINE_UTILIZATION`),
+       falling back to the offline tiktoken estimate on any failure.
      - :timeout-ms - Integer, optional.
      - :format-retries - Integer, optional. Default 0. Number of in-process
        retries when the provider returns content that fails schema parsing
@@ -3722,7 +3782,11 @@
                     (append-schema-tail-pointer with-cache))
         base-messages with-tail
           ;; Pre-flight context check (also counts input tokens for reuse)
-        check-opts (cond-> {:context-limits context-limits}
+        check-opts (cond-> {:context-limits context-limits
+                            :exact-count-fn (anthropic-exact-count-fn base-messages model
+                                              {:api-style api-style :api-key api-key
+                                               :base-url base-url :provider-id provider-id
+                                               :llm-headers llm-headers})}
                      output-reserve (assoc :output-reserve output-reserve))
         context-check (when check-context?
                         (let [check (router/check-context-limit model base-messages check-opts)]
@@ -4069,7 +4133,11 @@
         with-tail (if (false? code-tail-pointer?)
                     in-msgs
                     (append-code-tail-pointer in-msgs lang))
-        check-opts (cond-> {:context-limits context-limits}
+        check-opts (cond-> {:context-limits context-limits
+                            :exact-count-fn (anthropic-exact-count-fn with-tail model
+                                              {:api-style api-style :api-key api-key
+                                               :base-url base-url :provider-id provider-id
+                                               :llm-headers llm-headers})}
                      output-reserve (assoc :output-reserve output-reserve))
         context-check (when check-context?
                         (let [check (router/check-context-limit model with-tail check-opts)]
