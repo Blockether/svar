@@ -309,8 +309,9 @@
        This makes the guard testable and removes hard dependency on core.
      - :api-key - String. API key for LLM service.
      - :base-url - String. Base URL for LLM service.
-     - :model - String. LLM model to use for moderation.
-       Default: \"gpt-4o\".
+     - :model - String. LLM model to use for moderation. No built-in
+       default; when nil the supplied `:ask-fn` / router decides the model.
+       Supply one explicitly for a deterministic moderation model.
      - :policies - Set of keywords. Policies to enforce.
        Default: DEFAULT_MODERATION_POLICIES (all policies).
        Options: :sexual, :sexual/minors, :harassment, :harassment/threatening,

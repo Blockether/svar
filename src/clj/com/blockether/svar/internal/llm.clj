@@ -4949,14 +4949,27 @@
   (str "<original_task>\n" original-task "\n</original_task>\n\n"
     "<output_to_decompose>\n" (if (string? output) output (pr-str output)) "\n</output_to_decompose>"))
 
+(defn- sum-usage
+  "Sums `:tokens`/`:cost` maps across a seq of step results (ask!* returns or
+   sub-step maps that carry `:tokens`/`:cost`). Returns `{:tokens .. :cost ..}`
+   with each merged via `+`. Used to roll CoVe/refine sub-call usage up so
+   `refine!` reports real tokens/cost instead of nil (every sub-call here was
+   previously discarding its usage)."
+  [results]
+  {:tokens (apply merge-with + {} (keep :tokens results))
+   :cost   (apply merge-with + {} (keep :cost results))})
+
 (defn- decompose-output
-  "Extracts verifiable claims from an LLM output using DuTy-inspired decomposition."
+  "Extracts verifiable claims from an LLM output using DuTy-inspired decomposition.
+   Returns `{:claims [...] :tokens .. :cost ..}` so callers can roll up usage."
   [output original-task original-objective model router llm-opts]
-  (:result (ask!* router (merge llm-opts
-                           {:spec (build-decomposition-spec)
-                            :messages [(system (build-decomposition-objective original-objective))
-                                       (user (build-decomposition-task original-task output))]
-                            :model model}))))
+  (let [{:keys [result tokens cost]}
+        (ask!* router (merge llm-opts
+                        {:spec (build-decomposition-spec)
+                         :messages [(system (build-decomposition-objective original-objective))
+                                    (user (build-decomposition-task original-task output))]
+                         :model model}))]
+    {:claims (:claims result) :tokens tokens :cost cost}))
 
 ;; Verification helper functions (truncation, source documents, claim formatting)
 
@@ -5071,13 +5084,16 @@
     "<claims_to_plan_questions_for>\n" (format-claims-for-verification claims) "\n</claims_to_plan_questions_for>"))
 
 (defn- plan-verification-questions
-  "Step 1 of Factored CoVe: Generate verification questions without answers."
+  "Step 1 of Factored CoVe: Generate verification questions without answers.
+   Returns `{:questions [...] :tokens .. :cost ..}` for usage roll-up."
   [claims original-task original-objective model router llm-opts]
-  (:result (ask!* router (merge llm-opts
-                           {:spec (build-question-planning-spec)
-                            :messages [(system (build-question-planning-objective original-objective))
-                                       (user (build-question-planning-task original-task claims))]
-                            :model model}))))
+  (let [{:keys [result tokens cost]}
+        (ask!* router (merge llm-opts
+                        {:spec (build-question-planning-spec)
+                         :messages [(system (build-question-planning-objective original-objective))
+                                    (user (build-question-planning-task original-task claims))]
+                         :model model}))]
+    {:questions (:questions result) :tokens tokens :cost cost}))
 
 (defn- build-single-verification-spec
   "Builds the spec for independently verifying a single claim."
@@ -5190,13 +5206,16 @@
       (str "\n\n" (build-source-documents-block documents)))))
 
 (defn- verify-single-claim
-  "Step 2 of Factored CoVe: Answer a single verification question independently."
+  "Step 2 of Factored CoVe: Answer a single verification question independently.
+   Returns `{:verification <parsed> :tokens .. :cost ..}` for usage roll-up."
   [claim-text question model router documents llm-opts]
-  (:result (ask!* router (merge llm-opts
-                           {:spec (build-single-verification-spec (boolean (seq documents)))
-                            :messages [(system (build-single-verification-objective documents))
-                                       (user (build-single-verification-task claim-text question documents))]
-                            :model model}))))
+  (let [{:keys [result tokens cost]}
+        (ask!* router (merge llm-opts
+                        {:spec (build-single-verification-spec (boolean (seq documents)))
+                         :messages [(system (build-single-verification-objective documents))
+                                    (user (build-single-verification-task claim-text question documents))]
+                         :model model}))]
+    {:verification result :tokens tokens :cost cost}))
 
 (defn- verifiable-claim?
   "Returns true if a claim should be sent to verification."
@@ -5216,14 +5235,15 @@
   [claims original-task original-objective model router documents llm-opts]
   (let [{:keys [verifiable non-verifiable]} (filter-verifiable-claims claims)]
     (if (empty? verifiable)
-      ;; All claims are non-verifiable - return as uncertain
+      ;; All claims are non-verifiable - return as uncertain (no LLM calls)
       {:verifications (mapv (fn [claim]
                               {:claim (:claim claim)
                                :question "N/A"
                                :answer "N/A"
                                :verdict "uncertain"
                                :reasoning "Claim is subjective or not independently verifiable"})
-                        non-verifiable)}
+                        non-verifiable)
+       :tokens {} :cost {}}
       ;; Factored CoVe
       (let [;; Step 1: Plan verification questions (one LLM call - sees all claims)
             planning-result (plan-verification-questions verifiable original-task
@@ -5231,13 +5251,15 @@
             planned-questions (:questions planning-result)
 
             ;; Step 2: Answer each question independently (one LLM call per question)
-            factored-verifications
+            verify-results
             (mapv (fn [planned-q]
                     (let [claim-text (:claim planned-q)
                           question (:question planned-q)
-                          result (verify-single-claim claim-text question model router documents llm-opts)]
-                      (merge {:claim claim-text :question question} result)))
+                          vres (verify-single-claim claim-text question model router documents llm-opts)]
+                      (assoc vres :merged (merge {:claim claim-text :question question}
+                                             (:verification vres)))))
               planned-questions)
+            factored-verifications (mapv :merged verify-results)
 
             ;; Non-verifiable claims → uncertain without LLM calls
             skipped-results
@@ -5247,8 +5269,11 @@
                      :answer "N/A"
                      :verdict "uncertain"
                      :reasoning "Claim is subjective or not independently verifiable"})
-              non-verifiable)]
-        {:verifications (into factored-verifications skipped-results)}))))
+              non-verifiable)
+            ;; Roll up usage from the planning call + every per-claim call
+            usage (sum-usage (cons planning-result verify-results))]
+        {:verifications (into factored-verifications skipped-results)
+         :tokens (:tokens usage) :cost (:cost usage)}))))
 
 ;; =============================================================================
 ;; Factor+Revise: Cross-Claim Inconsistency Detection
@@ -5343,12 +5368,14 @@
   [current-output verifications original-objective model router llm-opts]
   (if (< (long (count verifications)) 2)
     ;; Need at least 2 verified claims to detect cross-claim inconsistencies
-    {:inconsistencies []}
-    (:result (ask!* router (merge llm-opts
-                             {:spec (build-inconsistency-detection-spec)
-                              :messages [(system (build-inconsistency-detection-objective original-objective))
-                                         (user (build-inconsistency-detection-task current-output verifications))]
-                              :model model})))))
+    {:inconsistencies [] :tokens {} :cost {}}
+    (let [{:keys [result tokens cost]}
+          (ask!* router (merge llm-opts
+                          {:spec (build-inconsistency-detection-spec)
+                           :messages [(system (build-inconsistency-detection-objective original-objective))
+                                      (user (build-inconsistency-detection-task current-output verifications))]
+                           :model model}))]
+      {:inconsistencies (:inconsistencies result) :tokens tokens :cost cost})))
 
 ;; Refinement functions
 (defn- format-verifications-for-refinement
@@ -5461,7 +5488,8 @@
   (let [iteration (inc (long iteration-num))
 
         [{:keys [claims verifications inconsistencies evaluation
-                 refined-output refinement-objective refinement-task]} iter-duration-ms]
+                 refined-output refinement-objective refinement-task
+                 iter-tokens iter-cost]} iter-duration-ms]
         (util/with-elapsed
           (let [;; Step 1: Decompose - extract claims from current output
                 decomposition (decompose-output current-output original-task original-objective
@@ -5492,15 +5520,21 @@
                 refinement-task (build-refinement-task original-task current-output
                                   verifications (:issues evaluation)
                                   inconsistencies)
-                {:keys [result]} (ask!* router (merge llm-opts
-                                                 {:spec spec
-                                                  :messages [(system refinement-objective)
-                                                             (user refinement-task)]
-                                                  :model model}))]
+                refine-resp (ask!* router (merge llm-opts
+                                            {:spec spec
+                                             :messages [(system refinement-objective)
+                                                        (user refinement-task)]
+                                             :model model}))
+                ;; Roll up usage from ALL five sub-calls (decompose, verify
+                ;; [plan + per-claim], detect, eval, refine). Previously every
+                ;; one was discarded → refine! reported nil tokens/cost.
+                iter-usage (sum-usage [decomposition verification inconsistency-result
+                                       evaluation refine-resp])]
             {:claims claims :verifications verifications
              :inconsistencies inconsistencies :evaluation evaluation
-             :refined-output result :refinement-objective refinement-objective
-             :refinement-task refinement-task}))
+             :refined-output (:result refine-resp) :refinement-objective refinement-objective
+             :refinement-task refinement-task
+             :iter-tokens (:tokens iter-usage) :iter-cost (:cost iter-usage)}))
 
         ;; Build iteration record
         incorrect-count (->> verifications (filter #(= "incorrect" (:verdict %))) count)
@@ -5532,7 +5566,9 @@
      :iterations (conj iterations iteration-record)
      :iteration-num iteration
      :latest-score (:overall-score evaluation)
-     :prompt-evolution (conj prompt-evolution prompt-record)}))
+     :prompt-evolution (conj prompt-evolution prompt-record)
+     :total-tokens (merge-with + (or (:total-tokens _state) {}) iter-tokens)
+     :total-cost   (merge-with + (or (:total-cost _state) {}) iter-cost)}))
 
 (defn- calculate-deltas
   "Compute score differences between adjacent iterations."
@@ -5591,17 +5627,20 @@
         original-objective (or (->> messages (filter #(= "system" (:role %))) first :content) "")
         original-task (or (->> messages (filter #(= "user" (:role %))) first :content) "")
           ;; Phase 1: Generate initial output
-        {:keys [result]} (ask!* router (merge llm-opts
-                                         {:spec spec
-                                          :messages messages}))
-        initial-output result
+        init-resp (ask!* router (merge llm-opts
+                                  {:spec spec
+                                   :messages messages}))
+        initial-output (:result init-resp)
 
-          ;; Phase 2: Iterative refinement loop
+          ;; Phase 2: Iterative refinement loop. Seed usage accumulators with
+          ;; the Phase-1 generation so the final :tokens/:cost are complete.
         initial-state {:current-output initial-output
                        :iterations []
                        :iteration-num 0
                        :latest-score 0.0
-                       :prompt-evolution []}
+                       :prompt-evolution []
+                       :total-tokens (or (:tokens init-resp) {})
+                       :total-cost   (or (:cost init-resp) {})}
 
         step-fn (partial refinement-iteration-step
                   spec original-objective original-task model router llm-opts criteria documents)
@@ -5644,8 +5683,9 @@
      :converged? converged?
      :iterations-count iterations-count
      :total-duration-ms total-duration-ms
-     :tokens (:total-tokens final-state)
-     :cost (:total-cost final-state)
+     ;; Fold the Phase-3 final evaluation into the accumulated usage.
+     :tokens (merge-with + (or (:total-tokens final-state) {}) (or (:tokens final-evaluation) {}))
+     :cost   (merge-with + (or (:total-cost final-state) {}) (or (:cost final-evaluation) {}))
      :gradient gradient
      :prompt-evolution (:prompt-evolution final-state)
      :window {:size window-size

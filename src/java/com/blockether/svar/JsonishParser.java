@@ -414,13 +414,26 @@ public class JsonishParser {
                     case 'n': sb.append('\n'); break;
                     case 'r': sb.append('\r'); break;
                     case 't': sb.append('\t'); break;
-                    case 'u':
-                        // Unicode escape
-                        pos++;
-                        String hex = input.substring(pos, Math.min(pos + 4, length));
-                        sb.append((char) Integer.parseInt(hex, 16));
-                        pos += 3; // Will be incremented at end of loop
+                    case 'u': {
+                        // Unicode escape: require exactly 4 hex digits following.
+                        // On malformed or truncated input, emit a literal 'u' and
+                        // continue rather than throwing — one bad escape must not
+                        // fail the whole parse (and bubble up as a full-response
+                        // rejection). pos is on 'u'; the trailing pos++ below
+                        // consumes it, so a valid escape advances pos by 4 here.
+                        if (pos + 5 <= length) {
+                            String hex = input.substring(pos + 1, pos + 5);
+                            try {
+                                sb.append((char) Integer.parseInt(hex, 16));
+                                pos += 4;
+                            } catch (NumberFormatException e) {
+                                sb.append('u');
+                            }
+                        } else {
+                            sb.append('u');
+                        }
                         break;
+                    }
                     default:
                         sb.append(escaped);
                 }

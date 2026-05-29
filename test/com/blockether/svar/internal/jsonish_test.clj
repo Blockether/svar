@@ -441,3 +441,37 @@
         (expect (= "2024-01-01" (get-in (:value result) [:outer :meta :created])))
         (expect (= "active" (get-in (:value result) [:outer :meta :status])))))))
 
+
+;; =============================================================================
+;; Unicode escape handling (regression)
+;; =============================================================================
+;;
+;; The hot `parseQuotedString` path previously decoded `\uXXXX` with no bounds
+;; or hex validation: a malformed or truncated escape threw, the blanket catch
+;; turned it into a whole-response failure, and parse-json fell back to the raw
+;; string — which downstream becomes :svar.spec/schema-rejected. One bad escape
+;; must NOT sink an otherwise-parseable object.
+
+(defdescribe parse-json-unicode-test
+  "parse-json must decode valid \\uXXXX escapes and tolerate malformed ones
+   (emit a literal rather than rejecting the whole response)."
+
+  (describe "valid escapes decode"
+    (it "decodes a basic \\uXXXX escape"
+      (expect (= {:a "A"} (:value (sut/parse-json "{\"a\": \"\\u0041\"}")))))
+    (it "decodes a surrogate-pair emoji"
+      (expect (= {:a "🚀"} (:value (sut/parse-json "{\"a\": \"\\ud83d\\ude80\"}"))))))
+
+  (describe "malformed escapes do not reject the whole object"
+    (it "tolerates a truncated \\u escape (too few hex digits before end)"
+      (let [v (:value (sut/parse-json "{\"a\": \"x\\u00\"}"))]
+        (expect (map? v))            ;; NOT the raw-string fallback
+        (expect (contains? v :a))))
+    (it "tolerates a non-hex \\u escape"
+      (let [v (:value (sut/parse-json "{\"a\": \"\\uZZZZ\"}"))]
+        (expect (map? v))
+        (expect (contains? v :a))))
+    (it "a bad escape in one field still yields the sibling fields"
+      (let [v (:value (sut/parse-json "{\"a\": \"\\uXY\", \"b\": 2}"))]
+        (expect (map? v))
+        (expect (= 2 (:b v)))))))

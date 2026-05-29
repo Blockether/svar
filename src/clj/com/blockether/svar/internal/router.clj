@@ -1157,6 +1157,16 @@
     :speed        (fn [m] (- (long (get SPEED_ORDER (:speed m) 0))))
     nil))
 
+(defn- force-provider-filter
+  "Restricts a provider seq to `:force-provider` when set (explicit provider
+   pin from `{:routing {:provider ...}}`). Without this, a pinned provider is
+   silently ignored and selection can route to any other provider that happens
+   to expose the same model name. Returns `providers` unchanged when no pin."
+  [prefs providers]
+  (if-let [fp (:force-provider prefs)]
+    (filter #(= (:id %) fp) providers)
+    providers))
+
 (defn- resolve-model
   "Returns the best model map for a provider given preferences, or nil.
    :prefer can be a keyword (:cost, :intelligence, :speed) or a vector of keywords
@@ -1236,7 +1246,7 @@
   [router prefs]
   (let [{:keys [providers state]} router
         current-state @state
-        candidates (->> providers
+        candidates (->> (force-provider-filter prefs providers)
                      (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
                      (filter (fn [[p _]] (provider-available? router p (get current-state (:id p) {})))))]
     (when (seq candidates)
@@ -1258,7 +1268,7 @@
     (loop []
       (let [current @state
             ts (router-now-ms router)
-            candidates (->> providers
+            candidates (->> (force-provider-filter prefs providers)
                          (remove #(contains? excluded (:id %)))
                          (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
                          (filter (fn [[p _]] (provider-available? router p (get current (:id p) {})))))]
@@ -1277,7 +1287,7 @@
         _ts (router-now-ms router)
         window-ms (:window-ms router)
         excluded (or (:exclude-providers prefs) #{})]
-    (->> providers
+    (->> (force-provider-filter prefs providers)
       (remove #(contains? excluded (:id %)))
       (filter #(some? (resolve-model % prefs)))
       (keep (fn [p]

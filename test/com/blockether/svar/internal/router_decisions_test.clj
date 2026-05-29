@@ -140,6 +140,33 @@
 ;; Tier 1 — with-provider-fallback happy/sad paths
 ;; =============================================================================
 
+(defdescribe force-provider-pinning-test
+  "Regression: `:force-provider` must actually RESTRICT selection to the
+   pinned provider, even when another (higher-priority) provider exposes the
+   same model name. Pre-fix the key was set in prefs but read nowhere, so the
+   pin was silently ignored and the first-priority provider won — meaning
+   `{:routing {:provider :openai}}` could be served by a different provider."
+  ;; Both providers expose the SAME model name; :first has higher priority
+  ;; (vector order), so without honoring the pin it always wins selection.
+  (let [router (llm/make-router
+                 [{:id :first  :api-key "k" :base-url "http://1" :models [{:name "shared"}]}
+                  {:id :second :api-key "k" :base-url "http://2" :models [{:name "shared"}]}])]
+
+    (it "provider + model pin routes to the pinned (lower-priority) provider"
+      (let [{:keys [prefs]} (router/resolve-routing router {:provider :second :model "shared"})
+            [prov _] (router/select-provider router prefs)]
+        (expect (= :second (:id prov)))))
+
+    (it "provider-only pin (no model) routes to the pinned provider"
+      (let [{:keys [prefs]} (router/resolve-routing router {:provider :second})
+            [prov _] (router/select-provider router prefs)]
+        (expect (= :second (:id prov)))))
+
+    (it "unpinned selection still allows the higher-priority provider"
+      (let [{:keys [prefs]} (router/resolve-routing router {:model "shared"})
+            [prov _] (router/select-provider router prefs)]
+        (expect (= :first (:id prov)))))))
+
 (defdescribe with-provider-fallback-happy-path-test
   "Successful call: result is annotated with `:routed/provider-id`,
    `:routed/model`, `:routed/base-url`, and the router's stats record the

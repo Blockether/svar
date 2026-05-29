@@ -148,7 +148,26 @@
           (expect (contains? result :total-duration-ms))
           (expect (contains? result :gradient))
           (expect (contains? result :prompt-evolution))
-          (expect (contains? result :window))))))
+          (expect (contains? result :window)))))
+
+    (it "rolls up :tokens/:cost from every sub-call (regression: were always nil)"
+      ;; refinement-iteration-step never produced :total-tokens/:total-cost, so
+      ;; refine! reported nil usage despite making many billed calls. Now each
+      ;; sub-call's usage is accumulated. The mock returns zero-valued token
+      ;; maps; the regression is the KEY being a populated map vs nil.
+      (with-mock-llm {:ask (make-dispatching-ask-fn {:answer "Paris"} {:answer "Paris"})
+                      :eval (fn [_router _opts] (make-mock-eval-response 0.95))}
+        (let [result (svar/refine! test-router
+                       {:spec test-spec
+                        :messages [(svar/system "Answer geography questions.")
+                                   (svar/user "What is the capital of France?")]
+                        :model "gpt-4o"
+                        :iterations 1
+                        :threshold 0.9})]
+          (expect (map? (:tokens result)))
+          (expect (map? (:cost result)))
+          (expect (contains? (:tokens result) :total))
+          (expect (contains? (:cost result) :total-cost))))))
 
   (describe "iteration control"
     (it "runs up to max iterations with default settings (3)"
