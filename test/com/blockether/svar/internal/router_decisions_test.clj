@@ -167,6 +167,29 @@
             [prov _] (router/select-provider router prefs)]
         (expect (= :first (:id prov)))))))
 
+(defdescribe provider-pin-honors-optimize-test
+  "`{:provider X :optimize Y}` must select the OPTIMIZED model WITHIN the pinned
+   provider — not silently fall back to the provider's root model. Used by
+   per-provider 'smallest model' preferences (e.g. auto-titling on a flat-fee
+   coding plan: pin the plan, pick its cheapest/fastest model)."
+  (let [router (llm/make-router
+                 [{:id :plan :api-key "k" :base-url "http://p"
+                   :models [{:name "big"   :cost :high}
+                            {:name "small" :cost :low}]}])]
+
+    (it "provider + :optimize :cost picks the cheapest model, not the root"
+      (let [{:keys [prefs]} (router/resolve-routing router
+                              {:provider :plan :optimize :cost})
+            [_ model] (router/select-provider router prefs)]
+        (expect (nil? (:strategy prefs)))
+        (expect (= "small" (:name model)))))
+
+    (it "provider alone still resolves to the root (first) model"
+      (let [{:keys [prefs]} (router/resolve-routing router {:provider :plan})
+            [_ model] (router/select-provider router prefs)]
+        (expect (= :root (:strategy prefs)))
+        (expect (= "big" (:name model)))))))
+
 (defdescribe with-provider-fallback-happy-path-test
   "Successful call: result is annotated with `:routed/provider-id`,
    `:routed/model`, `:routed/base-url`, and the router's stats record the
@@ -535,7 +558,7 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -559,13 +582,13 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                               :p2 (success-result 10))))
+                           :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)
@@ -1127,3 +1150,106 @@
         ;; so we know the interrupt escaped the loop instead of being
         ;; absorbed.
         (expect (< elapsed 2000))))))
+
+;; =============================================================================
+;; Model-unsupported fallback — provider advertises a model but rejects it at
+;; inference (400/404 `model_not_supported`). Route to a sibling model by NAME
+;; instead of failing the whole call. Regression: Copilot `grok-code-fast-1`.
+;; =============================================================================
+
+(defn- model-unsupported-error
+  "Throws the shape `with-provider-fallback` sees when an endpoint rejects the
+   selected model: a 400 carrying the upstream body on `:body`."
+  ([] (model-unsupported-error "The model `grok-code-fast-1` is not supported."))
+  ([body]
+   (throw (ex-info "Exceptional status code: 400"
+            {:type :svar.core/http-error :status 400 :body body}))))
+
+(defn- auth-400-error
+  "A 400 that is NOT a model problem (bad credentials). Must NOT be treated as
+   model-unsupported, otherwise a credential bug churns the whole fleet."
+  []
+  (throw (ex-info "Exceptional status code: 400"
+           {:type :svar.core/http-error :status 400
+            :body "bad request: Authorization header is badly formatted"})))
+
+(defdescribe with-provider-fallback-model-unsupported-test
+  "400/404 `model_not_supported` excludes the MODEL (not the provider) and
+   retries a sibling — including on the same provider."
+
+  (it "falls back to a sibling model on the SAME provider, excluding by name"
+    (let [r (llm/make-router
+              [{:id :copilot :api-key "k" :base-url "http://c"
+                :models [{:name "grok-code-fast-1"} {:name "gpt-5.4-mini"}]}])
+          calls (atom [])
+          live (atom [])
+          result (router/with-provider-fallback r {:on-chunk #(swap! live conj %)}
+                   (fn [_provider model]
+                     (swap! calls conj (:name model))
+                     (if (= "grok-code-fast-1" (:name model))
+                       (model-unsupported-error)
+                       (success-result 100))))]
+      ;; root (first) model tried, rejected, excluded; sibling served.
+      (expect (= ["grok-code-fast-1" "gpt-5.4-mini"] @calls))
+      (expect (= "gpt-5.4-mini" (:routed/model result)))
+      (expect (:routed/fallback? result))
+      (let [trace (:routed/trace result)]
+        (expect (= trace @live))
+        (expect (= [:llm.routing/model-fallback] (mapv :event/type trace)))
+        (expect (= "grok-code-fast-1" (:from-model (last trace))))
+        (expect (= "gpt-5.4-mini" (:to-model (last trace))))
+        (expect (= :model-unsupported (:reason (last trace)))))))
+
+  (it "falls back across providers when no sibling exists"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          calls (atom [])
+          result (router/with-provider-fallback r {}
+                   (fn [provider model]
+                     (swap! calls conj [(:id provider) (:name model)])
+                     (if (= "m1" (:name model))
+                       (model-unsupported-error "model_not_supported")
+                       (success-result 100))))]
+      (expect (= [[:p1 "m1"] [:p2 "m2"]] @calls))
+      (expect (= "m2" (:routed/model result)))))
+
+  (it "does NOT loop forever under :strategy :root (root honors exclusion)"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          calls (atom [])
+          result (router/with-provider-fallback r {:strategy :root}
+                   (fn [provider model]
+                     (swap! calls conj [(:id provider) (:name model)])
+                     (if (= "m1" (:name model))
+                       (model-unsupported-error "no such model")
+                       (success-result 100))))]
+      (expect (= [[:p1 "m1"] [:p2 "m2"]] @calls))
+      (expect (= "m2" (:routed/model result)))))
+
+  (it "an auth 400 is NOT mistaken for model-unsupported — it propagates"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          calls (atom [])]
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(router/with-provider-fallback r {}
+                   (fn [_provider model]
+                     (swap! calls conj (:name model))
+                     (auth-400-error)))))
+      ;; Only the first model attempted; no fleet churn on a credential bug.
+      (expect (= ["m1"] @calls))))
+
+  (it "every model unsupported → throws the concrete upstream reason"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1"
+                :models [{:name "m1"} {:name "m2"}]}])
+          thrown (try
+                   (router/with-provider-fallback r {}
+                     (fn [_provider _model] (model-unsupported-error "model_not_supported")))
+                   :no-throw
+                   (catch clojure.lang.ExceptionInfo e e))]
+      (expect (not= :no-throw thrown))
+      (expect (= 400 (:status (ex-data thrown))))
+      (expect (= #{"m1" "m2"} (:model-unsupported (ex-data thrown)))))))

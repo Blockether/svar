@@ -1188,10 +1188,17 @@
         automatically by `resolve-routing` when caller supplies a `:reasoning`
         level. Ensures `{:routing {:optimize :cost} :reasoning :deep}` picks
         the cheapest *reasoning-capable* model, not silently drops the depth.
-     - `:exclude-model` — skip a named model (used for post-failure retry)."
+     - `:exclude-model` — skip a named model (used for post-failure retry).
+     - `:exclude-models` — set of model NAMES to skip. Honored by EVERY
+        branch (root / force / prefer) so a model the endpoint rejected as
+        unsupported is never re-selected — otherwise `:strategy :root` would
+        keep handing back the same dead root and spin `with-provider-fallback`
+        forever."
   [provider prefs]
   (let [require-reasoning? (:require-reasoning? prefs)
-        reasoning-ok? (fn [m] (if require-reasoning? (:reasoning? m) true))]
+        reasoning-ok? (fn [m] (if require-reasoning? (:reasoning? m) true))
+        exclude-set (or (:exclude-models prefs) #{})
+        usable? (fn [m] (and m (reasoning-ok? m) (not (contains? exclude-set (:name m)))))]
     (cond
       ;; Explicit force-model wins regardless of strategy. But `:require-reasoning?`
       ;; still filters — forcing a non-reasoning model while asking for reasoning
@@ -1199,12 +1206,12 @@
       ;; reasoning requirement.
       (:force-model prefs)
       (let [m (first (filter #(= (:name %) (:force-model prefs)) (:models provider)))]
-        (when (and m (reasoning-ok? m)) m))
+        (when (usable? m) m))
 
       (= (:strategy prefs) :root)
       (let [root-name (:root provider)
             m (first (filter #(= (:name %) root-name) (:models provider)))]
-        (when (and m (reasoning-ok? m)) m))
+        (when (usable? m) m))
 
       :else
       (let [required-caps (or (:capabilities prefs) #{})
@@ -1212,7 +1219,8 @@
             candidates (->> (:models provider)
                          (filter #(every? (:capabilities %) required-caps))
                          (filter reasoning-ok?)
-                         (filter #(if exclude (not= (:name %) exclude) true)))]
+                         (filter #(if exclude (not= (:name %) exclude) true))
+                         (remove #(contains? exclude-set (:name %))))]
         (when (seq candidates)
           (let [prefer (:prefer prefs)
                 prefs-vec (cond
@@ -1366,6 +1374,31 @@
     (let [t (:type (ex-data e))
           retry-set (or (:format-retry-on prefs) DEFAULT_FORMAT_ERROR_TYPES)]
       (contains? retry-set t))))
+
+(def ^:private MODEL_UNSUPPORTED_PATTERNS
+  "Substrings (lower-cased) in an upstream 400/404 error body that mean the
+   SELECTED MODEL is unusable on this endpoint — the provider advertises it
+   but rejects inference. Distinct from auth / quota / request-shape 400s
+   (e.g. `authorization header is badly formatted`), which must NOT match so
+   we don't churn the whole fleet on a credential problem."
+  ["model_not_supported" "model not supported" "unsupported model"
+   "model_not_found" "model not found" "no such model"
+   "unknown model" "invalid model" "not a valid model"
+   "model does not exist" "the model `" "does not exist or you do not have access"])
+
+(defn- model-unsupported-error?
+  "True when a 400/404 indicates the SELECTED MODEL is unusable on this
+   endpoint, as opposed to an auth/quota/request-shape failure. Detected
+   from the captured upstream error body so `with-provider-fallback` can
+   route to a sibling model (same or another provider) instead of failing
+   the whole call. Body-driven, not status-driven: a bare 400 is NOT enough."
+  [e]
+  (let [data (ex-data e)
+        status (:status data)
+        hay (str/lower-case (str (or (:body data) "") " " (or (ex-message e) "")))]
+    (boolean
+      (and (contains? #{400 404} status)
+        (some #(str/includes? hay %) MODEL_UNSUPPORTED_PATTERNS)))))
 
 (defn- routing-event
   [router event-type data]
@@ -1559,6 +1592,11 @@
         ;; Last format-error caught — surfaced verbatim when no provider can
         ;; take call. Keeps schema-rejected ex-data, not opaque exhaustion.
         last-format-error (atom nil)
+        ;; Models the provider advertises but rejects at inference time
+        ;; (400/404 `model_not_supported`). Excluded by NAME (not provider)
+        ;; so a sibling model on the SAME provider can still serve the call.
+        model-unsupported (atom #{})
+        last-unsupported-error (atom nil)
         trace (atom [])
         selected (atom nil)
         pending-fallback (atom nil)
@@ -1568,7 +1606,9 @@
                          (seq @format-failed) (update :exclude-providers
                                                 (fnil into #{}) @format-failed)
                          (seq @rate-limited)  (update :exclude-providers
-                                                (fnil into #{}) @rate-limited))]
+                                                (fnil into #{}) @rate-limited)
+                         (seq @model-unsupported) (update :exclude-models
+                                                    (fnil into #{}) @model-unsupported))]
         (if-let [[provider model-map] (select-and-claim! router iter-prefs)]
           (let [pid (:id provider)
                 start-ms (router-now-ms router)]
@@ -1579,7 +1619,10 @@
             (when-let [{:keys [from-provider from-model status reason error elapsed-ms]} @pending-fallback]
               (append-routing-event! trace prefs
                 (routing-event router
-                  (if (= reason :format-error) :llm.routing/format-fallback :llm.routing/provider-fallback)
+                  (case reason
+                    :format-error :llm.routing/format-fallback
+                    :model-unsupported :llm.routing/model-fallback
+                    :llm.routing/provider-fallback)
                   (cond-> {:status status
                            :reason (if (= reason :rate-limit) :rate-limit-budget-exhausted reason)
                            :from-provider (name from-provider)
@@ -1608,6 +1651,9 @@
 
                                (format-error? prefs e)
                                {:format-error e}
+
+                               (model-unsupported-error? e)
+                               {:model-unsupported e}
 
                                :else (throw e))))]
               (cond
@@ -1652,6 +1698,25 @@
                                             :error (ex-message e)})
                   (recur (inc attempts)))
 
+                (:model-unsupported result)
+                (let [e (:model-unsupported result)]
+                  (trove/log! {:level :warn
+                               :id ::model-unsupported
+                               :data {:provider-id pid
+                                      :model (:name model-map)
+                                      :status (:status (ex-data e))}
+                               :msg "model unsupported by endpoint: excluding model, trying next"})
+                  ;; Exclude the MODEL name (not the provider): sibling models
+                  ;; on the same provider may still serve the call.
+                  (swap! model-unsupported conj (:name model-map))
+                  (reset! last-unsupported-error e)
+                  (reset! pending-fallback {:from-provider pid
+                                            :from-model (:name model-map)
+                                            :status (:status (ex-data e))
+                                            :reason :model-unsupported
+                                            :error (ex-message e)})
+                  (recur (inc attempts)))
+
                 (:error result)
                 (let [e (:error result)
                       status (:status (ex-data e))
@@ -1682,7 +1747,8 @@
                                  :error (ex-message e)}
                           (some? (:elapsed-ms result)) (assoc :elapsed-ms (:elapsed-ms result))))
                       (recur (inc attempts))))))))
-          (if (and @last-format-error (seq @format-failed))
+          (cond
+            (and @last-format-error (seq @format-failed))
             (let [e @last-format-error]
               (throw (ex-info (ex-message e)
                        (merge (ex-data e)
@@ -1690,6 +1756,20 @@
                           :tried @tried
                           :format-failed @format-failed})
                        e)))
+
+            ;; Every candidate model was rejected as unsupported and nothing
+            ;; else can take the call — surface the concrete upstream reason
+            ;; rather than a generic "all providers exhausted".
+            (and @last-unsupported-error (seq @model-unsupported))
+            (let [e @last-unsupported-error]
+              (throw (ex-info (ex-message e)
+                       (merge (ex-data e)
+                         {:routed/trace @trace
+                          :tried @tried
+                          :model-unsupported @model-unsupported})
+                       e)))
+
+            :else
             (let [earliest (earliest-available router iter-prefs)]
               (if (and earliest (< attempts 3))
                 (let [wait-ms (min (- (long earliest) (router-now-ms router)) (long max-wait-ms))]
@@ -1810,10 +1890,17 @@
                                    :provider provider :model model
                                    :available (mapv :name (:models p))})))
                        {:strategy :root :force-provider provider :force-model model})
-                     ;; Provider override + optimize
+                     ;; Provider override + optimize: honor the optimization
+                     ;; WITHIN the pinned provider (force-provider restricts to
+                     ;; it; :prefer selects the model). Without optimize, keep
+                     ;; the historical `:strategy :root` so a bare provider pin
+                     ;; still resolves to that provider's root model.
+                     (and provider optimize)
+                     {:force-provider provider :prefer optimize}
+
                      provider
                      {:strategy :root :force-provider provider
-                      :prefer (or optimize :cost)}
+                      :prefer :cost}
                      ;; Model override — find in any provider
                      model
                      {:strategy :root :force-model model}
