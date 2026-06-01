@@ -38,6 +38,22 @@
   (throw (ex-info (str "HTTP " status)
            {:type :svar.core/http-error :status status})))
 
+(defn- model-unsupported-error
+  "Throws the shape `with-provider-fallback` sees when an endpoint rejects the
+   selected model: a 400 carrying the upstream body on `:body`."
+  ([] (model-unsupported-error "The model `grok-code-fast-1` is not supported."))
+  ([body]
+   (throw (ex-info "Exceptional status code: 400"
+            {:type :svar.core/http-error :status 400 :body body}))))
+
+(defn- auth-400-error
+  "A 400 that is NOT a model problem (bad credentials). Must NOT be treated as
+   model-unsupported, otherwise a credential bug churns the whole fleet."
+  []
+  (throw (ex-info "Exceptional status code: 400"
+           {:type :svar.core/http-error :status 400
+            :body "bad request: Authorization header is badly formatted"})))
+
 (defn- stream-truncated-error
   "Throws the zero-content SSE EOF failure seen when a provider closes
    stream after an error event but before a terminal marker."
@@ -189,6 +205,58 @@
             [_ model] (router/select-provider router prefs)]
         (expect (= :root (:strategy prefs)))
         (expect (= "big" (:name model)))))))
+
+(defdescribe prefer-providers-ordered-chain-test
+  "`{:prefer-providers [...]}` walks a declared provider order, picking each
+   provider's `:optimize`-best model, and falls through natively on failure.
+   Framework primitive that replaces caller-side per-provider retry loops."
+  (let [router (llm/make-router
+                 ;; Vector order (priority) is DELIBERATELY the reverse of the
+                 ;; preference below, to prove provider-order beats priority.
+                 [{:id :copilot :api-key "k" :base-url "http://c"
+                   :models [{:name "cop-big" :cost :high} {:name "cop-small" :cost :low}]}
+                  {:id :anthropic :api-key "k" :base-url "http://a"
+                   :models [{:name "opus" :cost :high} {:name "haiku" :cost :low}]}
+                  {:id :zai :api-key "k" :base-url "http://z"
+                   :models [{:name "glm-turbo" :cost :low}]}])]
+
+    (it "resolve-routing translates :prefer-providers → :provider-order + :prefer"
+      (let [{:keys [prefs]} (router/resolve-routing router
+                              {:prefer-providers [:zai :anthropic] :optimize [:cost :speed]})]
+        (expect (= [:zai :anthropic] (:provider-order prefs)))
+        (expect (= [:cost :speed] (:prefer prefs)))
+        (expect (nil? (:strategy prefs)))))
+
+    (it "selects the first preferred provider's cheapest model, ignoring priority"
+      (let [{:keys [prefs]} (router/resolve-routing router
+                              {:prefer-providers [:zai :anthropic :copilot] :optimize :cost})
+            [prov model] (router/select-provider router prefs)]
+        (expect (= :zai (:id prov)))
+        (expect (= "glm-turbo" (:name model)))))
+
+    (it "walks the chain in order on model-unsupported failures, smallest per plan"
+      (let [calls (atom [])
+            result (router/with-provider-fallback router
+                     (:prefs (router/resolve-routing router
+                               {:prefer-providers [:zai :anthropic :copilot] :optimize :cost}))
+                     (fn [provider model]
+                       (swap! calls conj [(:id provider) (:name model)])
+                       (if (#{:zai :anthropic} (:id provider))
+                         (model-unsupported-error "model_not_supported")
+                         (success-result 100))))]
+        ;; zai (only model) → anthropic cheapest→dearest (haiku, opus) → copilot
+        ;; (cheapest surviving = cop-small). Provider order dominates; within a
+        ;; provider the cheapest model is tried first, then its siblings.
+        (expect (= [[:zai "glm-turbo"] [:anthropic "haiku"] [:anthropic "opus"] [:copilot "cop-small"]]
+                  @calls))
+        (expect (= :copilot (:routed/provider-id result)))
+        (expect (= "cop-small" (:routed/model result)))))
+
+    (it "providers absent from the preference list are tried last"
+      (let [{:keys [prefs]} (router/resolve-routing router
+                              {:prefer-providers [:anthropic] :optimize :cost})
+            [prov _] (router/select-provider router prefs)]
+        (expect (= :anthropic (:id prov)))))))
 
 (defdescribe with-provider-fallback-happy-path-test
   "Successful call: result is annotated with `:routed/provider-id`,
@@ -1156,22 +1224,6 @@
 ;; inference (400/404 `model_not_supported`). Route to a sibling model by NAME
 ;; instead of failing the whole call. Regression: Copilot `grok-code-fast-1`.
 ;; =============================================================================
-
-(defn- model-unsupported-error
-  "Throws the shape `with-provider-fallback` sees when an endpoint rejects the
-   selected model: a 400 carrying the upstream body on `:body`."
-  ([] (model-unsupported-error "The model `grok-code-fast-1` is not supported."))
-  ([body]
-   (throw (ex-info "Exceptional status code: 400"
-            {:type :svar.core/http-error :status 400 :body body}))))
-
-(defn- auth-400-error
-  "A 400 that is NOT a model problem (bad credentials). Must NOT be treated as
-   model-unsupported, otherwise a credential bug churns the whole fleet."
-  []
-  (throw (ex-info "Exceptional status code: 400"
-           {:type :svar.core/http-error :status 400
-            :body "bad request: Authorization header is badly formatted"})))
 
 (defdescribe with-provider-fallback-model-unsupported-test
   "400/404 `model_not_supported` excludes the MODEL (not the provider) and

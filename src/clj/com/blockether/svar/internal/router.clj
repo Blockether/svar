@@ -1233,11 +1233,19 @@
               (first candidates))))))))
 
 (defn- candidate-sort-key
-  "Composite sort key for cross-provider candidate selection: `[model-score
-   provider-priority]`. Model-score comes from the same `:prefer` sort keys
-   `resolve-model` used within a provider, so `(:optimize :intelligence)` now
-   picks the frontier-tier model across the whole fleet before falling back
-   to provider priority as a tiebreaker.
+  "Composite sort key for cross-provider candidate selection.
+
+   Default: `[model-score provider-priority]` — model-score (from the `:prefer`
+   keys) dominates, so `(:optimize :intelligence)` picks the frontier-tier model
+   across the whole fleet before provider priority breaks ties.
+
+   With `:provider-order` (an explicit ordered vector of provider ids, set by
+   `{:routing {:prefer-providers [...]}}`): `[provider-rank model-score
+   provider-priority]` — the declared PROVIDER order dominates and model-score
+   only breaks ties WITHIN a provider, so each plan still yields its optimized
+   model. Providers absent from the list sort last. Combined with
+   `with-provider-fallback`, this walks the preference chain natively: a failed
+   provider/model is excluded and the next-ranked candidate is selected.
 
    Returns `[[] priority]` when no `:prefer` is set — priority-only ordering,
    which preserves the historical `:strategy :root` / force-model semantics."
@@ -1247,8 +1255,15 @@
                     (keyword? prefer) [prefer]
                     :else nil)
         key-fns (keep preference-sort-key prefs-vec)
-        model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))]
-    (fn [[p m]] [(model-score m) (:priority p 0)])))
+        model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
+        order (:provider-order prefs)
+        order-rank (when (seq order)
+                     (let [idx (zipmap order (range))
+                           miss (count order)]
+                       (fn [p] (long (get idx (:id p) miss)))))]
+    (if order-rank
+      (fn [[p m]] [(order-rank p) (model-score m) (:priority p 0)])
+      (fn [[p m]] [(model-score m) (:priority p 0)]))))
 
 (defn select-provider
   "Returns [provider model-map] or nil. Read-only.
@@ -1864,6 +1879,14 @@
    Returns {:prefs prefs-map :error-strategy kw}.
    Throws on invalid provider/model combinations.
 
+   `:prefer-providers` (vector of provider ids) declares an ordered provider
+   preference: svar picks the `:optimize`-best model WITHIN each provider and
+   walks the list (via `with-provider-fallback`) on failure. Providers not in
+   the list are tried last. This is the framework primitive for cheap
+   side-channel tasks (e.g. auto-titling) that want a deliberate plan order +
+   smallest model per plan instead of one global cost winner — callers no
+   longer hand-roll a per-provider retry loop.
+
    `:reasoning` in the routing opts (abstract level — :quick/:balanced/:deep
    or strings/aliases) implies `:require-reasoning? true` in prefs, which
    filters model selection to `:reasoning? true` models in `resolve-model`.
@@ -1872,7 +1895,7 @@
    cost-cheapest model happens to be non-reasoning."
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning
-                on-format-error format-retry-on on-chunk]} routing-opts
+                prefer-providers on-format-error format-retry-on on-chunk]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
         base-prefs (cond
@@ -1904,6 +1927,15 @@
                      ;; Model override — find in any provider
                      model
                      {:strategy :root :force-model model}
+                     ;; Ordered provider preference: pick the `:optimize`-best
+                     ;; model WITHIN each provider, walking the declared order
+                     ;; (with-provider-fallback handles fall-through on
+                     ;; failure). Use for cheap side-channel tasks where the
+                     ;; caller wants a deliberate plan order + smallest model
+                     ;; per plan, not a single global cost winner.
+                     (seq prefer-providers)
+                     {:prefer (or optimize :cost)
+                      :provider-order (vec prefer-providers)}
                      ;; Optimize across all
                      optimize
                      {:prefer optimize}
