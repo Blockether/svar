@@ -441,7 +441,6 @@
         (expect (= "2024-01-01" (get-in (:value result) [:outer :meta :created])))
         (expect (= "active" (get-in (:value result) [:outer :meta :status])))))))
 
-
 ;; =============================================================================
 ;; Unicode escape handling (regression)
 ;; =============================================================================

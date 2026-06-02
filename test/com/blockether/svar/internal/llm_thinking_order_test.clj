@@ -157,4 +157,54 @@
       (expect (= 2 (count wire)))
       (expect (= "text" (:type (first wire))))
       (expect (= "text" (:type (second wire))))
-      (expect (= "wait" (:text (second wire)))))))
+      (expect (= "wait" (:text (second wire))))))
+
+  ;; Vis session ac065988: a long extended-thinking response whose
+  ;; TRAILING thinking block carried no text. `demote-interior-thinking-blocks`
+  ;; turned it into `{:type "text" :text ""}`; replaying that assistant
+  ;; message 400'd the next call with
+  ;;   `messages: text content blocks must be non-empty`.
+  ;; The serializer must DROP empty/blank text blocks, never emit them.
+  (it "drops an empty demoted thinking block instead of emitting an empty text block (ac065988)"
+    (let [messages [{:role "user" :content "go"}
+                    {:role    "assistant"
+                     :content [{:type "text" :text "the answer"}
+                               {:type "thinking" :thinking ""
+                                :thinking-signature "sig"}]}
+                    {:role "user" :content "next"}]
+          body (build-body messages "claude-opus-4-7" {:max_tokens 1024})
+          wire (-> body :messages second :content)]
+      ;; Empty trailing block removed — only the real text survives, so the
+      ;; single-text-collapse path emits the plain string (no empty block).
+      (expect (= "the answer" wire))))
+
+  (it "drops a missing-signature thinking block that has no text (would serialize to empty text)"
+    (let [messages [{:role "user" :content "go"}
+                    {:role    "assistant"
+                     :content [{:type "thinking" :thinking ""
+                                :thinking-signature ""}
+                               {:type "text" :text "real body"}]}
+                    {:role "user" :content "next"}]
+          body (build-body messages "claude-opus-4-7" {:max_tokens 1024})
+          wire (-> body :messages second :content)]
+      ;; A thinking block is present (empty sig → demoted), so the array
+      ;; form is kept; the empty text is dropped, leaving the real body.
+      (expect (= [{:type "text" :text "real body"}] wire))))
+
+  (it "drops the empty text block but keeps a co-present signed thinking block (no collapse)"
+    (let [messages [{:role "user" :content "go"}
+                    {:role    "assistant"
+                     :content [{:type "thinking" :thinking "lead"
+                                :thinking-signature "sig-A"}
+                               {:type "text" :text "body"}
+                               {:type "thinking" :thinking ""
+                                :thinking-signature "sig-B"}]}
+                    {:role "user" :content "next"}]
+          body (build-body messages "claude-opus-4-7" {:max_tokens 1024})
+          wire (-> body :messages second :content)]
+      ;; Leading signed thinking + the real text survive; the empty
+      ;; demoted trailer is dropped. Two blocks, no empty text.
+      (expect (= 2 (count wire)))
+      (expect (= "thinking" (:type (nth wire 0))))
+      (expect (= "sig-A" (:signature (nth wire 0))))
+      (expect (= {:type "text" :text "body"} (nth wire 1))))))

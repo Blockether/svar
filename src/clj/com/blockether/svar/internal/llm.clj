@@ -872,10 +872,25 @@
   [{:keys [content]}]
   (let [blocks        (-> content normalize-content demote-interior-thinking-blocks)
         has-thinking? (some canonical-thinking-block? blocks)
-        wire          (mapv (fn [b]
-                              (if (canonical-thinking-block? b)
-                                (canonical-thinking->anthropic-block b)
-                                (anthropic-block b)))
+        wire          (into []
+                        ;; Drop empty text blocks at the point of
+                        ;; production. The demote / missing-signature
+                        ;; fallbacks (`demote-interior-thinking-blocks`,
+                        ;; `canonical-thinking->anthropic-block` :else)
+                        ;; emit `{:type "text" :text ""}` when a thinking
+                        ;; block carried no text, and Anthropic 400s on ANY
+                        ;; empty text block (`messages: text content blocks
+                        ;; must be non-empty`) — replaying such an assistant
+                        ;; message rejected the whole next request (Vis
+                        ;; session ac065988). Non-text blocks (thinking,
+                        ;; image, tool_use) always pass through.
+                        (keep (fn [b]
+                                (let [w (if (canonical-thinking-block? b)
+                                          (canonical-thinking->anthropic-block b)
+                                          (anthropic-block b))]
+                                  (when-not (and (text-block? w)
+                                              (str/blank? (:text w)))
+                                    w))))
                         blocks)]
     (if (or has-thinking?
           (not= 1 (count wire))
