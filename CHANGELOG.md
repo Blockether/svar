@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.1] - 2026-06-03
+
+### Changed
+- fix(graal): remove boxed math warnings
+- fix(anthropic): drop empty text content blocks in wire serializer
+- feat(router): :prefer-providers — declarative ordered provider preference
+- feat(router): per-model 400 model_unsupported fallback + provider-pinned optimize
+- Exclude unsupported Grok Copilot model
+- docs: skip deps.edn block in README doctest; show correct unquoted coordinate
+- docs: clarify deps.edn quote is a README-doctest artifact, not for real deps.edn
+- release: update version files for v0.7.0, bump to next dev version
+
+
 ## [v0.7.0] - 2026-05-29
 
 ### Changed
@@ -1070,7 +1083,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.1...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1115,3 +1128,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.6.0]: https://github.com/Blockether/svar/releases/tag/v0.6.0
 [v0.6.1]: https://github.com/Blockether/svar/releases/tag/v0.6.1
 [v0.7.0]: https://github.com/Blockether/svar/releases/tag/v0.7.0
+[v0.7.1]: https://github.com/Blockether/svar/releases/tag/v0.7.1
