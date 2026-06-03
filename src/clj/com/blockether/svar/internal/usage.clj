@@ -72,19 +72,24 @@
         cache-read    (long-or-0 cache-read)
         cache-write   (long-or-0 cache-write)
         reasoning     (long-or-0 reasoning)
-        regular       (if (some? regular)
-                        (long-or-0 regular)
-                        ;; Compute when omitted. Anthropic feeds us split
-                        ;; values directly so we calculate input-tokens
-                        ;; from regular + cache; OpenAI feeds us total +
-                        ;; subset so we calculate regular from total -
-                        ;; cache.
-                        (max 0 (- input-tokens cache-read cache-write)))
+        regular       (long (if (some? regular)
+                              (long-or-0 regular)
+                              ;; Compute when omitted. Anthropic feeds us split
+                              ;; values directly so we calculate input-tokens
+                              ;; from regular + cache; OpenAI feeds us total +
+                              ;; subset so we calculate regular from total -
+                              ;; cache.
+                              (let [n (- (long input-tokens)
+                                        (long cache-read)
+                                        (long cache-write))]
+                                (if (neg? n) 0 n))))
         ;; Invariant check — log but don't throw. The cost calculator
         ;; will still produce sane output even if a provider returns
         ;; weird data; user-facing surfaces just see a 0/0/0 fallback.
-        computed-total (+ regular cache-write cache-read)]
-    (when (and (pos? input-tokens) (not= computed-total input-tokens))
+        computed-total (long (+ (long regular)
+                               (long cache-write)
+                               (long cache-read)))]
+    (when (and (pos? (long input-tokens)) (not= computed-total input-tokens))
       (trove/log!
         {:level :debug
          :id ::invariant-violation
@@ -98,8 +103,9 @@
              :input-tokens-details {:regular     regular
                                     :cache-write cache-write
                                     :cache-read  cache-read}
-             :total-tokens         (+ input-tokens output-tokens)}
-      (pos? reasoning) (assoc :output-tokens-details {:reasoning reasoning})
+             :total-tokens         (long (+ (long input-tokens)
+                                           (long output-tokens)))}
+      (pos? (long reasoning)) (assoc :output-tokens-details {:reasoning reasoning})
       raw              (assoc :raw raw))))
 
 (defn anthropic-canonical
@@ -119,7 +125,9 @@
           cache-read     (long-or-0 (:cache_read_input_tokens usage))
           cache-write    (long-or-0 (:cache_creation_input_tokens usage))]
       (build-canonical
-        {:input-tokens  (+ input-uncached cache-write cache-read)
+        {:input-tokens  (long (+ (long input-uncached)
+                                (long cache-write)
+                                (long cache-read)))
          :regular       input-uncached
          :cache-write   cache-write
          :cache-read    cache-read

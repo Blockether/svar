@@ -598,7 +598,7 @@
                     (.update bytes))
             digest (.digest md)]
         (str "svar-auto-"
-          (apply str (take 16 (map #(format "%02x" (bit-and % 0xff))
+          (apply str (take 16 (map #(format "%02x" (bit-and (long %) 0xff))
                                 (vec digest)))))))))
 
 (defn- openai-style? [api-style]
