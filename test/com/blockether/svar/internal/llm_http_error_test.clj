@@ -28,6 +28,8 @@
 (def ^:private truncate-error-body @#'sut/truncate-error-body)
 (def ^:private with-retry @#'sut/with-retry)
 (def ^:private MAX-CHARS @#'sut/MAX_HTTP_ERROR_BODY_CHARS)
+(def ^:private retryable-exception? @#'sut/retryable-exception?)
+(def ^:private transient-network-error? @#'sut/transient-network-error?)
 
 (defdescribe truncate-error-body-test
   (describe "pure stringifier"
@@ -219,3 +221,85 @@
                              (ex-data e)))))]
         (expect (= :svar.core/http-error (:type captured)))
         (expect (= "reasoning survived" (:reasoning captured)))))))
+
+;;; ── transient network-blip classification ──────────────────────────────
+
+;; Regression: a brief connectivity blip (wifi handoff, VPN reconnect,
+;; laptop sleep/wake) surfaces OS-level connection errors with NO HTTP
+;; status - most commonly "Can't assign requested address" (EADDRNOTAVAIL)
+;; once the idle watchdog has already closed a stalled stream and svar
+;; retries into a still-recovering stack. These cleared in seconds but were
+;; classified non-retryable, so svar threw `:svar.core/http-error` and Vis
+;; failed the whole turn (losing all prior iterations). They must retry.
+
+(defdescribe transient-network-error-test
+  (describe "transient-network-error? cause-chain matching"
+    (it "matches EADDRNOTAVAIL (Can't assign requested address)"
+      (expect (transient-network-error?
+                (java.net.BindException. "Can't assign requested address"))))
+
+    (it "matches when wrapped several layers deep"
+      (expect (transient-network-error?
+                (ex-info "Stream connection error"
+                  {:type :svar.core/http-error}
+                  (ex-info "request failed" {}
+                    (java.net.SocketException. "Network is unreachable"))))))
+
+    (it "matches no route to host / host unreachable / connect timeout"
+      (expect (transient-network-error?
+                (java.net.NoRouteToHostException. "No route to host")))
+      (expect (transient-network-error?
+                (java.net.ConnectException. "Connection timed out")))
+      (expect (transient-network-error?
+                (java.net.UnknownHostException. "api.anthropic.com"))))
+
+    (it "does NOT match connection refused (down service, not a blip)"
+      (expect (not (transient-network-error?
+                     (java.net.ConnectException. "Connection refused")))))
+
+    (it "does NOT match unrelated errors"
+      (expect (not (transient-network-error?
+                     (ex-info "Exceptional status code: 400" {:status 400}))))
+      (expect (not (transient-network-error? (NullPointerException.))))))
+
+  (describe "retryable-exception? folds transient network errors in"
+    (it "flags EADDRNOTAVAIL as retryable"
+      (expect (retryable-exception?
+                (ex-info "Can't assign requested address"
+                  {:type :svar.core/http-error}
+                  (java.net.BindException. "Can't assign requested address")))))
+
+    (it "still flags pre-existing connection-reset / EOF cases"
+      (expect (retryable-exception?
+                (ex-info "boom" {} (java.net.SocketException. "Connection reset"))))))
+
+  (describe "with-retry recovers from a transient connect blip"
+    (it "retries EADDRNOTAVAIL then succeeds when the stack recovers"
+      (let [calls (atom 0)
+            result (with-retry
+                     (fn []
+                       (if (< (swap! calls inc) 3)
+                         (throw (ex-info "Can't assign requested address"
+                                  {:type :svar.core/http-error}
+                                  (java.net.BindException. "Can't assign requested address")))
+                         :ok))
+                     {:max-retries 5 :initial-delay-ms 0})]
+        (expect (= :ok result))
+        (expect (= 3 @calls))))
+
+    (it "does NOT retry a transient connect error once stream output started"
+      ;; replaying after visible tokens would duplicate/rewind the trace
+      (let [calls (atom 0)]
+        (try
+          (with-retry
+            (fn []
+              (swap! calls inc)
+              (throw (ex-info "Can't assign requested address"
+                       {:type :svar.core/http-error
+                        :stream? true
+                        :reasoning-acc-len 42
+                        :reasoning "thinking..."}
+                       (java.net.BindException. "Can't assign requested address"))))
+            {:max-retries 5 :initial-delay-ms 0})
+          (catch clojure.lang.ExceptionInfo _ nil))
+        (expect (= 1 @calls))))))

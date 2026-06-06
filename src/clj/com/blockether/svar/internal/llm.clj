@@ -75,6 +75,52 @@
   "HTTP status codes that should trigger a retry."
   #{429 502 503 504 529})
 
+(def ^:private TRANSIENT_NETWORK_ERROR_SUBSTRINGS
+  "Lower-cased substrings of transient OS/network-layer connection errors.
+   A brief connectivity blip (wifi handoff, VPN reconnect, captive portal,
+   laptop sleep/wake) surfaces these while the local stack is momentarily
+   down - they clear once the network returns, so they're safe to retry
+   with backoff instead of failing the whole call.
+
+   Deliberately excludes \"connection refused\" (ECONNREFUSED): a RST from
+   the peer usually means a wrong endpoint / down service, not a transient
+   blip, and retrying just hammers it."
+  ["can't assign requested address"        ; EADDRNOTAVAIL - local stack churning
+   "cannot assign requested address"
+   "network is unreachable"                ; ENETUNREACH - interface down
+   "network is down"
+   "no route to host"                      ; EHOSTUNREACH - routing not up yet
+   "host is unreachable"
+   "connection timed out"                  ; connect-phase timeout
+   "connect timed out"
+   "operation timed out"
+   "temporary failure in name resolution"  ; DNS resolver had no network
+   "name or service not known"
+   "no address associated with hostname"
+   "nodename nor servname provided"])      ; macOS DNS during blip
+
+(defn- ex-chain
+  "Lazy seq of an exception and its causes, capped to avoid pathological
+   self-referential chains."
+  [^Throwable e]
+  (take 16 (take-while some? (iterate (fn [^Throwable t] (.getCause t)) e))))
+
+(defn- transient-network-error?
+  "True when any link in the cause chain looks like a transient OS/network
+   connection error (see `TRANSIENT_NETWORK_ERROR_SUBSTRINGS`). Walks the
+   whole chain because babashka.http-client and the router wrap the raw
+   `java.net.*` exception several layers deep."
+  [^Throwable e]
+  (boolean
+    (some (fn [^Throwable t]
+            (or
+              ;; UnknownHostException's message is just the hostname, so
+              ;; match it by class - a DNS miss during a blip is transient.
+              (instance? java.net.UnknownHostException t)
+              (let [m (some-> (ex-message t) str/lower-case)]
+                (and m (some #(str/includes? m %) TRANSIENT_NETWORK_ERROR_SUBSTRINGS)))))
+      (ex-chain e))))
+
 (defn- stream-output-started?
   "True when a failed stream already emitted anything to the caller.
    Do not retry after reasoning either: TUI already displayed it, so replaying
@@ -110,6 +156,10 @@
       (instance? java.net.SocketTimeoutException cause)
       (and cause-msg (str/includes? cause-msg "Connection reset"))
       (and cause-msg (str/includes? cause-msg "EOF"))
+     ;; transient OS/network-layer connection errors (brief connectivity
+     ;; blip): EADDRNOTAVAIL, ENETUNREACH, EHOSTUNREACH, connect timeout,
+     ;; transient DNS failures. Walks the full cause chain.
+      (transient-network-error? e)
       (and (:stream? data)
         (or (str/includes? msg-lower "stream connection error")
           (str/includes? msg-lower "connection reset")
