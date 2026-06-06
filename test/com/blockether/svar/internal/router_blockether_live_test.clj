@@ -220,23 +220,27 @@
 ;; =============================================================================
 
 (defdescribe blockether-reasoning-filter-rejection-test
-  (describe ":reasoning filter on a fleet with zero reasoning-capable models"
-    (it "select-provider returns nil when the fleet has no :reasoning? models"
+  (describe ":reasoning on a fleet with zero reasoning-capable models"
+    ;; gpt-4o and gpt-4.1 are both NOT flagged :reasoning? in KNOWN_MODEL_METADATA.
+    (it "root path routes best-effort — reasoning is a hint, not a hard gate"
       (when (blockether-enabled?)
-        ;; gpt-4o and gpt-4.1 are both NOT flagged :reasoning? in KNOWN_MODEL_METADATA
+        ;; No :optimize → :strategy :root. The root model is honored even though
+        ;; it is non-reasoning; reasoning is simply not applied (it would be a
+        ;; no-op anyway). Previously this returned nil → "all providers
+        ;; exhausted" on single/local non-reasoning fleets.
         (let [r (router-with-models ["gpt-4o" "gpt-4.1"])
               {:keys [prefs]} (router/resolve-routing r {:reasoning :deep})
+              [_ model] (router/select-provider r prefs)]
+          (expect (= "gpt-4o" (:name model))))))
+
+    (it "optimize/prefer path still filters — depth is not silently dropped"
+      (when (blockether-enabled?)
+        ;; When svar chooses among models, the reasoning filter still applies;
+        ;; with nothing reasoning-capable there is nothing to pick.
+        (let [r (router-with-models ["gpt-4o" "gpt-4.1"])
+              {:keys [prefs]} (router/resolve-routing r {:optimize :cost :reasoning :deep})
               selection (router/select-provider r prefs)]
-          (expect (nil? selection))
-          ;; And a live ask! should fail with the exhausted-providers error —
-          ;; no partial work / silent drop of `:reasoning`.
-          (try
-            (svar/ask! r {:spec answer-spec
-                          :messages [(svar/user "ignored")]
-                          :reasoning :deep})
-            (expect false "should have thrown — no reasoning-capable model")
-            (catch clojure.lang.ExceptionInfo e
-              (expect (= :svar.llm/all-providers-exhausted (:type (ex-data e)))))))))))
+          (expect (nil? selection)))))))
 
 ;; =============================================================================
 ;; Metadata sanity — Blockether really attaches pricing to its models

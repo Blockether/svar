@@ -1216,20 +1216,26 @@
   (let [require-reasoning? (:require-reasoning? prefs)
         reasoning-ok? (fn [m] (if require-reasoning? (:reasoning? m) true))
         exclude-set (or (:exclude-models prefs) #{})
-        usable? (fn [m] (and m (reasoning-ok? m) (not (contains? exclude-set (:name m)))))]
+        not-excluded? (fn [m] (and m (not (contains? exclude-set (:name m)))))]
     (cond
-      ;; Explicit force-model wins regardless of strategy. But `:require-reasoning?`
-      ;; still filters — forcing a non-reasoning model while asking for reasoning
-      ;; is a contradiction, so return nil rather than silently dropping the
-      ;; reasoning requirement.
+      ;; Explicit force-model wins regardless of strategy AND regardless of
+      ;; `:require-reasoning?`. The caller named this model, so reasoning is a
+      ;; best-effort hint: applied iff the model is `:reasoning?` (otherwise
+      ;; `reasoning-extra-body` no-ops), never a reason to refuse routing. The
+      ;; reasoning FILTER still applies to `:prefer`/optimize below, where svar
+      ;; — not the caller — chooses among models.
       (:force-model prefs)
       (let [m (first (filter #(= (:name %) (:force-model prefs)) (:models provider)))]
-        (when (usable? m) m))
+        (when (not-excluded? m) m))
 
+      ;; Root model: there's nothing to choose between, so honor it regardless
+      ;; of `:require-reasoning?` (same best-effort reasoning semantics as
+      ;; force-model). This is what lets a single local provider (e.g. LM Studio)
+      ;; serve `:reasoning`-flagged turns instead of "all providers exhausted".
       (= (:strategy prefs) :root)
       (let [root-name (:root provider)
             m (first (filter #(= (:name %) root-name) (:models provider)))]
-        (when (usable? m) m))
+        (when (not-excluded? m) m))
 
       :else
       (let [required-caps (or (:capabilities prefs) #{})

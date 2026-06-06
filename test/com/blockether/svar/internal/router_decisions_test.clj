@@ -792,12 +792,26 @@
             [_ model] (router/select-provider r prefs)]
         (expect (= "pricey-smart" (:name model))))))
 
-  (it "`:reasoning :deep` with zero reasoning-capable models returns nil selection"
-    ;; OpenAI fleet without any reasoning-capable model
+  (it "`:reasoning :deep` WITHOUT optimize routes the root model best-effort"
+    ;; Single-provider / local case (e.g. LM Studio): requesting a reasoning
+    ;; level must NOT block routing — the root model is honored and reasoning is
+    ;; applied iff it supports it. Previously this returned nil → the user saw
+    ;; "all providers exhausted" on a non-reasoning local model.
     (let [r (llm/make-router
               [{:id :openai :api-key "k"
                 :models [{:name "gpt-4o"} {:name "gpt-4.1"}]}])]
       (let [{:keys [prefs]} (router/resolve-routing r {:reasoning :deep})
+            [_ model] (router/select-provider r prefs)]
+        (expect (= "gpt-4o" (:name model))))))
+
+  (it "`:reasoning :deep` + `:optimize` with zero reasoning-capable models returns nil"
+    ;; When svar is choosing among models (optimize/prefer), the reasoning
+    ;; filter still applies so depth is not silently dropped — there is simply
+    ;; nothing reasoning-capable to pick here.
+    (let [r (llm/make-router
+              [{:id :openai :api-key "k"
+                :models [{:name "gpt-4o"} {:name "gpt-4.1"}]}])]
+      (let [{:keys [prefs]} (router/resolve-routing r {:optimize :cost :reasoning :deep})
             selection (router/select-provider r prefs)]
         (expect (nil? selection))))))
 
