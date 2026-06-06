@@ -143,8 +143,17 @@
                                :text {:verbosity "low"}}}
    :ollama      {:base-url "http://localhost:11434/v1"            :rpm 1000 :tpm 10000000
                  :env-keys []}
+   ;; LM Studio's OpenAI-compatible `/v1/models` omits context length, so
+   ;; svar would fall back to DEFAULT_CONTEXT_LIMIT and cripple a model that
+   ;; actually serves 100k+. Its native REST endpoint at `/api/v0/models`
+   ;; (host root, NOT under `/v1`) reports `max_context_length`,
+   ;; `loaded_context_length`, and `capabilities` — `models!` reads it via the
+   ;; `:models-base :host` + `:models-shape :lmstudio` hooks below.
    :lmstudio    {:base-url "http://localhost:1234/v1"             :rpm 1000 :tpm 10000000
-                 :env-keys []}})
+                 :env-keys []
+                 :models-path "/api/v0/models"
+                 :models-base :host
+                 :models-shape :lmstudio}})
 
 ;; =============================================================================
 ;; Provider-independent model-family metadata
@@ -581,6 +590,15 @@
       {}
       (into (set (keys catalog)) (keys overlay)))))
 
+(def ^:const DEFAULT_CONTEXT_LIMIT
+  "Fallback context window (tokens) for a model svar knows nothing about:
+   absent from models.dev, absent from any provider overlay, and carrying no
+   caller-supplied `:context`. Deliberately conservative — better to
+   under-promise the window than advertise tokens the backend will silently
+   truncate. Local providers (LM Studio / Ollama) should override this with a
+   detected `:context` (see `models!`); this is only the true-unknown floor."
+  8192)
+
 (def MODEL_CONTEXT_LIMITS
   "Best-effort flattened model context limits for legacy token utilities.
     When a model exists on multiple providers with different contexts, the most
@@ -599,7 +617,7 @@
                              (min (long existing) (long context)))))))
           acc (merged-provider-models pid)))
       {} (keys KNOWN_PROVIDERS))
-    :default 8192))
+    :default DEFAULT_CONTEXT_LIMIT))
 
 (def MODEL_PRICING
   "Best-effort flattened model pricing for legacy token utilities.

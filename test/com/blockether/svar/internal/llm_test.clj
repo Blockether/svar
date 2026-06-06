@@ -1033,3 +1033,42 @@
               m (fmt e)]
           (expect (string? m))
           (expect (not (clojure.string/blank? m))))))))
+
+(defdescribe lmstudio-models-shape-test
+  "Local-provider context detection: LM Studio's native /api/v0/models
+   reports context length the OpenAI-compatible /v1/models omits."
+  (describe "models-endpoint-url"
+    (it ":models-base :host hangs path off host root, not the /v1 chat base"
+      (expect (= "http://localhost:1234/api/v0/models"
+                ((var-get #'sut/models-endpoint-url) "http://localhost:1234/v1" :host "/api/v0/models"))))
+    (it "respects host/port overrides"
+      (expect (= "http://10.0.0.5:9000/api/v0/models"
+                ((var-get #'sut/models-endpoint-url) "http://10.0.0.5:9000/v1" :host "/api/v0/models"))))
+    (it "default base appends path to chat base-url (unchanged behavior)"
+      (expect (= "https://api.openai.com/v1/models"
+                ((var-get #'sut/models-endpoint-url) "https://api.openai.com/v1" nil "/models")))))
+  (describe "enrich-lmstudio-model"
+    (it "prefers loaded_context_length over max_context_length"
+      (let [m ((var-get #'sut/enrich-lmstudio-model)
+               {:id "m" :max_context_length 262144 :loaded_context_length 16384 :state "loaded"})]
+        (expect (= 16384 (:context m)))
+        (expect (true? (:loaded? m)))))
+    (it "falls back to max_context_length when not loaded"
+      (let [m ((var-get #'sut/enrich-lmstudio-model)
+               {:id "m" :max_context_length 131072 :state "not-loaded"})]
+        (expect (= 131072 (:context m)))
+        (expect (false? (:loaded? m)))))
+    (it "surfaces tool_use capability"
+      (expect (true? (:tool-call? ((var-get #'sut/enrich-lmstudio-model)
+                                   {:id "m" :capabilities ["tool_use"]})))))
+    (it "leaves models without context fields untouched"
+      (let [m ((var-get #'sut/enrich-lmstudio-model) {:id "m"})]
+        (expect (nil? (:context m)))
+        (expect (nil? (:tool-call? m))))))
+  (describe "shape-models"
+    (it "applies :lmstudio shaping"
+      (expect (= 8192 (-> ((var-get #'sut/shape-models) :lmstudio [{:id "m" :max_context_length 8192}])
+                        first :context))))
+    (it "passes through unknown shapes unchanged"
+      (let [models [{:id "m" :max_context_length 8192}]]
+        (expect (= models ((var-get #'sut/shape-models) nil models)))))))

@@ -14,7 +14,8 @@
    [taoensso.trove :as trove]
    [com.blockether.svar.internal.usage :as usage])
   (:import
-   (java.io BufferedReader InputStreamReader)))
+   (java.io BufferedReader InputStreamReader)
+   (java.net URI)))
 
 ;; =============================================================================
 ;; Correlation context
@@ -3217,7 +3218,7 @@
      `content` under `:deep` reasoning).
    - `:llm-headers` merges provider defaults with caller headers; caller wins."
   [opts provider model-map]
-  (let [ctx (long (or (:context model-map) 8192))
+  (let [ctx (long (or (:context model-map) router/DEFAULT_CONTEXT_LIMIT))
         ;; Quarter of the input context is a reasonable headroom for a
         ;; single response; the rest stays for the prompt + tool
         ;; outputs. But some providers cap output independently of
@@ -4321,6 +4322,46 @@
     (filterv #(router/provider-model-visible? provider-id (provider-model-id %)) models)
     (vec models)))
 
+(defn- host-root
+  "scheme://authority of a URL — drops path/query. `http://h:1234/v1` → `http://h:1234`.
+   Used when a provider's models endpoint lives at host root, not under the
+   chat base path (LM Studio: `/api/v0/...`). Returns base-url unchanged when
+   it can't be parsed."
+  [base-url]
+  (try
+    (let [u (URI. base-url)]
+      (str (.getScheme u) "://" (.getAuthority u)))
+    (catch Exception _ base-url)))
+
+(defn- models-endpoint-url
+  "Build the models-listing URL for a provider. With `:models-base :host` the
+   `:models-path` hangs off the host root (LM Studio's native REST); otherwise
+   it appends to the chat base-url (OpenAI/Anthropic/Codex convention)."
+  [base-url models-base models-path]
+  (if (= :host models-base)
+    (str (host-root base-url) models-path)
+    (str base-url models-path)))
+
+(defn- enrich-lmstudio-model
+  "Map LM Studio native `/api/v0/models` fields onto svar model keys.
+   Prefers `loaded_context_length` (the window the runtime ACTUALLY loaded —
+   LM Studio can load a 262k model at 16k to fit RAM, and advertising the max
+   would make the server truncate) over `max_context_length`. Surfaces
+   `tool_use` capability and load state. Non-native shapes pass through."
+  [m]
+  (let [ctx (or (:loaded_context_length m) (:max_context_length m))]
+    (cond-> m
+      ctx                              (assoc :context (long ctx))
+      (some #{"tool_use"} (:capabilities m)) (assoc :tool-call? true)
+      (some? (:state m))               (assoc :loaded? (= "loaded" (:state m))))))
+
+(defn- shape-models
+  "Apply provider-specific model normalization keyed by `:models-shape`."
+  [models-shape models]
+  (case models-shape
+    :lmstudio (mapv enrich-lmstudio-model models)
+    models))
+
 (defn- normalize-models-response
   "Normalize a `/models` response body to a vector of model maps with
    at least `{:id ...}`.
@@ -4395,7 +4436,9 @@
                                  "/models")
          models-query-params   (or (:models-query-params opts)
                                  (:models-query-params known-provider))
-         models-url            (str base-url models-path)
+         models-base           (or (:models-base opts) (:models-base known-provider))
+         models-shape          (or (:models-shape opts) (:models-shape known-provider))
+         models-url            (models-endpoint-url base-url models-base models-path)
          strict?               (boolean (:strict? opts))
          http-opts             (cond-> {:api-style   api-style
                                         :provider-id provider-id
@@ -4407,6 +4450,6 @@
                                  (catch clojure.lang.ExceptionInfo ex
                                    (when strict? (throw ex))
                                    nil))
-         models                (normalize-models-response body)]
+         models                (shape-models models-shape (normalize-models-response body))]
      (filter-provider-models provider-id models))))
 
