@@ -2426,7 +2426,8 @@
                               headers-received? ttft-fired?))
         response (try
                    (http/post url
-                     {:headers headers
+                     {:client @shared-http-client
+                      :headers headers
                       :body (json/write-json-str body)
                       :timeout timeout-ms
                       :as :stream})
