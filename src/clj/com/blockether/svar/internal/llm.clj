@@ -3090,7 +3090,7 @@
   [router {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve api-key
                   base-url provider-id api-style extra-body provider-state cache-system?
                   format-retries format-retry-on on-format-error
-                  responses-path llm-headers verbosity]
+                  responses-path llm-headers verbosity context]
            :as opts}]
   (let [{:keys [network tokens]} router
         default-pricing (or (:pricing tokens) router/MODEL_PRICING)
@@ -3098,9 +3098,14 @@
         pricing (if provider-id
                   (assoc default-pricing model (router/provider-model-pricing provider-id model))
                   default-pricing)
-        context-limits (if provider-id
-                         (assoc default-context-limits model (router/provider-model-context provider-id model))
-                         default-context-limits)]
+        ;; Prefer the routed model's explicit `:context` (set on the runtime
+        ;; provider — e.g. LM Studio detection or a user override) over the
+        ;; static catalog lookup, which knows nothing about runtime-configured
+        ;; local models and would fall back to DEFAULT_CONTEXT_LIMIT.
+        model-context (or context
+                        (when provider-id (router/provider-model-context provider-id model)))
+        context-limits (cond-> default-context-limits
+                         model-context (assoc model (long model-context)))]
     (cond-> {:model model
              :timeout-ms (or timeout-ms (:timeout-ms network) router/DEFAULT_TIMEOUT_MS)
              ;; TTFT + idle timeouts: caller > router > package default.
@@ -3257,6 +3262,13 @@
         :router-handles-rate-limit? true
         :json-object-mode? json-object-mode?
         :extra-body merged-body)
+      ;; Forward the routed model's real context window so `resolve-opts`'
+      ;; pre-flight `check-context-limit` uses it instead of re-deriving from
+      ;; the static catalog (which has nothing for runtime-configured local
+      ;; models → DEFAULT_CONTEXT_LIMIT). This is what carries LM Studio's
+      ;; detected window into the overflow check.
+      (cond-> (:context model-map)
+        (assoc :context (:context model-map)))
       (cond-> (some? (:responses-path provider))
         (assoc :responses-path (:responses-path provider)))
       (cond-> merged-headers

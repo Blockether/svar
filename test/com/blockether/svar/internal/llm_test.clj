@@ -1072,3 +1072,23 @@
     (it "passes through unknown shapes unchanged"
       (let [models [{:id "m" :max_context_length 8192}]]
         (expect (= models ((var-get #'sut/shape-models) nil models)))))))
+
+(defdescribe routed-context-limit-flow-test
+  "Routed model's real :context must reach the pre-flight context check, not
+   just the output-budget path. Regression: LM Studio models overflowed at the
+   8192 default because check-context-limit re-derived from the static catalog."
+  (let [inject       (var-get #'sut/inject-routed-params)
+        resolve-opts (var-get #'sut/resolve-opts)
+        sut-router-default @(requiring-resolve 'com.blockether.svar.internal.router/DEFAULT_CONTEXT_LIMIT)]
+    (describe "inject-routed-params forwards :context"
+      (it "carries the model-map's :context into opts"
+        (expect (= 262144 (:context (inject {} {:id :lmstudio} {:name "m" :context 262144})))))
+      (it "omits :context when the model-map has none"
+        (expect (nil? (:context (inject {} {:id :lmstudio} {:name "m"}))))))
+    (describe "resolve-opts context-limits"
+      (it "prefers an explicit :context over the static catalog default"
+        (let [resolved (resolve-opts {} {:model "m" :provider-id :lmstudio :context 262144})]
+          (expect (= 262144 (get (:context-limits resolved) "m")))))
+      (it "falls back to DEFAULT_CONTEXT_LIMIT for an unknown local model"
+        (let [resolved (resolve-opts {} {:model "m" :provider-id :lmstudio})]
+          (expect (= sut-router-default (get (:context-limits resolved) "m"))))))))
