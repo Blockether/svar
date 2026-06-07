@@ -121,6 +121,69 @@
                 (and m (some #(str/includes? m %) TRANSIENT_NETWORK_ERROR_SUBSTRINGS)))))
       (ex-chain e))))
 
+(defn- connection-error?
+  "True when any link in the cause chain is a connect-phase network failure:
+   the TCP/TLS connection to the provider could not be established at all
+   (refused, host down/unreachable, DNS miss, connect-phase timeout). Distinct
+   from mid-stream transport drops, which already carry an HTTP envelope and
+   `:stream?` data and are classified by `retryable-exception?`."
+  [^Throwable e]
+  (boolean
+    (some (fn [^Throwable t]
+            (or (instance? java.net.ConnectException t)
+              (instance? java.net.UnknownHostException t)
+              (instance? java.net.NoRouteToHostException t)
+              (instance? java.net.http.HttpConnectTimeoutException t)
+              (instance? java.nio.channels.UnresolvedAddressException t)))
+      (ex-chain e))))
+
+(defn- connection-error-reason
+  "Human phrase for a connect-phase failure. Prefers a real (non-blank)
+   message from the cause chain, but on JDK 25 / `java.net.http` the
+   `ConnectException` chain is frequently all-nil messages, so fall back to a
+   class-derived phrase instead of leaking a raw classname to the user."
+  [^Throwable e]
+  (or (some (fn [^Throwable t]
+              (let [m (some-> (ex-message t) str/trim)]
+                (when-not (str/blank? m) m)))
+        (ex-chain e))
+    (some (fn [^Throwable t]
+            (condp instance? t
+              java.net.UnknownHostException             "host not found (DNS lookup failed)"
+              java.nio.channels.UnresolvedAddressException "could not resolve the host address"
+              java.net.NoRouteToHostException           "no route to host"
+              java.net.http.HttpConnectTimeoutException  "connection timed out"
+              ;; JDK 25 / java.net.http collapses refused, host-down and some
+              ;; DNS failures into a message-less ConnectException, so stay
+              ;; general rather than falsely asserting "refused".
+              java.net.ConnectException                 "the connection could not be established (the host may be down, or the base URL/port may be wrong)"
+              nil))
+      (ex-chain e))
+    "connection failed"))
+
+(defn- connection-error->ex-info
+  "Wrap a connect-phase failure in an `ex-info` carrying a human-readable,
+   provider-aware message plus the `:url` that could not be reached - the raw
+   `java.net.ConnectException` message is often nil/terse with no hint of which
+   provider/endpoint died. Keeps the original throwable as cause so
+   `retryable-exception?` still walks the real `java.net.*` exception
+   (transient blips like ENETUNREACH stay retryable; ECONNREFUSED stays
+   non-retryable - retrying a down/misconfigured endpoint just hammers it)."
+  [^Throwable e url]
+  (let [reason (connection-error-reason e)
+        host   (try (.getHost (java.net.URI. (str url)))
+                    (catch Exception _ nil))]
+    (ex-info (str "Could not connect to the model provider"
+               (when-not (str/blank? host) (str " at " host))
+               ": " reason
+               ". The provider may be down or unreachable - check your network "
+               "connection and the provider's base URL.")
+      {:type              :svar.core/http-error
+       :url               url
+       :connection-error? true
+       :cause-class       (.getName (class e))}
+      e)))
+
 (defn- stream-output-started?
   "True when a failed stream already emitted anything to the caller.
    Do not retry after reasoning either: TUI already displayed it, so replaying
@@ -249,11 +312,16 @@
    only, partial JSON, undocumented fields) and vanilla `:message :content`
    extraction loses the evidence."
   [url body headers timeout-ms]
-  (let [response (http/post url
-                   {:client @shared-http-client
-                    :headers headers
-                    :body (json/write-json-str body)
-                    :timeout timeout-ms})
+  (let [response (try
+                   (http/post url
+                     {:client @shared-http-client
+                      :headers headers
+                      :body (json/write-json-str body)
+                      :timeout timeout-ms})
+                   (catch Exception e
+                     (if (connection-error? e)
+                       (throw (connection-error->ex-info e url))
+                       (throw e))))
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
                       (catch Exception _ nil))]
@@ -2502,13 +2570,15 @@
                                    :ttft-timeout-ms ttft-timeout-ms
                                    :cause-class (.getName (class e))}
                                   e)))
-                       (let [ed (ex-data e)
-                             body-str (when (instance? java.io.InputStream (:body ed))
-                                        (slurp-input-stream (:body ed)))]
-                         (throw (ex-info (ex-message e)
-                                  (cond-> (dissoc ed :body)
-                                    body-str (assoc :body body-str))
-                                  (ex-cause e))))))
+                       (if (connection-error? e)
+                         (throw (connection-error->ex-info e url))
+                         (let [ed (ex-data e)
+                               body-str (when (instance? java.io.InputStream (:body ed))
+                                          (slurp-input-stream (:body ed)))]
+                           (throw (ex-info (ex-message e)
+                                    (cond-> (dissoc ed :body)
+                                      body-str (assoc :body body-str))
+                                    (ex-cause e)))))))
                    (catch java.io.IOException e
                      ;; Same reclassification for raw IOExceptions (the
                      ;; JDK may surface InterruptedIOException here).
@@ -2526,7 +2596,9 @@
                                    :ttft-timeout-ms ttft-timeout-ms
                                    :cause-class (.getName (class e))}
                                   e)))
-                       (throw e)))
+                       (if (connection-error? e)
+                         (throw (connection-error->ex-info e url))
+                         (throw e))))
                    (finally
                      ;; Order matters: flip the flag BEFORE interrupting
                      ;; the watchdog so the watchdog's recheck sees the

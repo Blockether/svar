@@ -30,6 +30,8 @@
 (def ^:private MAX-CHARS @#'sut/MAX_HTTP_ERROR_BODY_CHARS)
 (def ^:private retryable-exception? @#'sut/retryable-exception?)
 (def ^:private transient-network-error? @#'sut/transient-network-error?)
+(def ^:private connection-error? @#'sut/connection-error?)
+(def ^:private connection-error->ex-info @#'sut/connection-error->ex-info)
 
 (defdescribe truncate-error-body-test
   (describe "pure stringifier"
@@ -303,3 +305,78 @@
             {:max-retries 5 :initial-delay-ms 0})
           (catch clojure.lang.ExceptionInfo _ nil))
         (expect (= 1 @calls))))))
+
+;;; ── connect-phase failure: human-readable message ──────────────────────
+
+;; Regression: a connect-phase failure (the TCP/TLS connection to the
+;; provider never opened - refused, host down, DNS miss, connect timeout)
+;; surfaced to the user as a bare `java.net.ConnectException` whose message
+;; on JDK 25 / java.net.http is frequently nil, with no hint of WHICH
+;; provider/endpoint died. svar now wraps these at the HTTP source with a
+;; human-readable, provider-aware message that names the host and keeps the
+;; original throwable as cause so retry classification is unchanged.
+
+(defdescribe connection-error-test
+  (describe "connection-error? cause-chain matching"
+    (it "matches connect-phase exception classes"
+      (expect (connection-error? (java.net.ConnectException. "Connection refused")))
+      (expect (connection-error? (java.net.UnknownHostException. "api.test")))
+      (expect (connection-error? (java.net.NoRouteToHostException. "x")))
+      (expect (connection-error? (java.nio.channels.UnresolvedAddressException.))))
+
+    (it "matches when wrapped several layers deep"
+      (expect (connection-error?
+                (ex-info "boom" {}
+                  (java.io.IOException. "io"
+                    (java.net.ConnectException. "Connection refused"))))))
+
+    (it "does NOT match plain HTTP-status / non-network errors"
+      (expect (not (connection-error?
+                     (ex-info "Exceptional status code: 400" {:status 400}))))
+      (expect (not (connection-error? (java.io.EOFException. "EOF"))))))
+
+  (describe "connection-error->ex-info wrapping"
+    (it "names the host, keeps :url + :connection-error?, preserves cause"
+      (let [cause (java.net.ConnectException. "Connection refused")
+            ex    (connection-error->ex-info cause "https://api.anthropic.com/v1/messages")]
+        (expect (= :svar.core/http-error (:type (ex-data ex))))
+        (expect (= "https://api.anthropic.com/v1/messages" (:url (ex-data ex))))
+        (expect (true? (:connection-error? (ex-data ex))))
+        (expect (identical? cause (ex-cause ex)))
+        (expect (str/includes? (ex-message ex) "api.anthropic.com"))
+        (expect (str/includes? (ex-message ex) "Connection refused"))))
+
+    (it "falls back to a class-derived phrase when the chain has no message (JDK 25)"
+      (let [ex (connection-error->ex-info (java.net.ConnectException.)
+                 "https://router.test/v1/chat")]
+        (expect (str/includes? (ex-message ex) "router.test"))
+        (expect (str/includes? (ex-message ex) "connection could not be established"))
+        (expect (not (str/includes? (ex-message ex) "java.net"))))))
+
+  (describe "streaming chat-completion surfaces connect failures without retry"
+    (it "does not retry a wrapped connect-phase failure and keeps the nice message"
+      (let [calls (atom 0)
+            captured (with-redefs-fn
+                       {#'com.blockether.svar.internal.llm/http-post-stream!
+                        (fn [url & _]
+                          (swap! calls inc)
+                          (throw (connection-error->ex-info
+                                   (java.net.ConnectException. "Connection refused")
+                                   url)))}
+                       (fn []
+                         (try
+                           (sut/chat-completion
+                             [{:role "user" :content "hi"}]
+                             "glm-5.1"
+                             "sk-fake"
+                             "https://example.test/v1"
+                             {:on-chunk (constantly nil)
+                              :max-retries 3
+                              :initial-delay-ms 0})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             {:data (ex-data e) :msg (ex-message e)}))))]
+        (expect (= 1 @calls))
+        (expect (= :svar.core/http-error (:type (:data captured))))
+        (expect (true? (:connection-error? (:data captured))))
+        (expect (str/includes? (:msg captured) "Could not connect to the model provider"))))))
