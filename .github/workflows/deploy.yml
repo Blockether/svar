@@ -13,7 +13,7 @@ jobs:
     name: Release & Deploy to Clojars
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: main
           fetch-depth: 1
@@ -24,12 +24,12 @@ jobs:
           git fetch --tags --no-recurse-submodules origin
           git fetch --deepen=200 origin main
 
-      - uses: DeLaGuardo/setup-clojure@13.5
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
       - name: Cache Clojure deps
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.m2/repository
@@ -58,7 +58,7 @@ jobs:
           } > /tmp/release_body.md
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           body_path: /tmp/release_body.md
 
