@@ -116,6 +116,42 @@
   (let [target (str/lower-case lang)]
     (filterv #(= (:lang %) target) blocks)))
 
+(defn lenient-block
+  "Lenient single-language extraction: the WHOLE reply IS the code.
+
+   For single-engine callers (e.g. a Python-only agent loop) where every
+   reply is exactly one program for one turn. No multi-fence scan, no lang
+   filtering, nothing dropped — the opposite of `select-blocks`' strictness.
+
+   If the entire trimmed reply is wrapped in ONE outer code fence
+   (```lang …``` or ``` …```), that single wrapper is stripped so the fence
+   markers don't leak into the source. Any other shape (no fence, or
+   interior fences) is used VERBATIM — we never split a reply into multiple
+   blocks here.
+
+   Returns `{:lang <lang> :source <code>}`, or `nil` when the reply is
+   blank. `lang` is stamped onto the block unconditionally (the caller's
+   engine tag), never inferred from the wrapper."
+  [raw lang]
+  (let [trimmed (str/trim (or raw ""))]
+    (when-not (str/blank? trimmed)
+      (let [lines       (str/split-lines trimmed)
+            first-line  (str/trim (first lines))
+            last-line   (str/trim (peek lines))
+            interior    (when (>= (count lines) 2)
+                          (subvec lines 1 (dec (count lines))))
+            ;; A genuine single wrapper: first line opens a fence, last line
+            ;; is a bare close, and nothing in between is a fence line.
+            single-wrapper?
+            (and (>= (count lines) 2)
+              (re-matches #"```[a-zA-Z0-9_+.-]*" first-line)
+              (= "```" last-line)
+              (not (some #(str/starts-with? (str/triml %) "```") interior)))
+            source (if single-wrapper?
+                     (str/join "\n" interior)
+                     trimmed)]
+        {:lang lang :source source}))))
+
 (defn concat-sources
   "Concatenate non-blank `:source` values, joined by a blank-line separator."
   [blocks]

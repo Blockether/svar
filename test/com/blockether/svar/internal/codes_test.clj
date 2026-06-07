@@ -372,3 +372,32 @@
         ;; reintroduction of the quadratic pass.
         (expect (< elapsed-ms 1500))))))
 
+(defdescribe lenient-block-test
+  "lenient-block: the WHOLE reply IS the code. No fence scan, no lang
+   filtering, nothing dropped — the opposite of select-blocks' strictness.
+   Used by ask-code! `:lenient` for single-engine agent loops."
+  (describe "fenceless raw reply is kept verbatim (NOT dropped)"
+    (it "stamps the caller lang and keeps the source as-is"
+      (let [b (sut/lenient-block "x = cat(\"a\")\ndone(\"\"\"hi\"\"\")" "python")]
+        (expect (= {:lang "python"
+                    :source "x = cat(\"a\")\ndone(\"\"\"hi\"\"\")"}
+                  b)))))
+  (describe "single outer wrapper fence is stripped"
+    (it "strips a tagged wrapper"
+      (expect (= "z = 2" (:source (sut/lenient-block "```python\nz = 2\n```" "python")))))
+    (it "strips an untagged wrapper"
+      (expect (= "x = 1" (:source (sut/lenient-block "```\nx = 1\n```" "python")))))
+    (it "stamps the caller lang, never the wrapper tag"
+      (expect (= "python" (:lang (sut/lenient-block "```py\nx = 1\n```" "python"))))))
+  (describe "never splits — multiple/interior fences stay verbatim"
+    (it "keeps a two-fence reply whole (no multifence behavior)"
+      (let [raw "```python\na = 1\n```\nmid\n```python\nb = 2\n```"]
+        (expect (= raw (:source (sut/lenient-block raw "python")))))))
+  (describe "edge cases"
+    (it "returns nil for blank input"
+      (expect (nil? (sut/lenient-block "   \n  " "python")))
+      (expect (nil? (sut/lenient-block nil "python"))))
+    (it "leaves an unclosed opener verbatim (only whole wrappers strip)"
+      (expect (= "```python\nx = 1"
+                (:source (sut/lenient-block "```python\nx = 1" "python")))))))
+

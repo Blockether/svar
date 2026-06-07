@@ -4275,9 +4275,17 @@
                    (str "The model produced reasoning but no content. "
                      "`ask-code!` needs textual content with code fences.")
                    (assoc base-envelope :type :svar.llm/empty-content))))))
-    (let [{:keys [blocks saw-fence? malformed?]}
-          (codes/extract-code-blocks-detail content)
-          selected    (->> (codes/select-blocks blocks lang)
+    (let [lenient? (boolean (:lenient opts))
+          {:keys [blocks saw-fence? malformed?]}
+          (if lenient?
+            ;; Lenient mode: the whole reply IS the code (single-engine
+            ;; callers). No fence scan, no lang filtering, nothing dropped —
+            ;; `codes/lenient-block` strips at most one outer wrapper fence.
+            {:blocks    (if-let [b (codes/lenient-block content lang)] [b] [])
+             :saw-fence? false
+             :malformed? false}
+            (codes/extract-code-blocks-detail content))
+          selected    (->> (if lenient? blocks (codes/select-blocks blocks lang))
                         (remove #(str/blank? (:source %)))
                         vec)
           token-stats (router/count-and-estimate model with-tail content
@@ -4333,6 +4341,11 @@
              pointing at the format contract (\"reply with `lang` source
              inside ```lang ... ``` fences\"). Restores recency-driven format
              adherence on long transcripts. Set to `false` to opt out.
+     :lenient - Boolean, default false. Single-engine mode: the WHOLE reply
+             is treated as one `:lang` block — no multi-fence scan, no lang
+             filtering, nothing dropped (`codes/lenient-block` strips at most
+             one outer wrapper fence). For agents whose every reply is one
+             program for one turn; pair with `:code-tail-pointer? false`.
 
    Returns:
    {:result      <concatenated source string of selected blocks>
