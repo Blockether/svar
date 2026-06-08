@@ -3655,22 +3655,33 @@
    contract right before generation, restoring recency-driven adherence
    on long transcripts.
 
-   Kept to ONE line on purpose: the contract is one rule (tag the fence
-   with `lang`, otherwise the block is dropped). Longer reminders waste
-   per-call tokens and dilute the immediately-preceding task text. The
-   strict-lang warning stays explicit so a model emitting untagged ```
-   fences sees why its code never reached the runtime."
-  [lang]
-  (str "Reply with exactly one ```" lang " … ``` fenced block; untagged or other-lang fences are DROPPED."))
+   Kept to ONE line on purpose: longer reminders waste per-call tokens and
+   dilute the immediately-preceding task text.
+
+   Two contracts, by mode:
+   - default (fenced): the model must tag exactly one ```lang fence, else the
+     block is dropped — the strict-lang warning stays explicit so a model
+     emitting untagged ``` fences sees why its code never reached the runtime.
+   - `:lenient` (single-engine): there is NO fence — the WHOLE reply is the
+     program — so preaching fences is actively wrong. The reminder flips to the
+     pure-code contract: code only, run verbatim, no prose/heading (a leading
+     sentence makes the entire reply a syntax error)."
+  [lang lenient?]
+  (if lenient?
+    (str "Reply with code ONLY — your ENTIRE message runs verbatim as one " lang
+      " program; no prose or Markdown outside " lang " comments. A leading sentence "
+      "or heading makes the whole reply a syntax error.")
+    (str "Reply with exactly one ```" lang " … ``` fenced block; untagged or other-lang fences are DROPPED.")))
 
 (defn- append-code-tail-pointer
   "`append-schema-tail-pointer` for the `ask-code!*` path. Appends the
    `code-tail-pointer-text` as a trailing text block on the LAST user
    message; synthesises a user message carrying just the pointer when
-   `messages` has none. Multimodal content is preserved."
-  [messages lang]
+   `messages` has none. Multimodal content is preserved. `lenient?` selects
+   the pure-code vs fenced reminder."
+  [messages lang lenient?]
   (let [v (vec messages)
-        pointer (code-tail-pointer-text lang)
+        pointer (code-tail-pointer-text lang lenient?)
         last-user-idx (->> v
                         (map-indexed vector)
                         (filter (fn [[_ m]] (= "user" (:role m))))
@@ -4226,7 +4237,7 @@
         ;; (nil / missing keep the default), matching ask!*'s semantics.
         with-tail (if (false? code-tail-pointer?)
                     in-msgs
-                    (append-code-tail-pointer in-msgs lang))
+                    (append-code-tail-pointer in-msgs lang (boolean (:lenient opts))))
         check-opts (cond-> {:context-limits context-limits
                             :exact-count-fn (anthropic-exact-count-fn with-tail model
                                               {:api-style api-style :api-key api-key
