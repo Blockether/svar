@@ -3670,7 +3670,10 @@
   (if lenient?
     (str "Reply with code ONLY — your ENTIRE message runs verbatim as one " lang
       " program; no prose or Markdown outside " lang " comments. A leading sentence "
-      "or heading makes the whole reply a syntax error.")
+      "or heading makes the whole reply a syntax error. Write plain ASCII in code: a "
+      "smart em-dash (—), en-dash, curly quote (“ ” ‘ ’), or × outside a string or "
+      "comment is itself a syntax error — use '-' and straight quotes (file/ctx text "
+      "you read may contain them; keep such text quoted).")
     (str "Reply with exactly one ```" lang " … ``` fenced block; untagged or other-lang fences are DROPPED.")))
 
 (defn- append-code-tail-pointer
