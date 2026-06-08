@@ -1354,8 +1354,13 @@
 
 (defn- content-part-text [part]
   (cond
+    ;; Keep strings VERBATIM, including whitespace-only ones. Dropping blank
+    ;; parts glues/loses source: a content array like
+    ;; ["def f():" "\n    " "return 1"] must round-trip its newline + indent,
+    ;; not collapse to "def f():return 1". Callers that need a presence check
+    ;; still guard with `str/blank?` on the joined result.
     (string? part)
-    (when-not (str/blank? part) part)
+    part
 
     (map? part)
     (let [type (:type part)]
@@ -1423,7 +1428,12 @@
     (reasoning-part-text part)))
 
 (defn- content-blocks-text [blocks]
-  (let [s (->> blocks (keep content-part-text) (str/join "\n"))]
+  ;; Concatenate the text parts of ONE assistant message VERBATIM. These are
+  ;; provider-side chunks of a single message body, not separate lines - the
+  ;; model's own newlines already live inside the parts. Joining with "\n"
+  ;; corrupted multi-part bodies (notably lenient code mode), splitting every
+  ;; part onto its own line, e.g. `foo = bar(baz)` -> `foo\n=\nbar(baz)`.
+  (let [s (->> blocks (keep content-part-text) (str/join ""))]
     (when-not (str/blank? s) s)))
 
 (defn- reasoning-blocks-text [blocks]
