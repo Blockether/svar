@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.7.12] - 2026-06-10
 
+### Changed
+- release: v0.7.12
+- fix(test): swap gpt-5-mini for glm-5-turbo in live Blockether tests
+- feat(router): add Claude Fable 5 + Mythos 5, fix adaptive thinking predicate
+- release: update version files for v0.7.11, bump to next dev version
+
+
+## [v0.7.12] - 2026-06-10
+
 ### Added
 - feat(router): add Claude Fable 5 + Mythos 5 model traits, pricing, and adaptive thinking support
 
@@ -1164,7 +1173,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.11...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.12...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1220,3 +1229,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.9]: https://github.com/Blockether/svar/releases/tag/v0.7.9
 [v0.7.10]: https://github.com/Blockether/svar/releases/tag/v0.7.10
 [v0.7.11]: https://github.com/Blockether/svar/releases/tag/v0.7.11
+[v0.7.12]: https://github.com/Blockether/svar/releases/tag/v0.7.12
