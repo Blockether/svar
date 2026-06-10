@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.12] - 2026-06-10
+
+### Added
+- feat(router): add Claude Fable 5 + Mythos 5 model traits, pricing, and adaptive thinking support
+
+### Changed
+- fix(router): extend anthropic-adaptive-thinking-model? regex for fable-5 / mythos-5 (reject budget_tokens)
+- fix(test): swap gpt-5-mini for glm-5-turbo in live Blockether tests (quota exhaustion)
+- chore: refresh models.dev catalog snapshot
+
 ## [v0.7.11] - 2026-06-08
 
 ### Changed
