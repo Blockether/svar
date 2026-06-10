@@ -184,7 +184,9 @@
    "gpt-5.4-mini"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
 
-   ;; ── Anthropic Claude 4.x (extended thinking, budget_tokens) ─────────────
+   ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
+   "claude-fable-5"            {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-mythos-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-8"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-7"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
@@ -299,13 +301,13 @@
     (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
 
 (defn- anthropic-adaptive-thinking-model?
-  "Claude Opus 4.8 / 4.7 reject manual budget_tokens. Opus 4.6 and Sonnet 4.6
-   still accept manual thinking today, but Anthropic marks it deprecated.
-   Use adaptive thinking for all four families. Accept dot/dash aliases so
-   Copilot-style names do not regress if routed through Anthropic style."
+  "Fable 5 / Mythos 5 / Opus 4.8–4.7 reject manual budget_tokens. Opus 4.6
+   and Sonnet 4.6 still accept manual thinking today, but Anthropic marks it
+   deprecated. Use adaptive thinking for all families listed here. Accept
+   dot/dash aliases so Copilot-style names do not regress."
   [model-name]
   (boolean
-    (re-find #"(?i)^claude-(?:opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
+    (re-find #"(?i)^claude-(?:fable-5|mythos-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
       (str model-name))))
 
 (defn- anthropic-thinking-extra-body
@@ -403,7 +405,9 @@
                                            :output-over-272k 45.00}}}
 
    :anthropic
-   {"claude-opus-4-8"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
+   {"claude-fable-5"            {:pricing {:input 10.00 :cached-input 1.00  :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00} :context 1000000}
+    "claude-mythos-5"           {:pricing {:input 10.00 :cached-input 1.00  :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00} :context 1000000}
+    "claude-opus-4-8"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
     "claude-opus-4-7"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
     "claude-opus-4-6"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
     "claude-opus-4-5"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
