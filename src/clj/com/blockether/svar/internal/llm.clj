@@ -2234,6 +2234,11 @@
     (:finish-reason chunk)
     (get-in chunk [:choices 0 :finish_reason])
     (get-in chunk [:choices 0 :finish-reason])
+    ;; Anthropic message_delta: {:delta {:stop_reason "end_turn"|"max_tokens"|…}}.
+    ;; Without it every Anthropic stream finalized with finish-reason nil —
+    ;; a max_tokens truncation was indistinguishable from a clean end_turn
+    ;; when diagnosing empty-content responses (vis session 372994ce).
+    (get-in chunk [:delta :stop_reason])
     (get-in chunk [:response :status])
     (:status chunk)))
 

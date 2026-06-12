@@ -1140,3 +1140,17 @@
                               {:type "text" :text "answer"}])
                    "glm-5")]
         (expect (nil? (rc-of body)))))))
+
+(defdescribe anthropic-stream-finish-reason-test
+  "Anthropic message_delta carries the stop reason under [:delta :stop_reason];
+   before this, every Anthropic stream finalized with finish-reason nil and a
+   max_tokens truncation looked identical to a clean end_turn."
+  (let [finish (var-get #'sut/stream-finish-reason)]
+    (it "reads stop_reason from an Anthropic message_delta"
+      (expect (= "end_turn" (finish {:type "message_delta"
+                                     :delta {:stop_reason "end_turn" :stop_sequence nil}
+                                     :usage {:output_tokens 42}})))
+      (expect (= "max_tokens" (finish {:type "message_delta"
+                                       :delta {:stop_reason "max_tokens"}}))))
+    (it "OpenAI chat shape still wins its own field"
+      (expect (= "stop" (finish {:choices [{:finish_reason "stop"}]}))))))
