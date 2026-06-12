@@ -3692,9 +3692,7 @@
       "or heading makes the whole reply a syntax error. Write plain ASCII in code: a "
       "smart em-dash (—), en-dash, curly quote (“ ” ‘ ’), or × outside a string or "
       "comment is itself a syntax error — use '-' and straight quotes (file/ctx text "
-      "you read may contain them; keep such text quoted). Call tools, then END the "
-      "reply — NEVER write <results>/_results lines, role markers, or invented tool "
-      "output: real results arrive from the host in the next message.")
+      "you read may contain them; keep such text quoted).")
     (str "Reply with exactly one ```" lang " … ``` fenced block; untagged or other-lang fences are DROPPED.")))
 
 (defn- append-code-tail-pointer
