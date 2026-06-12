@@ -1092,3 +1092,51 @@
       (it "falls back to DEFAULT_CONTEXT_LIMIT for an unknown local model"
         (let [resolved (resolve-opts {} {:model "m" :provider-id :lmstudio})]
           (expect (= sut-router-default (get (:context-limits resolved) "m"))))))))
+
+(defdescribe reasoning-content-echo-provenance-test
+  "openai-chat reasoning_content echo: the :thinking-signature slot rides
+   the wire ONLY when it IS the reasoning text (z.ai capture shape,
+   signature == thinking). Foreign-born signatures are opaque payloads —
+   Anthropic's HMAC base64 leaked as visible 'reasoning' when a provider
+   fallback re-routed Anthropic blocks to GLM (the blob echoed back as
+   reasoning_content and rendered as thinking in the client)."
+  (let [build (var-get #'sut/build-request-body)
+        msg   (fn [blocks] [{:role "assistant" :content blocks}
+                            {:role "user" :content "next"}])
+        rc-of (fn [body] (-> body :messages first :reasoning_content))]
+    (it "z.ai-born block (signature == thinking) echoes verbatim"
+      (let [body (build (msg [{:type "thinking"
+                               :thinking "step by step"
+                               :thinking-signature "step by step"
+                               :redacted? false}
+                              {:type "text" :text "answer"}])
+                   "glm-5")]
+        (expect (= "step by step" (rc-of body)))))
+    (it "Anthropic-born block (opaque HMAC signature) echoes the THINKING text, never the signature"
+      (let [hmac "CAIS9AkKYggOGAIqQFAKE-not-prose-claude-fable-5-thinking-hmac"
+            body (build (msg [{:type "thinking"
+                               :thinking "real visible reasoning"
+                               :thinking-signature hmac
+                               :redacted? false}
+                              {:type "text" :text "answer"}])
+                   "glm-5")
+            rc   (rc-of body)]
+        (expect (= "real visible reasoning" rc))
+        (expect (not (str/includes? (str body) hmac)))))
+    (it "Anthropic redacted block (encrypted data) is dropped from a foreign wire entirely"
+      (let [body (build (msg [{:type "thinking"
+                               :thinking ""
+                               :thinking-signature "ENCRYPTED-REDACTED-PAYLOAD"
+                               :redacted? true}
+                              {:type "text" :text "answer"}])
+                   "glm-5")]
+        (expect (nil? (rc-of body)))
+        (expect (not (str/includes? (str body) "ENCRYPTED-REDACTED-PAYLOAD")))))
+    (it "empty-thinking Anthropic block (redact-thinking shape) contributes nothing"
+      (let [body (build (msg [{:type "thinking"
+                               :thinking ""
+                               :thinking-signature "CAISfakeHMAC"
+                               :redacted? false}
+                              {:type "text" :text "answer"}])
+                   "glm-5")]
+        (expect (nil? (rc-of body)))))))

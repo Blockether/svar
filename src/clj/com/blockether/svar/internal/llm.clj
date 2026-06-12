@@ -1847,16 +1847,30 @@
    (filterv (complement canonical-thinking-block?) blocks)])
 
 (defn- openai-chat-reasoning-content
-  "Concatenates the `:thinking-signature` of every canonical thinking
-   block on the message, in order, into the single string that z.ai /
-   OpenRouter expect under `reasoning_content`. We use the signature
-   (not the visible `:thinking`) because z.ai's preservation contract
-   is exact-text echo - svar populates both fields with the same
-   provider-issued text on capture."
+  "Concatenates the reasoning text of every canonical thinking block on
+   the message, in order, into the single string that z.ai / OpenRouter
+   expect under `reasoning_content`.
+
+   The `:thinking-signature` slot is used ONLY when it equals the
+   visible `:thinking` — that identity is z.ai's own capture shape
+   (exact-text echo contract, both fields get the same provider-issued
+   text). For FOREIGN-born blocks the signature is an opaque payload
+   that must never ride a chat wire as text: Anthropic's HMAC base64
+   (leaked as visible 'reasoning' when a mid-session provider fallback
+   re-routed Anthropic blocks to GLM — the blob then echoes back as
+   reasoning_content and renders in the client as thinking), OpenAI
+   Responses' JSON reasoning item, and Anthropic redacted-thinking's
+   ENCRYPTED data (never to be sent to a third-party provider at all).
+   Those replay their visible `:thinking` text instead; redacted blocks
+   are dropped."
   [thinking-blocks]
   (let [parts (->> thinking-blocks
-                (map (fn [{:keys [thinking-signature thinking]}]
-                       (or thinking-signature thinking)))
+                (map (fn [{:keys [thinking-signature thinking redacted?]}]
+                       (cond
+                         redacted? nil
+                         (and (string? thinking-signature)
+                           (= thinking-signature thinking)) thinking-signature
+                         :else thinking)))
                 (remove str/blank?))]
     (when (seq parts)
       (str/join "\n" parts))))
