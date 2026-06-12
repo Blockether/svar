@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.14] - 2026-06-12
+
+### Changed
+- fix(llm): surface Anthropic stop_reason in stream finalization
+- release: update version files for v0.7.13, bump to next dev version
+
+
 ## [v0.7.13] - 2026-06-12
 
 ### Changed
@@ -1180,7 +1187,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.13...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.14...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1238,3 +1245,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.11]: https://github.com/Blockether/svar/releases/tag/v0.7.11
 [v0.7.12]: https://github.com/Blockether/svar/releases/tag/v0.7.12
 [v0.7.13]: https://github.com/Blockether/svar/releases/tag/v0.7.13
+[v0.7.14]: https://github.com/Blockether/svar/releases/tag/v0.7.14
