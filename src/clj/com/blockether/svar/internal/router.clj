@@ -424,10 +424,17 @@
    {"glm-4.6"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
     "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
     "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :json-object-mode? true}
-    "glm-5.2"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 1000000 :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
-    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :json-object-mode? true}
+    ;; `:output-limit` 131072: z.ai caps GLM-5 output at 131072 tokens and
+    ;; rejects anything larger with HTTP 400 "max_tokens is illegal, range
+    ;; [1,131072]". Without it, the auto budget = context/4 — fine at 200K
+    ;; context (50K) but 250K at glm-5.2's 1M context, which overflows the
+    ;; cap and 400s EVERY call. The overlay is the only source of this for
+    ;; the :zai provider (models.dev keys z.ai under different ids), so it
+    ;; must be declared here for svar's output-cap clamp to apply.
+    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :output-limit 131072 :json-object-mode? true}
+    "glm-5.2"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 1000000 :output-limit 131072 :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 131072 :json-object-mode? true}
+    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 131072 :json-object-mode? true}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
