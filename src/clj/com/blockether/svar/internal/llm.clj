@@ -2025,10 +2025,27 @@
 (def ^:dynamic *stream-semantic-timeout-ms*
   router/DEFAULT_SEMANTIC_TIMEOUT_MS)
 
+(def ^:dynamic *cancel-fn*
+  "Optional no-arg predicate for caller-driven cancellation. When bound to
+   a fn that returns truthy, an in-flight streaming call aborts ASAP — a
+   blocking JDK socket read does NOT respond to `Thread.interrupt()`, so
+   the only fast lever post-headers is closing the body `InputStream`. A
+   daemon watchdog polls this predicate and, on fire:
+     - closes the SSE `InputStream` (unblocks a parked `.readLine`), and
+     - interrupts the caller thread (unparks the pre-headers
+       `CompletableFuture.get` and any retry backoff sleep).
+   The reader loop also checks it between lines so an actively-streaming
+   response breaks within one delta. Surfaces `:svar.core/stream-cancelled`.
+   nil = no cancellation hook (default — zero overhead, no watchdog)."
+  nil)
+
 (def ^:private stream-finalization-error-types
   #{:svar.core/stream-incomplete
     :svar.core/stream-truncated
-    :svar.core/stream-semantic-timeout})
+    :svar.core/stream-semantic-timeout
+    ;; Caller cancellation must propagate verbatim (not be reclassified as
+    ;; a connection error or retried) — it's a clean terminal outcome.
+    :svar.core/stream-cancelled})
 
 (defn- stream-finalization-error? [e]
   (contains? stream-finalization-error-types (:type (ex-data e))))
@@ -2541,6 +2558,38 @@
                    (.start))]
     thread))
 
+(defn- start-cancel-watchdog!
+  "Daemon thread driving caller-requested cancellation (`*cancel-fn*`).
+   Polls `cancel-requested?` every `CANCEL_POLL_MS`; on the first truthy
+   read it sets `cancel-fired?` then applies BOTH levers (a blocking socket
+   read ignores `Thread.interrupt()`, and a not-yet-arrived body has no
+   stream to close, so neither lever alone covers every phase):
+     - closes the body `InputStream` if present (`stream-ref`) — unblocks a
+       parked `.readLine` mid-stream;
+     - interrupts `caller` — unparks the pre-headers `CompletableFuture.get`
+       and any retry/backoff `Thread/sleep`.
+   Exits when `alive?-atom` flips false (caller's `finally`) or after firing.
+   Returns the thread so the caller can interrupt it on normal completion."
+  [^Thread caller cancel-requested? stream-ref cancel-fired? alive?-atom]
+  (let [runnable (fn []
+                   (try
+                     (loop []
+                       (Thread/sleep 50)
+                       (when @alive?-atom
+                         (if (cancel-requested?)
+                           (do
+                             (reset! cancel-fired? true)
+                             (when-let [s @stream-ref]
+                               (try (.close ^java.io.InputStream s) (catch Throwable _ nil)))
+                             (try (.interrupt caller) (catch Throwable _ nil)))
+                           (recur))))
+                     (catch InterruptedException _ nil)
+                     (catch Throwable _ nil)))
+        thread   (doto (Thread. ^Runnable runnable "svar-cancel-watchdog")
+                   (.setDaemon true)
+                   (.start))]
+    thread))
+
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
    for each. `headers` - HTTP headers map. `delta-fn` - extracts delta
@@ -2571,6 +2620,17 @@
         ttft-watchdog     (when (and (number? ttft-timeout-ms) (pos? (long ttft-timeout-ms)))
                             (start-ttft-watchdog! caller-thread ttft-timeout-ms
                               headers-received? ttft-fired?))
+        ;; Caller-driven cancellation (bound `*cancel-fn*`). Captured on the
+        ;; caller thread so the watchdog (different thread, no dynamic
+        ;; binding) can read it. Zero cost when no cancel-fn is bound.
+        cancel-fn         *cancel-fn*
+        cancel-requested? (fn [] (boolean (and cancel-fn (try (cancel-fn) (catch Throwable _ false)))))
+        cancel-fired?     (atom false)
+        cancel-alive?     (atom true)
+        stream-ref        (atom nil)
+        cancel-watchdog   (when cancel-fn
+                            (start-cancel-watchdog! caller-thread cancel-requested?
+                              stream-ref cancel-fired? cancel-alive?))
         response (try
                    (http/post url
                      {:client @shared-http-client
@@ -2583,6 +2643,10 @@
                      ;; surface as ExceptionInfo wrapping IOException.
                      ;; Reclassify before propagating; otherwise convert
                      ;; InputStream body to string and re-throw as today.
+                     (when @cancel-fired?
+                       (Thread/interrupted)
+                       (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                                {:type :svar.core/stream-cancelled :stream? true :url url} e)))
                      (if @ttft-fired?
                        (do
                          ;; Consume any leftover interrupt so we don't
@@ -2611,6 +2675,10 @@
                    (catch java.io.IOException e
                      ;; Same reclassification for raw IOExceptions (the
                      ;; JDK may surface InterruptedIOException here).
+                     (when @cancel-fired?
+                       (Thread/interrupted)
+                       (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                                {:type :svar.core/stream-cancelled :stream? true :url url} e)))
                      (if @ttft-fired?
                        (do
                          (Thread/interrupted)
@@ -2643,6 +2711,9 @@
                                         :headers-elapsed-ms (long (/ (- (System/nanoTime) request-start-ns) 1000000))})
                        :msg "stream headers received"})
         input-stream (:body response)
+        ;; Hand the body to the cancel watchdog so it can close it (the only
+        ;; way to unblock a parked `.readLine` on a cancel mid-stream).
+        _ (reset! stream-ref input-stream)
         content-acc (StringBuilder.)
         reasoning-acc (StringBuilder.)
         usage-atom (atom nil)
@@ -2749,6 +2820,13 @@
               ;; Reset idle on every observed line: comments, blank
               ;; separators, and data all prove transport liveness.
               (reset! last-byte-ns now-ns)
+              ;; Caller cancelled while deltas are still flowing: break
+              ;; between lines (the watchdog's stream-close covers a parked
+              ;; read; this covers a fast stream that never parks). Cheap
+              ;; volatile read — set by the cancel watchdog.
+              (when @cancel-fired?
+                (throw (ex-info "Stream cancelled by caller."
+                         {:type :svar.core/stream-cancelled :stream? true :url url})))
               ;; Optional per-line trace. Gated on the cached boolean
               ;; so the disabled path is a single branch with zero
               ;; allocations - measurable improvement at high event
@@ -2908,6 +2986,12 @@
                                   :stream-finalization stream-finalization}}
           assistant-msg (assoc :assistant-message assistant-msg)))
       (catch clojure.lang.ExceptionInfo e
+        ;; Cancellation wins over idle/semantic reclassification — the
+        ;; watchdog closed the stream / interrupted us on purpose.
+        (when @cancel-fired?
+          (Thread/interrupted)
+          (throw (ex-info "Stream cancelled by caller."
+                   {:type :svar.core/stream-cancelled :stream? true :url url} e)))
         (if (stream-finalization-error? e)
           (throw e)
           (let [stream-finalization (stream-finalization-summary
@@ -2939,6 +3023,12 @@
                       :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
                      e)))))
       (catch Exception e
+        ;; A watchdog-closed stream surfaces here as a plain IOException —
+        ;; reclassify as cancellation before the idle/connection branches.
+        (when @cancel-fired?
+          (Thread/interrupted)
+          (throw (ex-info "Stream cancelled by caller."
+                   {:type :svar.core/stream-cancelled :stream? true :url url} e)))
         (let [stream-finalization (stream-finalization-summary
                                     {:terminal @terminal-event
                                      :incomplete @incomplete-response
@@ -2975,7 +3065,14 @@
         (when watchdog
           (try (.interrupt ^Thread watchdog) (catch Throwable _ nil)))
         (when semantic-watchdog
-          (try (.interrupt ^Thread semantic-watchdog) (catch Throwable _ nil)))))))
+          (try (.interrupt ^Thread semantic-watchdog) (catch Throwable _ nil)))
+        (reset! cancel-alive? false)
+        (when cancel-watchdog
+          (try (.interrupt ^Thread cancel-watchdog) (catch Throwable _ nil)))
+        ;; The cancel watchdog interrupts the caller thread to break parks;
+        ;; clear any residual interrupt so it can't poison the caller's next
+        ;; blocking op now that cancellation is captured as an exception.
+        (when @cancel-fired? (Thread/interrupted))))))
 
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
@@ -3577,11 +3674,14 @@
      to 240000-300000; reproductions of legitimate 185 s silences are
      documented in anthropics/claude-agent-sdk-typescript#44."
   [router opts]
-  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
-    (router/with-provider-fallback
-      router (:prefs resolved)
-      (fn [provider model-map]
-        (ask!* router (inject-routed-params opts provider model-map))))))
+  ;; Bind the caller's cancellation hook across the whole routed call (all
+  ;; fallback attempts + backoff sleeps). See `*cancel-fn*`.
+  (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
+    (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+      (router/with-provider-fallback
+        router (:prefs resolved)
+        (fn [provider model-map]
+          (ask!* router (inject-routed-params opts provider model-map)))))))
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
 ;; =============================================================================
@@ -4492,11 +4592,15 @@
    the provider returns no content; HTTP errors from `chat-completion`).
    Throws `:svar.core/invalid-lang` when `:lang` is missing/blank."
   [router opts]
-  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
-    (router/with-provider-fallback
-      router (:prefs resolved)
-      (fn [provider model-map]
-        (ask-code!* router (inject-routed-params opts provider model-map))))))
+  ;; Bind the caller's cancellation hook for the whole routed call so every
+  ;; provider-fallback attempt (and its backoff sleeps) honours it. See
+  ;; `*cancel-fn*`. `or` preserves an outer binding when opts omits it.
+  (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
+    (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+      (router/with-provider-fallback
+        router (:prefs resolved)
+        (fn [provider model-map]
+          (ask-code!* router (inject-routed-params opts provider model-map)))))))
 
 ;; =============================================================================
 ;; models! - Fetch available models
