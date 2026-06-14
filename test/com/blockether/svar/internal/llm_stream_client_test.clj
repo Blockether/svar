@@ -15,7 +15,7 @@
 
 (def ^:private http-post-stream! @#'sut/http-post-stream!)
 (def ^:private extract-stream-delta @#'sut/extract-stream-delta)
-(def ^:private shared-http-client @#'sut/shared-http-client)
+(def ^:private current-http-client @#'sut/current-http-client)
 
 (defn- sse-stream
   "Minimal terminating OpenAI-style SSE body."
@@ -39,6 +39,6 @@
       (expect (some? @captured))
       ;; The exact client instance — not merely present, but the shared one
       ;; (which is built with :version :http1.1).
-      (expect (identical? @shared-http-client (:client @captured)))
+      (expect (identical? (current-http-client) (:client @captured)))
       ;; And it must be a streaming request.
       (expect (= :stream (:as @captured))))))

@@ -253,21 +253,69 @@
                         (.setDaemon true))))]
       (java.util.concurrent.Executors/newCachedThreadPool factory))))
 
-(def ^:private shared-http-client
-  "Single shared HttpClient reused across ALL LLM requests. Without this each
-   http/post call constructs a new JDK HttpClient with its own SelectorManager
-   thread, which never gets GC'd before the JVM runs out of thread stack. Ran
-   into this during the 4clojure benchmark (OOM after ~108 tasks).
-   Uses shared-http-executor so blocked HTTP calls cost almost nothing and
-   don't pin OS threads.
+(defn- build-shared-http-client
+  "Construct the shared JDK HttpClient. HTTP/1.1 PIN - some remote providers
+   and local LLM servers (LM Studio, Ollama) choke on HTTP/2 trailers; if you
+   need HTTP/2 for a specific call build a second client, do NOT flip this."
+  []
+  (http/client (assoc http/default-client-opts
+                 :executor @shared-http-executor
+                 :version :http1.1)))
 
-   HTTP/1.1 PIN - some remote providers and local LLM servers (LM Studio,
-   Ollama) choke on HTTP/2 trailers. If you need HTTP/2 for a specific call,
-   build a second client - do NOT flip this default."
-  (delay
-    (http/client (assoc http/default-client-opts
-                   :executor @shared-http-executor
-                   :version :http1.1))))
+(def ^:private shared-http-client*
+  "Resettable holder (atom) for the single shared HttpClient reused across
+   ALL LLM requests. Shared because each fresh JDK HttpClient spins its own
+   never-GC'd SelectorManager thread (OOM after ~108 4clojure tasks).
+
+   RESETTABLE because the JDK client's SelectorManager thread can DIE mid-life
+   (its run loop catches an unexpected Throwable, or an interrupted/aborted
+   exchange wedges it) - after which EVERY send fails with 'selector manager
+   closed'. `reset-shared-http-client!` rebuilds it; `with-http-client-heal`
+   wires the rebuild+retry into the request paths so a dead client self-heals
+   instead of failing every subsequent turn until a process restart."
+  (atom nil))
+
+(defn- current-http-client
+  "The live shared HttpClient, built on first use."
+  []
+  (or @shared-http-client*
+    (swap! shared-http-client* (fn [c] (or c (build-shared-http-client))))))
+
+(defn- reset-shared-http-client!
+  "Rebuild the shared HttpClient (its predecessor's SelectorManager died).
+   Returns the fresh client."
+  []
+  (reset! shared-http-client* (build-shared-http-client)))
+
+(defn- dead-http-client-error?
+  "True when a throwable (anywhere in its cause chain) signals the shared JDK
+   HttpClient is unusable - its SelectorManager thread exited ('selector
+   manager closed') or its executor was shut down (RejectedExecutionException).
+   The cure is rebuilding the client."
+  [^Throwable t]
+  (boolean
+    (some (fn [e]
+            (or (instance? java.util.concurrent.RejectedExecutionException e)
+              (let [m (str/lower-case (or (ex-message e) ""))]
+                (or (str/includes? m "selector manager")
+                  (str/includes? m "httpclient is stopped")
+                  (str/includes? m "client is stopped")))))
+      (take-while some? (iterate ex-cause t)))))
+
+(defn- with-http-client-heal
+  "Run `(f client)` with the live shared client. On a dead-client error,
+   rebuild the client ONCE and retry. Happy path is a single try/catch."
+  [f]
+  (try
+    (f (current-http-client))
+    (catch Throwable t
+      (if (dead-http-client-error? t)
+        (do
+          (trove/log! {:level :warn :id ::http-client-rebuilt
+                       :data {:error (ex-message t)}
+                       :msg "shared HttpClient was dead (selector manager closed) — rebuilt + retried"})
+          (f (reset-shared-http-client!)))
+        (throw t)))))
 
 (defn shutdown-http-client!
   "Closes the shared HTTP client's virtual-thread executor.
@@ -313,11 +361,13 @@
    extraction loses the evidence."
   [url body headers timeout-ms]
   (let [response (try
-                   (http/post url
-                     {:client @shared-http-client
-                      :headers headers
-                      :body (json/write-json-str body)
-                      :timeout timeout-ms})
+                   (with-http-client-heal
+                     (fn [client]
+                       (http/post url
+                         {:client client
+                          :headers headers
+                          :body (json/write-json-str body)
+                          :timeout timeout-ms})))
                    (catch Exception e
                      (if (connection-error? e)
                        (throw (connection-error->ex-info e url))
@@ -352,11 +402,11 @@
                  :or   {api-style :openai-compatible-chat}}]
    (let [headers   (cond-> (make-llm-headers api-style api-key provider-id)
                      (seq llm-headers) (merge llm-headers))
-         req-opts  (cond-> {:client  @shared-http-client
-                            :headers headers
+         req-opts  (cond-> {:headers headers
                             :throw   false}
                      (seq query-params) (assoc :query-params query-params))
-         response  (http/get url req-opts)
+         response  (with-http-client-heal
+                     (fn [client] (http/get url (assoc req-opts :client client))))
          status    (:status response)
          raw-body  (:body response)]
      (when-not (and (integer? status) (<= 200 status 299))
@@ -2579,9 +2629,21 @@
                          (if (cancel-requested?)
                            (do
                              (reset! cancel-fired? true)
-                             (when-let [s @stream-ref]
-                               (try (.close ^java.io.InputStream s) (catch Throwable _ nil)))
-                             (try (.interrupt caller) (catch Throwable _ nil)))
+                             (if-let [s @stream-ref]
+                               ;; Post-headers: closing the body unblocks the
+                               ;; parked `.readLine`. Do NOT interrupt — the
+                               ;; caller is in OUR read loop, and interrupting
+                               ;; the shared JDK client's send machinery can
+                               ;; wedge its SelectorManager, surfacing as
+                               ;; "selector manager closed" on every LATER
+                               ;; send. (with-http-client-heal recovers from
+                               ;; that, but not killing it is cheaper.)
+                               (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
+                               ;; Pre-headers: no body yet; the caller is parked
+                               ;; in HttpClient.send -> CompletableFuture.get.
+                               ;; Interrupt to unpark it (the TTFT watchdog's
+                               ;; lever) — unavoidable here, but rare.
+                               (try (.interrupt caller) (catch Throwable _ nil))))
                            (recur))))
                      (catch InterruptedException _ nil)
                      (catch Throwable _ nil)))
@@ -2632,12 +2694,14 @@
                             (start-cancel-watchdog! caller-thread cancel-requested?
                               stream-ref cancel-fired? cancel-alive?))
         response (try
-                   (http/post url
-                     {:client @shared-http-client
-                      :headers headers
-                      :body (json/write-json-str body)
-                      :timeout timeout-ms
-                      :as :stream})
+                   (with-http-client-heal
+                     (fn [client]
+                       (http/post url
+                         {:client client
+                          :headers headers
+                          :body (json/write-json-str body)
+                          :timeout timeout-ms
+                          :as :stream})))
                    (catch clojure.lang.ExceptionInfo e
                      ;; If the TTFT watchdog fired, the interrupt may
                      ;; surface as ExceptionInfo wrapping IOException.
