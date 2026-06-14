@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.19] - 2026-06-14
+
+### Changed
+- feat(llm): caller-driven streaming cancellation via *cancel-fn*
+
+
 ## [v0.7.18] - 2026-06-13
 
 ### Changed
@@ -1215,7 +1221,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.18...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.19...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1278,3 +1284,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.16]: https://github.com/Blockether/svar/releases/tag/v0.7.16
 [v0.7.17]: https://github.com/Blockether/svar/releases/tag/v0.7.17
 [v0.7.18]: https://github.com/Blockether/svar/releases/tag/v0.7.18
+[v0.7.19]: https://github.com/Blockether/svar/releases/tag/v0.7.19
