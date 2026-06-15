@@ -212,13 +212,13 @@
    ;; Z.ai's chat/completions endpoint is OpenAI-compatible for everything
    ;; EXCEPT reasoning — it uses a binary `thinking` object at the top level.
    ;; Streaming delta surfaces reasoning_content (already handled).
-   "glm-4.6"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
-   "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-5.2"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
+   "glm-4.6"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-5.2"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
 
    ;; ── DeepSeek (reasoning_effort on reasoner only) ────────────────────────
    "deepseek-v3"               {:intelligence :high     :speed :medium :capabilities #{:chat}}
@@ -424,17 +424,22 @@
    {"glm-4.6"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
     "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
     "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
-    ;; `:output-limit` 131072: z.ai caps GLM-5 output at 131072 tokens and
-    ;; rejects anything larger with HTTP 400 "max_tokens is illegal, range
-    ;; [1,131072]". Without it, the auto budget = context/4 — fine at 200K
-    ;; context (50K) but 250K at glm-5.2's 1M context, which overflows the
-    ;; cap and 400s EVERY call. The overlay is the only source of this for
-    ;; the :zai provider (models.dev keys z.ai under different ids), so it
-    ;; must be declared here for svar's output-cap clamp to apply.
-    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :output-limit 131072 :json-object-mode? true}
-    "glm-5.2"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 1000000 :output-limit 131072 :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 131072 :json-object-mode? true}
-    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 131072 :json-object-mode? true}
+    ;; `:output-limit` 32768 — a DELIBERATE agentic-responsiveness cap, not
+    ;; just z.ai's hard ceiling. z.ai rejects max_tokens > 131072 with HTTP
+    ;; 400, and the auto budget (context/4) is 50K–250K for these models, so
+    ;; SOME overlay is mandatory to avoid 400ing every call. We cap LOWER
+    ;; (32768) on purpose: GLM thinking is unbounded (`thinking.type:enabled`
+    ;; has no budget — `budget_tokens` is accepted-but-ignored on the
+    ;; Anthropic wire), and max_tokens caps thinking + content COMBINED. A
+    ;; huge budget let GLM reason ~100K tokens and emit ZERO content; 32768
+    ;; keeps coding turns bounded while leaving ample room for a real answer
+    ;; (validated: merge / LRU-cache prompts produce code well within it).
+    ;; Raise per-call via `:extra-body {:max_tokens N}` (≤131072) when a turn
+    ;; genuinely needs a longer output.
+    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :output-limit 32768 :json-object-mode? true}
+    "glm-5.2"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 1000000 :output-limit 32768 :json-object-mode? true}
+    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 32768 :json-object-mode? true}
+    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 32768 :json-object-mode? true}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
