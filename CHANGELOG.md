@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.23] - 2026-06-15
+
+### Changed
+- feat(router): GLM → Anthropic wire (anthropic-thinking + bounded output)
+- test(llm-cancel): fix stale/flaky cancel-watchdog test to match either-or levers
+- fix(llm): surface non-SSE response bodies instead of "Stream ended before terminal marker"
+- release: update version files for v0.7.22, bump to next dev version
+
+
 ## [v0.7.22] - 2026-06-14
 
 ### Changed
@@ -1244,7 +1253,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.22...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.23...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1311,3 +1320,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.20]: https://github.com/Blockether/svar/releases/tag/v0.7.20
 [v0.7.21]: https://github.com/Blockether/svar/releases/tag/v0.7.21
 [v0.7.22]: https://github.com/Blockether/svar/releases/tag/v0.7.22
+[v0.7.23]: https://github.com/Blockether/svar/releases/tag/v0.7.23
