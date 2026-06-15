@@ -230,11 +230,14 @@
     (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "deepseek-v3"))))
     (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "minimax-m2.5")))))
 
-  (it "flags GLM-4.6+ as reasoning-capable with :zai-thinking style"
+  (it "flags GLM-4.6+ as reasoning-capable with :anthropic-thinking style"
+    ;; GLM is served via Z.ai's Anthropic-compatible wire, so its native
+    ;; reasoning convention is :anthropic-thinking (signed thinking blocks +
+    ;; cache_control), not the OpenAI-wire :zai-thinking reasoning_content echo.
     (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
       (let [m (get router/KNOWN_MODEL_METADATA name)]
         (expect (true? (:reasoning? m)))
-        (expect (= :zai-thinking (:reasoning-style m))))))
+        (expect (= :anthropic-thinking (:reasoning-style m))))))
 
   (it ":zai provider has per-token pricing for every reasoning-capable GLM"
     (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
@@ -261,7 +264,7 @@
       (expect (= :anthropic-thinking (:reasoning-style resolved))))
     (let [resolved (router/infer-model-metadata {:name "glm-4.6"})]
       (expect (true? (:reasoning? resolved)))
-      (expect (= :zai-thinking (:reasoning-style resolved))))
+      (expect (= :anthropic-thinking (:reasoning-style resolved))))
     (let [resolved (router/infer-model-metadata {:name "gpt-4o"})]
       (expect (not (:reasoning? resolved))))))
 
