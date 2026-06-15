@@ -346,7 +346,22 @@
   ([api-style model-map level {:keys [preserved-thinking?]}]
    (when-let [norm (normalize-reasoning-level level)]
      (when (:reasoning? model-map)
-       (let [style  (infer-reasoning-style api-style model-map)
+       (let [raw-style (infer-reasoning-style api-style model-map)
+             ;; The emitted reasoning BODY must be valid for the WIRE, not just
+             ;; the model's native convention. A model can be served across
+             ;; wires — e.g. Claude Opus via GitHub Copilot's OpenAI-compatible
+             ;; CHAT endpoint, or any Anthropic model behind an OpenAI proxy.
+             ;; Anthropic's `{:thinking …}` / `:output_config` fields are
+             ;; MEANINGLESS on an OpenAI-compatible wire: the endpoint silently
+             ;; ignores them (so the model runs with NO reasoning — the "same
+             ;; Opus is worse on Copilot" report) or 400s. On a non-Anthropic
+             ;; wire, coerce an Anthropic-thinking pin to the OpenAI reasoning
+             ;; knob (`reasoning_effort`) — the correct shape for chat
+             ;; completions; ignored harmlessly if the proxy doesn't honor it.
+             style (if (and (= raw-style :anthropic-thinking)
+                         (not= api-style :anthropic))
+                     :openai-effort
+                     raw-style)
              mapped (get-in REASONING_LEVELS [norm style])]
          (when mapped
            (case style
