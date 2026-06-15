@@ -36,8 +36,12 @@
     (available [] (.available delegate))))
 
 (defdescribe cancel-watchdog-test
-  (describe "fires when cancel-requested? becomes true"
-    (it "closes the stream, interrupts the caller, sets cancel-fired? once"
+  (describe "fires when cancel-requested? becomes true, POST-headers (stream present)"
+    (it "closes the stream and sets cancel-fired? once, WITHOUT interrupting the caller"
+      ;; Post-headers the caller is parked in OUR read loop, so the watchdog
+      ;; closes the body to unblock `.readLine` and deliberately does NOT
+      ;; interrupt — interrupting the shared JDK client mid-send wedges its
+      ;; SelectorManager ("selector manager closed" on every later send).
       (let [caller        (Thread/currentThread)
             closed?       (AtomicBoolean. false)
             stream        (close-tracking-stream
@@ -50,10 +54,35 @@
             alive?        (atom true)
             _             (Thread/interrupted) ; clear leftover interrupt
             t             (start-cancel-watchdog caller cancel-req?
+                            stream-ref cancel-fired? alive?)]
+        (reset! cancel-flag true)
+        ;; Deterministic wait: poll the fired flag (watchdog polls every ~50ms)
+        ;; up to ~2s instead of racing a fixed sleep.
+        (loop [n 0]
+          (when (and (not @cancel-fired?) (< n 100))
+            (Thread/sleep 20)
+            (recur (inc n))))
+        (reset! alive? false)
+        (.interrupt ^Thread t)
+        (expect (true? @cancel-fired?))
+        (expect (.get closed?))
+        ;; The caller must NOT have been interrupted on the stream-present path.
+        ;; `Thread/interrupted` reads+clears this thread's flag.
+        (expect (false? (Thread/interrupted))))))
+
+  (describe "fires when cancel-requested? becomes true, PRE-headers (no stream yet)"
+    (it "interrupts the caller and sets cancel-fired?, with no stream to close"
+      ;; Before the body arrives the caller is parked in HttpClient.send ->
+      ;; CompletableFuture.get; the only lever is interrupting it.
+      (let [caller        (Thread/currentThread)
+            stream-ref    (atom nil)
+            cancel-flag   (atom false)
+            cancel-req?   (fn [] @cancel-flag)
+            cancel-fired? (atom false)
+            alive?        (atom true)
+            _             (Thread/interrupted)
+            t             (start-cancel-watchdog caller cancel-req?
                             stream-ref cancel-fired? alive?)
-            ;; Caller parks (simulating a stalled .readLine / CF.get), then
-            ;; another action requests cancel. Watchdog polls every ~50ms,
-            ;; so we should be interrupted well under 2x that.
             interrupted?  (try
                             (reset! cancel-flag true)
                             (Thread/sleep 2000)
@@ -62,8 +91,7 @@
         (reset! alive? false)
         (.interrupt ^Thread t)
         (expect interrupted?)
-        (expect (true? @cancel-fired?))
-        (expect (.get closed?)))))
+        (expect (true? @cancel-fired?)))))
 
   (describe "does NOT fire while cancel-requested? stays false"
     (it "leaves the stream open, caller uninterrupted, cancel-fired? false"
