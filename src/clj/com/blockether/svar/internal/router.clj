@@ -1427,13 +1427,16 @@
                 (str/includes? msg-lower "connection reset")
                 (str/includes? msg-lower "connection closed")
                 (str/includes? msg-lower "closed")))))
-        ;; SSE EOF before provider terminal marker and before any
-        ;; visible content is a transport/provider failure, not a model
-        ;; answer. Route around it instead of burning caller iterations
-        ;; retrying the same provider. If content already started, keep
-        ;; the existing guard below and throw: caller may have useful
-        ;; partial output and replaying could duplicate work.
-        (and (= etype :svar.core/stream-truncated)
+        ;; SSE EOF before the provider terminal marker (`stream-truncated`) OR
+        ;; an explicit `response.incomplete` (`stream-incomplete`, e.g. Copilot's
+        ;; intermittent reason-null incomplete) — both before any visible content
+        ;; — are transport/provider failures, not a model answer. RETRY them
+        ;; (consistent with the OpenAI Codex CLI, which raises + retries on
+        ;; incomplete; early-close/incomplete usually succeeds on retry). If
+        ;; content already started, throw instead: svar can't rewind streamed
+        ;; chunks, so replaying would duplicate output (the caller's rewind-retry
+        ;; layer owns that case).
+        (and (contains? #{:svar.core/stream-truncated :svar.core/stream-incomplete} etype)
           (not stream-output-started?))
         (instance? java.net.ConnectException e)
         (instance? java.net.SocketTimeoutException e)
