@@ -123,11 +123,19 @@
    reply is exactly one program for one turn. No multi-fence scan, no lang
    filtering, nothing dropped — the opposite of `select-blocks`' strictness.
 
-   If the entire trimmed reply is wrapped in ONE outer code fence
-   (```lang …``` or ``` …```), that single wrapper is stripped so the fence
-   markers don't leak into the source. Any other shape (no fence, or
-   interior fences) is used VERBATIM — we never split a reply into multiple
-   blocks here.
+   Fence handling — robust to models that wrap code in markdown even when
+   told not to. GPT, and Claude served via GitHub Copilot's chat/Responses
+   wires, habitually emit ```python …``` AND surrounding prose (\"Here's the
+   code: …\"). In lenient mode the WHOLE reply is run as code, so that prose +
+   ``` markers would be a syntax error (the historical 'prose, not Python'
+   loop). Therefore:
+
+     - reply contains markdown code fence(s) → the code is the CONCATENATED
+       interiors of those fences; surrounding prose AND the ``` markers are
+       dropped. Covers a clean single wrapper, a prose-wrapped single block,
+       and multiple blocks alike.
+     - reply has NO fence → used VERBATIM (true raw-code replies pass through
+       untouched — the intended single-engine case).
 
    Returns `{:lang <lang> :source <code>}`, or `nil` when the reply is
    blank. `lang` is stamped onto the block unconditionally (the caller's
@@ -135,21 +143,15 @@
   [raw lang]
   (let [trimmed (str/trim (or raw ""))]
     (when-not (str/blank? trimmed)
-      (let [lines       (str/split-lines trimmed)
-            first-line  (str/trim (first lines))
-            last-line   (str/trim (peek lines))
-            interior    (when (>= (count lines) 2)
-                          (subvec lines 1 (dec (count lines))))
-            ;; A genuine single wrapper: first line opens a fence, last line
-            ;; is a bare close, and nothing in between is a fence line.
-            single-wrapper?
-            (and (>= (count lines) 2)
-              (re-matches #"```[a-zA-Z0-9_+.-]*" first-line)
-              (= "```" last-line)
-              (not (some #(str/starts-with? (str/triml %) "```") interior)))
-            source (if single-wrapper?
-                     (str/join "\n" interior)
-                     trimmed)]
+      (let [;; Interiors of every ```fenced``` block, anchored at line starts so
+            ;; a stray ``` inside a string is unlikely to false-match.
+            fence-re #"(?ms)^[ \t]*`{3,}[a-zA-Z0-9_+.-]*[ \t]*\r?\n(.*?)\r?\n[ \t]*`{3,}[ \t]*$"
+            fenced   (->> (re-seq fence-re trimmed)
+                       (keep second)
+                       (remove str/blank?))
+            source   (if (seq fenced)
+                       (str/join "\n" fenced)
+                       trimmed)]
         {:lang lang :source source}))))
 
 (defn concat-sources

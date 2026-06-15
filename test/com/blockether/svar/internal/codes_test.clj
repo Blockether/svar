@@ -389,9 +389,18 @@
       (expect (= "x = 1" (:source (sut/lenient-block "```\nx = 1\n```" "python")))))
     (it "stamps the caller lang, never the wrapper tag"
       (expect (= "python" (:lang (sut/lenient-block "```py\nx = 1\n```" "python"))))))
-  (describe "never splits — multiple/interior fences stay verbatim"
-    (it "keeps a two-fence reply whole (no multifence behavior)"
+  (describe "fenced replies — code extracted, prose + fences dropped"
+    (it "extracts + concatenates multiple fenced blocks, dropping interleaved prose"
+      ;; Models on the OpenAI / Copilot wires wrap code in ```fences``` AND add
+      ;; prose; in lenient mode the whole reply runs as code, so the prose +
+      ;; ``` markers must be stripped or it's a syntax error.
       (let [raw "```python\na = 1\n```\nmid\n```python\nb = 2\n```"]
+        (expect (= "a = 1\nb = 2" (:source (sut/lenient-block raw "python"))))))
+    (it "extracts a single fenced block out of surrounding prose"
+      (let [raw "Here is the code:\n\n```python\nprint(\"hi\")\n```\n\nThat should work."]
+        (expect (= "print(\"hi\")" (:source (sut/lenient-block raw "python"))))))
+    (it "uses a fence-free reply verbatim (true raw code)"
+      (let [raw "print(\"hi\")\ndef f(): return 1"]
         (expect (= raw (:source (sut/lenient-block raw "python")))))))
   (describe "edge cases"
     (it "returns nil for blank input"
