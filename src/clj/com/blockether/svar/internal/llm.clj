@@ -2994,24 +2994,39 @@
                     :partial-content (when (pos? (.length content-acc)) (str content-acc))
                     :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when-let [incomplete @incomplete-response]
-        (let [stream-finalization (stream-finalization-summary
-                                    {:terminal @terminal-event
-                                     :incomplete incomplete
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})]
-          (throw (ex-info "Stream ended with incomplete response."
-                   {:type :svar.core/stream-incomplete
-                    :stream? true
-                    :url url
-                    :reason (:reason incomplete)
-                    :stream-finalization stream-finalization
-                    :content-acc-len (.length content-acc)
-                    :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
+        ;; A Responses stream can end `incomplete` (reason `max_output_tokens`,
+        ;; `content_filter`, or — on some proxies, notably GitHub Copilot —
+        ;; reason NULL) AFTER it has already emitted usable content. Mirror
+        ;; opencode/AI-SDK: when content was produced, treat it as a SOFT FINISH
+        ;; and use the partial output rather than failing the whole turn. Only a
+        ;; TRULY EMPTY incomplete response is a hard error (nothing to salvage —
+        ;; e.g. reasoning consumed the entire budget before any content). This
+        ;; turns the intermittent Copilot-Responses "Stream ended with incomplete
+        ;; response" failures into completed turns whenever there's an answer.
+        (if (pos? (.length content-acc))
+          (trove/log! {:level :warn :id ::stream-incomplete-soft-finish
+                       :data (log-data {:url url
+                                        :reason (:reason incomplete)
+                                        :content-acc-len (.length content-acc)
+                                        :reasoning-acc-len (.length reasoning-acc)})
+                       :msg "responses stream ended incomplete with content; using partial output"})
+          (let [stream-finalization (stream-finalization-summary
+                                      {:terminal @terminal-event
+                                       :incomplete incomplete
+                                       :last-event-type @last-event-type
+                                       :last-finish-reason @last-finish-reason
+                                       :content-acc content-acc
+                                       :reasoning-acc reasoning-acc
+                                       :response response})]
+            (throw (ex-info "Stream ended with incomplete response (no content produced)."
+                     {:type :svar.core/stream-incomplete
+                      :stream? true
+                      :url url
+                      :reason (:reason incomplete)
+                      :stream-finalization stream-finalization
+                      :content-acc-len (.length content-acc)
+                      :reasoning-acc-len (.length reasoning-acc)
+                      :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))})))))
       (when-not @terminal-event
         (let [stream-finalization (stream-finalization-summary
                                     {:terminal nil

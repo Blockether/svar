@@ -141,7 +141,18 @@
                                :include ["reasoning.encrypted_content"]
                                :reasoning {:summary "detailed"}
                                :text {:verbosity "low"}}}
+   ;; Ollama (v0.14.0+, Jan 2026) and LM Studio (v0.4.1+, Jan 2026) both serve
+   ;; a native Anthropic Messages endpoint at `<host>/v1/messages` — base-url
+   ;; ends in `/v1` and the :anthropic builder appends `/messages`. Prefer it
+   ;; over chat-completions so local Claude-class models get native thinking
+   ;; blocks (Ollama maps `thinking`; LM Studio supports it from v0.4.x).
+   ;; Neither validates the key, but Ollama REQUIRES the header present, so a
+   ;; non-blank placeholder ships by default. (Prompt caching isn't supported
+   ;; locally — irrelevant for a local box.) Model discovery still uses the
+   ;; OpenAI `/v1/models` (Ollama) / `/api/v0/models` (LM Studio) paths below,
+   ;; independent of the chat api-style.
    :ollama      {:base-url "http://localhost:11434/v1"            :rpm 1000 :tpm 10000000
+                 :api-style :anthropic :api-key "ollama"
                  :env-keys []}
    ;; LM Studio's OpenAI-compatible `/v1/models` omits context length, so
    ;; svar would fall back to DEFAULT_CONTEXT_LIMIT and cripple a model that
@@ -150,6 +161,7 @@
    ;; `loaded_context_length`, and `capabilities` — `models!` reads it via the
    ;; `:models-base :host` + `:models-shape :lmstudio` hooks below.
    :lmstudio    {:base-url "http://localhost:1234/v1"             :rpm 1000 :tpm 10000000
+                 :api-style :anthropic :api-key "lmstudio"
                  :env-keys []
                  :models-path "/api/v0/models"
                  :models-base :host
