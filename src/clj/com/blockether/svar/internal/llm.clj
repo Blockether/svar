@@ -2780,6 +2780,15 @@
         _ (reset! stream-ref input-stream)
         content-acc (StringBuilder.)
         reasoning-acc (StringBuilder.)
+        ;; Diagnostics for a body that is NOT an SSE stream. Some gateways
+        ;; (e.g. Z.ai) answer an error with HTTP 200 + a plain JSON body like
+        ;; `{"code":500,"msg":"404 NOT_FOUND"}`. Read as a stream that yields
+        ;; zero SSE events, the generic "Stream ended before terminal marker."
+        ;; hides the real cause. We capture a bounded head of the raw body and
+        ;; whether ANY `event:`/`data:` line was seen so finalization can
+        ;; surface the actual payload instead.
+        raw-head (StringBuilder.)
+        saw-sse? (volatile! false)
         usage-atom (atom nil)
         provider-state-atom (atom nil)
         current-reasoning-item (atom nil)
@@ -2915,14 +2924,21 @@
                                       :reasoning-acc-len (.length reasoning-acc)})
                              :msg "sse line"}))
               (when (some? line)
+                ;; Capture a bounded head of the raw body for the not-an-SSE
+                ;; diagnostic (see `raw-head` binding). Cheap: a single length
+                ;; guard, only the first ~600 chars are kept.
+                (when (and (not (str/blank? line)) (< (.length raw-head) 600))
+                  (.append raw-head line) (.append raw-head "\n"))
                 (if (str/blank? line)
                   (do
                     (dispatch-event! event-type data-lines)
                     (recur nil [] (unchecked-inc line-count) now-ns))
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
-                      "event" (recur value data-lines (unchecked-inc line-count) now-ns)
-                      "data"  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns)
+                      "event" (do (vreset! saw-sse? true)
+                                  (recur value data-lines (unchecked-inc line-count) now-ns))
+                      "data"  (do (vreset! saw-sse? true)
+                                  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
                       (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
@@ -2991,15 +3007,32 @@
                                      :content-acc content-acc
                                      :reasoning-acc reasoning-acc
                                      :response response})]
-          (throw (ex-info "Stream ended before terminal marker."
-                   {:type :svar.core/stream-truncated
-                    :stream? true
-                    :url url
-                    :stream-finalization stream-finalization
-                    :content-acc-len (.length content-acc)
-                    :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
+          (if-not @saw-sse?
+            ;; The body was NEVER an SSE stream — no `event:`/`data:` line was
+            ;; seen. Almost always a gateway error answered as HTTP 200 + a
+            ;; plain JSON/text body (Z.ai: `{"code":500,"msg":"404 NOT_FOUND"}`;
+            ;; misrouted base-url, auth/quota error pages, HTML 502s). Surface
+            ;; the actual body so the cause is legible instead of the generic
+            ;; truncation message.
+            (let [body (str/trim (str raw-head))]
+              (throw (ex-info (str "Non-SSE response body (no stream events). "
+                                "The endpoint returned a non-streaming payload "
+                                "(often an error answered with HTTP 200): "
+                                (subs body 0 (min 400 (count body))))
+                       {:type :svar.core/non-sse-response
+                        :stream? true
+                        :url url
+                        :response-body body
+                        :stream-finalization stream-finalization})))
+            (throw (ex-info "Stream ended before terminal marker."
+                     {:type :svar.core/stream-truncated
+                      :stream? true
+                      :url url
+                      :stream-finalization stream-finalization
+                      :content-acc-len (.length content-acc)
+                      :reasoning-acc-len (.length reasoning-acc)
+                      :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                      :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))})))))
       (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
             final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
             ps              @provider-state-atom
