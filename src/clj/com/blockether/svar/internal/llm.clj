@@ -438,6 +438,20 @@
    "user-agent" "claude-cli/2.1.62"
    "x-app" "cli"})
 
+(defn- copilot-provider-id?
+  "True for ANY GitHub Copilot provider id — the bare `:github-copilot` and the
+   plan-scoped `:github-copilot-individual/-business/-enterprise`, plus
+   split-by-wire variants a config may declare (Claude on `/v1/messages`
+   alongside GPT on `/responses` and Gemini/Grok on `/chat/completions`, all
+   sharing one Copilot token). Copilot's auth + required headers
+   (Copilot-Integration-Id, Editor-Version, X-Initiator, Openai-Intent) are
+   identical across plans AND api-styles, so they must apply to every Copilot
+   id on every wire — not just the bare `:github-copilot` on chat-completions."
+  [provider-id]
+  (boolean
+    (and provider-id
+      (str/starts-with? (name provider-id) "github-copilot"))))
+
 (defn- make-llm-headers
   "Builds HTTP headers for the given API style."
   ([api-style api-key]
@@ -445,7 +459,7 @@
   ([api-style api-key provider-id]
    (case api-style
      :anthropic (cond
-                  (= :github-copilot provider-id)
+                  (copilot-provider-id? provider-id)
                   {"Authorization" (str "Bearer " api-key)
                    "anthropic-version" "2023-06-01"
                    "Content-Type" "application/json"}
@@ -484,7 +498,7 @@
     (some message-has-image? messages) (assoc "Copilot-Vision-Request" "true")))
 
 (defn- copilot-stream-required? [provider-id base-url]
-  (and (= :github-copilot provider-id)
+  (and (copilot-provider-id? provider-id)
     (string? base-url)
     (boolean (re-find #"(?i)(proxy|api)\.(individual|business|enterprise)\.githubcopilot\.com" base-url))))
 
@@ -506,10 +520,10 @@
 
 (defn- request-headers [api-style api-key provider-id messages llm-headers]
   (cond-> (make-llm-headers api-style api-key provider-id)
-    (= :github-copilot provider-id)
+    (copilot-provider-id? provider-id)
     (merge (copilot-static-headers))
 
-    (= :github-copilot provider-id)
+    (copilot-provider-id? provider-id)
     (merge (copilot-dynamic-headers messages))
 
     ;; Auto-add the 1h-cache beta header when any block in this
@@ -3280,9 +3294,9 @@
          responses-path (:responses-path opts)
          llm-headers    (:llm-headers opts)
          provider-id     (:provider-id opts)
-         headers         (merge (when (= :github-copilot provider-id)
+         headers         (merge (when (copilot-provider-id? provider-id)
                                   (copilot-static-headers))
-                           (when (= :github-copilot provider-id)
+                           (when (copilot-provider-id? provider-id)
                              (copilot-dynamic-headers messages))
                            ;; Caller headers win. Mirrors request-headers for
                            ;; Responses transport.
