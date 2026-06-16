@@ -478,39 +478,38 @@
    ;; Copilot /models reports total context for GPT reasoning models, but the
    ;; prompt/input budget is smaller because 128K output is reserved. svar's
    ;; `:context` is input budget for pre-flight checks.
-   ;; Claude on Copilot routes Anthropic models through the chat
-   ;; completions endpoint, but the proxy refuses (or silently mis-routes)
-   ;; client-supplied `reasoning_effort` / `thinking` fields — Anthropic
-   ;; models manage extended thinking server-side. Until May 2026 svar
-   ;; routed these through `:api-style :anthropic` (native /messages with
-   ;; signed thinking blocks); commit 33e2f0fc73 switched to
-   ;; `:openai-compatible-chat` so we use Copilot's canonical Claude
-   ;; surface, and commit 30e03c1258 then attached `:reasoning-style
-   ;; :openai-effort` to keep reasoning hints flowing. In practice that
-   ;; second move regressed agent loops: Copilot proxy receives
-   ;; `reasoning_effort: medium`, biases Claude into excessive autonomous
-   ;; thinking (4-8K hidden reasoning tokens per iteration) and burns
-   ;; iterations on self-recovery patches — see sessions 52983a42 and
-   ;; 831cedee for the 14-iteration spiral.
+   ;; Claude on Copilot routes through the NATIVE Anthropic wire
+   ;; (`:api-style :anthropic` → `{base}/messages`). Probed live 2026-06-16
+   ;; against api.{individual,business}.githubcopilot.com: `/v1/messages`
+   ;; returns 200 with `copilot_usage` token details AND honours
+   ;; `cache_control` prompt caching. `/chat/completions` exists only at the
+   ;; ROOT (not under /v1) and — critically — does NOT cache the prompt
+   ;; prefix, so agent loops re-read the same context every turn and
+   ;; "repeat the same work over and over". svar briefly routed Claude
+   ;; through `:openai-compatible-chat` (commit 33e2f0fc73) and then pushed
+   ;; `reasoning_effort` (commit 30e03c1258) which spiralled agent loops
+   ;; (sessions 52983a42 / 831cedee, 14 iterations). Returning to the
+   ;; Anthropic wire fixes the cache regression at its root; consumers must
+   ;; supply a `…/v1` base-url so `{base}/messages` resolves to
+   ;; `…/v1/messages` (the vis Copilot provider does this).
    ;;
-   ;; Mirror pi-ai's `compat.supportsReasoningEffort: false` for every
-   ;; Claude entry: `:reasoning-style :server-managed` resolves to nil
-   ;; in REASONING_LEVELS so `reasoning-extra-body` emits no field at
-   ;; all. Claude continues to think on its own (visible in
-   ;; `delta.reasoning_text` deltas); we just stop pushing on the lever.
-   {"claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
-    "claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+   ;; Reasoning stays server-managed: `:reasoning-style :server-managed`
+   ;; resolves to nil in REASONING_LEVELS, so `reasoning-extra-body` emits
+   ;; no `thinking` field at all — Claude thinks on its own (visible in the
+   ;; response) and we don't push the lever that caused the spiral.
+   {"claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     ;; Several Claude rows once carried Anthropic-native context copied
     ;; verbatim (`:context 1000000`) or stale Copilot caps (`144000`).
     ;; Both distort `auto-params` and pre-flight checks. Let refreshed
     ;; models.dev supply Copilot limits (currently 200K total / 168K
     ;; input for Opus 4.8 / 4.7 / 4.6 / Sonnet 4.6).
-    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
-    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
-    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
-    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
-    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
-    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :openai-compatible-chat :reasoning? true :reasoning-style :server-managed}
+    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
 
     "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
