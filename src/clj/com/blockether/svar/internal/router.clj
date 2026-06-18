@@ -29,9 +29,11 @@
 
 (def KNOWN_PROVIDERS
   {:openai      {:base-url "https://api.openai.com/v1"           :rpm 500 :tpm 2000000
-                 :env-keys ["OPENAI_API_KEY"]}
+                 :env-keys ["OPENAI_API_KEY"]
+                 :default-models [{:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"} {:name "gpt-4o-mini"} {:name "o3-mini"}]}
    :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
-                 :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic}
+                 :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic
+                 :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan
    {:base-url "https://api.anthropic.com/v1" :rpm 500 :tpm 2000000
     :env-keys [] :api-style :anthropic
@@ -39,10 +41,11 @@
     ;; OAuth coding plan: use retail Anthropic pricing for honest metering
     ;; once the included quota is exhausted (see internal/modelsdev).
     :pricing-source :anthropic
-    :default-models [{:name "claude-opus-4-8"}]
+    :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/paas/v4"        :rpm 500 :tpm 2000000
-                 :env-keys ["ZAI_API_KEY"]}
+                 :env-keys ["ZAI_API_KEY"]
+                 :default-models [{:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
    :zai-coding  {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
                  ;; Coding Plan endpoint, but for budget accounting we use
                  ;; retail :zai per-token rates (the plan meters overage at
@@ -60,10 +63,12 @@
    {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
     :pricing-source :zai
     :provider-model-source :zai
-    :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
+    :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
+    :default-models [{:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"}]}
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
    :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000
+                    :default-models [{:name "claude-opus-4.8"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
                     :llm-headers {"Editor-Version" "vscode/1.100.0"
                                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                                   "Copilot-Integration-Id" "vscode-chat"
@@ -107,6 +112,7 @@
     :provider-model-source :github-copilot}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
                   :env-keys [] :api-style :openai-compatible-responses
+                  :default-models [{:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1"
@@ -228,7 +234,7 @@
    "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
    "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
-   "glm-5.2"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-5.2"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-effort}
    "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
    "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
 
@@ -279,9 +285,9 @@
                              autonomous reasoning loops — observable on
                              session 52983a42 / 831cedee as 5K-8K output
                              tokens per iteration burned on hidden thinking."
-  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled" :server-managed nil}
-   :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"  :server-managed nil}
-   :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"  :server-managed nil}})
+  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "high" :server-managed nil}
+   :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
+   :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
 
 (defn normalize-reasoning-level
   "Coerce any accepted spelling to a canonical :quick|:balanced|:deep keyword.
@@ -382,6 +388,13 @@
              :zai-thinking       {:thinking (cond-> {:type mapped}
                                               ;; `clear_thinking: false` = keep reasoning_content
                                               ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
+                                              preserved-thinking? (assoc :clear_thinking false))}
+             ;; GLM-5.2+ (DeepSeek-V4 mechanism): thinking is ON and the DEPTH
+             ;; is chosen by `reasoning_effort` — but GLM only accepts "high"/
+             ;; "max" (NOT OpenAI's low/medium/high; anything else falls back to
+             ;; the heavy "max" default). Emit the effort AND keep thinking on.
+             :zai-effort         {:reasoning_effort mapped
+                                  :thinking (cond-> {:type "enabled"}
                                               preserved-thinking? (assoc :clear_thinking false))}
              nil)))))))
 
@@ -944,6 +957,27 @@
   (or (:context (provider-model-entry provider-id model-name))
     (get MODEL_CONTEXT_LIMITS model-name)
     (:default MODEL_CONTEXT_LIMITS)))
+
+(defn provider-base-url
+  "Sane default base-url svar knows for `provider-id` (honours plan-tier
+   `:provider-model-source` inheritance). Vis provider extensions use this as
+   their `:base-url` preset and override it only for local/custom endpoints
+   (e.g. ollama, lmstudio). Returns nil for unknown providers."
+  [provider-id]
+  (or (get-in KNOWN_PROVIDERS [provider-id :base-url])
+    (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :base-url])))
+
+(defn provider-default-models
+  "Sane default model NAMES (vec of strings) svar curates for `provider-id`,
+   honouring plan-tier `:provider-model-source` inheritance. This is the SINGLE
+   source of truth: vis provider extensions use it as their `:default-models`
+   preset and override only when they want a different curated set. Empty vec
+   for unknown providers."
+  [provider-id]
+  (->> (or (get-in KNOWN_PROVIDERS [provider-id :default-models])
+         (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :default-models]))
+    (keep (fn [m] (cond (string? m) m (map? m) (:name m))))
+    vec))
 
 ;; =============================================================================
 ;; Provider normalization

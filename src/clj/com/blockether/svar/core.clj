@@ -56,6 +56,22 @@
   router/reasoning-extra-body)
 
 ;; =============================================================================
+;; Provider defaults (single source of truth — consumers override these)
+;; =============================================================================
+
+(def provider-base-url
+  "Sane default base-url svar knows for a provider id (plan-tier aware).
+   Consumers (e.g. vis provider extensions) use it as the preset default and
+   override only for local/custom endpoints."
+  router/provider-base-url)
+
+(def provider-default-models
+  "Sane default model NAMES (vec of strings) svar curates for a provider id
+   (plan-tier aware). The single source of truth — consumers use it as their
+   `:default-models` and override only for a different curated set."
+  router/provider-default-models)
+
+;; =============================================================================
 ;; Spec DSL
 ;; =============================================================================
 
