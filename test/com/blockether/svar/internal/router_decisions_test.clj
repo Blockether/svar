@@ -550,11 +550,11 @@
                                      (swap! attempts inc)
                                      (case (:provider-id opts)
                                        :p1 (transient-error 429)
-                                       :p2 {:raw "ok"
-                                            :blocks []
+                                       :p2 {:stop-reason :end
+                                            :tool-calls []
+                                            :content "ok"
                                             :api-usage {:input-tokens 1 :output-tokens 1 :total-tokens 2}}))]
-        (llm/ask-code! r {:lang "clojure"
-                          :messages [{:role "user" :content "hi"}]
+        (llm/ask-code! r {:messages [{:role "user" :content "hi"}]
                           :on-chunk #(swap! live-events conj %)}))
       (let [types (mapv :event/type @live-events)]
         (expect (= [:llm.routing/provider-retry

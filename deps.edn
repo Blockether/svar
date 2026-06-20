@@ -16,14 +16,9 @@
  :aliases
  {:dev {:extra-paths ["test"]}
 
-  :test {:extra-paths ["test" "bench"]
-         :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}
-                      criterium/criterium {:mvn/version "0.4.6"}}
+  :test {:extra-paths ["test"]
+         :extra-deps {io.github.noahtheduke/lazytest {:mvn/version "1.9.1"}}
          :main-opts ["-m" "lazytest.main"]}
-
-  :bench {:extra-paths ["bench"]
-          :extra-deps {criterium/criterium {:mvn/version "0.4.6"}}
-          :main-opts ["-m" "com.blockether.svar.bench.fence-normalizer-bench"]}
 
   :build {:deps {io.github.clojure/tools.build {:mvn/version "0.10.13"}
                  slipset/deps-deploy {:mvn/version "0.2.2"}}

@@ -21,7 +21,6 @@
                               (user \"What is 2+2?\")]
                    :model \"gpt-4o\"})"
   (:require
-   [com.blockether.svar.internal.codes :as codes]
    [com.blockether.svar.internal.llm :as llm]
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]))
@@ -134,14 +133,9 @@
   llm/cached)
 (def ask! "Asks the LLM and returns structured Clojure data with token usage and cost." llm/ask!)
 (def ask-code!
-  "Plain-text completion + fenced code-block extraction. Sibling of `ask!`
-   for callers that want raw source (e.g. Clojure) instead of structured
-   JSON. Returns {:result :blocks :raw :reasoning :tokens :cost :duration-ms}.
-   Empty `:result` is a valid success."
+  "Native tool-calling completion. Sibling of `ask!` (structured `:spec`).
+   The model takes action by calling a `:tool`; no tool call ⇒ its text is the
+   final answer (`:stop-reason :end`). Returns {:stop-reason :tool-calls|:end
+   :tool-calls :content :assistant-message :reasoning :tokens :cost :duration-ms}."
   llm/ask-code!)
-(def extract-code-blocks
-  "Parse fenced code blocks from raw text. Returns vec of
-   {:lang <str-or-nil> :source <str>}. Lenient+: when no fences found,
-   treats the whole input as one untagged block."
-  codes/extract-code-blocks)
 (def models! "Fetches available models from the LLM API." llm/models!)

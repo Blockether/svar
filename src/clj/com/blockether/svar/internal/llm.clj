@@ -6,7 +6,6 @@
    [charred.api :as json]
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.internal.codes :as codes]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.spec :as spec]
@@ -471,6 +470,9 @@
                   {"x-api-key" api-key
                    "anthropic-version" "2023-06-01"
                    "Content-Type" "application/json"})
+     ;; Gemini authenticates with the API key in a dedicated header.
+     :gemini {"x-goog-api-key" api-key
+              "Content-Type" "application/json"}
      ;; :openai-compatible-chat and everything else - Bearer token
      {"Authorization" (str "Bearer " api-key)
       "Content-Type" "application/json"})))
@@ -552,6 +554,9 @@
       ;; Responses transport builds its final endpoint from base-url +
       ;; :responses-path later; keep the provider root unchanged here.
       :openai-compatible-responses base-url
+      ;; Gemini builds `{base}/models/{model}:generateContent` in
+      ;; `gemini-completion` (needs the model + stream flag); root unchanged.
+      :gemini base-url
       ;; :openai-compatible-chat default
       (if (str/ends-with? base-url "/chat/completions")
         base-url
@@ -1082,6 +1087,78 @@
       wire
       (-> wire first :text))))
 
+;; ---------------------------------------------------------------------------
+;; Native tool calling — canonical tool defs shaped per wire
+;; ---------------------------------------------------------------------------
+;;
+;; Caller passes canonical tool defs `{:name :description :schema <json-schema>}`
+;; plus a canonical tool-choice. They ride in `extra-body` under `:svar/tools` /
+;; `:svar/tool-choice` (the universal passthrough that already reaches every
+;; request-body builder), mirroring the `:svar/cache` marker convention. Each
+;; builder strips the svar keys, shapes the tools for its wire, and assocs the
+;; native `:tools` / `:tool_choice` body fields.
+
+(def ^:private EMPTY_TOOL_SCHEMA {:type "object" :properties {}})
+
+(defn- tool-def->wire
+  "Shape one canonical tool def `{:name :description :schema}` for `api-style`."
+  [api-style {:keys [name description schema]}]
+  (let [schema (or schema EMPTY_TOOL_SCHEMA)]
+    (case api-style
+      :anthropic
+      (cond-> {:name name :input_schema schema}
+        description (assoc :description description))
+
+      :openai-compatible-responses
+      (cond-> {:type "function" :name name :parameters schema}
+        description (assoc :description description))
+
+      ;; default = :openai-compatible-chat
+      {:type "function"
+       :function (cond-> {:name name :parameters schema}
+                   description (assoc :description description))})))
+
+(defn- tools->wire [api-style tools]
+  (mapv #(tool-def->wire api-style %) tools))
+
+(defn- tool-choice->wire
+  "Shape a canonical tool-choice for `api-style`.
+   Canonical: :auto | :required | :none | {:name \"x\"} | \"x\" (force a tool)."
+  [api-style choice]
+  (let [named (cond (map? choice) (:name choice) (string? choice) choice :else nil)]
+    (if (= api-style :anthropic)
+      (cond
+        named                (cond-> {:type "tool" :name named})
+        (= :required choice) {:type "any"}
+        :else                {:type "auto"})   ; :none has no clean anthropic shape pre-tool — auto is safe
+      (cond
+        named                (if (= api-style :openai-compatible-responses)
+                               {:type "function" :name named}
+                               {:type "function" :function {:name named}})
+        (= :required choice) "required"
+        (= :none choice)     "none"
+        :else                "auto"))))
+
+(defn- extra-body-tools
+  "Pull canonical tools/tool-choice out of `extra-body`.
+   Returns `[tools tool-choice extra-body-without-svar-keys]`."
+  [extra-body]
+  [(:svar/tools extra-body)
+   (:svar/tool-choice extra-body)
+   (dissoc extra-body :svar/tools :svar/tool-choice)])
+
+(defn- decode-tool-arguments
+  "Tool-call arguments reach svar as either an already-parsed map (anthropic
+   `tool_use.input`) or a JSON string (OpenAI chat `function.arguments`,
+   responses `function_call.arguments`). Normalize to a keyword-keyed map so
+   `:input` is uniform across all wires."
+  [args]
+  (cond
+    (map? args)                           args
+    (and (string? args) (not (str/blank? args)))
+    (try (json/read-json args :key-fn keyword) (catch Exception _ {}))
+    :else                                 {}))
+
 (defn- build-anthropic-request-body
   "Builds request body in Anthropic Messages API format.
 
@@ -1110,7 +1187,8 @@
    ;; S2 fix: accept both `:role :system` (keyword) and `:role "system"`
    ;; (string). Anthropic only accepts string role names; we normalise
    ;; here so callers can pass either.
-   (let [system-role? (fn [m] (= "system" (some-> (:role m) name)))
+   (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
+         system-role? (fn [m] (= "system" (some-> (:role m) name)))
          sys-blocks  (cond-> (vec (mapcat #(normalize-content (:content %))
                                     (filter system-role? messages)))
                        anthropic-oauth? (->> (into [{:type "text"
@@ -1134,6 +1212,8 @@
          anthropic-extra (dissoc extra-body :stream_options :prompt_cache_key)
          body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
                        system-wire (assoc :system system-wire)
+                       (seq tools) (assoc :tools (tools->wire :anthropic tools))
+                       (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :anthropic tool-choice))
                        (seq anthropic-extra) (merge anthropic-extra))]
     ;; Re-assert system after merge so extra-body can't clobber it,
     ;; then apply the thinking-aware max_tokens clamp.
@@ -1222,6 +1302,18 @@
      :thinking-signature (or (:data block) "")
      :redacted? true}
 
+    ;; Streaming accumulates a tool_use block's args under :partial_json (the
+    ;; raw input_json_delta concat); non-streaming delivers a parsed :input.
+    ;; Normalize both to a canonical `{:type tool_use :id :name :input}`.
+    "tool_use"
+    {:type "tool_use"
+     :id (:id block)
+     :name (:name block)
+     :input (let [pj (:partial_json block)]
+              (if (and (string? pj) (not (str/blank? pj)))
+                (decode-tool-arguments pj)
+                (or (:input block) {})))}
+
     block))
 
 (defn- anthropic-canonical-assistant-message
@@ -1260,6 +1352,12 @@
                          (map :thinking))
         usage          (:usage response)
         visible        (when (seq text-parts) (str/join "\n" text-parts))
+        ;; Native tool calls: `tool_use` blocks become canonical
+        ;; `{:id :name :input}` — input is already a parsed map on the
+        ;; anthropic wire (no JSON-string decode needed).
+        tool-calls     (->> content-blocks
+                         (filter #(= "tool_use" (:type %)))
+                         (mapv (fn [b] {:id (:id b) :name (:name b) :input (or (:input b) {})})))
         canonical-msg  (anthropic-canonical-assistant-message content-blocks)]
     (cond-> {:content       visible
              :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
@@ -1267,6 +1365,7 @@
              ;; TOTAL (anthropic-additive raw values are summed here).
              :api-usage     (usage/anthropic-canonical usage)
              :http-response envelope}
+      (seq tool-calls) (assoc :tool-calls tool-calls)
       canonical-msg (assoc :assistant-message canonical-msg))))
 
 (defn- make-anthropic-stream-delta-fn
@@ -1573,6 +1672,8 @@
           items)]
     (mapv by-key order)))
 
+(declare dedupe-tool-calls)
+
 (defn- merge-provider-state
   "Provider-aware aggregator. The streaming pipeline merges every
    `:provider-state` event coming out of `delta-fn` into a single
@@ -1590,14 +1691,28 @@
       (case provider
         :openai-responses
         (let [items (dedupe-reasoning-items
-                      (concat (:reasoning-items a) (:reasoning-items b)))]
+                      (concat (:reasoning-items a) (:reasoning-items b)))
+              ;; Tool calls arrive one-per-`output_item.done`; concat across
+              ;; events (parallel calls) and dedupe vs the terminal
+              ;; `response.completed` output.
+              tcs   (dedupe-tool-calls (concat (:tool-calls a) (:tool-calls b)))]
           (cond-> (merge a b)
-            (seq items) (assoc :reasoning-items items)))
+            (seq items) (assoc :reasoning-items items)
+            (seq tcs)   (assoc :tool-calls tcs)))
 
         :anthropic
         (let [blocks (vec (concat (or (:blocks a) []) (or (:blocks b) [])))]
           (cond-> (merge a b)
             (seq blocks) (assoc :blocks blocks)))
+
+        ;; OpenAI chat-completions streams native tool calls as
+        ;; `delta.tool_calls[]` fragments across many chunks (id/name on the
+        ;; first, arguments string in pieces, paired by :index). Accumulate the
+        ;; raw fragments; the finalizer assembles them into canonical calls.
+        :openai-chat
+        (let [frags (vec (concat (:tool-call-fragments a) (:tool-call-fragments b)))]
+          (cond-> (merge a b)
+            (seq frags) (assoc :tool-call-fragments frags)))
 
         (merge a b)))))
 
@@ -1606,19 +1721,26 @@
     {:provider :openai-responses
      :reasoning-items [state]}))
 
+(declare response-output-tool-calls)
+
 (defn- openai-responses-state
   "Builds the OpenAI Responses preserved-thinking state from the
    response's `:output` array. The result is exposed under
    `:provider-state` for diagnostic / fallback uses; the canonical
    replay path lifts each reasoning item into a `{:type \"thinking\"}`
    block on `:assistant-message` so callers don't have to touch this
-   shape directly."
+   shape directly. Also carries any `function_call` items as `:tool-calls`
+   so the streaming finalizer (whose only handle on the response is this
+   provider-state) can surface them — the terminal `response.completed`
+   event delivers the full output array with complete arguments."
   [response]
   (let [items (dedupe-reasoning-items
-                (keep reasoning-item-state (:output response)))]
-    (when (seq items)
-      {:provider :openai-responses
-       :reasoning-items items})))
+                (keep reasoning-item-state (:output response)))
+        tool-calls (response-output-tool-calls response)]
+    (when (or (seq items) (seq tool-calls))
+      (cond-> {:provider :openai-responses}
+        (seq items)      (assoc :reasoning-items items)
+        (seq tool-calls) (assoc :tool-calls tool-calls)))))
 
 (defn- normalize-openai-usage
   "Phase A: alias of `usage/openai-canonical`. Kept as a private name
@@ -1710,6 +1832,74 @@
         {:role "assistant"
          :content (vec (keep identity [thinking-block text-block]))}))))
 
+(defn- openai-chat-tool-calls
+  "Canonical tool calls from an OpenAI chat-completions `message.tool_calls`."
+  [message]
+  (->> (:tool_calls message)
+    (keep (fn [tc]
+            (let [f (:function tc)]
+              (when (:name f)
+                {:id (:id tc) :name (:name f) :input (decode-tool-arguments (:arguments f))}))))
+    vec))
+
+(defn- response-output-tool-calls
+  "Canonical tool calls from an OpenAI Responses `:output` `function_call` items."
+  [response]
+  (->> (:output response)
+    (keep (fn [item]
+            (when (= "function_call" (:type item))
+              {:id (or (:call_id item) (:id item))
+               :name (:name item)
+               :input (decode-tool-arguments (:arguments item))})))
+    vec))
+
+(defn- function-call-item->tool-call
+  "Canonical tool call from one OpenAI Responses `function_call` output item
+   (as delivered complete on `response.output_item.done`)."
+  [item]
+  (when (= "function_call" (:type item))
+    {:id (or (:call_id item) (:id item))
+     :name (:name item)
+     :input (decode-tool-arguments (:arguments item))}))
+
+(defn- dedupe-tool-calls
+  "Dedupe canonical tool calls by `:id`, preserving first-seen order. Guards
+   against the same Responses function_call arriving via both an
+   `output_item.done` event AND the terminal `response.completed` output."
+  [tool-calls]
+  (->> tool-calls
+    (reduce (fn [acc tc]
+              (if (some #(= (:id tc) (:id %)) acc) acc (conj acc tc)))
+      [])
+    vec))
+
+(defn- assemble-chat-tool-call-fragments
+  "Reassemble streamed OpenAI chat `delta.tool_calls[]` fragments into canonical
+   tool calls. Fragments are paired by `:index`; `:id`/`:name` arrive on the
+   first fragment, `:arguments` as a string concatenated across fragments."
+  [fragments]
+  (->> fragments
+    (reduce (fn [acc {:keys [index id] f :function}]
+              (let [idx (or index 0)]
+                (cond-> acc
+                  id            (assoc-in [idx :id] id)
+                  (:name f)     (assoc-in [idx :name] (:name f))
+                  true          (update-in [idx :arguments] (fnil str "") (or (:arguments f) "")))))
+      (sorted-map))
+    (mapv (fn [[_ {:keys [id name arguments]}]]
+            {:id id :name name :input (decode-tool-arguments arguments)}))))
+
+(defn- with-tool-use-blocks
+  "Append canonical `tool_use` content blocks (built from `tool-calls`) onto a
+   canonical assistant message so the calls round-trip into the next request.
+   Creates the message when `canonical-msg` is nil (tool-call-only reply)."
+  [canonical-msg tool-calls]
+  (if (seq tool-calls)
+    (update (or canonical-msg {:role "assistant" :content []})
+      :content (fnil into [])
+      (mapv (fn [c] {:type "tool_use" :id (:id c) :name (:name c) :input (:input c)}) tool-calls))
+    canonical-msg))
+
 (defn- extract-response-data
   "Extracts content, reasoning, and usage data from an OpenAI-compatible
    response envelope. Accepts the map returned by `http-post!`:
@@ -1765,18 +1955,28 @@
         ;; `responses-extract-assistant-message`). Provider-state
         ;; presence picks the Responses path so we don't double-build
         ;; on chat-completions where it stays nil.
+        ;; Native tool calls: chat puts them on `message.tool_calls`, Responses
+        ;; emits `function_call` items in `:output`. Either is empty on the
+        ;; other wire, so the concat is safe.
+        tool-calls         (vec (concat (openai-chat-tool-calls message)
+                                  (response-output-tool-calls response)))
         canonical-msg      (or (when provider-state
                                  (responses-extract-assistant-message
                                    (:reasoning-items provider-state) content))
                              (openai-chat-canonical-assistant-message
                                {:content content
                                 :reasoning-content (when (string? message-reasoning-content)
-                                                     message-reasoning-content)}))]
+                                                     message-reasoning-content)}))
+        ;; tool_use blocks must ride the canonical assistant message so they
+        ;; replay into the next request (chat → message.tool_calls;
+        ;; responses → function_call input items).
+        canonical-msg      (with-tool-use-blocks canonical-msg tool-calls)]
     (cond-> {:content        content
              :reasoning      reasoning
              :provider-state provider-state
              :api-usage      (normalize-openai-usage (get-in response [:usage]))
              :http-response  envelope}
+      (seq tool-calls) (assoc :tool-calls tool-calls)
       canonical-msg (assoc :assistant-message canonical-msg))))
 
 (defn- responses-text-content [content]
@@ -1844,26 +2044,53 @@
                      :strict (:strict response-format)}
       nil)))
 
+(defn- tool-result-text
+  "Normalize a canonical `tool_result` block's `:content` to a string for the
+   OpenAI wires (chat `role:tool` content / responses `function_call_output`)."
+  [content]
+  (if (string? content) content (responses-text-content content)))
+
 (defn- responses-message-input-entries
-  "Expands one canonical message into the OpenAI Responses `:input`
-   entries it generates: thinking blocks become standalone `reasoning`
-   items emitted BEFORE the message itself, the rest of the content
-   becomes the message entry. System messages are filtered out
-   upstream; this helper handles user/assistant only."
+  "Expands one canonical message into the OpenAI Responses `:input` entries it
+   generates:
+     - assistant thinking blocks → standalone `reasoning` items (before msg)
+     - assistant `tool_use` blocks → `function_call` items
+     - user `tool_result` blocks → `function_call_output` items
+     - remaining text/image blocks → the message entry
+   System messages are filtered out upstream; user/assistant only."
   [{:keys [role content]}]
-  (let [normalized (normalize-content content)
-        [thinking-blocks rest-blocks] (if (= role "assistant")
-                                        [(filterv canonical-thinking-block? normalized)
-                                         (filterv (complement canonical-thinking-block?) normalized)]
-                                        [nil normalized])
-        reasoning-items (when (= role "assistant")
+  (let [normalized   (normalize-content content)
+        assistant?   (= role "assistant")
+        tool-use?    #(= "tool_use" (:type %))
+        tool-result? #(= "tool_result" (:type %))
+        thinking-blocks (when assistant? (filterv canonical-thinking-block? normalized))
+        tool-use-blocks (filterv tool-use? normalized)
+        tool-result-blocks (filterv tool-result? normalized)
+        rest-blocks  (filterv #(not (or (canonical-thinking-block? %)
+                                      (tool-use? %) (tool-result? %)))
+                       normalized)
+        reasoning-items (when assistant?
                           (vec (keep canonical-thinking-block->responses-reasoning-item thinking-blocks)))
-        message-entry {:role    (if (= role "assistant") "assistant" "user")
-                       :content (responses-content-blocks role rest-blocks)}]
-    (vec (concat reasoning-items [message-entry]))))
+        fn-call-items   (mapv (fn [b] {:type "function_call"
+                                       :call_id (:id b)
+                                       :name (:name b)
+                                       :arguments (json/write-json-str (or (:input b) {}))})
+                          tool-use-blocks)
+        fn-output-items (mapv (fn [b] {:type "function_call_output"
+                                       :call_id (:tool_use_id b)
+                                       :output (tool-result-text (:content b))})
+                          tool-result-blocks)
+        message-entry (when (seq rest-blocks)
+                        {:role    (if assistant? "assistant" "user")
+                         :content (responses-content-blocks role rest-blocks)})]
+    (vec (concat reasoning-items
+           (when message-entry [message-entry])
+           fn-call-items
+           fn-output-items))))
 
 (defn- build-openai-responses-request-body [messages model extra-body]
-  (let [system-text (->> messages
+  (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
+        system-text (->> messages
                       (filter #(= "system" (:role %)))
                       (map (comp responses-text-content :content))
                       (remove str/blank?)
@@ -1897,7 +2124,136 @@
       max-output-tokens (assoc :max_output_tokens max-output-tokens)
       (seq reasoning) (assoc :reasoning reasoning)
       text-format (assoc :text (assoc base-text :format text-format))
+      (seq tools) (assoc :tools (tools->wire :openai-compatible-responses tools))
+      (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :openai-compatible-responses tool-choice))
       (seq base-extra*) (merge (cond-> base-extra* text-format (dissoc :text))))))
+
+;; ---------------------------------------------------------------------------
+;; Google Gemini wire — generateContent / streamGenerateContent
+;; ---------------------------------------------------------------------------
+;;
+;; Native Gemini (NOT the OpenAI-compat shim): messages → `contents`
+;; (role user|model, `parts`), system → `systemInstruction`, tools →
+;; `tools[].functionDeclarations`, a tool call → a `functionCall` part, a tool
+;; result → a `functionResponse` part. Gemini pairs a response to its call by
+;; NAME (there is no call-id on the wire), so the round-trip resolves each
+;; canonical `tool_result`'s function name from the preceding `tool_use` by id.
+
+(defn- gemini-tool-decls [tools]
+  [{:functionDeclarations
+    (mapv (fn [{:keys [name description schema]}]
+            (cond-> {:name name :parameters (or schema EMPTY_TOOL_SCHEMA)}
+              description (assoc :description description)))
+      tools)}])
+
+(defn- gemini-tool-config [tool-choice]
+  (let [named (cond (map? tool-choice) (:name tool-choice) (string? tool-choice) tool-choice :else nil)]
+    {:functionCallingConfig
+     (cond
+       named                     {:mode "ANY" :allowedFunctionNames [named]}
+       (= :required tool-choice) {:mode "ANY"}
+       (= :none tool-choice)     {:mode "NONE"}
+       :else                     {:mode "AUTO"})}))
+
+(defn- gemini-part-text [part]
+  (cond (string? part)          part
+        (string? (:text part))  (:text part)
+        :else                   nil))
+
+(defn- canonical->gemini-parts
+  "One canonical content vec → Gemini `parts`. `id->name` resolves a
+   tool_result's function name from the tool_use it answers."
+  [blocks id->name]
+  (->> blocks
+    (keep (fn [b]
+            (case (:type b)
+              "text"        (when-not (str/blank? (:text b)) {:text (:text b)})
+              ;; Thinking is NOT replayed to Gemini — no signed-echo contract.
+              "thinking"    nil
+              "tool_use"    {:functionCall {:name (:name b) :args (or (:input b) {})}}
+              "tool_result" {:functionResponse
+                             {:name (or (id->name (:tool_use_id b)) (:tool_use_id b))
+                              :response {:result (tool-result-text (:content b))}}}
+              (when (:text b) {:text (:text b)}))))
+    vec))
+
+(defn- gemini-contents
+  "Canonical messages → `[system-instruction contents]`. System messages fold
+   into `systemInstruction`; assistant→\"model\", everything else→\"user\"."
+  [messages]
+  (let [sys      (->> messages
+                   (filter #(= "system" (some-> (:role %) name)))
+                   (mapcat #(normalize-content (:content %)))
+                   (keep gemini-part-text) (remove str/blank?) (str/join "\n\n"))
+        id->name (into {} (for [m messages
+                                b (normalize-content (:content m))
+                                :when (= "tool_use" (:type b))]
+                            [(:id b) (:name b)]))
+        contents (->> messages
+                   (remove #(= "system" (some-> (:role %) name)))
+                   (keep (fn [{:keys [role content]}]
+                           (let [parts (canonical->gemini-parts (normalize-content content) id->name)]
+                             (when (seq parts)
+                               {:role (if (= "assistant" (some-> role name)) "model" "user")
+                                :parts parts}))))
+                   vec)]
+    [(when-not (str/blank? sys) {:parts [{:text sys}]}) contents]))
+
+(defn- build-gemini-request-body [messages model extra-body]
+  (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
+        [sys-instr contents] (gemini-contents messages)
+        max-out    (or (:max_output_tokens extra-body) (:max_tokens extra-body))
+        gen-config (cond-> {}
+                     max-out                   (assoc :maxOutputTokens max-out)
+                     (:temperature extra-body) (assoc :temperature (:temperature extra-body))
+                     (:thinkingConfig extra-body) (assoc :thinkingConfig (:thinkingConfig extra-body)))
+        base-extra (dissoc extra-body :max_tokens :max_output_tokens :temperature :thinkingConfig
+                     :reasoning_effort :reasoning :response_format :stream_options :prompt_cache_key)]
+    (cond-> {:contents contents}
+      sys-instr            (assoc :systemInstruction sys-instr)
+      (seq tools)          (assoc :tools (gemini-tool-decls tools))
+      (and (seq tools) tool-choice) (assoc :toolConfig (gemini-tool-config tool-choice))
+      (seq gen-config)     (assoc :generationConfig gen-config)
+      (seq base-extra)     (merge base-extra))))
+
+(defn- gemini-candidate-parts [response]
+  (get-in response [:candidates 0 :content :parts]))
+
+(defn- gemini-tool-calls
+  "Canonical tool calls from Gemini `functionCall` parts. Gemini emits no
+   call-id, so synthesize a unique one (name+index) for caller correlation;
+   the wire round-trip matches by name/order, not id."
+  [parts]
+  (->> parts
+    (keep-indexed (fn [idx p]
+                    (when-let [fc (:functionCall p)]
+                      {:id (str "gemini-" (:name fc) "-" idx)
+                       :name (:name fc)
+                       :input (or (:args fc) {})})))
+    vec))
+
+(defn- gemini-visible-text [parts]
+  (->> parts (remove :functionCall) (remove :thought) (keep gemini-part-text)
+    (remove str/blank?) (str/join "")))
+
+(defn- gemini-canonical-assistant-message [parts tool-calls]
+  (let [text (gemini-visible-text parts)
+        msg  (when-not (str/blank? text) {:role "assistant" :content [{:type "text" :text text}]})]
+    (with-tool-use-blocks msg tool-calls)))
+
+(defn- extract-gemini-response-data [envelope]
+  (let [response   (:parsed envelope)
+        parts      (gemini-candidate-parts response)
+        text       (gemini-visible-text parts)
+        thoughts   (->> parts (filter :thought) (keep gemini-part-text) (remove str/blank?) (str/join "\n"))
+        tool-calls (gemini-tool-calls parts)
+        canonical-msg (gemini-canonical-assistant-message parts tool-calls)]
+    (cond-> {:content       (when-not (str/blank? text) text)
+             :reasoning     (when-not (str/blank? thoughts) thoughts)
+             :api-usage     (usage/gemini-canonical (:usageMetadata response))
+             :http-response envelope}
+      (seq tool-calls) (assoc :tool-calls tool-calls)
+      canonical-msg    (assoc :assistant-message canonical-msg))))
 
 (defn- openai-chat-split-thinking
   "Splits a normalized canonical content vec into `[thinking-blocks
@@ -1996,23 +2352,58 @@
   ([messages model]
    (build-request-body messages model nil))
   ([messages model extra-body]
-   (let [echo-off? (echo-reasoning-disabled?)
-         processed (mapv (fn [{:keys [role content] :as m}]
-                           (let [normalized (normalize-content content)
-                                 [thinking-blocks rest-blocks]
-                                 (if (= role "assistant")
-                                   (openai-chat-split-thinking normalized)
-                                   [nil normalized])
-                                 reasoning-content
-                                 (when (and (not echo-off?) (seq thinking-blocks))
-                                   (openai-chat-reasoning-content thinking-blocks))
-                                 base (-> m
-                                        (assoc :content (openai-content rest-blocks))
-                                        (cond-> (= role "system") (assoc :role "system")))]
-                             (cond-> base
-                               reasoning-content (assoc :reasoning_content reasoning-content))))
-                     messages)]
+   (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
+         echo-off? (echo-reasoning-disabled?)
+         tool-use?    #(= "tool_use" (:type %))
+         tool-result? #(= "tool_result" (:type %))
+         ;; One canonical message can expand to MULTIPLE wire messages: a user
+         ;; message carrying `tool_result` blocks emits a `{:role "tool"}`
+         ;; message per result (and is dropped entirely when it held nothing
+         ;; else). Assistant `tool_use` blocks hoist to message-level
+         ;; `:tool_calls`, mirroring the `reasoning_content` hoist.
+         processed (vec
+                     (mapcat
+                       (fn [{:keys [role content] :as m}]
+                         (let [normalized (normalize-content content)
+                               assistant? (= role "assistant")
+                               [thinking-blocks non-thinking]
+                               (if assistant?
+                                 (openai-chat-split-thinking normalized)
+                                 [nil normalized])
+                               tool-use-blocks    (filterv tool-use? non-thinking)
+                               tool-result-blocks (filterv tool-result? non-thinking)
+                               rest-blocks        (filterv #(not (or (tool-use? %) (tool-result? %)))
+                                                    non-thinking)
+                               reasoning-content
+                               (when (and (not echo-off?) (seq thinking-blocks))
+                                 (openai-chat-reasoning-content thinking-blocks))
+                               tool-calls
+                               (when (seq tool-use-blocks)
+                                 (mapv (fn [b] {:id (:id b) :type "function"
+                                                :function {:name (:name b)
+                                                           :arguments (json/write-json-str (or (:input b) {}))}})
+                                   tool-use-blocks))
+                               base (-> m
+                                      (dissoc :content)
+                                      (assoc :content (openai-content rest-blocks))
+                                      (cond-> (= role "system") (assoc :role "system")))
+                               base (cond-> base
+                                      reasoning-content (assoc :reasoning_content reasoning-content)
+                                      (seq tool-calls)  (assoc :tool_calls tool-calls))
+                               ;; Keep the base message unless it's a pure
+                               ;; tool_result carrier (no text, no tool_calls,
+                               ;; no reasoning) — an empty user message is a
+                               ;; 400 on every OpenAI-compatible endpoint.
+                               keep-base? (or (seq rest-blocks) (seq tool-calls) reasoning-content)
+                               tool-msgs (mapv (fn [b] {:role "tool"
+                                                        :tool_call_id (:tool_use_id b)
+                                                        :content (tool-result-text (:content b))})
+                                           tool-result-blocks)]
+                           (vec (concat (when keep-base? [base]) tool-msgs))))
+                       messages))]
      (cond-> {:model model :messages processed}
+       (seq tools) (assoc :tools (tools->wire :openai-compatible-chat tools))
+       (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :openai-compatible-chat tool-choice))
        (seq extra-body) (merge extra-body)))))
 
 (defn- sanitize-messages-for-logging
@@ -2192,6 +2583,47 @@
                          :llm-request llm-request})
                 response-body (assoc :body (truncate-error-body response-body))
                 api-key-error (assoc :api-key-error api-key-error)))))))))
+
+(defn- gemini-url
+  "Gemini puts the model + method in the path:
+   `{base}/models/{model}:generateContent` (or `:streamGenerateContent?alt=sse`)."
+  [base-url model stream?]
+  (str (str/replace base-url #"/+$" "") "/models/" model
+    (if stream? ":streamGenerateContent?alt=sse" ":generateContent")))
+
+(defn gemini-completion
+  "Low-level Google Gemini transport (native generateContent). Auth is the
+   `x-goog-api-key` header. Returns the same normalized shape as
+   `chat-completion` / `openai-responses-completion`:
+   {:content :reasoning :tool-calls :assistant-message :api-usage :http-response}.
+
+   NOTE: v1 is non-streaming (`generateContent`). When `:on-chunk` is supplied
+   it still does a single non-streaming call and fires one terminal chunk so
+   streaming callers keep working; true `streamGenerateContent` SSE is a
+   follow-up."
+  [request-body {:keys [api-key base-url model headers timeout-ms on-chunk]
+                 :or   {timeout-ms router/DEFAULT_TIMEOUT_MS}}]
+  (let [url          (gemini-url base-url model false)
+        http-headers (merge {"x-goog-api-key" api-key "Content-Type" "application/json"}
+                       headers)
+        llm-request  {:model model :base-url base-url}]
+    (trove/log! {:level :info
+                 :data (log-data {:model model :url url :timeout-ms timeout-ms})
+                 :msg "gemini request dispatched"})
+    (try
+      (let [result (extract-gemini-response-data (http-post! url request-body http-headers timeout-ms))]
+        (when on-chunk
+          (on-chunk {:content (:content result) :reasoning (:reasoning result)
+                     :provider-state nil :api-usage (:api-usage result) :done? false}))
+        result)
+      (catch Exception e
+        (let [ex-data-map   (ex-data e)
+              response-body (when (string? (:body ex-data-map)) (:body ex-data-map))
+              error-message (http-error-message e)]
+          (anomaly/fault! error-message
+            (cond-> (merge (dissoc ex-data-map :body)
+                      {:type :svar.core/http-error :llm-request llm-request})
+              response-body (assoc :body (truncate-error-body response-body)))))))))
 
 (defn- chat-completion-with-retry
   "Calls the LLM API with exponential backoff retry for rate limits."
@@ -2405,15 +2837,20 @@
 
       (contains? #{"response.output_item.added" "response.output_item.done"}
         event-type)
-      (let [item (:item chunk)]
+      (let [item (:item chunk)
+            done? (= "response.output_item.done" event-type)
+            ;; A completed `function_call` item carries its full arguments
+            ;; here — codex with `store:false` does NOT echo it on
+            ;; `response.completed`, so this is the only place to catch it.
+            tool-call (when done? (function-call-item->tool-call item))]
         {:content-delta nil
          :reasoning-delta nil
          :content-fallback nil
-         :reasoning-fallback (when (and (= "reasoning" (:type item))
-                                     (= "response.output_item.done" event-type))
+         :reasoning-fallback (when (and (= "reasoning" (:type item)) done?)
                                (reasoning-part-text item))
-         :provider-state (when (= "response.output_item.done" event-type)
-                           (reasoning-item-provider-state item))
+         :provider-state (cond
+                           tool-call {:provider :openai-responses :tool-calls [tool-call]}
+                           done?     (reasoning-item-provider-state item))
          :api-usage (normalize-openai-usage (:usage chunk))})
 
       (contains? #{"response.completed" "response.done" "response.incomplete"}
@@ -2441,7 +2878,8 @@
           reasoning   (or (:reasoning_content delta)
                         (:reasoning delta)
                         (:reasoning_text delta)
-                        (:reasoning_summary delta))]
+                        (:reasoning_summary delta))
+          tool-frags  (:tool_calls delta)]
       {:content-delta (cond
                         ;; Preserve exact string deltas, including a
                         ;; single-space token between adjacent code tokens.
@@ -2453,6 +2891,10 @@
                             (reasoning-blocks-text raw-content)))
        :content-fallback nil
        :reasoning-fallback nil
+       ;; Native tool-call fragments accumulate via provider-state; the
+       ;; finalizer assembles them (args arrive piecewise, paired by :index).
+       :provider-state (when (seq tool-frags)
+                         {:provider :openai-chat :tool-call-fragments (vec tool-frags)})
        :api-usage (normalize-openai-usage (:usage chunk))})))
 
 (defn- append-summary-text-to-last-part [item delta]
@@ -3086,6 +3528,25 @@
                               (openai-chat-canonical-assistant-message
                                 {:content final-content
                                  :reasoning-content final-reasoning}))
+            ;; Native tool calls, per wire:
+            ;;   anthropic — tool_use blocks already in provider-state :blocks
+            ;;               (→ assistant-msg content).
+            ;;   responses — terminal `response.completed` carried function_call
+            ;;               items into provider-state :tool-calls.
+            ;;   chat      — delta.tool_calls fragments accumulated in
+            ;;               provider-state :tool-call-fragments; assemble now.
+            msg-tool-calls  (->> (:content assistant-msg)
+                              (filter #(= "tool_use" (:type %)))
+                              (mapv (fn [b] {:id (:id b) :name (:name b) :input (or (:input b) {})})))
+            ps-tool-calls   (or (not-empty (:tool-calls ps))
+                              (when (seq (:tool-call-fragments ps))
+                                (assemble-chat-tool-call-fragments (:tool-call-fragments ps))))
+            tool-calls      (vec (or (not-empty msg-tool-calls) ps-tool-calls))
+            ;; responses/chat assistant-msg has no tool_use blocks yet — graft
+            ;; them on so the calls round-trip into the next request.
+            assistant-msg   (if (and (seq ps-tool-calls) (empty? msg-tool-calls))
+                              (with-tool-use-blocks assistant-msg ps-tool-calls)
+                              assistant-msg)
             stream-finalization (stream-finalization-summary
                                   {:terminal @terminal-event
                                    :incomplete nil
@@ -3106,6 +3567,7 @@
                                   :streaming? true
                                   :status     (:status response)
                                   :stream-finalization stream-finalization}}
+          (seq tool-calls) (assoc :tool-calls tool-calls)
           assistant-msg (assoc :assistant-message assistant-msg)))
       (catch clojure.lang.ExceptionInfo e
         ;; Cancellation wins over idle/semantic reclassification — the
@@ -3312,7 +3774,18 @@
                            ;; Caller headers win. Mirrors request-headers for
                            ;; Responses transport.
                            llm-headers)]
-     (if (= api-style :openai-compatible-responses)
+     (cond
+       (= api-style :gemini)
+       (gemini-completion
+         (build-gemini-request-body messages model extra-body)
+         {:api-key    api-key
+          :base-url   base-url
+          :model      model
+          :headers    llm-headers
+          :timeout-ms timeout-ms
+          :on-chunk   on-chunk})
+
+       (= api-style :openai-compatible-responses)
        (openai-responses-completion
          (build-openai-responses-request-body messages model extra-body)
          {:api-key         api-key
@@ -3324,6 +3797,8 @@
           :idle-timeout-ms idle-timeout-ms
           :semantic-timeout-ms semantic-timeout-ms
           :on-chunk        on-chunk})
+
+       :else
        (if on-chunk
          (chat-completion-streaming
            messages model api-key base-url opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style)
@@ -4430,86 +4905,69 @@
                      ex))))))))
 
 ;; =============================================================================
-;; ask-code! / ask-code!* - Plain-text completion + fenced code-block extraction
+;; ask-code!* / ask-code! — native tool-calling completion (no spec)
 ;; =============================================================================
 ;;
-;; Sibling of `ask!` for callers that want raw source (typically Clojure)
-;; instead of a structured JSON envelope. No spec, no schema-prompt inlining,
-;; no JSON-mode tricks. Sends `:messages` verbatim, parses the assistant
-;; response with `codes/extract-code-blocks`, filters by `:lang` (default
-;; "clojure"), and returns the concatenated source.
-;;
-;; Empty `:result` (no matching code blocks) is a VALID success - the caller
-;; decides what to do (semantic retry with reminder, treat as no-op, etc.).
-;; svar throws only on transport-level failures: HTTP errors propagate from
-;; `chat-completion`; `:svar.llm/empty-content` is thrown when the provider
-;; returns no content at all (reasoning-only response). No format-retry loop
-;; here - extraction shape is the caller's contract, not svar's.
-;;
-;; Tail-pointer placement (`:code-tail-pointer?`) mirrors the schema-tail
-;; pointer on `ask!*`: a short code-format reminder is appended as the last
-;; text block of the last user message, default ON, opt-out via
-;; `:code-tail-pointer? false`. Restores recency-driven format adherence on
-;; long transcripts without burning a cache breakpoint.
+;; The non-structured sibling of `ask!*`: sends `:messages` verbatim and
+;; advertises `:tools` (canonical defs). The model either calls a tool
+;; (`:stop-reason :tool-calls`) or returns its final text answer
+;; (`:stop-reason :end` — NO tool call = the turn is done, the maki /
+;; Claude-Code model). No schema, no fence parsing, no lenient extraction —
+;; the model's action arrives as a native tool call, not fenced code.
 
 (defn ask-code!*
-  "Low-level ask-code - calls the LLM directly without routing. Use `ask-code!`.
+  "Low-level native-tool-calling completion — no routing. Prefer `ask-code!`
+   which routes + falls back into this.
 
-   See `ask-code!` for the full param + return contract."
+   opts:
+     :messages    - REQUIRED. Canonical messages; may carry prior `tool_use`
+                    (assistant) + `tool_result` (user) content blocks.
+     :tools       - Canonical defs `[{:name :description :schema}]`
+                    (`:schema` is a JSON-Schema map for the tool input).
+     :tool-choice - Optional. :auto (default) | :required | :none | {:name \"x\"}
+                    | \"x\" (force a specific tool).
+     plus the usual :model/:timeout-ms/:extra-body/:on-chunk keys resolved
+     through `resolve-opts`.
+
+   Returns:
+     {:stop-reason :tool-calls | :end      ; :end (no tool call) IS the answer
+      :tool-calls  [{:id :name :input}]    ; [] when :end
+      :content     <text or nil>
+      :reasoning :assistant-message :provider-state :api-usage
+      :tokens :cost :duration-ms :http-response}
+
+   `:assistant-message` MUST be appended to `:messages` on the next call so the
+   tool_use blocks round-trip; append matching `tool_result` user blocks too."
   [router opts0]
-  (let [;; Caller-opt → wire-body chokepoint. Runs ONCE per call so
-        ;; role normalisation / top-level :system / auto-cache /
-        ;; :cache-key forwarding all land in one place regardless of
-        ;; entry point.
-        [messages opts1] (apply-llm-opts (:messages opts0) opts0)
+  (let [[messages opts1] (apply-llm-opts (:messages opts0) opts0)
         opts             (assoc opts1 :messages messages)
-        {:keys [on-chunk code-tail-pointer?]} opts
-        lang (:lang opts)
-        _ (when-not (and (string? lang) (not (str/blank? lang)))
-            ;; `:lang` is REQUIRED. No default. `select-blocks` filters
-            ;; strictly on this tag; without it we don't know what to keep.
-            (anomaly/incorrect! ":lang is required on ask-code! and must be a non-blank string"
-              {:type :svar.core/invalid-lang :lang lang}))
+        {:keys [on-chunk tools tool-choice]} opts
         {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms output-reserve
                 check-context? network pricing context-limits responses-path llm-headers]}
         (resolve-opts router opts)
         provider-id (:provider-id opts)
         chat-url (make-chat-url base-url api-style)
         in-msgs (vec messages)
-        ;; Default ON: append the code-format reminder as the LAST text
-        ;; block of the LAST user message. Only literal `false` opts out
-        ;; (nil / missing keep the default), matching ask!*'s semantics.
-        with-tail (if (false? code-tail-pointer?)
-                    in-msgs
-                    (append-code-tail-pointer in-msgs lang (boolean (:lenient opts))))
         check-opts (cond-> {:context-limits context-limits
-                            :exact-count-fn (anthropic-exact-count-fn with-tail model
+                            :exact-count-fn (anthropic-exact-count-fn in-msgs model
                                               {:api-style api-style :api-key api-key
                                                :base-url base-url :provider-id provider-id
                                                :llm-headers llm-headers})}
                      output-reserve (assoc :output-reserve output-reserve))
-        context-check (when check-context?
-                        (let [check (router/check-context-limit model with-tail check-opts)]
-                          (when-not (:ok? check)
-                            (anomaly/incorrect! (:error check)
-                              {:type :svar.core/context-overflow
-                               :model model
-                               :input-tokens (:input-tokens check)
-                               :max-input-tokens (:max-input-tokens check)
-                               :overflow (:overflow check)
-                               :utilization (:utilization check)
-                               :suggestion (str "Reduce task content by ~"
-                                             (int (* (double (:overflow check)) 0.75)) " words, "
-                                             "or use a larger context model.")}))
-                          check))
-        ;; Per-chunk on-chunk: signal progress only. Never re-parse the
-        ;; accumulated buffer here — `codes/extract-code-blocks` is
-        ;; O(N) per call and the buffer grows monotonically, so doing
-        ;; it on every SSE delta is O(N²) and pegs CPU on long
-        ;; responses (reproduced live in Vis conv 0c8188ac, glm-5.1,
-        ;; thread stuck in `normalize-fence-closers`). The final parse
-        ;; happens exactly once after `chat-completion` returns and is
-        ;; surfaced in the `:done? true` chunk + return value below.
+        _context-check (when check-context?
+                         (let [check (router/check-context-limit model in-msgs check-opts)]
+                           (when-not (:ok? check)
+                             (anomaly/incorrect! (:error check)
+                               {:type :svar.core/context-overflow
+                                :model model
+                                :input-tokens (:input-tokens check)
+                                :max-input-tokens (:max-input-tokens check)
+                                :overflow (:overflow check)
+                                :utilization (:utilization check)
+                                :suggestion (str "Reduce task content by ~"
+                                              (int (* (double (:overflow check)) 0.75)) " words, "
+                                              "or use a larger context model.")}))
+                           check))
         streaming-on-chunk (when on-chunk
                              (fn [{:keys [content reasoning provider-state api-usage]}]
                                (let [tokens (api-usage->tokens api-usage)
@@ -4518,73 +4976,47 @@
                                               (or (:input-tokens api-usage) 0)
                                               (or (:output-tokens api-usage) 0)
                                               pricing
-                                              {:api-usage api-usage
-                                               :api-style api-style}))]
+                                              {:api-usage api-usage :api-style api-style}))]
                                  (when (or (not (str/blank? (or reasoning "")))
                                          (not (str/blank? (or content ""))))
-                                   (on-chunk {:blocks    nil
-                                              :raw       content
+                                   (on-chunk {:content   content
                                               :reasoning reasoning
                                               :provider-state provider-state
                                               :tokens    tokens
                                               :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                                               :done?     false})))))
         caller-extra-body (or (:extra-body opts) {})
+        ;; Tools ride in extra-body under :svar/* (the universal passthrough);
+        ;; each request-body builder strips + shapes them per wire.
+        extra-body (cond-> caller-extra-body
+                     (seq tools)  (assoc :svar/tools (vec tools))
+                     tool-choice  (assoc :svar/tool-choice tool-choice))
         retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
-                                           ;; Carry resolved streaming timeouts verbatim
-                                           ;; (incl. explicit nil) so `chat-completion`
-                                           ;; sees post-`resolve-opts` precedence.
                                            :ttft-timeout-ms ttft-timeout-ms
                                            :idle-timeout-ms idle-timeout-ms
                                            :semantic-timeout-ms semantic-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
-                     (seq caller-extra-body) (assoc :extra-body caller-extra-body)
+                     (seq extra-body) (assoc :extra-body extra-body)
                      responses-path (assoc :responses-path responses-path)
                      llm-headers (assoc :llm-headers llm-headers))
-        [{:keys [content reasoning provider-state assistant-message api-usage http-response
+        [{:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
                  stream-finalization]} duration-ms]
         (util/with-elapsed
-          (chat-completion with-tail model api-key chat-url retry-opts))
-        stream-finalization (or stream-finalization
-                              (:stream-finalization http-response))]
+          (chat-completion in-msgs model api-key chat-url retry-opts))
+        stream-finalization (or stream-finalization (:stream-finalization http-response))]
     (trove/log! {:level :info
-                 :data (log-data (cond-> {:model model
-                                          :duration-ms duration-ms
-                                          :input-tokens (:input-tokens api-usage)
-                                          :output-tokens (:output-tokens api-usage)
-                                          :reasoning-length (when reasoning (count reasoning))
-                                          :content-length   (when content (count content))
-                                          :content-preview  (when content
-                                                              (subs content 0 (min 200 (count content))))}
-                                   stream-finalization
-                                   (assoc :stream-finalization stream-finalization)))
-                 :msg "ask-code! HTTP response received"})
-    (when (str/blank? content)
-      ;; Distinguish max_tokens cap from genuine empty-content. Both
-      ;; arrive here with `:content blank`, but the failure modes are
-      ;; different:
-      ;;   :svar.llm/max-tokens-exceeded — model burnt the entire
-      ;;     output budget on hidden reasoning before opening a code
-      ;;     fence. Provider reports `finish_reason: \"length\"`.
-      ;;     Retry path: bump `:extra-body {:max_tokens N}` 2× and try
-      ;;     once more. Reasoning length is real evidence to show the
-      ;;     user / log: model was thinking, just couldn't ship.
-      ;;   :svar.llm/empty-content — model returned nothing useful with
-      ;;     `finish_reason: \"stop\"` or no reason at all (rare; e.g.
-      ;;     prompt confused the model). Retry path: caller-level
-      ;;     `:format-retry-on` opt-in only; svar does NOT auto-retry
-      ;;     because the next call would emit the same blank.
-      ;;
-      ;; Surfaces a dedicated `:retry-hint` payload so callers can
-      ;; either (a) bump max_tokens directly or (b) re-route to a
-      ;; longer-output model. `:reasoning-length` lets the UI render a
-      ;; \"model spent ~2K tokens reasoning before timing out\" line
-      ;; instead of the generic \"no content\" placeholder.
+                 :data (log-data {:model model :duration-ms duration-ms
+                                  :input-tokens (:input-tokens api-usage)
+                                  :output-tokens (:output-tokens api-usage)
+                                  :tool-call-count (count tool-calls)
+                                  :content-length (when content (count content))})
+                 :msg "chat! HTTP response received"})
+    ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
+    ;; blank content is normal and terminates as :tool-calls.
+    (when (and (empty? tool-calls) (str/blank? content))
       (let [finish-reason (some-> stream-finalization :finish-reason str)
-            length-cap? (= "length" finish-reason)
-            reasoning-len (long (or (some-> reasoning count) 0))
-            output-tokens (long (or (:output-tokens api-usage) 0))
+            length-cap?   (= "length" finish-reason)
             base-envelope (envelope-data
                             {:model model :api-style api-style :chat-url chat-url
                              :duration-ms duration-ms :api-usage api-usage
@@ -4594,125 +5026,71 @@
                              :http-response http-response
                              :stream-finalization stream-finalization
                              :provider-id provider-id})]
-        (if length-cap?
-          (throw (ex-info
-                   (str "Stream truncated at max_tokens (" output-tokens
-                     " output tokens consumed, " reasoning-len
-                     " went to hidden reasoning, 0 to visible content). "
-                     "Raise `:extra-body {:max_tokens N}` for this call "
-                     "or shorten input/reasoning so the model has room "
-                     "to emit content.")
-                   (assoc base-envelope
-                     :type :svar.llm/max-tokens-exceeded
-                     :finish-reason finish-reason
-                     :reasoning-length reasoning-len
-                     :output-tokens output-tokens
-                     :retry-hint :raise-max-tokens)))
-          (throw (ex-info
-                   (str "The model produced reasoning but no content. "
-                     "`ask-code!` needs textual content with code fences.")
-                   (assoc base-envelope :type :svar.llm/empty-content))))))
-    (let [lenient? (boolean (:lenient opts))
-          {:keys [blocks saw-fence? malformed?]}
-          (if lenient?
-            ;; Lenient mode: the whole reply IS the code (single-engine
-            ;; callers). No fence scan, no lang filtering, nothing dropped —
-            ;; `codes/lenient-block` strips at most one outer wrapper fence.
-            {:blocks    (if-let [b (codes/lenient-block content lang)] [b] [])
-             :saw-fence? false
-             :malformed? false}
-            (codes/extract-code-blocks-detail content))
-          selected    (->> (if lenient? blocks (codes/select-blocks blocks lang))
-                        (remove #(str/blank? (:source %)))
-                        vec)
-          token-stats (router/count-and-estimate model with-tail content
-                        (cond-> {:pricing pricing
-                                 :api-usage api-usage
-                                 :api-style api-style}
-                          context-check (assoc :input-tokens (:input-tokens context-check))))
+        (throw (ex-info
+                 (if length-cap?
+                   "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
+                   "The model produced neither text nor a tool call.")
+                 (assoc base-envelope
+                   :type (if length-cap? :svar.llm/max-tokens-exceeded :svar.llm/empty-content))))))
+    (let [token-stats (router/count-and-estimate model in-msgs (or content "")
+                        {:pricing pricing :api-usage api-usage :api-style api-style})
           tokens      (token-stats->tokens token-stats)
-          cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])]
+          cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+          tool-calls  (vec (or tool-calls []))
+          stop-reason (if (seq tool-calls) :tool-calls :end)]
       (when on-chunk
-        (on-chunk {:blocks    selected
-                   :all-blocks blocks
-                   :saw-fence? saw-fence?
-                   :malformed? malformed?
-                   :raw       content
-                   :reasoning reasoning
-                   :provider-state provider-state
-                   :stream-finalization stream-finalization
-                   :tokens    tokens
-                   :cost      cost
-                   :done?     true}))
-      (cond-> {:blocks      selected
-               ;; `:all-blocks` is the pre-`select-blocks` vec. Callers
-               ;; diagnose wrong-lang fences via `(count :all-blocks) >
-               ;; (count :blocks)` and multi-fence emission via the same
-               ;; count plus `:saw-fence?` / `:malformed?`. svar itself
-               ;; only routes the lang-filtered `:blocks`; these extras
-               ;; are observational.
-               :all-blocks  blocks
-               :saw-fence?  saw-fence?
-               :malformed?  malformed?
-               :raw         content
+        (on-chunk {:content content :reasoning reasoning :tool-calls tool-calls
+                   :stop-reason stop-reason :provider-state provider-state
+                   :tokens tokens :cost cost :done? true}))
+      (cond-> {:stop-reason stop-reason
+               :tool-calls  tool-calls
+               :content     content
                :tokens      tokens
                :cost        cost
                :duration-ms duration-ms}
         reasoning           (assoc :reasoning reasoning)
         provider-state      (assoc :provider-state provider-state)
         assistant-message   (assoc :assistant-message assistant-message)
+        api-usage           (assoc :api-usage api-usage)
         http-response       (assoc :http-response http-response)
         stream-finalization (assoc :stream-finalization stream-finalization)))))
 
 (defn ask-code!
-  "Plain-text completion + fenced code-block extraction. Routed sibling of
-   `ask!`.
+  "Native tool-calling completion. Routed sibling of `ask!` (which is for
+   structured `:spec` output). The model takes ACTION by calling a tool; when
+   it calls no tool, its text IS the final answer (`:stop-reason :end` — the
+   maki / Claude-Code model). No fences, no lenient extraction.
 
-   Params: same routing/network/streaming opts as `ask!`, minus `:spec`,
-   `:format-retries`, `:format-retry-on`, `:json-object-mode?`. Adds:
-     :lang - String, default \"clojure\". Selects blocks tagged that lang
-             (case-insensitive) PLUS untagged blocks. Required-with-default;
-             must be a non-blank string (`nil` / `\"\"` rejected).
-     :code-tail-pointer? - Boolean, default true. Appends a short code-format
-             reminder as the last text block of the last user message,
-             pointing at the format contract (\"reply with `lang` source
-             inside ```lang ... ``` fences\"). Restores recency-driven format
-             adherence on long transcripts. Set to `false` to opt out.
-     :lenient - Boolean, default false. Single-engine mode: the WHOLE reply
-             is treated as one `:lang` block — no multi-fence scan, no lang
-             filtering, nothing dropped (`codes/lenient-block` strips at most
-             one outer wrapper fence). For agents whose every reply is one
-             program for one turn; pair with `:code-tail-pointer? false`.
+   Params: same routing/network/streaming opts as `ask!`, minus the spec-only
+   keys (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`).
+   Adds:
+     :tools       - Canonical tool defs `[{:name :description :schema}]`, where
+                    `:schema` is a JSON-Schema map for the tool input. Shaped
+                    per wire (anthropic `tools`/`input_schema`; OpenAI chat
+                    `function`/`parameters`; responses flat `function`).
+     :tool-choice - :auto (default) | :required | :none | {:name \"x\"} |
+                    \"x\" (force a specific tool).
 
    Returns:
-   {:result      <concatenated source string of selected blocks>
-    :blocks      [{:lang <str-or-nil> :source <str>} ...]
-    :raw         <full assistant text content>
+   {:stop-reason :tool-calls | :end   ; :end (no tool call) IS the answer
+    :tool-calls  [{:id <str> :name <str> :input <map>} ...]  ; [] when :end
+    :content     <final/answer text, or nil on a tool-call-only turn>
     :reasoning   <provider reasoning channel, when present>
+    :assistant-message svar's canonical assistant turn — `{:role \"assistant\"
+                       :content [...]}` carrying any `tool_use` blocks (and
+                       preserved `{:type \"thinking\"}` blocks). MUST be
+                       appended to `:messages` on the next call so the tool
+                       calls round-trip; append matching `tool_result` user
+                       blocks for each call's result.
     :provider-state <opaque provider continuation state, when present>
-    :assistant-message svar's canonical assistant turn:
-                       `{:role \"assistant\" :content [<blocks>]}`.
-                       Append it to `:messages` on the next call to
-                       keep preserved thinking alive. Canonical
-                       `{:type \"thinking\"}` content blocks carry the
-                       per-provider preserved-reasoning signature
-                       (Anthropic HMAC, OpenAI Responses raw item JSON,
-                       z.ai verbatim text) under `:thinking-signature`;
-                       the wire serializer transforms them to native
-                       shapes. Only present for providers that emit
-                       preserved reasoning.
     :tokens      {:input :output :reasoning :cached :total}
     :cost        {:input-cost :output-cost :total-cost}
     :duration-ms <ms>
-    :stream-finalization {:terminal? :terminal-kind :finish-reason
-                          :content-acc-len ...} ; streaming calls only
+    :stream-finalization {...} ; streaming calls only
     :http-response {:status :streaming? :stream-finalization ...}}
 
-   Empty `:blocks` is a valid success.
-
-   Throws ex-info on transport-level failure (`:svar.llm/empty-content` when
-   the provider returns no content; HTTP errors from `chat-completion`).
-   Throws `:svar.core/invalid-lang` when `:lang` is missing/blank."
+   Throws ex-info on transport-level failure, and `:svar.llm/empty-content`
+   when the provider returns neither text nor a tool call."
   [router opts]
   ;; Bind the caller's cancellation hook for the whole routed call so every
   ;; provider-fallback attempt (and its backoff sleeps) honours it. See

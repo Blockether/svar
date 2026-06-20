@@ -65,6 +65,16 @@
     :provider-model-source :zai
     :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
     :default-models [{:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"}]}
+   ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
+   ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
+   ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
+   ;; function calling (unlike GLM-on-chat, which z.ai poisons with an XML
+   ;; tool-call prompt).
+   :gemini      {:base-url "https://generativelanguage.googleapis.com/v1beta" :rpm 500 :tpm 2000000
+                 :api-style :gemini
+                 :default-models [{:name "gemini-3-pro-preview"} {:name "gemini-3-flash-preview"}
+                                  {:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}]
+                 :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
    :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000

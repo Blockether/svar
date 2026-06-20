@@ -134,6 +134,29 @@
          :output-tokens (:output_tokens usage)
          :raw           usage}))))
 
+(defn gemini-canonical
+  "Google Gemini `usageMetadata` → canonical shape.
+
+   Gemini is INCLUSIVE: `promptTokenCount` is the TOTAL input (cached
+   subset under `cachedContentTokenCount`). Visible output is
+   `candidatesTokenCount`; thinking tokens are reported separately under
+   `thoughtsTokenCount` (a subset of output we add into output-tokens and
+   surface as :reasoning).
+
+   Returns nil for nil input."
+  [usage]
+  (when usage
+    (let [prompt   (long-or-0 (:promptTokenCount usage))
+          cand     (long-or-0 (:candidatesTokenCount usage))
+          thoughts (long-or-0 (:thoughtsTokenCount usage))
+          cached   (long-or-0 (:cachedContentTokenCount usage))]
+      (build-canonical
+        {:input-tokens  prompt
+         :cache-read    cached
+         :output-tokens (+ cand thoughts)
+         :reasoning     thoughts
+         :raw           usage}))))
+
 (defn openai-canonical
   "OpenAI Chat / Responses API → canonical shape.
 
