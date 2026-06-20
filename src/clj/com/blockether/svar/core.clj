@@ -5,7 +5,7 @@
 
     Scope: structured LLM output + provider routing. Main functions:
     - `ask!` - Structured output using the spec DSL
-    - `ask-code!` - Plain-text completion + fenced code-block extraction
+    - `ask-code!` - native tool-calling completion (the model acts via tools)
     - `models!` - Fetch available models from the LLM API
 
      Re-exports the spec DSL (`field`, `spec`, `str->data`, `str->data-with-spec`,

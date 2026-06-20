@@ -4364,57 +4364,6 @@
       (conj v {:role "user"
                :content [{:type "text" :text SCHEMA_TAIL_POINTER}]}))))
 
-(defn- code-tail-pointer-text
-  "One-line format reminder appended as the last text block of the last
-   user message in `ask-code!*`. Mirrors `SCHEMA_TAIL_POINTER` for the
-   plain-text-with-fenced-code path: nudges the model back to the format
-   contract right before generation, restoring recency-driven adherence
-   on long transcripts.
-
-   Kept to ONE line on purpose: longer reminders waste per-call tokens and
-   dilute the immediately-preceding task text.
-
-   Two contracts, by mode:
-   - default (fenced): the model must tag exactly one ```lang fence, else the
-     block is dropped — the strict-lang warning stays explicit so a model
-     emitting untagged ``` fences sees why its code never reached the runtime.
-   - `:lenient` (single-engine): there is NO fence — the WHOLE reply is the
-     program — so preaching fences is actively wrong. The reminder flips to the
-     pure-code contract: code only, run verbatim, no prose/heading (a leading
-     sentence makes the entire reply a syntax error)."
-  [lang lenient?]
-  (if lenient?
-    (str "Reply with code ONLY — your ENTIRE message runs verbatim as one " lang
-      " program; no prose or Markdown outside " lang " comments. A leading sentence "
-      "or heading makes the whole reply a syntax error. Write plain ASCII in code: a "
-      "smart em-dash (—), en-dash, curly quote (“ ” ‘ ’), or × outside a string or "
-      "comment is itself a syntax error — use '-' and straight quotes (file/ctx text "
-      "you read may contain them; keep such text quoted).")
-    (str "Reply with exactly one ```" lang " … ``` fenced block; untagged or other-lang fences are DROPPED.")))
-
-(defn- append-code-tail-pointer
-  "`append-schema-tail-pointer` for the `ask-code!*` path. Appends the
-   `code-tail-pointer-text` as a trailing text block on the LAST user
-   message; synthesises a user message carrying just the pointer when
-   `messages` has none. Multimodal content is preserved. `lenient?` selects
-   the pure-code vs fenced reminder."
-  [messages lang lenient?]
-  (let [v (vec messages)
-        pointer (code-tail-pointer-text lang lenient?)
-        last-user-idx (->> v
-                        (map-indexed vector)
-                        (filter (fn [[_ m]] (= "user" (:role m))))
-                        last
-                        first)]
-    (if last-user-idx
-      (update v last-user-idx
-        (fn [{:keys [content] :as m}]
-          (assoc m :content
-            (conj (normalize-content content)
-              {:type "text" :text pointer}))))
-      (conj v {:role "user"
-               :content [{:type "text" :text pointer}]}))))
-
 (defn- format-retry-prompt
   "Tiny re-prompt appended after the model's failed assistant response. Kept
    short - long retry messages waste tokens on every attempt and dilute the
