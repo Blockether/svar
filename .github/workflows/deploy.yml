@@ -130,14 +130,14 @@ jobs:
           PATCH=$(echo "$CURRENT" | cut -d. -f3)
           NEXT_PATCH=$((PATCH + 1))
           NEXT_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}"
-          echo "$NEXT_VERSION" > resources/VERSION
+          echo "$NEXT_VERSION" > resources/svar/VERSION
           echo "Bumped VERSION to $NEXT_VERSION"
 
       - name: Commit version updates
         run: |
           git config user.name "blockether-deployer"
           git config user.email "contact@blockether.com"
-          git add README.md CHANGELOG.md resources/VERSION
+          git add README.md CHANGELOG.md resources/svar/VERSION
           git diff --cached --quiet && echo "No changes to commit" || {
             git commit -m "release: update version files for ${{ github.ref_name }}, bump to next dev version"
             git push origin main
