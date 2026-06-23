@@ -3,7 +3,8 @@
    (mocked + integration). Integration tests (real LLM) are guarded by env var."
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.core :as svar]))
+   [com.blockether.svar.core :as svar]
+   [com.blockether.svar.test-support :as ts]))
 
 ;; =============================================================================
 ;; Message Helpers Tests
@@ -56,21 +57,18 @@
 (defn- integration-tests-enabled?
   "Returns true if LLM integration tests should run."
   []
-  (or (some? (System/getenv "BLOCKETHER_LLM_API_KEY"))
-    (some? (System/getenv "BLOCKETHER_OPENAI_API_KEY"))
-    (some? (System/getenv "OPENAI_API_KEY"))))
+  (some? (ts/first-env "BLOCKETHER_LLM_API_KEY"
+           "BLOCKETHER_OPENAI_API_KEY" "OPENAI_API_KEY")))
 
 (defn- make-integration-router
   "Creates a router for real LLM calls from env vars.
    Asserts if no API key — integration tests must have credentials."
   []
-  (let [api-key (or (System/getenv "BLOCKETHER_LLM_API_KEY")
-                  (System/getenv "BLOCKETHER_OPENAI_API_KEY")
-                  (System/getenv "OPENAI_API_KEY"))
+  (let [api-key (ts/first-env "BLOCKETHER_LLM_API_KEY"
+                  "BLOCKETHER_OPENAI_API_KEY" "OPENAI_API_KEY")
         _ (assert api-key "Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY to run integration tests")
-        base-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
-                   (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
-                   (System/getenv "OPENAI_BASE_URL")
+        base-url (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL"
+                       "BLOCKETHER_OPENAI_BASE_URL" "OPENAI_BASE_URL")
                    "https://api.openai.com/v1")]
     (svar/make-router [{:id :integration
                         :api-key api-key
@@ -80,15 +78,15 @@
 (defn- blockether-one-enabled?
   "Returns true if Blockether One LLM endpoint is configured."
   []
-  (some? (System/getenv "BLOCKETHER_LLM_API_KEY")))
+  (some? (ts/env "BLOCKETHER_LLM_API_KEY")))
 
 (defdescribe blockether-one-glm-test
   (describe "ask! with glm-5.1 via Blockether One"
     (it "parses structured JSON from GLM 5.1"
       (when (blockether-one-enabled?)
         (let [router (svar/make-router [{:id :blockether-integration
-                                         :api-key (System/getenv "BLOCKETHER_LLM_API_KEY")
-                                         :base-url (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
+                                         :api-key (ts/env "BLOCKETHER_LLM_API_KEY")
+                                         :base-url (or (ts/env "BLOCKETHER_LLM_API_BASE_URL")
                                                      "https://llm.blockether.com/v1")
                                          :models [{:name "glm-5.1"}]}])
               person-spec (svar/spec

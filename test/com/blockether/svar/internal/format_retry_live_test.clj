@@ -47,20 +47,19 @@
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.core :as svar]
-   [com.blockether.svar.internal.router :as router]))
+   [com.blockether.svar.internal.router :as router]
+   [com.blockether.svar.test-support :as ts]))
 
 ;; =============================================================================
-;; Env-var gating
+;; Env-var gating (blank env vars read as ABSENT — see `ts/env`)
 ;; =============================================================================
 
-(defn- zai-coding-key [] (or (System/getenv "ZAI_CODING_PLAN_API_KEY")
-                           (System/getenv "Z_AI_CODING_API_KEY")
-                           (System/getenv "ZAI_API_KEY")))
-(defn- blockether-key [] (or (System/getenv "BLOCKETHER_LLM_API_KEY")
-                           (System/getenv "BLOCKETHER_OPENAI_API_KEY")))
+(defn- zai-coding-key [] (ts/first-env "ZAI_CODING_PLAN_API_KEY"
+                           "Z_AI_CODING_API_KEY" "ZAI_API_KEY"))
+(defn- blockether-key [] (ts/first-env "BLOCKETHER_LLM_API_KEY"
+                           "BLOCKETHER_OPENAI_API_KEY"))
 (defn- blockether-base-url []
-  (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
-    (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
+  (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL" "BLOCKETHER_OPENAI_BASE_URL")
     "https://llm.blockether.com/v1"))
 
 (defn- zai-coding-enabled? [] (some? (zai-coding-key)))

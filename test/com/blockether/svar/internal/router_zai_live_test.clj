@@ -23,21 +23,21 @@
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.core :as svar]
-   [com.blockether.svar.internal.router :as router]))
+   [com.blockether.svar.internal.router :as router]
+   [com.blockether.svar.test-support :as ts]))
 
 ;; =============================================================================
 ;; Env-var gating
 ;; =============================================================================
 
-(defn- zai-key []           (System/getenv "ZAI_API_KEY"))
+(defn- zai-key []           (ts/env "ZAI_API_KEY"))
 ;; Renamed from ZAI_CODING_API_KEY → ZAI_CODING_PLAN_API_KEY to clearly
 ;; identify the Z.ai Coding Plan subscription (the coding endpoint).
 ;; Additional alias Z_AI_CODING_API_KEY is accepted for environments that
 ;; use the hyphenated-looking style. The legacy ZAI_API_KEY fallback stays
 ;; so a single Z.ai key keeps working for both endpoints in local dev.
-(defn- zai-coding-key []    (or (System/getenv "ZAI_CODING_PLAN_API_KEY")
-                              (System/getenv "Z_AI_CODING_API_KEY")
-                              (System/getenv "ZAI_API_KEY")))
+(defn- zai-coding-key []    (ts/first-env "ZAI_CODING_PLAN_API_KEY"
+                              "Z_AI_CODING_API_KEY" "ZAI_API_KEY"))
 
 (defn- zai-enabled?         [] (some? (zai-key)))
 (defn- zai-coding-enabled?  [] (some? (zai-coding-key)))

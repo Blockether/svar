@@ -19,24 +19,23 @@
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.core :as svar]
-   [com.blockether.svar.internal.router :as router]))
+   [com.blockether.svar.internal.router :as router]
+   [com.blockether.svar.test-support :as ts]))
 
 ;; =============================================================================
 ;; Env-var gating — matches `core_test.clj` `integration-tests-enabled?`
 ;; pattern: either the Blockether One key OR the legacy OpenAI-compat key
-;; unlocks the tests.
+;; unlocks the tests. Blank env vars read as ABSENT (see `ts/env`).
 ;; =============================================================================
 
 (defn- blockether-key []
-  (or (System/getenv "BLOCKETHER_LLM_API_KEY")
-    (System/getenv "BLOCKETHER_OPENAI_API_KEY")))
+  (ts/first-env "BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"))
 
 (defn- blockether-enabled? []
   (some? (blockether-key)))
 
 (defn- blockether-base-url []
-  (or (System/getenv "BLOCKETHER_LLM_API_BASE_URL")
-    (System/getenv "BLOCKETHER_OPENAI_BASE_URL")
+  (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL" "BLOCKETHER_OPENAI_BASE_URL")
     "https://llm.blockether.com/v1"))
 
 ;; `:blockether` is a user-supplied custom provider id (no built-in entry
