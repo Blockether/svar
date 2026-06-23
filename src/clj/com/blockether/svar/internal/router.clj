@@ -295,7 +295,7 @@
                              autonomous reasoning loops — observable on
                              session 52983a42 / 831cedee as 5K-8K output
                              tokens per iteration burned on hidden thinking."
-  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "high" :server-managed nil}
+  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "off"  :server-managed nil}
    :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
    :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
 
@@ -402,10 +402,20 @@
              ;; GLM-5.2+ (DeepSeek-V4 mechanism): thinking is ON and the DEPTH
              ;; is chosen by `reasoning_effort` — but GLM only accepts "high"/
              ;; "max" (NOT OpenAI's low/medium/high; anything else falls back to
-             ;; the heavy "max" default). Emit the effort AND keep thinking on.
-             :zai-effort         {:reasoning_effort mapped
-                                  :thinking (cond-> {:type "enabled"}
-                                              preserved-thinking? (assoc :clear_thinking false))}
+             ;; the heavy "max" default), so there is NO genuinely-light effort
+             ;; rung. The only way to stop GLM-5.2 over-reasoning on a `:quick`
+             ;; turn is to turn thinking OFF — verified live against z.ai's
+             ;; Anthropic endpoint: glm-5.2 honors `thinking:{type "disabled"}`
+             ;; (clean `text` answer, `stop_reason "end_turn"`, zero reasoning
+             ;; burn), whereas a small `max_tokens` cap just truncates mid-think
+             ;; and starves the answer (600-token cap → all thinking, no reply).
+             ;; `:quick` → "off" disables thinking; `:balanced`/`:deep` keep it
+             ;; on at high/max effort.
+             :zai-effort         (if (= mapped "off")
+                                   {:thinking {:type "disabled"}}
+                                   {:reasoning_effort mapped
+                                    :thinking (cond-> {:type "enabled"}
+                                                preserved-thinking? (assoc :clear_thinking false))})
              nil)))))))
 
 ;; =============================================================================

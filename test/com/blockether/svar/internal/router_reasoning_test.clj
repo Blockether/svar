@@ -172,6 +172,29 @@
         (expect (nil? (router/reasoning-extra-body :openai-compatible-chat glm nil
                         {:preserved-thinking? true}))))))
 
+  (describe "Z.ai / GLM-5.2 effort thinking (:zai-effort)"
+    ;; GLM-5.2 chooses thinking DEPTH via reasoning_effort, but only accepts
+    ;; "high"/"max" — no light rung. `:quick` therefore disables thinking
+    ;; outright (verified live: glm-5.2 honors thinking:{type "disabled"}),
+    ;; which is the only way to stop it over-reasoning short turns.
+    (let [glm {:name "glm-5.2" :reasoning? true :reasoning-style :zai-effort}]
+      (it "`:quick` disables thinking (no light effort rung exists)"
+        (expect (= {:thinking {:type "disabled"}}
+                  (router/reasoning-extra-body :anthropic glm :quick))))
+
+      (it "`:balanced` keeps thinking on at high effort"
+        (expect (= {:reasoning_effort "high" :thinking {:type "enabled"}}
+                  (router/reasoning-extra-body :anthropic glm :balanced))))
+
+      (it "`:deep` keeps thinking on at max effort"
+        (expect (= {:reasoning_effort "max" :thinking {:type "enabled"}}
+                  (router/reasoning-extra-body :anthropic glm :deep))))
+
+      (it "`:quick` ignores `:preserved-thinking?` (no thinking → nothing to preserve)"
+        (expect (= {:thinking {:type "disabled"}}
+                  (router/reasoning-extra-body :anthropic glm :quick
+                    {:preserved-thinking? true}))))))
+
   (describe "non-reasoning models (silent no-op)"
     (it "returns nil when model lacks :reasoning? flag"
       (expect (nil? (router/reasoning-extra-body :openai-compatible-chat    {:name "gpt-4o"} :deep)))
