@@ -2080,8 +2080,16 @@
                                        :call_id (:tool_use_id b)
                                        :output (tool-result-text (:content b))})
                           tool-result-blocks)
+        ;; `:type "message"` is REQUIRED on a Responses input message item.
+        ;; The public OpenAI `/v1/responses` API defaults a typeless item to
+        ;; "message", but the ChatGPT Codex backend
+        ;; (`chatgpt.com/backend-api/codex/responses`) validates strictly and
+        ;; rejects a typeless item with HTTP 400 `{"detail":"Unsupported
+        ;; content type"}`. function_call / function_call_output / reasoning
+        ;; items already carry their `:type`; the message entry must too.
         message-entry (when (seq rest-blocks)
-                        {:role    (if assistant? "assistant" "user")
+                        {:type    "message"
+                         :role    (if assistant? "assistant" "user")
                          :content (responses-content-blocks role rest-blocks)})]
     (vec (concat reasoning-items
            (when message-entry [message-entry])
