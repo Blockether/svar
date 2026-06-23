@@ -167,7 +167,34 @@
       (expect (= "{\"code\":\"print(2)\"}" (:arguments (first asst))))
       (expect (= "function_call_output" (:type (first usr))))
       (expect (= "fc_1" (:call_id (first usr))))
-      (expect (= "2\n" (:output (first usr)))))))
+      (expect (= "2\n" (:output (first usr))))))
+
+  (it "a text message entry carries :type \"message\" (Codex backend rejects a typeless item)"
+    ;; Regression: the ChatGPT Codex backend (chatgpt.com/backend-api/codex/
+    ;; responses) validates strictly and 400s a typeless message item with
+    ;; {"detail":"Unsupported content type"}. A text-bearing user/assistant
+    ;; turn must emit `{:type "message" :role ... :content [...]}`.
+    (let [usr  (responses-input {:role "user" :content "hello there"})
+          asst (responses-input {:role "assistant" :content [{:type "text" :text "hi"}]})]
+      (expect (= "message" (:type (first usr))))
+      (expect (= "user" (:role (first usr))))
+      (expect (= [{:type "input_text" :text "hello there"}] (:content (first usr))))
+      (expect (= "message" (:type (first asst))))
+      (expect (= "output_text" (:type (first (:content (first asst))))))))
+
+  (it "every Responses input item has a non-nil :type"
+    ;; A mixed turn (text + tool_use + thinking, then a tool_result) must not
+    ;; produce any item without `:type` — the trap that broke the Codex wire.
+    (let [input ((deref (var sut/build-openai-responses-request-body))
+                 [{:role "system" :content "sys"}
+                  {:role "user" :content "do it"}
+                  {:role "assistant"
+                   :content [{:type "thinking" :thinking "h" :thinking-signature "sig"}
+                             {:type "text" :text "working"}
+                             {:type "tool_use" :id "c1" :name "run_python" :input {:code "1"}}]}
+                  {:role "user" :content [{:type "tool_result" :tool_use_id "c1" :content "1\n"}]}]
+                 "gpt-5.5" {})]
+      (expect (every? (comp some? :type) (:input input))))))
 
 (defdescribe chat-round-trip-test
   (it "assistant tool_use -> message-level :tool_calls; user tool_result -> separate role:tool message"
