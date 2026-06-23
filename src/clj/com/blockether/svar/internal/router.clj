@@ -863,12 +863,35 @@
        :capabilities (cond-> #{:chat}
                        (re-find #"vision|glm.*v|pixtral" m) (conj :vision))})))
 
+(defn model-key-variants
+  "Catalog/overlay lookup keys for a model name, tolerant of the dotted vs
+   dashed version separator. vis's canonical id and `KNOWN_MODEL_METADATA` are
+   DASHED (`claude-opus-4-8`); the Copilot overlay in `KNOWN_PROVIDER_MODELS`
+   is DOTTED (`claude-opus-4.8`). Without this, a dashed name reaching the
+   Copilot provider misses the overlay → `:api-style` falls back to
+   `:openai-compatible-chat` (the /chat/completions wire, no prompt cache) and
+   Claude-on-Copilot 404s / loses caching. We try the name AS-IS first (so
+   `gpt-5.4` / `glm-5.2` hit their dotted keys directly), then the dot↔dash
+   variants in the numeric version tail."
+  [name]
+  (let [s (str name)]
+    (distinct
+      [s
+       (str/replace s #"(\d)\.(\d)" "$1-$2")   ; dotted → dashed (4.8 → 4-8)
+       (str/replace s #"(\d)-(\d)" "$1.$2")]))) ; dashed → dotted (4-8 → 4.8)
+
+(defn lookup-by-model-variants
+  "First value from map `m` matching any `model-key-variants` of `name`, or nil."
+  [m name]
+  (some #(get m %) (model-key-variants name)))
+
 (defn infer-model-metadata
   "Returns provider-independent model metadata.
-    Looks up KNOWN_MODEL_METADATA first. Falls back to regex inference for unknown models.
+    Looks up KNOWN_MODEL_METADATA first (tolerant of dotted/dashed version
+    separators). Falls back to regex inference for unknown models.
     Explicit fields in model-map override inferred values."
   [{:keys [name] :as model-map}]
-  (let [base (or (get KNOWN_MODEL_METADATA name)
+  (let [base (or (lookup-by-model-variants KNOWN_MODEL_METADATA name)
                (regex-infer-metadata name))
         inferred (assoc base :name name)]
     (merge inferred (dissoc model-map :name))))
@@ -957,8 +980,12 @@
    `:cache-write` from the catalog."
   [provider-id model-name]
   (when-not (provider-excluded-model? provider-id model-name)
-    (let [overlay (get-in KNOWN_PROVIDER_MODELS [(provider-model-source provider-id) model-name])
-          catalog (get (modelsdev/provider-models (provider-pricing-source provider-id)) model-name)]
+    (let [overlay (lookup-by-model-variants
+                    (get KNOWN_PROVIDER_MODELS (provider-model-source provider-id))
+                    model-name)
+          catalog (lookup-by-model-variants
+                    (modelsdev/provider-models (provider-pricing-source provider-id))
+                    model-name)]
       (when (or overlay catalog)
         (cond-> (merge catalog overlay)
           (and (:pricing catalog) (:pricing overlay))

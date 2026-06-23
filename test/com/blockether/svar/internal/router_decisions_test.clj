@@ -1324,3 +1324,28 @@
       (expect (not= :no-throw thrown))
       (expect (= 400 (:status (ex-data thrown))))
       (expect (= #{"m1" "m2"} (:model-unsupported (ex-data thrown)))))))
+
+(defdescribe copilot-claude-dotted-or-dashed-test
+  ;; Regression: vis's canonical Claude id is DASHED (claude-opus-4-8) but the
+  ;; Copilot overlay (KNOWN_PROVIDER_MODELS) is keyed DOTTED (claude-opus-4.8).
+  ;; A dashed name reaching the Copilot provider used to miss the overlay →
+  ;; :api-style fell back to :openai-compatible-chat (/chat/completions, no
+  ;; prompt cache) and Claude-on-Copilot 404'd. `model-key-variants` makes the
+  ;; lookup tolerant so BOTH forms resolve to the native /v1/messages wire.
+  (it "routes Claude-on-Copilot to the anthropic wire for dashed AND dotted ids"
+    (doseq [model-name ["claude-opus-4-8" "claude-opus-4.8"
+                        "claude-sonnet-4-6" "claude-sonnet-4.6"]]
+      (let [p (router/normalize-provider 0 {:id :github-copilot-business
+                                            :api-key "x"
+                                            :models [{:name model-name}]})
+            m (first (:models p))]
+        (expect (= :anthropic (:api-style m)))
+        (expect (= :server-managed (:reasoning-style m))))))
+
+  (it "model-key-variants tries as-is first, then dot↔dash version variants"
+    (expect (= ["claude-opus-4-8" "claude-opus-4.8"]
+              (router/model-key-variants "claude-opus-4-8")))
+    (expect (= ["claude-opus-4.8" "claude-opus-4-8"]
+              (router/model-key-variants "claude-opus-4.8")))
+    ;; GPT/glm dotted ids resolve as-is first (their catalog keys are dotted).
+    (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
