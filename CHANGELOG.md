@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.38] - 2026-06-23
+
+### Changed
+- fix(responses): tag input message items with :type "message" (Codex 400)
+- release: update version files for v0.7.36, bump to next dev version
+
+
 ## [v0.7.36] - 2026-06-23
 
 ### Changed
@@ -1334,7 +1341,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.36...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.38...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1413,3 +1420,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.33]: https://github.com/Blockether/svar/releases/tag/v0.7.33
 [v0.7.35]: https://github.com/Blockether/svar/releases/tag/v0.7.35
 [v0.7.36]: https://github.com/Blockether/svar/releases/tag/v0.7.36
+[v0.7.38]: https://github.com/Blockether/svar/releases/tag/v0.7.38
