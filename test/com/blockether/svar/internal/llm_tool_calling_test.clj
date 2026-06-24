@@ -20,6 +20,7 @@
 (def ^:private fn-item->tool-call @#'sut/function-call-item->tool-call)
 (def ^:private dedupe-tool-calls @#'sut/dedupe-tool-calls)
 (def ^:private extract-stream-delta @#'sut/extract-stream-delta)
+(def ^:private make-anthropic-stream-delta-fn @#'sut/make-anthropic-stream-delta-fn)
 (def ^:private build-gemini      @#'sut/build-gemini-request-body)
 (def ^:private extract-gemini    @#'sut/extract-gemini-response-data)
 (def ^:private gemini-tool-config @#'sut/gemini-tool-config)
@@ -245,8 +246,12 @@
       (expect (= [{:id "call_1" :name "run_python" :input {:code "print(6*7)"}}]
                 (get-in out [:provider-state :tool-calls])))))
 
-  (it "ignores function_call args delta (accumulation handled at output_item.done)"
-    (let [out (extract-stream-delta {:type "response.function_call_arguments.delta" :delta "{\"" :output_index 0})]
+  (it "surfaces function_call args delta as :tool-args-delta (live tool-call preview), no provider-state yet"
+    ;; The finalized call still assembles at output_item.done; mid-stream the
+    ;; raw argument fragment rides :tool-args-delta so the live bubble can paint
+    ;; the Python (the tool args) being written.
+    (let [out (extract-stream-delta {:type "response.function_call_arguments.delta" :delta "{\"code\":\"pri" :output_index 0})]
+      (expect (= "{\"code\":\"pri" (:tool-args-delta out)))
       (expect (nil? (:provider-state out)))))
 
   (it "function-call-item->tool-call decodes a complete item; nil for non-function items"
@@ -260,6 +265,36 @@
           dup {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
           m (merge-provider-state (merge-provider-state a b) dup)]
       (expect (= ["c1" "c2"] (mapv :id (:tool-calls m)))))))
+
+(defdescribe streaming-tool-args-delta-test
+  ;; Native tool calling puts the model's work in the tool-call arguments. To
+  ;; render that live (the "watch it code" UX), every wire surfaces the raw
+  ;; argument fragments as :tool-args-delta on each stream tick.
+  (it "anthropic input_json_delta surfaces :tool-args-delta (and still accumulates the block)"
+    (let [f (make-anthropic-stream-delta-fn)]
+      (f {:type "content_block_start" :index 0
+          :content_block {:type "tool_use" :id "t1" :name "run_python"}})
+      (let [d1 (f {:type "content_block_delta" :index 0
+                   :delta {:type "input_json_delta" :partial_json "{\"code\":\""}})
+            d2 (f {:type "content_block_delta" :index 0
+                   :delta {:type "input_json_delta" :partial_json "print(1)\"}"}})]
+        (expect (= "{\"code\":\"" (:tool-args-delta d1)))
+        (expect (= "print(1)\"}" (:tool-args-delta d2)))
+        (expect (nil? (:content-delta d1)))
+        ;; The closed block still flushes the canonical tool_use via provider-state.
+        (let [stop (f {:type "content_block_stop" :index 0})]
+          (expect (= :anthropic (get-in stop [:provider-state :provider])))))))
+
+  (it "chat-completions tool_calls fragments surface concatenated :tool-args-delta"
+    (let [out (extract-stream-delta
+                {:choices [{:delta {:tool_calls [{:index 0 :id "c1"
+                                                  :function {:name "run_python" :arguments "{\"code\":\""}}]}}]})]
+      (expect (= "{\"code\":\"" (:tool-args-delta out)))
+      (expect (= :openai-chat (get-in out [:provider-state :provider]))))
+    ;; A plain text delta carries no tool args.
+    (let [out (extract-stream-delta {:choices [{:delta {:content "hello"}}]})]
+      (expect (nil? (:tool-args-delta out)))
+      (expect (= "hello" (:content-delta out))))))
 
 (defdescribe responses-state-tool-calls-test
   (it "openai-responses-state carries function_call items as :tool-calls"
