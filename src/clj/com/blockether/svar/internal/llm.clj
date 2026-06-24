@@ -1412,13 +1412,17 @@
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
                 {:content-delta nil :reasoning-delta nil :api-usage nil})
 
-            ;; Anthropic also emits input_json_delta for tool_use blocks;
-            ;; svar doesn't use Anthropic tool_use today, but keep the
-            ;; accumulator forward-compatible by passing the raw delta
-            ;; through under a synthetic :partial_json key.
+            ;; Anthropic emits input_json_delta for tool_use blocks (the
+            ;; tool arguments, e.g. run_python's `{"code": …}`, arrive as a
+            ;; piecewise JSON string). Accumulate under :partial_json for the
+            ;; canonical block, AND surface the raw fragment as
+            ;; `:tool-args-delta` so the streaming loop can show the
+            ;; tool call's arguments being written live (the model's actual
+            ;; work, not just its reasoning).
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+                {:content-delta nil :reasoning-delta nil :api-usage nil
+                 :tool-args-delta (:partial_json delta)})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -2564,8 +2568,9 @@
         (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
           (http-post-stream! url request-body http-headers timeout-ms ttft-timeout-ms idle-timeout-ms extract-stream-delta
             (when on-chunk
-              (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
+              (fn [{:keys [content-acc reasoning-acc tool-args-acc provider-state api-usage]}]
                 (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
+                           :tool-input (nonblank-str tool-args-acc)
                            :provider-state provider-state
                            :api-usage api-usage :done? false})))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
@@ -2819,6 +2824,19 @@
        :reasoning-fallback nil
        :api-usage (normalize-openai-usage (:usage chunk))}
 
+      ;; Tool-call arguments stream as their own delta event (the function
+      ;; arguments, e.g. run_python's `{"code": …}`, arrive piecewise). Surface
+      ;; them as `:tool-args-delta` so callers can render the tool call being
+      ;; written live, mirroring the anthropic input_json_delta path. The
+      ;; finalized tool call still assembles via `output_item.done` below.
+      (= "response.function_call_arguments.delta" event-type)
+      {:content-delta nil
+       :reasoning-delta nil
+       :content-fallback nil
+       :reasoning-fallback nil
+       :tool-args-delta (:delta chunk)
+       :api-usage (normalize-openai-usage (:usage chunk))}
+
       (= "response.reasoning_summary_part.added" event-type)
       {:content-delta nil
        :reasoning-delta (when (:svar/reasoning-summary-part-boundary? chunk) "\n\n")
@@ -2903,6 +2921,12 @@
        ;; finalizer assembles them (args arrive piecewise, paired by :index).
        :provider-state (when (seq tool-frags)
                          {:provider :openai-chat :tool-call-fragments (vec tool-frags)})
+       ;; ALSO surface the raw argument fragments as `:tool-args-delta` so the
+       ;; streaming loop can render the tool call's arguments live (the same
+       ;; live-code affordance the anthropic input_json_delta path gives).
+       :tool-args-delta (when (seq tool-frags)
+                          (not-empty
+                            (str/join (keep #(get-in % [:function :arguments]) tool-frags))))
        :api-usage (normalize-openai-usage (:usage chunk))})))
 
 (defn- append-summary-text-to-last-part [item delta]
@@ -3244,6 +3268,11 @@
         _ (reset! stream-ref input-stream)
         content-acc (StringBuilder.)
         reasoning-acc (StringBuilder.)
+        ;; Accumulates streamed tool-call argument fragments (e.g. the raw
+        ;; `{"code": …}` JSON of a run_python call) so callers can render the
+        ;; tool call being written live. The authoritative tool call still
+        ;; assembles via provider-state at terminal; this is preview-only.
+        tool-args-acc (StringBuilder.)
         ;; Diagnostics for a body that is NOT an SSE stream. Some gateways
         ;; (e.g. Z.ai) answer an error with HTTP 200 + a plain JSON body like
         ;; `{"code":500,"msg":"404 NOT_FOUND"}`. Read as a stream that yields
@@ -3308,6 +3337,7 @@
                     parsed
                     (let [parsed (enrich-responses-reasoning-event current-reasoning-item parsed)
                           {:keys [content-delta reasoning-delta content-fallback reasoning-fallback
+                                  tool-args-delta
                                   provider-state api-usage terminal? incomplete? incomplete-reason]
                            :as extracted}
                           (delta-fn parsed)
@@ -3334,6 +3364,7 @@
                         (reset! last-semantic-ns (System/nanoTime)))
                       (when content-piece (.append content-acc content-piece))
                       (when reasoning-piece (.append reasoning-acc reasoning-piece))
+                      (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
                       (when provider-state
                         (swap! provider-state-atom merge-provider-state provider-state))
                       (when api-usage (reset! usage-atom api-usage))
@@ -3342,6 +3373,7 @@
                                    :reasoning-delta reasoning-piece
                                    :content-acc (str content-acc)
                                    :reasoning-acc (str reasoning-acc)
+                                   :tool-args-acc (str tool-args-acc)
                                    :provider-state @provider-state-atom
                                    :api-usage api-usage})))))
                 (dispatch-event! [event-type data-lines]
@@ -3693,8 +3725,9 @@
         (fn []
           (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
             (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
-              (fn [{:keys [content-acc reasoning-acc provider-state api-usage]}]
+              (fn [{:keys [content-acc reasoning-acc tool-args-acc provider-state api-usage]}]
                 (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
+                           :tool-input (nonblank-str tool-args-acc)
                            :provider-state provider-state
                            :api-usage api-usage :done? false})))))
         retry-opts)
@@ -4926,7 +4959,7 @@
                                               "or use a larger context model.")}))
                            check))
         streaming-on-chunk (when on-chunk
-                             (fn [{:keys [content reasoning provider-state api-usage]}]
+                             (fn [{:keys [content reasoning tool-input provider-state api-usage]}]
                                (let [tokens (api-usage->tokens api-usage)
                                      cost (when api-usage
                                             (router/estimate-cost model
@@ -4934,10 +4967,16 @@
                                               (or (:output-tokens api-usage) 0)
                                               pricing
                                               {:api-usage api-usage :api-style api-style}))]
+                                 ;; Native tool calling: the model's work arrives as
+                                 ;; the tool call's arguments (`:tool-input`), often
+                                 ;; with NO text content at all — fire on that too so
+                                 ;; callers can render the call being written live.
                                  (when (or (not (str/blank? (or reasoning "")))
-                                         (not (str/blank? (or content ""))))
+                                         (not (str/blank? (or content "")))
+                                         (not (str/blank? (or tool-input ""))))
                                    (on-chunk {:content   content
                                               :reasoning reasoning
+                                              :tool-input tool-input
                                               :provider-state provider-state
                                               :tokens    tokens
                                               :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
