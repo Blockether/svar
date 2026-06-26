@@ -1159,6 +1159,65 @@
     (try (json/read-json args :key-fn keyword) (catch Exception _ {}))
     :else                                 {}))
 
+;; ── Replay hygiene (mirrors pi-ai transform-messages guards) ────────────────
+;; Two defensive passes over the message array BEFORE a provider request body is
+;; built, so a malformed history can't trigger a hard provider 400:
+;;   1. Drop assistant turns the caller flagged :aborted / :error / :interrupted
+;;      (via :stop-reason or :status). Their partial content — reasoning with no
+;;      following item, a half-written tool call — is exactly what OpenAI rejects
+;;      with "reasoning without following item".
+;;   2. Strip thinking blocks produced by a DIFFERENT model than the one we're
+;;      about to call. A thinking block's signature (Anthropic HMAC / OpenAI
+;;      encrypted reasoning item) is model-bound; ONLY the producing model can
+;;      validate it, so replaying another model's reasoning is a 400. `:model` is
+;;      stamped onto each canonical assistant message at response time; turns
+;;      with NO stamp are left untouched (we can't tell, so we don't guess).
+;; This is the svar-side equivalent of pi-ai's `transformMessages` (skip
+;; error/aborted turns + same-model thinking) — needed because vis cycles models
+;; mid-session (C-x C-m), which replays one model's reasoning into another's call.
+
+(def ^:private non-replayable-statuses
+  #{:aborted :error :interrupted "aborted" "error" "interrupted"})
+
+(defn- assistant-turn-replayable?
+  "False when a caller-tagged assistant turn must not be replayed."
+  [msg]
+  (not (or (contains? non-replayable-statuses (:stop-reason msg))
+         (contains? non-replayable-statuses (:status msg)))))
+
+(defn- strip-foreign-thinking
+  "Drop thinking blocks from an assistant `msg` whose stamped `:model` differs
+   from `target-model`. No-op when the turn has no `:model` stamp, no content
+   vector, or was produced by the same model."
+  [msg target-model]
+  (let [src (:model msg)]
+    (if (and (= "assistant" (some-> (:role msg) name))
+          src target-model (not= src target-model)
+          (sequential? (:content msg)))
+      (update msg :content (fn [blocks] (vec (remove canonical-thinking-block? blocks))))
+      msg)))
+
+(defn- sanitize-replayed-messages
+  "Defensive pre-request hygiene (see comment above). Skips non-replayable
+   assistant turns and strips cross-model thinking. Idempotent and safe on any
+   message array; `target-model` is the model the request is being built for."
+  [messages target-model]
+  (->> messages
+    (filterv (fn [m] (or (not= "assistant" (some-> (:role m) name))
+                       (assistant-turn-replayable? m))))
+    (mapv #(strip-foreign-thinking % target-model))))
+
+(defn- stamp-assistant-model
+  "Tag a completion result's canonical `:assistant-message` with the `model` that
+   produced it, so when the caller round-trips this message into the NEXT request
+   `sanitize-replayed-messages` can tell whether a different model is now being
+   called and drop the (model-bound) reasoning. No-op when there is no
+   `:assistant-message`. Idempotent."
+  [result model]
+  (cond-> result
+    (and (map? result) (:assistant-message result) (some? model))
+    (update :assistant-message assoc :model model)))
+
 (defn- build-anthropic-request-body
   "Builds request body in Anthropic Messages API format.
 
@@ -1187,7 +1246,8 @@
    ;; S2 fix: accept both `:role :system` (keyword) and `:role "system"`
    ;; (string). Anthropic only accepts string role names; we normalise
    ;; here so callers can pass either.
-   (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
+   (let [messages (sanitize-replayed-messages messages model)
+         [tools tool-choice extra-body] (extra-body-tools extra-body)
          system-role? (fn [m] (= "system" (some-> (:role m) name)))
          sys-blocks  (cond-> (vec (mapcat #(normalize-content (:content %))
                                     (filter system-role? messages)))
@@ -2101,7 +2161,8 @@
            fn-output-items))))
 
 (defn- build-openai-responses-request-body [messages model extra-body]
-  (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
+  (let [messages (sanitize-replayed-messages messages model)
+        [tools tool-choice extra-body] (extra-body-tools extra-body)
         system-text (->> messages
                       (filter #(= "system" (:role %)))
                       (map (comp responses-text-content :content))
@@ -2364,7 +2425,8 @@
   ([messages model]
    (build-request-body messages model nil))
   ([messages model extra-body]
-   (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
+   (let [messages (sanitize-replayed-messages messages model)
+         [tools tool-choice extra-body] (extra-body-tools extra-body)
          echo-off? (echo-reasoning-disabled?)
          tool-use?    #(= "tool_use" (:type %))
          tool-result? #(= "tool_result" (:type %))
@@ -3815,36 +3877,41 @@
                            ;; Caller headers win. Mirrors request-headers for
                            ;; Responses transport.
                            llm-headers)]
-     (cond
-       (= api-style :gemini)
-       (gemini-completion
-         (build-gemini-request-body messages model extra-body)
-         {:api-key    api-key
-          :base-url   base-url
-          :model      model
-          :headers    llm-headers
-          :timeout-ms timeout-ms
-          :on-chunk   on-chunk})
+     ;; Stamp the producing model onto the canonical :assistant-message at the
+     ;; single dispatch funnel (every wire + every caller flows through here), so
+     ;; a later turn can drop this reasoning if a DIFFERENT model is called next.
+     (stamp-assistant-model
+       (cond
+         (= api-style :gemini)
+         (gemini-completion
+           (build-gemini-request-body messages model extra-body)
+           {:api-key    api-key
+            :base-url   base-url
+            :model      model
+            :headers    llm-headers
+            :timeout-ms timeout-ms
+            :on-chunk   on-chunk})
 
-       (= api-style :openai-compatible-responses)
-       (openai-responses-completion
-         (build-openai-responses-request-body messages model extra-body)
-         {:api-key         api-key
-          :base-url        base-url
-          :responses-path  (or responses-path "/responses")
-          :headers         headers
-          :timeout-ms      timeout-ms
-          :ttft-timeout-ms ttft-timeout-ms
-          :idle-timeout-ms idle-timeout-ms
-          :semantic-timeout-ms semantic-timeout-ms
-          :on-chunk        on-chunk})
+         (= api-style :openai-compatible-responses)
+         (openai-responses-completion
+           (build-openai-responses-request-body messages model extra-body)
+           {:api-key         api-key
+            :base-url        base-url
+            :responses-path  (or responses-path "/responses")
+            :headers         headers
+            :timeout-ms      timeout-ms
+            :ttft-timeout-ms ttft-timeout-ms
+            :idle-timeout-ms idle-timeout-ms
+            :semantic-timeout-ms semantic-timeout-ms
+            :on-chunk        on-chunk})
 
-       :else
-       (if on-chunk
-         (chat-completion-streaming
-           messages model api-key base-url opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style)
-         (chat-completion-with-retry
-           messages model api-key base-url opts timeout-ms extra-body api-style))))))
+         :else
+         (if on-chunk
+           (chat-completion-streaming
+             messages model api-key base-url opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style)
+           (chat-completion-with-retry
+             messages model api-key base-url opts timeout-ms extra-body api-style)))
+       model))))
 
 (defn- url? [s] (or (str/starts-with? s "http://") (str/starts-with? s "https://")))
 
