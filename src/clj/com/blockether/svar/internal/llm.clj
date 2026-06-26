@@ -1197,15 +1197,127 @@
       (update msg :content (fn [blocks] (vec (remove canonical-thinking-block? blocks))))
       msg)))
 
+(defn- content-blocks-of-type
+  "The values under `key` for every `type-str` block in `msg`'s content vector."
+  [msg type-str key]
+  (when (sequential? (:content msg))
+    (keep key (filter #(= type-str (:type %)) (:content msg)))))
+
+(defn- result-turn?
+  "A user message that already carries tool_result blocks (a results turn)."
+  [m]
+  (and (= "user" (some-> (:role m) name))
+    (seq (content-blocks-of-type m "tool_result" :type))))
+
+(defn- normalize-id-part
+  "Sanitize ONE id segment to [A-Za-z0-9_-], at most 64 chars, no trailing
+   underscore. Over-long ids keep a 53-char prefix + a stable hash so distinct
+   ids don't collide after truncation."
+  [id]
+  (when id
+    (let [s (str/replace (str id) #"[^a-zA-Z0-9_-]" "_")]
+      (if (<= (count s) 64)
+        (let [s* (str/replace s #"_+$" "")] (if (str/blank? s*) (str id) s*))
+        (let [h (-> (str id) hash (Integer/toUnsignedString 36) (str "0000000000"))]
+          (str (str/replace (subs s 0 53) #"_+$" "") "_" (subs h 0 10)))))))
+
+(defn- normalize-tool-call-id
+  "Make a tool-call id valid for the TARGET wire while keeping it stable.
+   OpenAI Responses uses a COMPOSITE `call_id|item_id` (the `fc_…` item id pairs
+   with the preceding reasoning item) — when `openai?`, preserve it, normalizing
+   each half and keeping the `fc_` prefix. Every other wire (Anthropic / Gemini)
+   wants ONE id matching `^[A-Za-z0-9_-]{1,64}$`, so collapse the whole thing.
+   Mirrors pi-ai's `normalizeToolCallId` (`allowedToolCallProviders`)."
+  [id openai?]
+  (when id
+    (let [s (str id)]
+      (if (and openai? (str/includes? s "|"))
+        (let [[c i] (str/split s #"\|" 2)
+              i*    (normalize-id-part i)
+              i*    (if (and i* (str/starts-with? i* "fc_")) i* (str "fc_" (or i* "")))]
+          (str (normalize-id-part c) "|" i*))
+        (normalize-id-part s)))))
+
+(defn- normalize-tool-ids
+  "Rewrite every assistant tool_use id AND its matching user tool_result
+   tool_use_id to the target-wire-valid form via ONE shared map, so each
+   call↔result pair stays consistent. A provider/proxy (GitHub Copilot) that
+   enforces a different id format than the one the call was minted in would
+   otherwise reject or silently DROP the tool_result — the 'tool call sometimes
+   has no result' symptom. No-op when no id needs changing. `openai?` preserves
+   the Responses composite `call_id|item_id`. Mirrors pi-ai transformMessages."
+  [messages openai?]
+  (let [id-map (into {}
+                 (comp (filter #(= "assistant" (some-> (:role %) name)))
+                   (mapcat #(content-blocks-of-type % "tool_use" :id))
+                   (distinct)
+                   (keep (fn [id] (let [n (normalize-tool-call-id id openai?)]
+                                    (when (and n (not= n id)) [id n])))))
+                 messages)]
+    (if (empty? id-map)
+      (vec messages)
+      (let [remap (fn [id] (get id-map id id))
+            fix   (fn [b]
+                    (cond
+                      (and (= "tool_use" (:type b)) (:id b))           (update b :id remap)
+                      (and (= "tool_result" (:type b)) (:tool_use_id b)) (update b :tool_use_id remap)
+                      :else b))]
+        (mapv (fn [m] (if (sequential? (:content m))
+                        (update m :content #(mapv fix %))
+                        m))
+          messages)))))
+
+(defn- synthesize-orphan-tool-results
+  "Ensure every assistant `tool_use` has a matching `tool_result` somewhere in the
+   array. A tool call that FAILED or was interrupted before its result was
+   recorded — typically after one or two transient retries — leaves a dangling
+   tool_use, which the provider rejects (OpenAI: a function_call with no output;
+   Anthropic: a tool_use with no tool_result), so the model's call comes back
+   UNANSWERED. Inject a placeholder result for each orphan: merged into the
+   results turn right after the assistant message when one exists (Anthropic
+   wants all results for a turn in ONE following user message), else a fresh
+   results turn. Mirrors pi-ai's `insertSyntheticToolResults`. Ids already
+   resolved ANYWHERE are left alone, so healthy turns are untouched."
+  [messages]
+  (let [resolved (->> messages
+                   (mapcat #(when (= "user" (some-> (:role %) name))
+                              (content-blocks-of-type % "tool_result" :tool_use_id)))
+                   set)
+        synth    (fn [id] {:type "tool_result" :tool_use_id id
+                           ;; Flag it an ERROR (pi-ai parity) so the model treats
+                           ;; it as a failure, not an empty success. Anthropic
+                           ;; emits `is_error: true`; OpenAI has no structured
+                           ;; flag, so the text carries the signal there.
+                           :is_error true
+                           :content "No result: the tool call did not complete (failed or interrupted)."})]
+    (loop [out [] ms (vec messages)]
+      (if-let [m (first ms)]
+        (let [orphans (when (= "assistant" (some-> (:role m) name))
+                        (vec (remove resolved (content-blocks-of-type m "tool_use" :id))))]
+          (if (seq orphans)
+            (if (result-turn? (second ms))
+              (recur (conj out m (update (second ms) :content #(into (vec %) (map synth) orphans)))
+                (subvec ms 2))
+              (recur (conj out m {:role "user" :content (mapv synth orphans)})
+                (subvec ms 1)))
+            (recur (conj out m) (subvec ms 1))))
+        out))))
+
 (defn- sanitize-replayed-messages
   "Defensive pre-request hygiene (see comment above). Skips non-replayable
-   assistant turns and strips cross-model thinking. Idempotent and safe on any
-   message array; `target-model` is the model the request is being built for."
-  [messages target-model]
-  (->> messages
-    (filterv (fn [m] (or (not= "assistant" (some-> (:role m) name))
-                       (assistant-turn-replayable? m))))
-    (mapv #(strip-foreign-thinking % target-model))))
+   assistant turns, strips cross-model thinking, normalizes tool-call ids for the
+   target wire (`openai?` preserves the Responses composite `call_id|item_id`),
+   and synthesizes a placeholder result for any orphaned tool call
+   (failed/interrupted before its result was recorded). Idempotent and safe on
+   any message array; `target-model` is the model the request is being built for."
+  ([messages target-model] (sanitize-replayed-messages messages target-model false))
+  ([messages target-model openai?]
+   (-> (->> messages
+         (filterv (fn [m] (or (not= "assistant" (some-> (:role m) name))
+                            (assistant-turn-replayable? m))))
+         (mapv #(strip-foreign-thinking % target-model)))
+     (normalize-tool-ids openai?)
+     synthesize-orphan-tool-results)))
 
 (defn- stamp-assistant-model
   "Tag a completion result's canonical `:assistant-message` with the `model` that
@@ -1906,13 +2018,24 @@
                 {:id (:id tc) :name (:name f) :input (decode-tool-arguments (:arguments f))}))))
     vec))
 
+(defn- responses-tool-call-id
+  "Canonical id for a Responses `function_call`: the COMPOSITE `call_id|item_id`
+   when both are present. The `call_id` pairs the function_call with its
+   function_call_output; the `id` (an `fc_…` item id) is what OpenAI pairs with
+   the preceding reasoning item — dropping it breaks reasoning-model replay. On
+   re-emit `responses-message-input-entries` splits this back into the two wire
+   fields. Mirrors pi-ai (`${item.call_id}|${item.id}`)."
+  [item]
+  (let [c (:call_id item) i (:id item)]
+    (if (and c i) (str c "|" i) (or c i))))
+
 (defn- response-output-tool-calls
   "Canonical tool calls from an OpenAI Responses `:output` `function_call` items."
   [response]
   (->> (:output response)
     (keep (fn [item]
             (when (= "function_call" (:type item))
-              {:id (or (:call_id item) (:id item))
+              {:id (responses-tool-call-id item)
                :name (:name item)
                :input (decode-tool-arguments (:arguments item))})))
     vec))
@@ -1922,7 +2045,7 @@
    (as delivered complete on `response.output_item.done`)."
   [item]
   (when (= "function_call" (:type item))
-    {:id (or (:call_id item) (:id item))
+    {:id (responses-tool-call-id item)
      :name (:name item)
      :input (decode-tool-arguments (:arguments item))}))
 
@@ -2135,13 +2258,21 @@
                        normalized)
         reasoning-items (when assistant?
                           (vec (keep canonical-thinking-block->responses-reasoning-item thinking-blocks)))
-        fn-call-items   (mapv (fn [b] {:type "function_call"
-                                       :call_id (:id b)
-                                       :name (:name b)
-                                       :arguments (json/write-json-str (or (:input b) {}))})
+        ;; The canonical id is the COMPOSITE `call_id|item_id` (see
+        ;; `responses-tool-call-id`). Split it back into the two wire fields:
+        ;; the function_call carries BOTH `id` (the `fc_…` item id OpenAI pairs
+        ;; with the reasoning item) and `call_id`; the function_call_output and
+        ;; the reasoning↔call pairing both key on `call_id`.
+        fn-call-items   (mapv (fn [b]
+                                (let [[call-id item-id] (str/split (str (:id b)) #"\|" 2)]
+                                  (cond-> {:type "function_call"
+                                           :call_id call-id
+                                           :name (:name b)
+                                           :arguments (json/write-json-str (or (:input b) {}))}
+                                    (not (str/blank? item-id)) (assoc :id item-id))))
                           tool-use-blocks)
         fn-output-items (mapv (fn [b] {:type "function_call_output"
-                                       :call_id (:tool_use_id b)
+                                       :call_id (first (str/split (str (:tool_use_id b)) #"\|" 2))
                                        :output (tool-result-text (:content b))})
                           tool-result-blocks)
         ;; `:type "message"` is REQUIRED on a Responses input message item.
@@ -2161,7 +2292,7 @@
            fn-output-items))))
 
 (defn- build-openai-responses-request-body [messages model extra-body]
-  (let [messages (sanitize-replayed-messages messages model)
+  (let [messages (sanitize-replayed-messages messages model true)
         [tools tool-choice extra-body] (extra-body-tools extra-body)
         system-text (->> messages
                       (filter #(= "system" (:role %)))
@@ -2425,7 +2556,7 @@
   ([messages model]
    (build-request-body messages model nil))
   ([messages model extra-body]
-   (let [messages (sanitize-replayed-messages messages model)
+   (let [messages (sanitize-replayed-messages messages model true)
          [tools tool-choice extra-body] (extra-body-tools extra-body)
          echo-off? (echo-reasoning-disabled?)
          tool-use?    #(= "tool_use" (:type %))
