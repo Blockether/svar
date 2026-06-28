@@ -2375,9 +2375,15 @@
               ;; Thinking is NOT replayed to Gemini — no signed-echo contract.
               "thinking"    nil
               "tool_use"    {:functionCall {:name (:name b) :args (or (:input b) {})}}
+              ;; Gemini's functionResponse `:response` is a STRUCTURED error
+              ;; channel: newer models (Gemini 3) require `{:output v}` for
+              ;; success and `{:error v}` for failures, and REJECT the legacy
+              ;; `{:result v}` shape. Key on the canonical `:is_error` flag.
               "tool_result" {:functionResponse
                              {:name (or (id->name (:tool_use_id b)) (:tool_use_id b))
-                              :response {:result (tool-result-text (:content b))}}}
+                              :response (if (:is_error b)
+                                          {:error  (tool-result-text (:content b))}
+                                          {:output (tool-result-text (:content b))})}}
               (when (:text b) {:text (:text b)}))))
     vec))
 
