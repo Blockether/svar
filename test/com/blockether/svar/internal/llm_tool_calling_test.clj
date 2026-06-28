@@ -367,7 +367,22 @@
         (expect (= {:name "run_python" :args {:code "print(1)"}}
                   (:functionCall (first (:parts model-msg)))))
         (expect (= "run_python" (get-in (first (:parts last-user)) [:functionResponse :name])))
-        (expect (= {:result "1\n"} (get-in (first (:parts last-user)) [:functionResponse :response])))))))
+        ;; Gemini 3 requires `{:output v}` for success (the legacy `{:result v}`
+        ;; shape is rejected by newer models).
+        (expect (= {:output "1\n"} (get-in (first (:parts last-user)) [:functionResponse :response])))))
+
+    (it "a tool_result flagged :is_error emits Gemini's structured `{:error v}` channel"
+      (let [body (build-gemini [{:role "user" :content "go"}
+                                {:role "assistant"
+                                 :content [{:type "tool_use" :id "gemini-cat-0"
+                                            :name "cat" :input {:path "x"}}]}
+                                {:role "user"
+                                 :content [{:type "tool_result" :tool_use_id "gemini-cat-0"
+                                            :is_error true :content "No such file"}]}]
+                   "gemini-3-pro" {})
+            last-user (last (:contents body))]
+        (expect (= {:error "No such file"}
+                  (get-in (first (:parts last-user)) [:functionResponse :response])))))))
 
 (defdescribe anthropic-round-trip-test
   (it "prior tool_use (assistant) + tool_result (user) blocks re-emit onto the wire body"
