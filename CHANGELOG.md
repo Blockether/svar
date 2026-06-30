@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.44] - 2026-06-30
+
+### Changed
+- fix(llm): a clean end_turn/stop with empty text is a legit completion, not an error
+- fix(gemini): tool-result uses {output}/{error} per Gemini 3 contract
+- release: update version files for v0.7.42, bump to next dev version
+
+
 ## [v0.7.42] - 2026-06-28
 
 ### Changed
@@ -1370,7 +1378,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.42...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.44...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1454,3 +1462,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.40]: https://github.com/Blockether/svar/releases/tag/v0.7.40
 [v0.7.41]: https://github.com/Blockether/svar/releases/tag/v0.7.41
 [v0.7.42]: https://github.com/Blockether/svar/releases/tag/v0.7.42
+[v0.7.44]: https://github.com/Blockether/svar/releases/tag/v0.7.44
