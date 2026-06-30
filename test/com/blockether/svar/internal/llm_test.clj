@@ -809,3 +809,20 @@
                                        :delta {:stop_reason "max_tokens"}}))))
     (it "OpenAI chat shape still wins its own field"
       (expect (= "stop" (finish {:choices [{:finish_reason "stop"}]}))))))
+
+(defdescribe empty-reply-anomaly-type-test
+  "A blank reply (no tool call, no text) is only an ERROR when the finish reason
+   says so. A clean stop is a legitimate empty completion (thinking-only turn),
+   not an anomaly — mature agent loops treat a no-tool-call turn as done."
+  (let [classify (var-get #'sut/empty-reply-anomaly-type)]
+    (it "a CLEAN stop is a legit empty completion (nil = fall through, no throw)"
+      (expect (nil? (classify "end_turn")))       ;; Anthropic
+      (expect (nil? (classify "stop")))           ;; OpenAI
+      (expect (nil? (classify "stop_sequence")))) ;; Anthropic stop sequence
+    (it "a token cap is :max-tokens-exceeded for BOTH OpenAI (length) and Anthropic (max_tokens)"
+      (expect (= :svar.llm/max-tokens-exceeded (classify "length")))
+      (expect (= :svar.llm/max-tokens-exceeded (classify "max_tokens"))))
+    (it "an unknown / missing finish reason (mid-stream truncation) stays a retryable empty-content blip"
+      (expect (= :svar.llm/empty-content (classify nil)))
+      (expect (= :svar.llm/empty-content (classify "")))
+      (expect (= :svar.llm/empty-content (classify "content_filter"))))))

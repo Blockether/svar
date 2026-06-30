@@ -5109,6 +5109,28 @@
 ;; Claude-Code model). No schema, no fence parsing, no lenient extraction —
 ;; the model's action arrives as a native tool call, not fenced code.
 
+(defn- empty-reply-anomaly-type
+  "Classify a BLANK reply (no tool calls AND no text) by its finish reason.
+   Returns the anomaly `:type` to throw, or `nil` when the blank reply is a
+   LEGITIMATE empty completion that should fall through and return normally.
+
+   A clean stop (Anthropic `end_turn`/`stop_sequence`, OpenAI `stop`) with empty
+   text is NOT an error: extended thinking can return a turn whose only content
+   is a thinking block with empty text, and the Messages API treats `end_turn` as
+   \"done\". Mature agent loops (pi, Codex, opencode) treat a no-tool-call turn as
+   final, not an error.
+     - `length` (OpenAI) / `max_tokens` (Anthropic) -> :max-tokens-exceeded
+       (pre-fix only `length` matched, so an Anthropic cap was misread as a
+        generic empty-content blip instead of a token-cap error)
+     - `stop` / `end_turn` / `stop_sequence`         -> nil (legit empty completion)
+     - anything else (nil / mid-stream truncation)   -> :empty-content (retry)"
+  [finish-reason]
+  (let [fr (some-> finish-reason str)]
+    (cond
+      (contains? #{"length" "max_tokens"} fr)             :svar.llm/max-tokens-exceeded
+      (contains? #{"stop" "end_turn" "stop_sequence"} fr) nil
+      :else                                               :svar.llm/empty-content)))
+
 (defn ask-code!*
   "Low-level native-tool-calling completion — no routing. Prefer `ask-code!`
    which routes + falls back into this.
@@ -5213,25 +5235,27 @@
                                   :content-length (when content (count content))})
                  :msg "chat! HTTP response received"})
     ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
-    ;; blank content is normal and terminates as :tool-calls.
+    ;; blank content is normal and terminates as :tool-calls. A blank reply with a
+    ;; CLEAN stop reason is a legitimate empty completion (see
+    ;; `empty-reply-anomaly-type`) and falls through to return normally; only a
+    ;; token cap or a truncated/unknown finish reason is thrown.
     (when (and (empty? tool-calls) (str/blank? content))
-      (let [finish-reason (some-> stream-finalization :finish-reason str)
-            length-cap?   (= "length" finish-reason)
-            base-envelope (envelope-data
-                            {:model model :api-style api-style :chat-url chat-url
-                             :duration-ms duration-ms :api-usage api-usage
-                             :reasoning reasoning :content content
-                             :provider-state provider-state
-                             :assistant-message assistant-message
-                             :http-response http-response
-                             :stream-finalization stream-finalization
-                             :provider-id provider-id})]
-        (throw (ex-info
-                 (if length-cap?
-                   "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
-                   "The model produced neither text nor a tool call.")
-                 (assoc base-envelope
-                   :type (if length-cap? :svar.llm/max-tokens-exceeded :svar.llm/empty-content))))))
+      (when-let [anomaly-type (empty-reply-anomaly-type
+                                (some-> stream-finalization :finish-reason str))]
+        (let [base-envelope (envelope-data
+                              {:model model :api-style api-style :chat-url chat-url
+                               :duration-ms duration-ms :api-usage api-usage
+                               :reasoning reasoning :content content
+                               :provider-state provider-state
+                               :assistant-message assistant-message
+                               :http-response http-response
+                               :stream-finalization stream-finalization
+                               :provider-id provider-id})]
+          (throw (ex-info
+                   (if (= :svar.llm/max-tokens-exceeded anomaly-type)
+                     "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
+                     "The model produced neither text nor a tool call.")
+                   (assoc base-envelope :type anomaly-type))))))
     (let [token-stats (router/count-and-estimate model in-msgs (or content "")
                         {:pricing pricing :api-usage api-usage :api-style api-style})
           tokens      (token-stats->tokens token-stats)
