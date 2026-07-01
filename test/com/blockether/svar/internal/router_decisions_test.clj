@@ -579,7 +579,14 @@
         (expect false "should have thrown")
         (catch clojure.lang.ExceptionInfo e
           (expect (= :svar.llm/all-providers-exhausted (:type (ex-data e))))
-          (expect (= #{:p1 :p2} (:tried (ex-data e)))))))))
+          (expect (= #{:p1 :p2} (:tried (ex-data e))))
+          ;; per-provider breakdown: one attempt per provider, each with the
+          ;; provider/model/status/reason so the caller can name WHY each failed.
+          (let [attempts (:attempts (ex-data e))]
+            (expect (= 2 (count attempts)))
+            (expect (= #{:p1 :p2} (set (map :provider attempts))))
+            (expect (= #{503} (set (map :status attempts))))
+            (expect (every? #{:transient-error} (map :reason attempts)))))))))
 
 ;; =============================================================================
 ;; Tier 1 — Circuit breaker state machine

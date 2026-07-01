@@ -1767,6 +1767,12 @@
         trace (atom [])
         selected (atom nil)
         pending-fallback (atom nil)
+        ;; Ordered record of EVERY failed attempt — `{:provider :model :status
+        ;; :reason :error}` per provider tried. Unlike `pending-fallback` (which
+        ;; is last-wins) this accumulates, so an "all providers exhausted" failure
+        ;; can name WHY each provider bowed out (`anthropic: 429 · openai: 401`)
+        ;; instead of a generic message. Surfaced on the terminal ex-info.
+        failed-attempts (atom [])
         max-wait-ms (:max-wait-ms router)]
     (loop [attempts 0]
       (let [iter-prefs (cond-> prefs
@@ -1863,6 +1869,9 @@
                                             :status (:status (ex-data e))
                                             :reason :format-error
                                             :error (ex-message e)})
+                  (swap! failed-attempts conj {:provider pid :model (:name model-map)
+                                        :status (:status (ex-data e)) :reason :format-error
+                                        :error (ex-message e)})
                   (recur (inc attempts)))
 
                 (:model-unsupported result)
@@ -1882,6 +1891,9 @@
                                             :status (:status (ex-data e))
                                             :reason :model-unsupported
                                             :error (ex-message e)})
+                  (swap! failed-attempts conj {:provider pid :model (:name model-map)
+                                        :status (:status (ex-data e)) :reason :model-unsupported
+                                        :error (ex-message e)})
                   (recur (inc attempts)))
 
                 (:error result)
@@ -1913,6 +1925,10 @@
                                  :reason reason
                                  :error (ex-message e)}
                           (some? (:elapsed-ms result)) (assoc :elapsed-ms (:elapsed-ms result))))
+                      (swap! failed-attempts conj
+                        (cond-> {:provider pid :model (:name model-map)
+                                 :status status :reason reason :error (ex-message e)}
+                          (some? (:elapsed-ms result)) (assoc :elapsed-ms (:elapsed-ms result))))
                       (recur (inc attempts))))))))
           (cond
             (and @last-format-error (seq @format-failed))
@@ -1921,7 +1937,8 @@
                        (merge (ex-data e)
                          {:routed/trace @trace
                           :tried @tried
-                          :format-failed @format-failed})
+                          :format-failed @format-failed
+                          :attempts @failed-attempts})
                        e)))
 
             ;; Every candidate model was rejected as unsupported and nothing
@@ -1933,7 +1950,8 @@
                        (merge (ex-data e)
                          {:routed/trace @trace
                           :tried @tried
-                          :model-unsupported @model-unsupported})
+                          :model-unsupported @model-unsupported
+                          :attempts @failed-attempts})
                        e)))
 
             :else
@@ -1950,6 +1968,7 @@
                          {:type :svar.llm/all-providers-exhausted
                           :prefs iter-prefs :tried @tried
                           :format-failed @format-failed
+                          :attempts @failed-attempts
                           :routed/trace @trace}))))))))))
 
 ;; =============================================================================
