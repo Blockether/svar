@@ -506,10 +506,20 @@
     (sequential? values) values
     :else                nil))
 
+(defn- enum-canon
+  "Canonical form of an enum member for membership comparison.
+
+   Keyword-typed fields keywordize parsed values (`\"ai\"` -> `:ai`) while
+   enum `::values` are declared as strings, so both sides are reduced to
+   their name string. Non-keyword values pass through unchanged."
+  [v]
+  (if (keyword? v) (name v) v))
+
 (defn- enum-values-set
-  "Set view of enum values — used by the validator for membership checks."
+  "Canonicalized set view of enum values — used by the validator for
+   membership checks (see `enum-canon`)."
   [values]
-  (some-> (enum-values values) set))
+  (some->> (enum-values values) (map enum-canon) set))
 
 (defn- field->baml-type
   "Converts a field definition to BAML type string.
@@ -1682,6 +1692,10 @@
    a `[value ...]` vector (values-only shorthand). Internally we reduce
    both to a set so membership is O(1) either way.
 
+   Values and allowed values are canonicalized via `enum-canon`, so
+   keywordized values (`:spec.type/keyword` fields) match their
+   string-declared enum members.
+
    For cardinality many, checks every item in the vector."
   [value allowed-values cardinality]
   (let [allowed-set (enum-values-set allowed-values)]
@@ -1690,9 +1704,9 @@
       (nil? allowed-set) true
       (= cardinality :spec.cardinality/many)
       (and (vector? value)
-        (every? allowed-set value))
+        (every? #(contains? allowed-set (enum-canon %)) value))
       :else
-      (boolean (allowed-set value)))))
+      (contains? allowed-set (enum-canon value)))))
 
 (defn- nested-in-array?
   "Checks if a path is nested inside an array container.

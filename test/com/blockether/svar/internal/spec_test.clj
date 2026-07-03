@@ -731,6 +731,87 @@
         (expect (= [:foo :bar :baz] (:tags result)))
         (expect (every? keyword? (:tags result)))))))
 
+(defdescribe keyword-enum-validation-test
+  "Keyword-typed fields are keywordized on parse, but enum VALUES are declared
+   as strings. Validation must canonicalize both sides — otherwise no value can
+   ever satisfy a TYPE_KEYWORD + VALUES field (strings fail the type check,
+   keywords fail the enum check)."
+
+  (describe "cardinality one"
+    (it "accepts a keyword matching a string-declared enum value"
+      (let [s (sut/spec
+                (sut/field ::sut/name :topic
+                  ::sut/type :spec.type/keyword
+                  ::sut/cardinality :spec.cardinality/one
+                  ::sut/description "Topic"
+                  ::sut/values {"ai" "AI/ML" "databases" "Storage"}))]
+        (expect (= {:valid? true} (sut/validate-data s {:topic :ai})))
+        (expect (= {:valid? true} (sut/validate-data s {:topic :databases})))))
+
+    (it "rejects a keyword outside the enum"
+      (let [s (sut/spec
+                (sut/field ::sut/name :topic
+                  ::sut/type :spec.type/keyword
+                  ::sut/cardinality :spec.cardinality/one
+                  ::sut/description "Topic"
+                  ::sut/values {"ai" "AI/ML" "databases" "Storage"}))
+            result (sut/validate-data s {:topic :cooking})]
+        (expect (= false (:valid? result)))
+        (expect (some #(= :invalid-enum-value (:error %)) (:errors result)))))
+
+    (it "accepts enum VALUES declared as vector shorthand"
+      (let [s (sut/spec
+                (sut/field ::sut/name :status
+                  ::sut/type :spec.type/keyword
+                  ::sut/cardinality :spec.cardinality/one
+                  ::sut/description "Status"
+                  ::sut/values ["active" "inactive"]))]
+        (expect (= {:valid? true} (sut/validate-data s {:status :active}))))))
+
+  (describe "cardinality many"
+    (it "accepts a vector of keywords all within the enum"
+      (let [s (sut/spec
+                (sut/field ::sut/name :tags
+                  ::sut/type :spec.type/keyword
+                  ::sut/cardinality :spec.cardinality/many
+                  ::sut/description "Tags"
+                  ::sut/values {"foo" "F" "bar" "B"}))]
+        (expect (= {:valid? true} (sut/validate-data s {:tags [:foo :bar]})))))
+
+    (it "rejects a vector containing a keyword outside the enum"
+      (let [s (sut/spec
+                (sut/field ::sut/name :tags
+                  ::sut/type :spec.type/keyword
+                  ::sut/cardinality :spec.cardinality/many
+                  ::sut/description "Tags"
+                  ::sut/values {"foo" "F" "bar" "B"}))
+            result (sut/validate-data s {:tags [:foo :nope]})]
+        (expect (= false (:valid? result)))
+        (expect (some #(= :invalid-enum-value (:error %)) (:errors result))))))
+
+  (describe "parse → validate roundtrip"
+    (it "validate-data accepts str->data-with-spec output for keyword enums"
+      (let [s (sut/spec
+                (sut/field ::sut/name :topic
+                  ::sut/type :spec.type/keyword
+                  ::sut/cardinality :spec.cardinality/one
+                  ::sut/description "Topic"
+                  ::sut/values {"ai" "AI/ML" "databases" "Storage"}))
+            parsed (sut/str->data-with-spec "{\"topic\": \"databases\"}" s)]
+        (expect (= {:topic :databases} parsed))
+        (expect (= {:valid? true} (sut/validate-data s parsed))))))
+
+  (describe "string enums are unaffected"
+    (it "still accepts matching strings and rejects non-members"
+      (let [s (sut/spec
+                (sut/field ::sut/name :role
+                  ::sut/type :spec.type/string
+                  ::sut/cardinality :spec.cardinality/one
+                  ::sut/description "Role"
+                  ::sut/values {"admin" "Full" "user" "Standard"}))]
+        (expect (= {:valid? true} (sut/validate-data s {:role "admin"})))
+        (expect (= false (:valid? (sut/validate-data s {:role "guest"}))))))))
+
 ;; =============================================================================
 ;; Fixed-Size Vector Type Tests
 ;; =============================================================================
