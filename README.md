@@ -37,7 +37,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 |----------|-----------|-------------|
 | [**Router**](#router) | `make-router`, `router-stats`, `reset-budget!`, `reset-provider!` | Multi-provider routing with circuit breakers, cost budgets, automatic fallback. The entry point to the library. |
 | [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Supports [streaming](#streaming) via `:on-chunk`. Token counting + cost estimation via JTokkit. |
-| [**Code Output**](#code-output-ask-code) | `ask-code!`, `extract-code-blocks` | Plain-text completion + fenced code-block extraction. Filters by `:lang`, keeps untagged fences, concatenates matching blocks, exposes raw text + parsed blocks. Supports [streaming](#streaming) via `:on-chunk`. |
+| [**Tool Calling**](#tool-calling-ask-code) | `ask-code!` | Native tool-calling completion. The model acts by calling your tools (`tool_use` / `tool_calls` / `function_call` — shaped per wire); no tool call means its text IS the final answer. Supports [streaming](#streaming) via `:on-chunk`. |
 | [**Spec DSL**](#spec-dsl-reference) | `spec`, `field`, `spec->prompt`, `validate-data` | Define output shapes: types, enums, refs, optional fields, namespaced keys, fixed-size vectors. |
 | [**Parsing**](#parsing--validation) | `str->data`, `str->data-with-spec`, `data->str` | Schemaless and spec-validated JSON↔Clojure. Handles malformed JSON out of the box. |
 | [**Models**](#available-models-models) | `models!` | List available models from your provider. |
@@ -251,38 +251,42 @@ Under the hood, `spec->prompt` translates the spec into a schema the LLM can fol
 
 Returns `{:result <data> :tokens {:input N :output N :total N} :cost {:input-cost N :output-cost N :total-cost N} :duration-ms N}`.
 
-### Code Output (`ask-code!`)
+### Tool Calling (`ask-code!`)
 
-Use `ask-code!` when you want source text, not JSON. svar asks for plain text, extracts fenced code blocks, filters by `:lang`, keeps untagged fences as matches for any language, and concatenates the selected blocks into `:result`.
+Use `ask-code!` when the model should ACT — by calling tools you define — rather than produce spec-shaped data. It is the native tool-calling sibling of `ask!`: you pass canonical tool definitions, svar shapes them for the selected wire (Anthropic `tool_use`, OpenAI chat `tool_calls`, Responses `function_call`), and “no tool call in the response” means the model's text IS the final answer — impossible to get wrong with a stray fence.
 
 ```clojure
-(svar/extract-code-blocks "Before\n```clojure\n(+ 1 1)\n```\nAfter")
-;; => [{:lang "clojure", :source "(+ 1 1)"}]
-
-(svar/extract-code-blocks "(println \"no fence\")")
-;; => [{:lang nil, :source "(println \"no fence\")"}]
+(def run-python-tool
+  {:name "run_python"
+   :description "Execute Python in the sandbox."
+   :schema {:type "object"
+            :properties {"code" {:type "string"}}
+            :required ["code"]}})
 ```
 
 ```clojure
 (comment
   (def code-result
     (svar/ask-code! router
-      {:messages [(svar/system "Reply with Clojure code only.")
-                  (svar/user "Write a function `square`.")]
-       :model "gpt-4o"
-       :lang "clojure"}))
+      {:messages [(svar/user "Compute the 10th Fibonacci number.")]
+       :tools [run-python-tool]
+       :tool-choice :auto      ;; :auto | :required | :none | {:name "run_python"}
+       :model "gpt-4o"}))
 
-  (:result code-result)
-  ;; => "(defn square [x] (* x x))"
+  (:stop-reason code-result)
+  ;; => :tool-calls           ;; the model wants to act
 
-  (:blocks code-result)
-  ;; => [{:lang "clojure", :source "(defn square [x] (* x x))"}]
+  (:tool-calls code-result)
+  ;; => [{:id "call_1" :name "run_python" :input {:code "print(fib(10))"}}]
+
+  ;; Append :assistant-message + a matching tool_result, then call again.
+  ;; When the model calls NO tool, :stop-reason is :end and :content is the answer.
   )
 ```
 
-Returns `{:result <source> :blocks [{:lang <str-or-nil> :source <str>} ...] :raw <full-assistant-text> :reasoning <provider-reasoning-when-present> :tokens {:input N :output N :reasoning N :total N} :cost {:input-cost N :output-cost N :total-cost N} :duration-ms N}`.
+Returns `{:stop-reason :tool-calls|:end :tool-calls [{:id <str> :name <str> :input <map>} ...] :content <text-or-nil> :reasoning <provider-reasoning-when-present> :assistant-message <canonical-assistant-turn — MUST be appended to :messages on the next call> :tokens {:input N :output N :reasoning N :total N} :cost {:input-cost N :output-cost N :total-cost N} :duration-ms N}`.
 
-`ask-code!` accepts the same routing, reasoning, verbosity, network, and streaming controls as `ask!`, minus the structured-output-only knobs (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`).
+`ask-code!` accepts the same routing, reasoning, verbosity, network, and streaming controls as `ask!`, minus the structured-output-only knobs (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`). See [TOOL_CALLING.md](TOOL_CALLING.md) for the full wire-level design.
 
 ### Reasoning depth and output verbosity
 
@@ -307,7 +311,6 @@ They are independent. Example: `:reasoning :deep` + `:verbosity :low` means thin
   (svar/ask-code! router
     {:messages [(svar/user "Write a compact Clojure fn that squares a number.")]
      :model "gpt-5.5"
-     :lang "clojure"
      :reasoning :balanced
      :verbosity :low}))
 ```
