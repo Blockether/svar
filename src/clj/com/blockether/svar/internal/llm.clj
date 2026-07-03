@@ -2409,7 +2409,7 @@
                    vec)]
     [(when-not (str/blank? sys) {:parts [{:text sys}]}) contents]))
 
-(defn- build-gemini-request-body [messages model extra-body]
+(defn- build-gemini-request-body [messages _model extra-body]
   (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
         [sys-instr contents] (gemini-contents messages)
         max-out    (or (:max_output_tokens extra-body) (:max_tokens extra-body))

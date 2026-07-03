@@ -41,7 +41,7 @@
       (let [calls (atom 0)]
         (expect (= "boom"
                   (try (heal (fn [_] (swap! calls inc) (throw (ex-info "boom" {}))))
-                    (catch Exception e (ex-message e)))))
+                       (catch Exception e (ex-message e)))))
         (expect (= 1 @calls)))))
 
   (describe "happy path"

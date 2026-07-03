@@ -8,7 +8,7 @@
    [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.llm :as sut])
   (:import
-   (java.io ByteArrayInputStream InputStream)))
+   (java.io ByteArrayInputStream)))
 
 ;;; ── Test fixtures ──────────────────────────────────────────────────────
 
@@ -30,32 +30,6 @@
 (defn- selected-model [router prefs]
   (when-let [[_ model-map] (sut/select-provider router prefs)]
     (:name model-map)))
-
-(defn- slow-heartbeat-stream []
-  (let [closed? (atom false)
-        payload (.getBytes ": ping\n\n" "UTF-8")
-        idx (atom 0)
-        next-byte (fn []
-                    (let [i @idx]
-                      (swap! idx #(mod (inc %) (alength payload)))
-                      (bit-and (aget payload i) 0xff)))]
-    (proxy [InputStream] []
-      (read
-        ([]
-         (if @closed?
-           -1
-           (do
-             (Thread/sleep 5)
-             (next-byte))))
-        ([buf off len]
-         (if @closed?
-           -1
-           (do
-             (Thread/sleep 5)
-             (aset-byte buf off (unchecked-byte (next-byte)))
-             1))))
-      (close []
-        (reset! closed? true)))))
 
 ;;; ── Tests ──────────────────────────────────────────────────────────────
 

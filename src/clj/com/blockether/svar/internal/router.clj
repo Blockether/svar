@@ -1870,8 +1870,8 @@
                                             :reason :format-error
                                             :error (ex-message e)})
                   (swap! failed-attempts conj {:provider pid :model (:name model-map)
-                                        :status (:status (ex-data e)) :reason :format-error
-                                        :error (ex-message e)})
+                                               :status (:status (ex-data e)) :reason :format-error
+                                               :error (ex-message e)})
                   (recur (inc attempts)))
 
                 (:model-unsupported result)
@@ -1892,8 +1892,8 @@
                                             :reason :model-unsupported
                                             :error (ex-message e)})
                   (swap! failed-attempts conj {:provider pid :model (:name model-map)
-                                        :status (:status (ex-data e)) :reason :model-unsupported
-                                        :error (ex-message e)})
+                                               :status (:status (ex-data e)) :reason :model-unsupported
+                                               :error (ex-message e)})
                   (recur (inc attempts)))
 
                 (:error result)

@@ -6,7 +6,6 @@
    [com.blockether.svar.internal.llm :as sut]))
 
 (def ^:private tool-def->wire   @#'sut/tool-def->wire)
-(def ^:private tools->wire      @#'sut/tools->wire)
 (def ^:private tool-choice->wire @#'sut/tool-choice->wire)
 (def ^:private build-anthropic  @#'sut/build-anthropic-request-body)
 (def ^:private build-chat       @#'sut/build-request-body)
@@ -18,7 +17,6 @@
 (def ^:private openai-responses-state @#'sut/openai-responses-state)
 (def ^:private merge-provider-state @#'sut/merge-provider-state)
 (def ^:private fn-item->tool-call @#'sut/function-call-item->tool-call)
-(def ^:private dedupe-tool-calls @#'sut/dedupe-tool-calls)
 (def ^:private extract-stream-delta @#'sut/extract-stream-delta)
 (def ^:private make-anthropic-stream-delta-fn @#'sut/make-anthropic-stream-delta-fn)
 (def ^:private build-gemini      @#'sut/build-gemini-request-body)

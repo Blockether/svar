@@ -14,6 +14,7 @@
       item, half-written tool calls) is exactly what OpenAI rejects with
       'reasoning without following item', so such turns are skipped entirely."
   (:require
+   [clojure.string :as str]
    [com.blockether.svar.internal.llm :as sut]
    [lazytest.core :refer [defdescribe expect it]]))
 
@@ -187,8 +188,8 @@
                                    [{:role "assistant" :content [{:type "tool_use" :id "call_abc|fc_xyz" :name "cat" :input {}}]}
                                     {:role "user" :content [{:type "tool_result" :tool_use_id "call_abc|fc_xyz" :content "ok"}]}]
                                    "claude-x" {}))
-                    (mapcat :content))
+                   (mapcat :content))
           tu (first (filter #(= "tool_use" (:type %)) blocks))
           tr (first (filter #(= "tool_result" (:type %)) blocks))]
       (expect (= (:id tu) (:tool_use_id tr)))
-      (expect (not (clojure.string/includes? (str (:id tu)) "|"))))))
+      (expect (not (str/includes? (str (:id tu)) "|"))))))

@@ -54,7 +54,7 @@
 ;; Canonical shape constructors per provider
 ;; =============================================================================
 
-(defn ^:private long-or-0 [v]
+(defn ^:private long-or-0 ^long [v]
   (long (or v 0)))
 
 (defn ^:private build-canonical
