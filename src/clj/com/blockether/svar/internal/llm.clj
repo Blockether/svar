@@ -866,12 +866,31 @@
                 :else false)))
       messages)))
 
+(defn- image-url-block->anthropic
+  "Translate one canonical `image_url` block → Anthropic native `image`
+   block. Canonical multimodal content (built by `user` + `image`) carries
+   OpenAI-shaped `{:type \"image_url\" :image_url {:url ...}}` blocks; the
+   Anthropic Messages API rejects that type, expecting
+   `{:type \"image\" :source ...}` with a `base64` or `url` source.
+   Data URIs are unpacked into the base64 source; plain http(s) URLs ride
+   the url source."
+  [block]
+  (let [url (get-in block [:image_url :url] "")]
+    (if-let [[_ media-type data] (re-matches #"(?s)data:([^;,]+);base64,(.*)" url)]
+      {:type "image" :source {:type "base64" :media_type media-type :data data}}
+      {:type "image" :source {:type "url" :url url}})))
+
 (defn- anthropic-block
   "Translate one canonical block → Anthropic wire shape, attaching
-   `cache_control` when the block was tagged `:svar/cache true`."
+   `cache_control` when the block was tagged `:svar/cache true`.
+   Canonical `image_url` blocks become native `image` blocks — Anthropic
+   400s on the OpenAI-shaped type."
   [block]
   (let [cc    (cache-control-for block)
-        clean (strip-svar-keys block)]
+        clean (strip-svar-keys block)
+        clean (if (= "image_url" (:type clean))
+                (image-url-block->anthropic clean)
+                clean)]
     (cond-> clean
       cc (assoc :cache_control cc))))
 
