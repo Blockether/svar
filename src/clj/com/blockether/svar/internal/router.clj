@@ -77,6 +77,19 @@
                  :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
    :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["OPENROUTER_API_KEY"]}
+   ;; Mistral — OpenAI-compatible `/v1/chat/completions`. No `:api-style` needed
+   ;; (default OpenAI chat wire). The `:mistral` slug already exists in the bundled
+   ;; `resources/models.dev.json` (env `MISTRAL_API_KEY`, full model catalog with
+   ;; real context windows), so pricing/context/capabilities auto-resolve via
+   ;; `modelsdev/provider-models`; NO `KNOWN_PROVIDER_MODELS` overlay required.
+   ;; See `provider-pricing-source` (router.clj) — it keys models.dev off `:id`,
+   ;; and `:mistral` is already a known catalog slug.
+   :mistral     {:base-url "https://api.mistral.ai/v1"  :rpm 500 :tpm 2000000
+                 :env-keys ["MISTRAL_API_KEY"]
+                 :default-models [{:name "mistral-large-latest"}
+                                  {:name "mistral-medium-latest"}
+                                  {:name "mistral-small-latest"}
+                                  {:name "codestral-latest"}]}
    :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000
                     :default-models [{:name "claude-opus-4.8"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
                     :llm-headers {"Editor-Version" "vscode/1.100.0"
