@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.46] - 2026-07-05
+
+### Changed
+- fix(llm): translate canonical image_url blocks to native image on anthropic wire
+- chore(lint): clear baseline lint, boxed math, and dead test helpers
+- docs(readme): document native tool-calling ask-code!, drop deleted fence API
+- fix(spec): canonicalize keyword enum values in validate-data
+- release: update version files for v0.7.45, bump to next dev version
+
+
 ## [v0.7.45] - 2026-07-01
 
 ### Changed
@@ -1385,7 +1395,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.45...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.46...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1471,3 +1481,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.42]: https://github.com/Blockether/svar/releases/tag/v0.7.42
 [v0.7.44]: https://github.com/Blockether/svar/releases/tag/v0.7.44
 [v0.7.45]: https://github.com/Blockether/svar/releases/tag/v0.7.45
+[v0.7.46]: https://github.com/Blockether/svar/releases/tag/v0.7.46
