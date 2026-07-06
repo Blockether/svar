@@ -633,7 +633,7 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -657,13 +657,13 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                               :p2 (success-result 10))))
+                           :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)
@@ -1356,3 +1356,18 @@
               (router/model-key-variants "claude-opus-4.8")))
     ;; GPT/glm dotted ids resolve as-is first (their catalog keys are dotted).
     (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
+
+(defdescribe known-provider-default-models-test
+  (it "uses curated Mistral defaults when caller omits :models"
+    (let [p (router/normalize-provider 0 {:id :mistral :api-key "x"})
+          models (mapv :name (:models p))
+          large (first (:models p))]
+      (expect (= :mistral (:id p)))
+      (expect (= :openai-compatible-chat (:api-style p)))
+      (expect (= ["mistral-large-latest"
+                  "mistral-medium-latest"
+                  "mistral-small-latest"
+                  "codestral-latest"]
+                models))
+      (expect (= 262144 (:context large)))
+      (expect (= 262144 (:output-limit large))))))

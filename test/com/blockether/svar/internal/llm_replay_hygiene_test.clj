@@ -22,6 +22,7 @@
 (def ^:private build-anthropic  @#'sut/build-anthropic-request-body)
 (def ^:private sanitize         @#'sut/sanitize-replayed-messages)
 (def ^:private stamp            @#'sut/stamp-assistant-model)
+(def ^:private build-chat       @#'sut/build-request-body)
 
 (def ^:private sig-A
   "{\"type\":\"reasoning\",\"id\":\"rs_A\",\"encrypted_content\":\"ENC_A\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"t\"}]}")
@@ -61,6 +62,17 @@
     (expect (= {:content "x"} (stamp {:content "x"} "m-A")))
     (expect (= {:assistant-message {:role "assistant"}}
               (stamp {:assistant-message {:role "assistant"}} nil)))))
+
+(defdescribe chat-wire-strips-model-stamp-test
+  (it "drops the :model stamp from assistant messages in the OpenAI chat body"
+    (let [msgs [{:role "user" :content "hi"}
+                {:role "assistant" :content "hello" :model "devstral-latest"}
+                {:role "user" :content "bye"}]
+          body (build-chat msgs "devstral-latest")]
+      ;; top-level :model stays
+      (expect (= "devstral-latest" (:model body)))
+      ;; no message carries :model (would 422 on strict providers like Mistral)
+      (expect (not-any? #(contains? % :model) (:messages body))))))
 
 (defdescribe cross-model-reasoning-guard-test
   (it "OpenAI Responses: keeps reasoning for the SAME model, drops it for a DIFFERENT model"

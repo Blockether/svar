@@ -171,7 +171,7 @@
   [^Throwable e url]
   (let [reason (connection-error-reason e)
         host   (try (.getHost (java.net.URI. (str url)))
-                    (catch Exception _ nil))]
+                 (catch Exception _ nil))]
     (ex-info (str "Could not connect to the model provider"
                (when-not (str/blank? host) (str " at " host))
                ": " reason
@@ -384,7 +384,7 @@
                        (throw e))))
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                      (catch Exception _ nil))]
+                   (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -601,7 +601,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-          (assoc body :max_tokens required-min))
+        (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -1604,15 +1604,15 @@
           (case (:type delta)
             "text_delta"
             (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic emits input_json_delta for tool_use blocks (the
             ;; tool arguments, e.g. run_python's `{"code": …}`, arrive as a
@@ -1623,8 +1623,8 @@
             ;; work, not just its reasoning).
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil
-                 :tool-args-delta (:partial_json delta)})
+              {:content-delta nil :reasoning-delta nil :api-usage nil
+               :tool-args-delta (:partial_json delta)})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -1993,7 +1993,7 @@
   [{:keys [thinking thinking-signature]}]
   (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
         (try (json/read-json thinking-signature :key-fn keyword)
-             (catch Exception _ nil)))
+          (catch Exception _ nil)))
     (when (and (string? thinking) (not (str/blank? thinking)))
       {:type "reasoning"
        :summary [{:type "summary_text" :text thinking}]})))
@@ -2391,8 +2391,8 @@
 
 (defn- gemini-part-text [part]
   (cond (string? part)          part
-        (string? (:text part))  (:text part)
-        :else                   nil))
+    (string? (:text part))  (:text part)
+    :else                   nil))
 
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
@@ -2625,7 +2625,7 @@
                                                            :arguments (json/write-json-str (or (:input b) {}))}})
                                    tool-use-blocks))
                                base (-> m
-                                      (dissoc :content)
+                                      (dissoc :content :model)
                                       (assoc :content (openai-content rest-blocks))
                                       (cond-> (= role "system") (assoc :role "system")))
                                base (cond-> base
@@ -3661,9 +3661,9 @@
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
                       "event" (do (vreset! saw-sse? true)
-                                  (recur value data-lines (unchecked-inc line-count) now-ns))
+                                (recur value data-lines (unchecked-inc line-count) now-ns))
                       "data"  (do (vreset! saw-sse? true)
-                                  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
+                                (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
                       (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
@@ -3863,8 +3863,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                  idle?     :svar.core/stream-idle-timeout
-                                  :else     :svar.core/http-error)
+                              idle?     :svar.core/stream-idle-timeout
+                              :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -3898,8 +3898,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                idle?     :svar.core/stream-idle-timeout
-                                :else     :svar.core/http-error)
+                            idle?     :svar.core/stream-idle-timeout
+                            :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4868,7 +4868,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
+                                                 (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))

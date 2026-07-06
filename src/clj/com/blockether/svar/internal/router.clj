@@ -917,10 +917,12 @@
 
 (defn- configured-model-inputs
   [known provider-map]
-  (let [configured (:models provider-map)]
-    (if (:prepend-default-models? known)
-      (concat (:default-models known) configured)
-      configured)))
+  (let [configured (:models provider-map)
+        defaults (:default-models known)]
+    (cond
+      (:prepend-default-models? known) (concat defaults configured)
+      (seq configured) configured
+      :else defaults)))
 
 (defn- conj-model-once
   [models model]
@@ -1203,10 +1205,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1218,7 +1220,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1414,8 +1416,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
+                    (keyword? prefer) [prefer]
+                    :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)
