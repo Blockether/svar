@@ -138,6 +138,34 @@
         (expect (= 2 @calls))
         (expect (= "ok" (:content result)))))
 
+    (it "retries a pre-response 'received no bytes' drop (proxy/tunnel closed before responding, NO :stream?)"
+      ;; The peer accepted the connection but closed the socket before the first
+      ;; response byte — no stream started, so ex-data carries NO `:stream?`.
+      ;; This is the gap that failed a Cloudflare-tunnel call outright; it must
+      ;; now retry (nothing was produced, so it is fully idempotent).
+      (let [calls (atom 0)
+            result (with-redefs-fn
+                     {#'com.blockether.svar.internal.llm/http-post-stream!
+                      (fn [_url _body _headers _timeout-ms _ttft-ms _idle-ms _delta-fn _on-delta]
+                        (if (= 1 (swap! calls inc))
+                          (throw (ex-info "HTTP/1.1 header parser received no bytes"
+                                   {:type :svar.core/http-error}
+                                   (java.io.IOException. "HTTP/1.1 header parser received no bytes")))
+                          {:content "ok"
+                           :reasoning nil
+                           :http-response {:status 200 :streaming? true}}))}
+                     (fn []
+                       (sut/chat-completion
+                         [{:role "user" :content "hi"}]
+                         "glm-5.1"
+                         "sk-fake"
+                         "https://example.test/v1"
+                         {:on-chunk (constantly nil)
+                          :max-retries 2
+                          :initial-delay-ms 0})))]
+        (expect (= 2 @calls))
+        (expect (= "ok" (:content result)))))
+
     (it "does not retry after reasoning started"
       (let [calls (atom 0)
             captured (with-redefs-fn

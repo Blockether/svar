@@ -222,6 +222,17 @@
      ;; blip): EADDRNOTAVAIL, ENETUNREACH, EHOSTUNREACH, connect timeout,
      ;; transient DNS failures. Walks the full cause chain.
       (transient-network-error? e)
+     ;; Peer ACCEPTED the connection but closed the socket before sending ANY
+     ;; response byte — java.net.http surfaces this as "HTTP/1.1 header parser
+     ;; received no bytes". It falls BETWEEN a connect-phase failure (the TCP/TLS
+     ;; connection succeeded, so `connection-error?` misses it) and a mid-stream
+     ;; drop (no byte ever arrived, so `:stream?` is not set and the block below
+     ;; misses it) — the exact hole that let proxies / tunnels / load-balancers
+     ;; (e.g. a Cloudflare quick tunnel dropping an idle connection) fail a call
+     ;; that should just retry. Idempotent: nothing was produced, so it is the
+     ;; safest retry of all (`stream-output-started?` still gates the rest).
+      (str/includes? msg-lower "received no bytes")
+      (str/includes? cause-lower "received no bytes")
       (and (:stream? data)
         (or (str/includes? msg-lower "stream connection error")
           (str/includes? msg-lower "connection reset")
