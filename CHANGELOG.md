@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.49] - 2026-07-06
 
 ### Changed
+- release: update changelog and VERSION for v0.7.49
+- fix(mistral): strip per-message :model and fill curated default models
+- release: update version files for v0.7.48, bump to next dev version
+
+
+## [v0.7.49] - 2026-07-06
+
+### Changed
 - fix(mistral): strip per-message :model and fill curated default models
 
 ## [v0.7.48] - 2026-07-06
