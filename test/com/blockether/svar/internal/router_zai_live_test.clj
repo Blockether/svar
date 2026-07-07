@@ -231,13 +231,18 @@
    `KNOWN_PROVIDER_MODELS` and accidentally desyncing the two Z.ai surfaces."
 
   (describe "KNOWN_PROVIDERS entries"
-    (it ":zai has the documented base-url"
-      (expect (= "https://api.z.ai/api/paas/v4"
-                (:base-url (:zai router/KNOWN_PROVIDERS)))))
+    ;; GLM rides the z.ai ANTHROPIC-Messages endpoint (native tool_use). The
+    ;; chat wire (/paas/v4) poisons tool calls with an XML prompt, so all zai
+    ;; providers point at /api/anthropic/v1 with :api-style :anthropic.
+    (it ":zai uses the Anthropic-Messages endpoint (native tool_use)"
+      (expect (= "https://api.z.ai/api/anthropic/v1"
+                (:base-url (:zai router/KNOWN_PROVIDERS))))
+      (expect (= :anthropic (:api-style (:zai router/KNOWN_PROVIDERS)))))
 
-    (it ":zai-coding has the documented Coding Plan base-url"
-      (expect (= "https://api.z.ai/api/coding/paas/v4"
-                (:base-url (:zai-coding router/KNOWN_PROVIDERS)))))
+    (it ":zai-coding uses the Anthropic-Messages endpoint"
+      (expect (= "https://api.z.ai/api/anthropic/v1"
+                (:base-url (:zai-coding router/KNOWN_PROVIDERS))))
+      (expect (= :anthropic (:api-style (:zai-coding router/KNOWN_PROVIDERS)))))
 
     (it ":zai-coding falls back to ZAI_API_KEY when ZAI_CODING_API_KEY is absent"
       (expect (= ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]

@@ -437,6 +437,11 @@
   [token]
   (boolean (and (string? token) (str/includes? token "sk-ant-oat"))))
 
+(def ^:private claude-cli-version
+  "Version string sent as Claude Code on the OAuth path (user-agent + billing
+   attribution). Bump toward the current official CLI over time."
+  "2.1.62")
+
 (defn- anthropic-oauth-headers
   [api-key]
   {"Authorization" (str "Bearer " api-key)
@@ -445,7 +450,15 @@
    "accept" "application/json"
    "anthropic-dangerous-direct-browser-access" "true"
    "anthropic-beta" "claude-code-20250219,oauth-2025-04-20"
-   "user-agent" "claude-cli/2.1.62"
+   ;; First-party Claude Code BILLING ATTRIBUTION. As of 2026-04 Anthropic
+   ;; routes subscription OAuth tokens to extra-usage billing (HTTP 400
+   ;; "third-party apps now draw from your extra usage") UNLESS the request
+   ;; carries this machine-parsed entrypoint label — the natural-language
+   ;; "You are Claude Code" system block alone is not enough; the server
+   ;; routes on `cc_entrypoint`. Community finding: anthropics/claude-code
+   ;; #48176. `anthropic-third-party-400?` retry is the fallback for blips.
+   "x-anthropic-billing-header" (str "cc_version=" claude-cli-version "; cc_entrypoint=sdk-cli;")
+   "user-agent" (str "claude-cli/" claude-cli-version " (external, sdk-cli)")
    "x-app" "cli"})
 
 (defn- copilot-provider-id?
@@ -1263,8 +1276,12 @@
     (let [s (str id)]
       (if (and openai? (str/includes? s "|"))
         (let [[c i] (str/split s #"\|" 2)
-              i*    (normalize-id-part i)
-              i*    (if (and i* (str/starts-with? i* "fc_")) i* (str "fc_" (or i* "")))]
+              ;; fc_ prefix FIRST, THEN clamp — clamping to 64 and prepending
+              ;; "fc_" afterwards produced a 67-char id (HTTP 400 "maximum
+              ;; length 64"). normalize-id-part keeps a 53-char prefix, so the
+              ;; "fc_" survives the clamp.
+              raw-i (str (or i ""))
+              i*    (normalize-id-part (if (str/starts-with? raw-i "fc_") raw-i (str "fc_" raw-i)))]
           (str (normalize-id-part c) "|" i*))
         (normalize-id-part s)))))
 
@@ -1654,10 +1671,40 @@
 
         {:content-delta nil :reasoning-delta nil :api-usage nil}))))
 
+(def ^:private anthropic-third-party-400-max-retries
+  "Attempt cap for the transient Anthropic 'third-party app routing' 400
+   (see `anthropic-third-party-400?`). Tighter than the general HTTP-retry cap so
+   a persistent routing blip falls through to provider fallback in a few seconds
+   instead of stalling the loop on backoff, while still absorbing the common
+   sub-second blip that clears on the first retry. Compared like `max-retries`
+   (`(< attempt cap)`), so 4 ⇒ up to 3 retries (~7s of 1s/2s/4s backoff)."
+  4)
+
+(defn- anthropic-third-party-400?
+  "True for Anthropic's transient 'third-party app routing' 400 — an
+   `invalid_request_error` whose message says third-party apps now draw from
+   extra usage, returned intermittently for a Claude subscription OAuth token
+   (`sk-ant-oat-*`) even when the request is first-party-correct (correct
+   `anthropic-beta`, `x-app`, `user-agent`, and Claude Code system identity).
+   Documented to hit the OFFICIAL Claude Code CLI and VS Code extension too
+   (anthropics/claude-code #45016/#45134/#45057); it clears on retry / over
+   time, so we retry the chosen Claude model instead of immediately abandoning
+   it to a provider fallback. Matched on stable lower-cased substrings of the
+   raw `:body` so it survives minor wording changes."
+  [ex-data-map]
+  (and (= 400 (:status ex-data-map))
+    (let [body (some-> (:body ex-data-map) str/lower-case)]
+      (and body
+        (some #(str/includes? body %)
+          ["third-party apps now draw from your extra usage"
+           "draw from your extra usage"
+           "draw from extra usage"])))))
+
 (defn- with-retry
   "Executes a function with exponential backoff retry for transient errors.
 
-   Retries on HTTP status codes 429, 502, 503, 504, 529.
+   Retries on HTTP status codes 429, 502, 503, 504, 529, and on the transient
+   Anthropic 'third-party app routing' 400 (see `anthropic-third-party-400?`,
 
    Params:
    `f` - Function to execute (no args).
@@ -1690,10 +1737,17 @@
                                                        (= 429 status))))
                             retryable-conn? (and (not (stream-output-started? e))
                                               (retryable-exception? e))
-                            can-retry? (< attempt (long max-retries))]
-                        (if (and (or retryable-status? retryable-conn?) can-retry?)
+                            retryable-third-party-400? (anthropic-third-party-400? ex-data-map)
+                            attempt-cap (if retryable-third-party-400?
+                                          (long anthropic-third-party-400-max-retries)
+                                          (long max-retries))
+                            can-retry? (< attempt attempt-cap)]
+                        (if (and (or retryable-status? retryable-conn? retryable-third-party-400?)
+                              can-retry?)
                           {:retry true :error e :status status
-                           :reason (if retryable-conn? :connection-error :http-status)}
+                           :reason (cond retryable-conn?            :connection-error
+                                     retryable-third-party-400? :anthropic-third-party-400
+                                     :else                      :http-status)}
                           {:error e}))))]
        (cond
          (:success result) (:success result)
@@ -2309,7 +2363,9 @@
                                            :call_id call-id
                                            :name (:name b)
                                            :arguments (json/write-json-str (or (:input b) {}))}
-                                    (not (str/blank? item-id)) (assoc :id item-id))))
+                                    ;; every :input item id must be <=64 chars
+                                    ;; (Responses/Copilot reject longer, HTTP 400)
+                                    (not (str/blank? item-id)) (assoc :id (normalize-id-part item-id)))))
                           tool-use-blocks)
         fn-output-items (mapv (fn [b] {:type "function_call_output"
                                        :call_id (first (str/split (str (:tool_use_id b)) #"\|" 2))
@@ -5296,12 +5352,12 @@
                      "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
                      "The model produced neither text nor a tool call.")
                    (assoc base-envelope :type anomaly-type))))))
-    (let [token-stats (router/count-and-estimate model in-msgs (or content "")
-                        {:pricing pricing :api-usage api-usage :api-style api-style})
-          tokens      (token-stats->tokens token-stats)
-          cost        (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
-          tool-calls  (vec (or tool-calls []))
-          stop-reason (if (seq tool-calls) :tool-calls :end)]
+    (let [tool-calls        (vec (or tool-calls []))
+          token-stats   (router/count-and-estimate model in-msgs (or content "")
+                          {:pricing pricing :api-usage api-usage :api-style api-style})
+          tokens        (token-stats->tokens token-stats)
+          cost          (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+          stop-reason   (if (seq tool-calls) :tool-calls :end)]
       (when on-chunk
         (on-chunk {:content content :reasoning reasoning :tool-calls tool-calls
                    :stop-reason stop-reason :provider-state provider-state

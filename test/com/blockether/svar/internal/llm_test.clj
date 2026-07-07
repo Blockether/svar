@@ -321,8 +321,12 @@
               (expect (nil? (get headers "x-api-key")))
               (expect (str/includes? (get headers "anthropic-beta") "claude-code-20250219"))
               (expect (str/includes? (get headers "anthropic-beta") "oauth-2025-04-20"))
-              (expect (= "claude-cli/2.1.62" (get headers "user-agent")))
+              (expect (str/starts-with? (get headers "user-agent") "claude-cli/"))
+              (expect (str/includes? (get headers "user-agent") "sdk-cli"))
               (expect (= "cli" (get headers "x-app")))
+              ;; billing attribution: server routes OAuth on cc_entrypoint,
+              ;; else the "third-party / extra usage" 400 (claude-code #48176)
+              (expect (str/includes? (get headers "x-anthropic-billing-header") "cc_entrypoint=sdk-cli"))
               (expect (= "You are Claude Code, Anthropic's official CLI for Claude."
                         (get-in body [:system 0 :text])))
               (expect (= {:type "ephemeral"} (get-in body [:system 0 :cache_control])))

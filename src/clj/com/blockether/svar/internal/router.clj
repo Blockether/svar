@@ -43,10 +43,10 @@
     :pricing-source :anthropic
     :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
     :prepend-default-models? true}
-   :zai         {:base-url "https://api.z.ai/api/paas/v4"        :rpm 500 :tpm 2000000
+   :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000 ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
                  :env-keys ["ZAI_API_KEY"]
                  :default-models [{:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
-   :zai-coding  {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
+   :zai-coding  {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000
                  ;; Coding Plan endpoint, but for budget accounting we use
                  ;; retail :zai per-token rates (the plan meters overage at
                  ;; the same rates). `:provider-model-source :zai` lets the
@@ -60,7 +60,7 @@
    ;; catalog miss reproduces the same `max_tokens = 2048` bug observed
    ;; on Copilot. Same policy as `:zai-coding`; keep both keys in sync.
    :zai-coding-plan
-   {:base-url "https://api.z.ai/api/coding/paas/v4" :rpm 500 :tpm 2000000
+   {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000
     :pricing-source :zai
     :provider-model-source :zai
     :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]

@@ -397,3 +397,4 @@
       (expect (some #(= "tool_use" (:type %)) (:content asst)))
       (expect (= "toolu_1" (:tool_use_id (first (:content usr)))))
       (expect (= "tool_result" (:type (first (:content usr))))))))
+

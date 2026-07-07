@@ -184,6 +184,15 @@
   (it "normalize preserves the composite for OpenAI, collapses for others"
     (expect (= "call_abc|fc_xyz" (normalize-id3 "call_abc|fc_xyz" true)))
     (expect (= "call_abc_fc_xyz" (normalize-id3 "call_abc|fc_xyz" false))))
+  (it "over-long composite halves stay <=64 AND keep the fc_ prefix (HTTP-400 regression)"
+    ;; A 90-char item id: normalize to 64, and the fc_ prefix must be applied
+    ;; BEFORE the clamp so the result is not 67 (fc_ + 64).
+    (let [long-item (str "itm_" (apply str (repeat 90 "a")))
+          out       (normalize-id3 (str "call_abc|" long-item) true)
+          [c i]     (clojure.string/split out #"\|" 2)]
+      (expect (<= (count c) 64))
+      (expect (<= (count i) 64) (str "item id half must be <=64, got " (count i)))
+      (expect (clojure.string/starts-with? i "fc_"))))
   (it "Responses re-emits function_call with BOTH id (fc_) and call_id, output keyed on call_id"
     (let [in (:input (build-responses
                        [{:role "assistant" :content [{:type "tool_use" :id "call_abc|fc_xyz" :name "cat" :input {"path" "x"}}]}
