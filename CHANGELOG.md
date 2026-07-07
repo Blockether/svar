@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.53] - 2026-07-09
+
+### Changed
+- fix(llm): bump claude-cli-version to 2.1.202 for accurate billing attribution
+
 ## [v0.7.52] - 2026-07-07
 
 ### Changed
