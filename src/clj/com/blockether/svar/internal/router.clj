@@ -1779,6 +1779,10 @@
         ;; so a sibling model on the SAME provider can still serve the call.
         model-unsupported (atom #{})
         last-unsupported-error (atom nil)
+        ;; Last transient (5xx / network) error caught — surfaced verbatim when a
+        ;; SINGLE provider was ever in play, so a pinned / only-provider failure
+        ;; reads as ONE provider being unavailable, not a fleet "all exhausted".
+        last-transient-error (atom nil)
         trace (atom [])
         selected (atom nil)
         pending-fallback (atom nil)
@@ -1929,6 +1933,7 @@
                   ;; with a single model would loop forever resolving the
                   ;; offender right back into itself.
                   (swap! rate-limited conj pid)
+                  (reset! last-transient-error e)
                   (if (and (= reason :rate-limit)
                         (false? (:fallback-provider? result)))
                     (throw e)
@@ -1979,12 +1984,25 @@
                     ;; Interruptible sleep — see comment in handle-rate-limit-retries.
                     (Thread/sleep (long wait-ms)))
                   (recur (inc attempts)))
-                (throw (ex-info "All providers exhausted"
-                         {:type :svar.llm/all-providers-exhausted
-                          :prefs iter-prefs :tried @tried
-                          :format-failed @format-failed
-                          :attempts @failed-attempts
-                          :routed/trace @trace}))))))))))
+                ;; No candidate could take the call. A SINGLE provider having been
+                ;; in play is NOT a fleet exhaustion — it's one provider being
+                ;; unavailable, and the CALLER owns where to go next. Surface it as
+                ;; `:provider-unavailable` (carrying the upstream transient's
+                ;; status/body) so the fleet-wide "all exhausted" wording is
+                ;; reserved for a real multi-provider walk.
+                (let [single? (<= (count @tried) 1)
+                      te @last-transient-error
+                      te-data (when te (ex-data te))]
+                  (throw (ex-info (if single? "Provider unavailable" "All providers exhausted")
+                           (cond-> {:type (if single?
+                                            :svar.llm/provider-unavailable
+                                            :svar.llm/all-providers-exhausted)
+                                    :prefs iter-prefs :tried @tried
+                                    :format-failed @format-failed
+                                    :attempts @failed-attempts
+                                    :routed/trace @trace}
+                             (and single? (:status te-data)) (assoc :status (:status te-data))
+                             (and single? (:body te-data)) (assoc :body (:body te-data))))))))))))))
 
 ;; =============================================================================
 ;; Router creation

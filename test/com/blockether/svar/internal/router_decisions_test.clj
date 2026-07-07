@@ -588,6 +588,31 @@
             (expect (= #{503} (set (map :status attempts))))
             (expect (every? #{:transient-error} (map :reason attempts)))))))))
 
+(defdescribe with-provider-fallback-single-provider-unavailable-test
+  "A SINGLE provider (pinned / only-provider fleet) failing transiently is NOT a
+   fleet exhaustion: it throws `:svar.llm/provider-unavailable` (not
+   `:all-providers-exhausted`), carrying the upstream transient's status/body so
+   the caller can classify + decide where to go next. Regression for the Vis
+   'All providers unavailable' card lying about a one-provider turn."
+  (it "throws :provider-unavailable with preserved status when the only provider fails"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
+              {:clock clock})]
+      (try
+        (router/with-provider-fallback r {}
+          (fn [_ _] (transient-error 503)))
+        (expect false "should have thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (expect (= :svar.llm/provider-unavailable (:type (ex-data e))))
+          (expect (= "Provider unavailable" (ex-message e)))
+          (expect (= #{:solo} (:tried (ex-data e))))
+          ;; upstream status preserved so downstream classification works
+          (expect (= 503 (:status (ex-data e))))
+          (let [attempts (:attempts (ex-data e))]
+            (expect (= 1 (count attempts)))
+            (expect (= :solo (:provider (first attempts))))))))))
+
 ;; =============================================================================
 ;; Tier 1 — Circuit breaker state machine
 ;; =============================================================================
@@ -623,12 +648,18 @@
 
   (it "open → half-open (time) → closed (probe success)"
     (let [[clock clock-atom] (mock-clock)
-          r (llm/make-router
-              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
-               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
-              {:clock clock
-               :failure-threshold 2
-               :recovery-ms 10000})]
+          r                  (llm/make-router
+                               [{:id       :p1
+                                 :api-key  "k"
+                                 :base-url "http://p1"
+                                 :models   [{:name "m1"}]}
+                                {:id       :p2
+                                 :api-key  "k"
+                                 :base-url "http://p2"
+                                 :models   [{:name "m2"}]}]
+                               {:clock             clock
+                                :failure-threshold 2
+                                :recovery-ms       10000})]
       ;; Open the CB on P1 by pushing 2 failures.
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
@@ -1181,7 +1212,9 @@
                    (router/with-provider-fallback r {} f-429)
                    (catch Exception e {:thrown-type (:type (ex-data e))
                                        :tried       (:tried (ex-data e))}))]
-      (expect (= :svar.llm/all-providers-exhausted (:thrown-type result)))
+      ;; ONE provider ever tried → `:provider-unavailable`, NOT the fleet-wide
+      ;; `:all-providers-exhausted` (reserved for a real multi-provider walk).
+      (expect (= :svar.llm/provider-unavailable (:thrown-type result)))
       ;; The offending provider must show up in `:tried` exactly once,
       ;; not be replayed back into the chain.
       (expect (= #{:test} (:tried result)))
