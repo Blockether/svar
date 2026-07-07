@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.52] - 2026-07-07
+
+### Changed
+- fix: OpenAI Responses id<=64, zai native anthropic wire (drop XML), Claude OAuth billing attribution
+- release: update version files for v0.7.51, bump to next dev version
+
+
 ## [v0.7.51] - 2026-07-07
 
 ### Changed
@@ -1429,7 +1436,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.51...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.52...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1520,3 +1527,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.48]: https://github.com/Blockether/svar/releases/tag/v0.7.48
 [v0.7.49]: https://github.com/Blockether/svar/releases/tag/v0.7.49
 [v0.7.51]: https://github.com/Blockether/svar/releases/tag/v0.7.51
+[v0.7.52]: https://github.com/Blockether/svar/releases/tag/v0.7.52
