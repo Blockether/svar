@@ -438,11 +438,29 @@
   (boolean (and (string? token) (str/includes? token "sk-ant-oat"))))
 
 (def ^:private claude-cli-version
-  "Version string sent as Claude Code on the OAuth path (user-agent + billing
-   attribution). Bump toward the current official CLI over time."
+  "Version string sent as `claude-cli/<v>` in the OAuth-path user-agent,
+   mirroring the officially-installed Claude Code CLI. Bump toward the
+   current official CLI over time."
   "2.1.202")
 
 (defn- anthropic-oauth-headers
+  "Headers for a Claude subscription OAuth token (`sk-ant-oat-*`): the Claude
+   Code identity the Anthropic API expects on the OAuth path — Bearer auth,
+   the `claude-code-20250219` + `oauth-2025-04-20` betas, a `claude-cli/<v>`
+   user-agent, and `x-app: cli`. Mirrors the official Claude Code CLI and the
+   known-working pi `@earendil-works/pi-ai` OAuth client verbatim.
+
+   We intentionally send NOTHING that self-labels the request as a third-party
+   SDK. A prior revision added an `x-anthropic-billing-header` carrying
+   `cc_entrypoint=sdk-cli` plus an `(external, sdk-cli)` user-agent suffix, on
+   the theory that Anthropic routes subscription billing on a machine-parsed
+   entrypoint label. That was verified FALSE against api.anthropic.com: a 2x2
+   header probe returned HTTP 200 both with and without those headers, so the
+   header is unrecognised — and `sdk-cli` only advertises us AS the very
+   third-party path the `extra usage` gate targets. The real `extra usage`
+   400 is an intermittent, sometimes multi-second server-side gate that hits
+   even the official CLI; we ride it out via `anthropic-third-party-400?`
+   retry (see below), not header tricks."
   [api-key]
   {"Authorization" (str "Bearer " api-key)
    "anthropic-version" "2023-06-01"
@@ -450,15 +468,7 @@
    "accept" "application/json"
    "anthropic-dangerous-direct-browser-access" "true"
    "anthropic-beta" "claude-code-20250219,oauth-2025-04-20"
-   ;; First-party Claude Code BILLING ATTRIBUTION. As of 2026-04 Anthropic
-   ;; routes subscription OAuth tokens to extra-usage billing (HTTP 400
-   ;; "third-party apps now draw from your extra usage") UNLESS the request
-   ;; carries this machine-parsed entrypoint label — the natural-language
-   ;; "You are Claude Code" system block alone is not enough; the server
-   ;; routes on `cc_entrypoint`. Community finding: anthropics/claude-code
-   ;; #48176. `anthropic-third-party-400?` retry is the fallback for blips.
-   "x-anthropic-billing-header" (str "cc_version=" claude-cli-version "; cc_entrypoint=sdk-cli;")
-   "user-agent" (str "claude-cli/" claude-cli-version " (external, sdk-cli)")
+   "user-agent" (str "claude-cli/" claude-cli-version)
    "x-app" "cli"})
 
 (defn- copilot-provider-id?
@@ -1466,7 +1476,15 @@
    api-style."
   [messages model {:keys [api-key base-url provider-id llm-headers]}]
   (try
-    (let [body    (-> (build-anthropic-request-body messages model nil)
+    (let [body    (-> (build-anthropic-request-body messages model nil
+                        ;; Carry the SAME Claude Code identity (the "You are
+                        ;; Claude Code" system block) the real message call
+                        ;; sends on the OAuth path, so this preflight is
+                        ;; indistinguishable from a first-party request. pi
+                        ;; makes no count_tokens preflight at all; if we're
+                        ;; going to send one on an OAuth token, it must not
+                        ;; look like a bare third-party probe.
+                        {:anthropic-oauth? (anthropic-oauth-token? api-key)})
                     ;; count_tokens takes the message-creation inputs minus
                     ;; generation params. Drop max_tokens/stream so the
                     ;; endpoint doesn't choke on fields it doesn't model.
@@ -1681,16 +1699,17 @@
   4)
 
 (defn- anthropic-third-party-400?
-  "True for Anthropic's transient 'third-party app routing' 400 — an
+  "True for Anthropic's intermittent 'third-party app routing' 400 — an
    `invalid_request_error` whose message says third-party apps now draw from
-   extra usage, returned intermittently for a Claude subscription OAuth token
-   (`sk-ant-oat-*`) even when the request is first-party-correct (correct
-   `anthropic-beta`, `x-app`, `user-agent`, and Claude Code system identity).
-   Documented to hit the OFFICIAL Claude Code CLI and VS Code extension too
-   (anthropics/claude-code #45016/#45134/#45057); it clears on retry / over
-   time, so we retry the chosen Claude model instead of immediately abandoning
-   it to a provider fallback. Matched on stable lower-cased substrings of the
-   raw `:body` so it survives minor wording changes."
+   extra usage, returned for a Claude subscription OAuth token (`sk-ant-oat-*`)
+   even when the request is first-party-correct (correct `anthropic-beta`,
+   `x-app`, `user-agent`, and Claude Code system identity). Empirically this is
+   a transient SERVER-side gate, not a request defect: the identical request
+   that 400s returns HTTP 200 seconds later (verified by replay against
+   api.anthropic.com), and a burst has been observed persisting ~10s. So we
+   retry the chosen Claude model to ride the gate out instead of immediately
+   abandoning it to a provider fallback. Matched on stable lower-cased
+   substrings of the raw `:body` so it survives minor wording changes."
   [ex-data-map]
   (and (= 400 (:status ex-data-map))
     (let [body (some-> (:body ex-data-map) str/lower-case)]

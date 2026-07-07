@@ -322,11 +322,17 @@
               (expect (str/includes? (get headers "anthropic-beta") "claude-code-20250219"))
               (expect (str/includes? (get headers "anthropic-beta") "oauth-2025-04-20"))
               (expect (str/starts-with? (get headers "user-agent") "claude-cli/"))
-              (expect (str/includes? (get headers "user-agent") "sdk-cli"))
               (expect (= "cli" (get headers "x-app")))
-              ;; billing attribution: server routes OAuth on cc_entrypoint,
-              ;; else the "third-party / extra usage" 400 (claude-code #48176)
-              (expect (str/includes? (get headers "x-anthropic-billing-header") "cc_entrypoint=sdk-cli"))
+              ;; Clean Claude Code identity — must NOT self-label as the
+              ;; third-party SDK. An `(external, sdk-cli)` user-agent suffix and
+              ;; an `x-anthropic-billing-header: cc_entrypoint=sdk-cli` were a
+              ;; disproven "billing attribution" theory: a 2x2 header probe
+              ;; against api.anthropic.com returned HTTP 200 with AND without
+              ;; them, so they are unrecognised — and `sdk-cli` only advertises
+              ;; the request AS the extra-usage-gated third-party path. Match
+              ;; the official CLI / pi verbatim: neither header is sent.
+              (expect (not (str/includes? (get headers "user-agent") "sdk-cli")))
+              (expect (nil? (get headers "x-anthropic-billing-header")))
               (expect (= "You are Claude Code, Anthropic's official CLI for Claude."
                         (get-in body [:system 0 :text])))
               (expect (= {:type "ephemeral"} (get-in body [:system 0 :cache_control])))
