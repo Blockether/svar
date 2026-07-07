@@ -1989,14 +1989,24 @@
    the OpenAI Responses wire-shape map the API expects in `:input`.
    Falls back to a synthesized minimal item if the signature is not
    parseable JSON - keeps round-trips robust without leaking thinking
-   content the model would refuse on replay."
+   content the model would refuse on replay.
+
+   The decoded item's `:id` is normalized to the wire contract
+   (`^[A-Za-z0-9_-]{1,64}$`) via `normalize-id-part`. Every `:input` item
+   id must satisfy the 64-char ceiling: the Responses backend (notably
+   GitHub Copilot / Codex) rejects a longer one with HTTP 400 even though
+   it sometimes mints reasoning ids that exceed it. Tool-call ids are
+   already clamped in `normalize-tool-ids`; this covers the only other
+   id-bearing input item, the reasoning item."
   [{:keys [thinking thinking-signature]}]
-  (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
-        (try (json/read-json thinking-signature :key-fn keyword)
-          (catch Exception _ nil)))
-    (when (and (string? thinking) (not (str/blank? thinking)))
-      {:type "reasoning"
-       :summary [{:type "summary_text" :text thinking}]})))
+  (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
+                   (try (json/read-json thinking-signature :key-fn keyword)
+                     (catch Exception _ nil)))
+               (when (and (string? thinking) (not (str/blank? thinking)))
+                 {:type "reasoning"
+                  :summary [{:type "summary_text" :text thinking}]}))]
+    (cond-> item
+      (:id item) (update :id normalize-id-part))))
 
 (defn- responses-extract-assistant-message
   "Builds the canonical `:assistant-message` for an OpenAI Responses

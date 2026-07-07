@@ -205,3 +205,26 @@
           tr (first (filter #(= "tool_result" (:type %)) blocks))]
       (expect (= (:id tu) (:tool_use_id tr)))
       (expect (not (str/includes? (str (:id tu)) "|"))))))
+
+(def ^:private sig-long-id
+  (str "{\"type\":\"reasoning\",\"id\":\"rs_" (apply str (repeat 64 \a))
+    "\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"t\"}]}"))
+
+(defdescribe responses-reasoning-id-ceiling-test
+  ;; GitHub Copilot / Codex mints reasoning ids that exceed the 64-char
+  ;; ceiling its own validator enforces on every :input item, rejecting the
+  ;; replay with HTTP 400 `Invalid input[1].id: string too long`. Tool-call
+  ;; ids are already clamped in normalize-tool-ids; reasoning-item ids must
+  ;; be clamped on decode too, since a reasoning item is the only other
+  ;; id-bearing input item svar emits.
+  (it "clamps a >64-char reasoning id to <=64 and the wire contract"
+    (let [convo [{:role "user" :content "go"}
+                 {:role "assistant"
+                  :content [{:type "thinking" :thinking "t" :thinking-signature sig-long-id :redacted? false}
+                            {:type "text" :text "ok"}]}
+                 {:role "user" :content "again"}]
+          input (:input (build-responses convo "gpt-5" {}))
+          r     (first (filter #(= "reasoning" (:type %)) input))]
+      (expect (some? r))
+      (expect (<= (count (:id r)) 64))
+      (expect (some? (re-matches #"[A-Za-z0-9_-]{1,64}" (:id r)))))))
