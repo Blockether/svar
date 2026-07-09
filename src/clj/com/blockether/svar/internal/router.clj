@@ -33,7 +33,7 @@
                  :default-models [{:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"} {:name "gpt-4o-mini"} {:name "o3-mini"}]}
    :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic
-                 :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+                 :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan
    {:base-url "https://api.anthropic.com/v1" :rpm 500 :tpm 2000000
     :env-keys [] :api-style :anthropic
@@ -41,7 +41,7 @@
     ;; OAuth coding plan: use retail Anthropic pricing for honest metering
     ;; once the included quota is exhausted (see internal/modelsdev).
     :pricing-source :anthropic
-    :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
+    :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000 ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
                  :env-keys ["ZAI_API_KEY"]
@@ -91,7 +91,7 @@
                                   {:name "mistral-small-latest"}
                                   {:name "codestral-latest"}]}
    :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000
-                    :default-models [{:name "claude-opus-4.8"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
+                    :default-models [{:name "claude-opus-4.8"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
                     :llm-headers {"Editor-Version" "vscode/1.100.0"
                                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                                   "Copilot-Integration-Id" "vscode-chat"
@@ -234,6 +234,7 @@
    "claude-opus-4-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-sonnet-4"           {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-sonnet-4-6"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-sonnet-5"           {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-sonnet-4-5"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-sonnet-4-20250514"  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-haiku-4-5"          {:intelligence :medium   :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
@@ -349,7 +350,7 @@
    dot/dash aliases so Copilot-style names do not regress."
   [model-name]
   (boolean
-    (re-find #"(?i)^claude-(?:fable-5|mythos-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
+    (re-find #"(?i)^claude-(?:fable-5|mythos-5|sonnet-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
       (str model-name))))
 
 (defn- anthropic-thinking-extra-body
@@ -487,7 +488,8 @@
     "claude-opus-4-5"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
     "claude-sonnet-4"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
     "claude-sonnet-4-6"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "claude-sonnet-4-5"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
+    "claude-sonnet-5"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00 :output 15.00} :context 200000}
+    "claude-sonnet-4-5"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00 :output 15.00} :context 200000}
     "claude-sonnet-4-20250514"  {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
     "claude-haiku-4-5"          {:pricing {:input 1.00  :cached-input 0.10  :cache-write-5m 1.25  :cache-write-1h 2.00  :output 5.00}  :context 200000}}
 
@@ -554,6 +556,7 @@
     "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-sonnet-5"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
 

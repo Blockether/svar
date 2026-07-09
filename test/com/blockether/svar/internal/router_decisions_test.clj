@@ -764,11 +764,11 @@
           provider (first (:providers r))]
       (expect (= "claude-opus-4-8" (:root provider)))
       ;; `:anthropic-coding-plan` prepends its FULL default catalog
-      ;; (opus-4-8 → opus-4-7 → opus-4-6 → sonnet-4-6 → haiku-4-5), deduped
-      ;; against the caller's configured models via `conj-model-once`. The
-      ;; caller's opus-4-6 / sonnet-4-6 collapse into the prepended defaults.
+      ;; (opus-4-8 → opus-4-7 → opus-4-6 → sonnet-5 → sonnet-4-6 → haiku-4-5),
+      ;; deduped against the caller's configured models via `conj-model-once`.
+      ;; The caller's opus-4-6 / sonnet-4-6 collapse into the prepended defaults.
       (expect (= ["claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
-                  "claude-sonnet-4-6" "claude-haiku-4-5"]
+                  "claude-sonnet-5" "claude-sonnet-4-6" "claude-haiku-4-5"]
                 (mapv :name (:models provider))))
       (expect (= :anthropic (:api-style provider)))
       (expect (= {:input 5.0
