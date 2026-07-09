@@ -2057,6 +2057,16 @@
    :thinking-signature (json/write-json-str (or raw-item item))
    :redacted? false})
 
+(defn- normalize-responses-reasoning-id
+  "Normalize reasoning item id for Responses replay. nil means non-replayable."
+  [id]
+  (when id
+    (let [id* (normalize-id-part id)]
+      ;; Non-rs_ id => reject. Do not invent prefix; encrypted payload may be
+      ;; id-bound. Copilot has minted such ids, then rejected replay.
+      (when (str/starts-with? id* "rs_")
+        id*))))
+
 (defn- canonical-thinking-block->responses-reasoning-item
   "Decodes a canonical thinking block's `:thinking-signature` back into
    the OpenAI Responses wire-shape map the API expects in `:input`.
@@ -2065,12 +2075,13 @@
    content the model would refuse on replay.
 
    The decoded item's `:id` is normalized to the wire contract
-   (`^[A-Za-z0-9_-]{1,64}$`) via `normalize-id-part`. Every `:input` item
-   id must satisfy the 64-char ceiling: the Responses backend (notably
-   GitHub Copilot / Codex) rejects a longer one with HTTP 400 even though
-   it sometimes mints reasoning ids that exceed it. Tool-call ids are
-   already clamped in `normalize-tool-ids`; this covers the only other
-   id-bearing input item, the reasoning item."
+   (`rs_` prefix, `^[A-Za-z0-9_-]{1,64}$`) via
+   `normalize-responses-reasoning-id`. Every `:input` item id must satisfy
+   the Responses contract: the backend (notably GitHub Copilot / Codex)
+   rejects longer or non-`rs_` reasoning ids with HTTP 400 even though it
+   sometimes mints them. Invalid explicit ids make the item non-replayable.
+   Tool-call ids are already clamped in `normalize-tool-ids`; this covers
+   the only other id-bearing input item, the reasoning item."
   [{:keys [thinking thinking-signature]}]
   (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
                    (try (json/read-json thinking-signature :key-fn keyword)
@@ -2078,8 +2089,11 @@
                (when (and (string? thinking) (not (str/blank? thinking)))
                  {:type "reasoning"
                   :summary [{:type "summary_text" :text thinking}]}))]
-    (cond-> item
-      (:id item) (update :id normalize-id-part))))
+    (when item
+      (if-let [id (:id item)]
+        (when-let [id* (normalize-responses-reasoning-id id)]
+          (assoc item :id id*))
+        item))))
 
 (defn- responses-extract-assistant-message
   "Builds the canonical `:assistant-message` for an OpenAI Responses
@@ -5586,4 +5600,3 @@
                                    nil))
          models                (shape-models models-shape (normalize-models-response body))]
      (filter-provider-models provider-id models))))
-

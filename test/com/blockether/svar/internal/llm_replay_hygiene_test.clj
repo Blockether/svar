@@ -219,6 +219,9 @@
   (str "{\"type\":\"reasoning\",\"id\":\"rs_" (apply str (repeat 64 \a))
     "\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"t\"}]}"))
 
+(def ^:private sig-non-rs-id
+  "{\"type\":\"reasoning\",\"id\":\"gz750QpY9qy5DXA5Qba0N3M\",\"encrypted_content\":\"ENC\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"t\"}]}")
+
 (defdescribe responses-reasoning-id-ceiling-test
   ;; GitHub Copilot / Codex mints reasoning ids that exceed the 64-char
   ;; ceiling its own validator enforces on every :input item, rejecting the
@@ -236,4 +239,16 @@
           r     (first (filter #(= "reasoning" (:type %)) input))]
       (expect (some? r))
       (expect (<= (count (:id r)) 64))
-      (expect (some? (re-matches #"[A-Za-z0-9_-]{1,64}" (:id r)))))))
+      (expect (some? (re-matches #"[A-Za-z0-9_-]{1,64}" (:id r))))))
+
+  (it "drops a decoded reasoning item whose id lacks the required rs_ prefix"
+    (let [convo [{:role "user" :content "go"}
+                 {:role "assistant"
+                  :content [{:type "thinking" :thinking "t" :thinking-signature sig-non-rs-id :redacted? false}
+                            {:type "text" :text "ok"}]}
+                 {:role "user" :content "again"}]
+          input (:input (build-responses convo "gpt-5" {}))]
+      (expect (not-any? #(= "reasoning" (:type %)) input))
+      (expect (some #(and (= "message" (:type %))
+                       (= "assistant" (:role %)))
+                input)))))

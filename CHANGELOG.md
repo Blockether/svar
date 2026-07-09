@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- fix(llm): drop non-replayable Responses reasoning items with non-rs ids
+
 ## [v0.7.55] - 2026-07-07
 
 ### Changed
