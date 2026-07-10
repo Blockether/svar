@@ -33,7 +33,7 @@
                  :default-models [{:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"} {:name "gpt-4o-mini"} {:name "o3-mini"}]}
    :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
                  :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic
-                 :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+                 :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan
    {:base-url "https://api.anthropic.com/v1" :rpm 500 :tpm 2000000
     :env-keys [] :api-style :anthropic
@@ -41,7 +41,7 @@
     ;; OAuth coding plan: use retail Anthropic pricing for honest metering
     ;; once the included quota is exhausted (see internal/modelsdev).
     :pricing-source :anthropic
-    :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
+    :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000 ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
                  :env-keys ["ZAI_API_KEY"]
@@ -91,7 +91,7 @@
                                   {:name "mistral-small-latest"}
                                   {:name "codestral-latest"}]}
    :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000
-                    :default-models [{:name "claude-opus-4.8"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
+                    :default-models [{:name "claude-opus-4.8"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
                     :llm-headers {"Editor-Version" "vscode/1.100.0"
                                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                                   "Copilot-Integration-Id" "vscode-chat"
@@ -135,7 +135,7 @@
     :provider-model-source :github-copilot}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
                   :env-keys [] :api-style :openai-compatible-responses
-                  :default-models [{:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
+                  :default-models [{:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1"
@@ -224,6 +224,7 @@
    "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.4-mini"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.6-sol"               {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
    "claude-fable-5"            {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
@@ -477,6 +478,10 @@
     "gpt-5.4-mini"              {:context 272000}
     "gpt-5.5"                   {:context 272000
                                  :pricing {:input-over-272k 10.00 :cached-input-over-272k 1.00
+                                           :output-over-272k 45.00}}
+    "gpt-5.6-sol"               {:context 272000
+                                 :pricing {:input 5.00  :cached-input 0.50  :output 30.00
+                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
                                            :output-over-272k 45.00}}}
 
    :anthropic
@@ -557,6 +562,7 @@
     "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-sonnet-5"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-fable-5"            {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
 
