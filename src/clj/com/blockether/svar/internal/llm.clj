@@ -194,6 +194,21 @@
       (some? (:partial-content data))
       (some? (:reasoning data)))))
 
+(def ^:private deliberate-stream-abort-types
+  "svar's OWN watchdog/caller stream aborts. Each is a DELIBERATE `InputStream`
+   `.close` (idle/semantic watchdog fired, or caller cancel) — NOT a transient
+   peer connection drop. The JDK surfaces the intentional close as an
+   `IOException` whose message is 'Stream closed', which then trips
+   `retryable-exception?`'s broad 'closed' substring heuristic. Left unguarded,
+   `with-retry` misreads a watchdog abort as a retryable connection blip and
+   silently re-hammers the SAME provider (idle 180s × max-retries ⇒ a
+   multi-minute 'calling the provider, nothing moving' hang, emitting no
+   on-chunk). These belong to bounded, observable router-level fallback — never
+   blind same-provider retry."
+  #{:svar.core/stream-idle-timeout
+    :svar.core/stream-semantic-timeout
+    :svar.core/stream-cancelled})
+
 (defn- retryable-exception?
   "Returns true if the exception represents a transient connection/read error
    that should be retried (e.g., proxy dropping connection mid-response).
@@ -207,7 +222,11 @@
         cause (ex-cause e)
         cause-msg (when cause (or (ex-message cause) ""))
         cause-lower (str/lower-case (or cause-msg ""))]
-    (or
+    (and
+     ;; svar's own watchdog/caller aborts close the stream on purpose; their
+     ;; 'Stream closed' message must NOT be mistaken for a transient drop.
+     (not (contains? deliberate-stream-abort-types (:type data)))
+     (or
      ;; charred.api/read-json fails on truncated response body
       (str/includes? msg "EOF reached while reading")
       (str/includes? msg "Unexpected end of input")
@@ -243,7 +262,7 @@
           (str/includes? cause-lower "closed")))
      ;; babashka.http-client wraps errors in ExceptionInfo
       (and (instance? clojure.lang.ExceptionInfo e)
-        (some-> cause retryable-exception?)))))
+        (some-> cause retryable-exception?))))))
 
 (def ^:private shared-http-executor
   "Cached thread pool that backs the shared HttpClient.

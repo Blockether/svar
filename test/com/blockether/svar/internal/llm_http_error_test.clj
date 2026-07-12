@@ -20,7 +20,7 @@
       ex-data so callers can render it without scraping logs."
   (:require
    [clojure.string :as str]
-   [lazytest.core :refer [defdescribe describe expect it]]
+   [lazytest.core :refer [defdescribe describe expect it throws?]]
    [com.blockether.svar.internal.llm :as sut]))
 
 ;;; ── helper ─────────────────────────────────────────────────────────────
@@ -68,6 +68,53 @@
                     :initial-delay-ms 0})]
       (expect (= :ok result))
       (expect (= 2 @calls)))))
+
+;;; ── deliberate watchdog/cancel aborts must NOT be retried ────────────────
+
+;; Regression for the multi-minute "calling the provider, nothing moving"
+;; hang: svar's idle/semantic watchdogs and caller cancel abort a stream by
+;; CLOSING its `InputStream`. The JDK reports that deliberate close as
+;; "Stream closed", which used to match `retryable-exception?`'s broad
+;; "closed" substring → `with-retry` mistook a watchdog abort for a transient
+;; drop and silently re-hammered the SAME provider (idle 180s × max-retries).
+
+(defdescribe deliberate-stream-abort-test
+  (describe "retryable-exception? rejects svar's own watchdog/cancel aborts"
+    (it "treats a closed-stream idle timeout as non-retryable"
+      (expect (false? (boolean (retryable-exception?
+                                (ex-info "Stream idle timeout (180000ms with no bytes): Stream closed"
+                                  {:type :svar.core/stream-idle-timeout :stream? true :content-acc-len 0}))))))
+
+    (it "treats a closed-stream semantic timeout as non-retryable"
+      (expect (false? (boolean (retryable-exception?
+                                (ex-info "Stream semantic timeout (240000ms without model/progress event): Stream closed"
+                                  {:type :svar.core/stream-semantic-timeout :stream? true}))))))
+
+    (it "treats a caller cancellation as non-retryable"
+      (expect (false? (boolean (retryable-exception?
+                                (ex-info "Stream cancelled: Stream closed"
+                                  {:type :svar.core/stream-cancelled :stream? true}))))))
+
+    (it "still retries a genuine mid-stream connection reset"
+      (expect (true? (boolean (retryable-exception?
+                               (ex-info "stream connection error: Connection reset"
+                                 {:type :svar.core/http-error :stream? true}))))))
+
+    (it "still retries a peer that accepted then sent no bytes"
+      (expect (true? (boolean (retryable-exception?
+                               (ex-info "HTTP/1.1 header parser received no bytes" {})))))))
+
+  (describe "with-retry stops re-hammering a watchdog idle timeout"
+    (it "invokes the fn exactly once for a closed idle-timeout (no silent retry storm)"
+      (let [calls (atom 0)]
+        (expect (throws? clojure.lang.ExceptionInfo
+                  #(with-retry
+                     (fn []
+                       (swap! calls inc)
+                       (throw (ex-info "Stream idle timeout (180000ms with no bytes): Stream closed"
+                                {:type :svar.core/stream-idle-timeout :stream? true :content-acc-len 0})))
+                     {:max-retries 5 :initial-delay-ms 0})))
+        (expect (= 1 @calls))))))
 
 ;;; ── ex-data round-trip ─────────────────────────────────────────────────
 
