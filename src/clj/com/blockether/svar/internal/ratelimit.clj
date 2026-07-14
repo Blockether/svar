@@ -7,26 +7,31 @@
    renderers (vis footer, CLI) had no reset date to show. This ns parses
    the per-provider header families into ONE canonical shape:
 
-     {:reset-at  <epoch-ms>          ;; soonest effective reset across windows
+     {:resets-at-ms <epoch-ms>       ;; soonest effective reset across windows
       :remaining <long>              ;; requests remaining in the primary window
       :limit     <long>              ;; primary-window limit
-      :windows   {:requests {:reset-at :remaining :limit}
-                  :tokens   {:reset-at :remaining :limit}
-                  :unified  {:reset-at :remaining :status}}
+      :windows   {:requests {:resets-at-ms :remaining :limit}
+                  :tokens   {:resets-at-ms :remaining :limit}
+                  :unified  {:resets-at-ms :remaining :status}}
       :raw       {<header> <value>}} ;; the rate-limit headers, verbatim
 
-   `:reset-at` is the caller-facing 'effective date of reset' (epoch
+   `:resets-at-ms` is the caller-facing 'effective date of reset' (epoch
    millis, UTC). Two provider dialects:
 
    - Anthropic (`:anthropic` — Claude API + coding-plan OAuth): reset
      values are ABSOLUTE — either unix epoch seconds
      (`anthropic-ratelimit-unified-reset`) or RFC-3339 timestamps
      (`anthropic-ratelimit-{requests,tokens}-reset`). The coding plan's
-     5h/weekly window rides on the `-unified-` family.
+     5h/weekly window rides on the `-unified-` family. CAVEAT: the
+     Claude *coding-plan* OAuth proxy (sk-ant-oat* tokens) does NOT
+     forward the `anthropic-ratelimit-*` headers, so `parse` returns
+     nil there. For the coding plan callers must prefer the OAuth
+     usage endpoint (`/api/oauth/usage`) as the source of truth and
+     treat this header parse as best-effort fallback only.
 
    - OpenAI / Codex (`:openai-compatible-*`): reset values are RELATIVE
      Go-style durations (`x-ratelimit-reset-requests` = \"6m0s\",
-     \"1s\", \"100ms\", \"1h2m3s\"); reset-at = now + duration.
+     \"1s\", \"100ms\", \"1h2m3s\"); resets-at-ms = now + duration.
 
    Returns nil when no rate-limit headers are present (never throws — a
    quirky header must not break the LLM call)."
@@ -104,22 +109,22 @@
         windows  (cond-> {}
                    (or u-reset u-remain u-status)
                    (assoc :unified (cond-> {}
-                                     u-reset  (assoc :reset-at u-reset)
+                                     u-reset  (assoc :resets-at-ms u-reset)
                                      u-remain (assoc :remaining u-remain)
                                      u-status (assoc :status u-status)))
                    (or r-reset r-remain r-limit)
                    (assoc :requests (cond-> {}
-                                      r-reset  (assoc :reset-at r-reset)
+                                      r-reset  (assoc :resets-at-ms r-reset)
                                       r-remain (assoc :remaining r-remain)
                                       r-limit  (assoc :limit r-limit)))
                    (or t-reset t-remain t-limit)
                    (assoc :tokens (cond-> {}
-                                    t-reset  (assoc :reset-at t-reset)
+                                    t-reset  (assoc :resets-at-ms t-reset)
                                     t-remain (assoc :remaining t-remain)
                                     t-limit  (assoc :limit t-limit))))]
     (when (seq windows)
       (cond-> {:windows windows}
-        (soonest u-reset r-reset t-reset) (assoc :reset-at (soonest u-reset r-reset t-reset))
+        (soonest u-reset r-reset t-reset) (assoc :resets-at-ms (soonest u-reset r-reset t-reset))
         (or u-remain r-remain)            (assoc :remaining (or u-remain r-remain))
         r-limit                           (assoc :limit r-limit)))))
 
@@ -136,17 +141,17 @@
         windows    (cond-> {}
                      (or r-reset r-remain r-limit)
                      (assoc :requests (cond-> {}
-                                        r-reset  (assoc :reset-at r-reset)
+                                        r-reset  (assoc :resets-at-ms r-reset)
                                         r-remain (assoc :remaining r-remain)
                                         r-limit  (assoc :limit r-limit)))
                      (or t-reset t-remain t-limit)
                      (assoc :tokens (cond-> {}
-                                      t-reset  (assoc :reset-at t-reset)
+                                      t-reset  (assoc :resets-at-ms t-reset)
                                       t-remain (assoc :remaining t-remain)
                                       t-limit  (assoc :limit t-limit))))]
     (when (seq windows)
       (cond-> {:windows windows}
-        (soonest r-reset t-reset) (assoc :reset-at (soonest r-reset t-reset))
+        (soonest r-reset t-reset) (assoc :resets-at-ms (soonest r-reset t-reset))
         r-remain                  (assoc :remaining r-remain)
         r-limit                   (assoc :limit r-limit)))))
 

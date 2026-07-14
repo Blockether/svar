@@ -5516,7 +5516,7 @@
     :tokens      {:input :output :reasoning :cached :total}
     :cost        {:input-cost :output-cost :total-cost}
     :duration-ms <ms>
-    :rate-limit  {:reset-at <epoch-ms> :remaining N :limit N :windows {...}}
+    :rate-limit  {:resets-at-ms <epoch-ms> :remaining N :limit N :windows {...}}
                  ; provider quota-reset clock, when the response carried
                  ; rate-limit headers (see internal.ratelimit)
     :stream-finalization {...} ; streaming calls only

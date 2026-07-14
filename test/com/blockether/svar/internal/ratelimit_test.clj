@@ -16,9 +16,9 @@
                  "anthropic-ratelimit-unified-remaining" "42"
                  "anthropic-ratelimit-unified-status"    "allowed"}
                 now)]
-        (expect (= 1700003600000 (:reset-at r)))
+        (expect (= 1700003600000 (:resets-at-ms r)))
         (expect (= 42 (:remaining r)))
-        (expect (= 1700003600000 (get-in r [:windows :unified :reset-at])))
+        (expect (= 1700003600000 (get-in r [:windows :unified :resets-at-ms])))
         (expect (= "allowed" (get-in r [:windows :unified :status])))))
 
     (it "parses RFC-3339 request/token reset timestamps"
@@ -27,7 +27,7 @@
                  "anthropic-ratelimit-requests-remaining" "5"
                  "anthropic-ratelimit-requests-limit"     "50"}
                 now)]
-        (expect (= 1700000000000 (:reset-at r)))
+        (expect (= 1700000000000 (:resets-at-ms r)))
         (expect (= 5 (:remaining r)))
         (expect (= 50 (:limit r)))))
 
@@ -36,7 +36,7 @@
                 {"anthropic-ratelimit-requests-reset" "1700003600"
                  "anthropic-ratelimit-tokens-reset"   "1700001000"}
                 now)]
-        (expect (= 1700001000000 (:reset-at r))))))
+        (expect (= 1700001000000 (:resets-at-ms r))))))
 
   (describe "openai / codex — relative duration resets"
     (it "adds the Go-style duration to now"
@@ -46,20 +46,20 @@
                  "x-ratelimit-limit-requests"     "10"
                  "x-ratelimit-reset-tokens"       "1.5s"}
                 now)]
-        (expect (= (+ now 360000) (get-in r [:windows :requests :reset-at])))
-        (expect (= (+ now 1500) (get-in r [:windows :tokens :reset-at])))
+        (expect (= (+ now 360000) (get-in r [:windows :requests :resets-at-ms])))
+        (expect (= (+ now 1500) (get-in r [:windows :tokens :resets-at-ms])))
         ;; soonest of the two
-        (expect (= (+ now 1500) (:reset-at r)))
+        (expect (= (+ now 1500) (:resets-at-ms r)))
         (expect (= 9 (:remaining r)))
         (expect (= 10 (:limit r)))))
 
     (it "parses compound durations (1h2m3s, 100ms)"
       (let [r (sut/parse :openai-compatible-chat
                 {"x-ratelimit-reset-requests" "1h2m3s"} now)]
-        (expect (= (+ now 3723000) (get-in r [:windows :requests :reset-at]))))
+        (expect (= (+ now 3723000) (get-in r [:windows :requests :resets-at-ms]))))
       (let [r (sut/parse :openai-compatible-chat
                 {"x-ratelimit-reset-tokens" "100ms"} now)]
-        (expect (= (+ now 100) (get-in r [:windows :tokens :reset-at]))))))
+        (expect (= (+ now 100) (get-in r [:windows :tokens :resets-at-ms]))))))
 
   (describe "absent / malformed headers"
     (it "returns nil when no rate-limit headers present"
@@ -69,4 +69,4 @@
       (expect (nil? (sut/parse :openai-compatible-chat "not-a-map" now))))
     (it "is case-insensitive on header names"
       (let [r (sut/parse :anthropic {"Anthropic-RateLimit-Unified-Reset" "1700003600"} now)]
-        (expect (= 1700003600000 (:reset-at r)))))))
+        (expect (= 1700003600000 (:resets-at-ms r)))))))

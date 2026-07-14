@@ -76,7 +76,12 @@
                              ;; pick it up without an overlay shim.
                              (some? (:cache_read cost))  (assoc :cache-read   (d (:cache_read cost))
                                                            :cached-input (d (:cache_read cost)))
-                             (some? (:cache_write cost)) (assoc :cache-write (d (:cache_write cost)))))
+                             ;; Anthropic ships ONE `cache_write` = the 5-minute
+                             ;; write rate. Surface it under `:cache-write` AND the
+                             ;; svar cost-path key `:cache-write-5m` so a slimmed
+                             ;; overlay need only add the 1h tier (`:cache-write-1h`).
+                             (some? (:cache_write cost)) (assoc :cache-write    (d (:cache_write cost))
+                                                           :cache-write-5m (d (:cache_write cost)))))
       (:context lim)     (assoc :context (:context lim))
       (:input lim)       (assoc :input-limit (:input lim))
       (:output lim)      (assoc :output-limit (:output lim))

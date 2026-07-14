@@ -7,12 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- refactor(ratelimit)!: rename the `:rate-limit` reset key `:reset-at` →
+  `:resets-at-ms` (top-level and every `:windows` sub-map) to match the
+  canonical `:resets-at-ms` name vis already uses across every provider's
+  limit-window shape. One reset-clock key end-to-end — status renderers read
+  `(get-in result [:rate-limit :resets-at-ms])` with zero translation. The key
+  was introduced in v0.7.59 and has no external consumers yet, so this is a
+  safe pre-adoption rename.
+- refactor(router): slim the `:anthropic` and `:zai` `KNOWN_PROVIDER_MODELS`
+  overlays down to their true deltas — base pricing/context now flow from the
+  models.dev catalog (`internal/modelsdev`), which carries them identically.
+  Overlay now keeps ONLY what the catalog can't express: Anthropic's 1-hour
+  cache-write tier (`:cache-write-1h`) and svar's ENFORCED `:context` pre-flight
+  budget (deliberately below the catalog product/beta window — e.g. 200K vs the
+  sonnets' 1M beta); GLM `:json-object-mode?` + the `:output-limit 32768`
+  agentic cap. Full pricing stays only for models the catalog lacks (mythos-5,
+  sonnet-4, the cloud GLMs) or where it drifts from our metered retail rate
+  (sonnet-5). `modelsdev/normalize-model` now surfaces the catalog's single
+  `cache_write` under `:cache-write-5m` too, so the slimmed overlay need only add
+  the 1h tier. Behavior-preserving: verified every trimmed model resolves to its
+  pre-slim context + pricing. No more hand-maintaining numbers models.dev owns.
+- chore(models): refresh the bundled `resources/models.dev.json` snapshot
+  (152 → 166 providers) via `make refresh-models`.
+
 ## [v0.7.59] - 2026-07-14
 
 ### Changed
 - feat(router,ratelimit): catalog gpt-5.6-terra + surface provider quota-reset clock
 - release: update version files for v0.7.58, bump to next dev version
-
 
 ## [v0.7.58] - 2026-07-14
 
@@ -27,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlay entry svar fell back to `DEFAULT_CONTEXT_LIMIT` (8192), so pre-flight
   checks rejected any real prompt with "model gpt-5.6-terra has 8192 context".
 - feat(ratelimit): surface the provider quota-reset clock on `ask!` /
-  `ask-code!` results as `:rate-limit {:reset-at <epoch-ms> :remaining :limit
+  `ask-code!` results as `:rate-limit {:resets-at-ms <epoch-ms> :remaining :limit
   :windows {...}}`. svar previously discarded every success-response header, so
   status renderers (vis footer, CLI) had no effective reset DATE to show for
   Claude coding-plan or Codex. New `internal.ratelimit` parses both dialects:

@@ -489,25 +489,36 @@
                                            :output-over-272k 45.00}}}
 
    :anthropic
-   {"claude-fable-5"            {:pricing {:input 10.00 :cached-input 1.00  :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00} :context 1000000}
+   ;; Pricing/context flow from models.dev (`internal/modelsdev`). Overlay keeps
+   ;; ONLY what the catalog can't supply: the 1-hour cache-write tier
+   ;; (`:cache-write-1h`, ~2× input — models.dev ships a single `cache_write` = the
+   ;; 5m rate, surfaced as `:cache-write-5m`), plus `:context` as svar's ENFORCED
+   ;; pre-flight budget (may sit BELOW the catalog product/beta window — e.g. the
+   ;; sonnets' 1M beta vs the 200K we enforce). FULL pricing stays only for models
+   ;; the catalog lacks (mythos-5, sonnet-4, sonnet-4-20250514) or where the
+   ;; catalog drifts from our metered retail rate (sonnet-5 → catalog 2/10 vs 3/15).
+   {"claude-fable-5"            {:pricing {:cache-write-1h 20.00} :context 1000000}
     "claude-mythos-5"           {:pricing {:input 10.00 :cached-input 1.00  :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00} :context 1000000}
-    "claude-opus-4-8"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
-    "claude-opus-4-7"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
-    "claude-opus-4-6"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 1000000}
-    "claude-opus-4-5"           {:pricing {:input 5.00  :cached-input 0.50  :cache-write-5m 6.25  :cache-write-1h 10.00 :output 25.00} :context 200000}
+    "claude-opus-4-8"           {:pricing {:cache-write-1h 10.00} :context 1000000}
+    "claude-opus-4-7"           {:pricing {:cache-write-1h 10.00} :context 1000000}
+    "claude-opus-4-6"           {:pricing {:cache-write-1h 10.00} :context 1000000}
+    "claude-opus-4-5"           {:pricing {:cache-write-1h 10.00} :context 200000}
     "claude-sonnet-4"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "claude-sonnet-4-6"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "claude-sonnet-5"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00 :output 15.00} :context 200000}
-    "claude-sonnet-4-5"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00 :output 15.00} :context 200000}
+    "claude-sonnet-4-6"         {:pricing {:cache-write-1h 6.00} :context 200000}
+    "claude-sonnet-5"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
+    "claude-sonnet-4-5"         {:pricing {:cache-write-1h 6.00} :context 200000}
     "claude-sonnet-4-20250514"  {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "claude-haiku-4-5"          {:pricing {:input 1.00  :cached-input 0.10  :cache-write-5m 1.25  :cache-write-1h 2.00  :output 5.00}  :context 200000}}
+    "claude-haiku-4-5"          {:pricing {:cache-write-1h 2.00} :context 200000}}
 
    :zai
-   ;; Direct z.ai API — per-token billing. Pricing from z.ai dashboard
-   ;; (docs.z.ai/guides/pricing). Keep in sync with :zai-coding below.
-   {"glm-4.6"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
-    "glm-4.6v"                  {:pricing {:input 0.30  :cached-input 0.05  :output 0.90}  :context 128000  :json-object-mode? true}
-    "glm-4.7"                   {:pricing {:input 0.60  :cached-input 0.11  :output 2.20}  :context 200000  :json-object-mode? true}
+   ;; Direct z.ai API — per-token billing. Pricing/context flow from models.dev
+   ;; (`zai` provider — retail per-token rates). Overlay keeps ONLY the GLM
+   ;; `:json-object-mode?` prose-leak guard, the deliberate `:output-limit 32768`
+   ;; agentic cap, and `:context`. FULL entries stay for cloud models the catalog
+   ;; lacks (minimax / gemma / qwen) and glm-4.6v's cached-input (catalog omits it).
+   {"glm-4.6"                   {:context 200000  :json-object-mode? true}
+    "glm-4.6v"                  {:pricing {:cached-input 0.05} :context 128000  :json-object-mode? true}
+    "glm-4.7"                   {:context 200000  :json-object-mode? true}
     ;; `:output-limit` 32768 — a DELIBERATE agentic-responsiveness cap, not
     ;; just z.ai's hard ceiling. z.ai rejects max_tokens > 131072 with HTTP
     ;; 400, and the auto budget (context/4) is 50K–250K for these models, so
@@ -520,10 +531,10 @@
     ;; (validated: merge / LRU-cache prompts produce code well within it).
     ;; Raise per-call via `:extra-body {:max_tokens N}` (≤131072) when a turn
     ;; genuinely needs a longer output.
-    "glm-5.1"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 200000  :output-limit 32768 :json-object-mode? true}
-    "glm-5.2"                   {:pricing {:input 1.40  :cached-input 0.26  :output 4.40}  :context 1000000 :output-limit 32768 :json-object-mode? true}
-    "glm-5-turbo"               {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 32768 :json-object-mode? true}
-    "glm-5v-turbo"              {:pricing {:input 1.20  :cached-input 0.24  :output 4.00}  :context 200000  :output-limit 32768 :json-object-mode? true}
+    "glm-5.1"                   {:context 200000  :output-limit 32768 :json-object-mode? true}
+    "glm-5.2"                   {:context 1000000 :output-limit 32768 :json-object-mode? true}
+    "glm-5-turbo"               {:context 200000  :output-limit 32768 :json-object-mode? true}
+    "glm-5v-turbo"              {:context 200000  :output-limit 32768 :json-object-mode? true}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
     "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
     "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
@@ -1218,10 +1229,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1233,7 +1244,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1429,8 +1440,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
+                    (keyword? prefer) [prefer]
+                    :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)
