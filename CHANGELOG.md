@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- feat(router): catalog `gpt-5.6-terra` in the `:openai-codex` overlay
+  (`:context 272000`, same tiered pricing as `gpt-5.6-sol`). Without an
+  overlay entry svar fell back to `DEFAULT_CONTEXT_LIMIT` (8192), so pre-flight
+  checks rejected any real prompt with "model gpt-5.6-terra has 8192 context".
+
+### Fixed
+- fix(llm): pre-headers streaming path now catches a RAW `InterruptedException`
+  from `HttpClient.send` (the JDK method is declared `throws
+  InterruptedException`, so a caller interrupt can escape UNWRAPPED past both
+  the `ExceptionInfo` and `IOException` catches). A new
+  `reclassify-pre-headers-interrupt!` helper turns our own TTFT/cancel watchdog
+  fires into the typed `:svar.core/stream-{ttft-timeout,cancelled}` errors the
+  wrapped paths already raise, and propagates a genuinely external interrupt
+  verbatim (flag restored). Previously the bare interrupt leaked and downstream
+  retry layers misread it as a spurious blip and re-sent, doubling an
+  already-elapsed stall (~4min → ~8min hang). Covered by
+  `llm-interrupt-reclassify-test`.
+
 ## [v0.7.57] - 2026-07-12
 
 ### Changed

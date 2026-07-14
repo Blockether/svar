@@ -225,22 +225,22 @@
     (and
      ;; svar's own watchdog/caller aborts close the stream on purpose; their
      ;; 'Stream closed' message must NOT be mistaken for a transient drop.
-     (not (contains? deliberate-stream-abort-types (:type data)))
-     (or
+      (not (contains? deliberate-stream-abort-types (:type data)))
+      (or
      ;; charred.api/read-json fails on truncated response body
-      (str/includes? msg "EOF reached while reading")
-      (str/includes? msg "Unexpected end of input")
+        (str/includes? msg "EOF reached while reading")
+        (str/includes? msg "Unexpected end of input")
      ;; java.net.http connection errors
-      (instance? java.io.EOFException e)
-      (instance? java.io.EOFException cause)
-      (instance? java.net.SocketTimeoutException e)
-      (instance? java.net.SocketTimeoutException cause)
-      (and cause-msg (str/includes? cause-msg "Connection reset"))
-      (and cause-msg (str/includes? cause-msg "EOF"))
+        (instance? java.io.EOFException e)
+        (instance? java.io.EOFException cause)
+        (instance? java.net.SocketTimeoutException e)
+        (instance? java.net.SocketTimeoutException cause)
+        (and cause-msg (str/includes? cause-msg "Connection reset"))
+        (and cause-msg (str/includes? cause-msg "EOF"))
      ;; transient OS/network-layer connection errors (brief connectivity
      ;; blip): EADDRNOTAVAIL, ENETUNREACH, EHOSTUNREACH, connect timeout,
      ;; transient DNS failures. Walks the full cause chain.
-      (transient-network-error? e)
+        (transient-network-error? e)
      ;; Peer ACCEPTED the connection but closed the socket before sending ANY
      ;; response byte — java.net.http surfaces this as "HTTP/1.1 header parser
      ;; received no bytes". It falls BETWEEN a connect-phase failure (the TCP/TLS
@@ -250,19 +250,19 @@
      ;; (e.g. a Cloudflare quick tunnel dropping an idle connection) fail a call
      ;; that should just retry. Idempotent: nothing was produced, so it is the
      ;; safest retry of all (`stream-output-started?` still gates the rest).
-      (str/includes? msg-lower "received no bytes")
-      (str/includes? cause-lower "received no bytes")
-      (and (:stream? data)
-        (or (str/includes? msg-lower "stream connection error")
-          (str/includes? msg-lower "connection reset")
-          (str/includes? msg-lower "connection closed")
-          (str/includes? msg-lower "closed")
-          (str/includes? cause-lower "connection reset")
-          (str/includes? cause-lower "connection closed")
-          (str/includes? cause-lower "closed")))
+        (str/includes? msg-lower "received no bytes")
+        (str/includes? cause-lower "received no bytes")
+        (and (:stream? data)
+          (or (str/includes? msg-lower "stream connection error")
+            (str/includes? msg-lower "connection reset")
+            (str/includes? msg-lower "connection closed")
+            (str/includes? msg-lower "closed")
+            (str/includes? cause-lower "connection reset")
+            (str/includes? cause-lower "connection closed")
+            (str/includes? cause-lower "closed")))
      ;; babashka.http-client wraps errors in ExceptionInfo
-      (and (instance? clojure.lang.ExceptionInfo e)
-        (some-> cause retryable-exception?))))))
+        (and (instance? clojure.lang.ExceptionInfo e)
+          (some-> cause retryable-exception?))))))
 
 (def ^:private shared-http-executor
   "Cached thread pool that backs the shared HttpClient.
@@ -3487,6 +3487,44 @@
                    (.start))]
     thread))
 
+(defn- reclassify-pre-headers-interrupt!
+  "Reclassify a RAW `InterruptedException` surfaced by the pre-headers
+   `HttpClient.send`. The JDK client is declared `throws InterruptedException`,
+   so a caller interrupt can escape UNWRAPPED past the ExceptionInfo/IOException
+   catches. Turn OUR OWN watchdog fires into the same typed errors as the
+   wrapped paths (`:svar.core/stream-cancelled` / `:svar.core/stream-ttft-timeout`)
+   so downstream retry layers don't mistake a bare interrupt for a spurious blip
+   and re-send it (doubling the effective stall). A genuinely external interrupt
+   is propagated verbatim with the thread's interrupt flag restored.
+
+   `cancel-fired?`/`ttft-fired?` are the watchdog atoms. Always throws."
+  [^InterruptedException e cancel-fired? ttft-fired? url ttft-timeout-ms]
+  (cond
+    @cancel-fired?
+    (do (Thread/interrupted)
+        (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                 {:type :svar.core/stream-cancelled :stream? true :url url} e)))
+
+    @ttft-fired?
+    (do (Thread/interrupted)
+        (trove/log! {:level :warn :id ::stream-ttft-timeout
+                     :data (log-data {:url url
+                                      :ttft-timeout-ms ttft-timeout-ms})
+                     :msg "TTFT timeout, no headers received"})
+        (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                          "ms with no response headers): " (ex-message e))
+                 {:type :svar.core/stream-ttft-timeout
+                  :stream? true :url url
+                  :ttft-timeout-ms ttft-timeout-ms
+                  :cause-class (.getName (class e))}
+                 e)))
+
+    :else
+    ;; Not our watchdog — a real external interrupt. Restore the flag and
+    ;; propagate as-is (clean cancellation).
+    (do (.interrupt (Thread/currentThread))
+        (throw e))))
+
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
    for each. `headers` - HTTP headers map. `delta-fn` - extracts delta
@@ -3595,6 +3633,19 @@
                        (if (connection-error? e)
                          (throw (connection-error->ex-info e url))
                          (throw e))))
+                   (catch InterruptedException e
+                     ;; The JDK `HttpClient.send` is declared
+                     ;; `throws InterruptedException` and CAN surface the
+                     ;; caller interrupt RAW (unwrapped) — our TTFT/cancel
+                     ;; watchdog lever, or a genuinely external interrupt.
+                     ;; Neither the ExceptionInfo nor the IOException clause
+                     ;; above catches it, so without this it escapes as a BARE
+                     ;; `InterruptedException` — which downstream retry layers
+                     ;; mistake for a spurious blip and re-send, doubling the
+                     ;; effective stall. Reclassify OUR OWN watchdog fires into
+                     ;; the same typed errors as the wrapped paths; propagate a
+                     ;; genuinely external interrupt verbatim (flag restored).
+                     (reclassify-pre-headers-interrupt! e cancel-fired? ttft-fired? url ttft-timeout-ms))
                    (finally
                      ;; Order matters: flip the flag BEFORE interrupting
                      ;; the watchdog so the watchdog's recheck sees the
