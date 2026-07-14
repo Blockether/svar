@@ -19,6 +19,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`:context 272000`, same tiered pricing as `gpt-5.6-sol`). Without an
   overlay entry svar fell back to `DEFAULT_CONTEXT_LIMIT` (8192), so pre-flight
   checks rejected any real prompt with "model gpt-5.6-terra has 8192 context".
+- feat(ratelimit): surface the provider quota-reset clock on `ask!` /
+  `ask-code!` results as `:rate-limit {:reset-at <epoch-ms> :remaining :limit
+  :windows {...}}`. svar previously discarded every success-response header, so
+  status renderers (vis footer, CLI) had no effective reset DATE to show for
+  Claude coding-plan or Codex. New `internal.ratelimit` parses both dialects:
+  Anthropic's absolute clocks (`anthropic-ratelimit-*-reset` — unix epoch or
+  RFC-3339, incl. the coding-plan `-unified-` window) and OpenAI/Codex relative
+  Go-durations (`x-ratelimit-reset-*` = now + duration). Response headers are
+  now captured into `:http-response :headers` on both streaming and
+  non-streaming paths. Returns nil (no key) when a response carries no
+  rate-limit headers.
 
 ### Fixed
 - fix(llm): pre-headers streaming path now catches a RAW `InterruptedException`

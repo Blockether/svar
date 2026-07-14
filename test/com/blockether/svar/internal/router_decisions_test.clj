@@ -664,7 +664,7 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                             :p2 (success-result 10)))))
+                                 :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -688,13 +688,13 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                             :p2 (success-result 10)))))
+                                 :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                           :p2 (success-result 10))))
+                               :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)

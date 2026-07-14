@@ -136,6 +136,9 @@
   "Native tool-calling completion. Sibling of `ask!` (structured `:spec`).
    The model takes action by calling a `:tool`; no tool call ⇒ its text is the
    final answer (`:stop-reason :end`). Returns {:stop-reason :tool-calls|:end
-   :tool-calls :content :assistant-message :reasoning :tokens :cost :duration-ms}."
+   :tool-calls :content :assistant-message :reasoning :tokens :cost :duration-ms
+   :rate-limit}. `:rate-limit` (when the provider sent quota headers) carries
+   `{:reset-at <epoch-ms> :remaining :limit :windows}` — the effective reset
+   clock a status view can render."
   llm/ask-code!)
 (def models! "Fetches available models from the LLM API." llm/models!)

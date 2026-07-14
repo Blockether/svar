@@ -482,6 +482,10 @@
     "gpt-5.6-sol"               {:context 272000
                                  :pricing {:input 5.00  :cached-input 0.50  :output 30.00
                                            :input-over-272k 10.00 :cached-input-over-272k 1.00
+                                           :output-over-272k 45.00}}
+    "gpt-5.6-terra"             {:context 272000
+                                 :pricing {:input 5.00  :cached-input 0.50  :output 30.00
+                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
                                            :output-over-272k 45.00}}}
 
    :anthropic
@@ -1214,10 +1218,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-              (assoc ps
-                :cb-state :open
-                :cb-failures new-failures
-                :cb-open-until (+ now recovery-ms)))
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1229,7 +1233,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1425,8 +1429,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                    (keyword? prefer) [prefer]
-                    :else nil)
+                        (keyword? prefer) [prefer]
+                        :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)

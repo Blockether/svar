@@ -50,7 +50,9 @@
     (it "uses Codex catalog prompt windows for current GPT coding models"
       (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.3-codex")))
       (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4")))
-      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4-mini"))))
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4-mini")))
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-sol")))
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-terra"))))
 
     (it "uses Copilot prompt budgets for visible GPT reasoning coding models"
       (doseq [name ["gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5"]]

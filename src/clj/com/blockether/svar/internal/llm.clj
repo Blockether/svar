@@ -8,6 +8,7 @@
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.jsonish :as jsonish]
    [com.blockether.svar.internal.router :as router]
+   [com.blockether.svar.internal.ratelimit :as ratelimit]
    [com.blockether.svar.internal.spec :as spec]
    [com.blockether.svar.internal.util :as util]
    [taoensso.trove :as trove]
@@ -407,6 +408,7 @@
     {:parsed   parsed
      :raw-body raw-body
      :url      url
+     :headers  (:headers response)
      :status   (:status response)}))
 
 (declare make-llm-headers)
@@ -4004,6 +4006,7 @@
                  :http-response  {:url        url
                                   :streaming? true
                                   :status     (:status response)
+                                  :headers    (:headers response)
                                   :stream-finalization stream-finalization}}
           (seq tool-calls) (assoc :tool-calls tool-calls)
           assistant-msg (assoc :assistant-message assistant-msg)))
@@ -5201,7 +5204,8 @@
         (cond
           ;; SUCCESS - parse worked; fire done callback, return.
           (:ok? outcome)
-          (let [{:keys [result token-stats]} outcome
+          (let [{:keys [result token-stats http-response]} outcome
+                rate-limit     (ratelimit/parse api-style (:headers http-response))
                 final-result result
                 attempt-record {:attempt     attempt
                                 :ok?         true
@@ -5223,6 +5227,7 @@
                      :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
                      :duration-ms duration-ms}
               reasoning              (assoc :reasoning reasoning)
+              rate-limit             (assoc :rate-limit rate-limit)
               provider-state         (assoc :provider-state provider-state)
               ;; Only surface :format-attempts when retries actually happened.
               ;; Empty / single-element vec is noise on the happy path.
@@ -5460,7 +5465,8 @@
                           {:pricing pricing :api-usage api-usage :api-style api-style})
           tokens        (token-stats->tokens token-stats)
           cost          (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
-          stop-reason   (if (seq tool-calls) :tool-calls :end)]
+          stop-reason   (if (seq tool-calls) :tool-calls :end)
+          rate-limit    (ratelimit/parse api-style (:headers http-response))]
       (when on-chunk
         (on-chunk {:content content :reasoning reasoning :tool-calls tool-calls
                    :stop-reason stop-reason :provider-state provider-state
@@ -5476,6 +5482,7 @@
         assistant-message   (assoc :assistant-message assistant-message)
         api-usage           (assoc :api-usage api-usage)
         http-response       (assoc :http-response http-response)
+        rate-limit          (assoc :rate-limit rate-limit)
         stream-finalization (assoc :stream-finalization stream-finalization)))))
 
 (defn ask-code!
@@ -5509,6 +5516,9 @@
     :tokens      {:input :output :reasoning :cached :total}
     :cost        {:input-cost :output-cost :total-cost}
     :duration-ms <ms>
+    :rate-limit  {:reset-at <epoch-ms> :remaining N :limit N :windows {...}}
+                 ; provider quota-reset clock, when the response carried
+                 ; rate-limit headers (see internal.ratelimit)
     :stream-finalization {...} ; streaming calls only
     :http-response {:status :streaming? :stream-finalization ...}}
 

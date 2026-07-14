@@ -82,27 +82,27 @@
   (describe "retryable-exception? rejects svar's own watchdog/cancel aborts"
     (it "treats a closed-stream idle timeout as non-retryable"
       (expect (false? (boolean (retryable-exception?
-                                (ex-info "Stream idle timeout (180000ms with no bytes): Stream closed"
-                                  {:type :svar.core/stream-idle-timeout :stream? true :content-acc-len 0}))))))
+                                 (ex-info "Stream idle timeout (180000ms with no bytes): Stream closed"
+                                   {:type :svar.core/stream-idle-timeout :stream? true :content-acc-len 0}))))))
 
     (it "treats a closed-stream semantic timeout as non-retryable"
       (expect (false? (boolean (retryable-exception?
-                                (ex-info "Stream semantic timeout (240000ms without model/progress event): Stream closed"
-                                  {:type :svar.core/stream-semantic-timeout :stream? true}))))))
+                                 (ex-info "Stream semantic timeout (240000ms without model/progress event): Stream closed"
+                                   {:type :svar.core/stream-semantic-timeout :stream? true}))))))
 
     (it "treats a caller cancellation as non-retryable"
       (expect (false? (boolean (retryable-exception?
-                                (ex-info "Stream cancelled: Stream closed"
-                                  {:type :svar.core/stream-cancelled :stream? true}))))))
+                                 (ex-info "Stream cancelled: Stream closed"
+                                   {:type :svar.core/stream-cancelled :stream? true}))))))
 
     (it "still retries a genuine mid-stream connection reset"
       (expect (true? (boolean (retryable-exception?
-                               (ex-info "stream connection error: Connection reset"
-                                 {:type :svar.core/http-error :stream? true}))))))
+                                (ex-info "stream connection error: Connection reset"
+                                  {:type :svar.core/http-error :stream? true}))))))
 
     (it "still retries a peer that accepted then sent no bytes"
       (expect (true? (boolean (retryable-exception?
-                               (ex-info "HTTP/1.1 header parser received no bytes" {})))))))
+                                (ex-info "HTTP/1.1 header parser received no bytes" {})))))))
 
   (describe "with-retry stops re-hammering a watchdog idle timeout"
     (it "invokes the fn exactly once for a closed idle-timeout (no silent retry storm)"
