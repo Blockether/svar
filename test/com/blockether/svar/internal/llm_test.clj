@@ -732,6 +732,35 @@
         (let [resolved (resolve-opts {} {:model "m" :provider-id :lmstudio})]
           (expect (= sut-router-default (get (:context-limits resolved) "m"))))))))
 
+(defdescribe routed-provider-native-reasoning-effort-test
+  (let [inject (var-get #'sut/inject-routed-params)
+        provider {:id :zai-coding-plan :api-style :anthropic}
+        model {:name "glm-5.2"
+               :context 1000000
+               :reasoning? true
+               :reasoning-style :zai-effort
+               :reasoning-options [{:type "effort"
+                                    :values ["high" "max"]}]}]
+    (it "injects exact high/max bodies"
+      (doseq [effort ["high" "max"]]
+        (let [body (:extra-body
+                    (inject {:reasoning-effort effort} provider model))]
+          (expect (= effort (:reasoning_effort body)))
+          (expect (= {:type "enabled"} (:thinking body))))))
+
+    (it "raw effort bypasses abstract translation when both are supplied"
+      (let [body (:extra-body
+                  (inject {:reasoning :quick :reasoning-effort "max"}
+                    provider model))]
+        (expect (= "max" (:reasoning_effort body)))
+        (expect (= {:type "enabled"} (:thinking body)))))
+
+    (it "consumes both public reasoning controls before the wire primitive"
+      (let [opts (inject {:reasoning :deep :reasoning-effort "high"}
+                   provider model)]
+        (expect (not (contains? opts :reasoning)))
+        (expect (not (contains? opts :reasoning-effort)))))))
+
 (defdescribe reasoning-content-echo-provenance-test
   "openai-chat reasoning_content echo: the :thinking-signature slot rides
    the wire ONLY when it IS the reasoning text (z.ai capture shape,

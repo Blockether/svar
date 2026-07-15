@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- feat(reasoning): preserve models.dev `reasoning_options` as normalized
+  `:reasoning-options` and expose `resolve-reasoning-effort` for exact,
+  catalog-gated provider controls.
+- feat(router): accept provider-native `:reasoning-effort "high"|"max"`,
+  resolve it for every routed attempt, skip incompatible fallback candidates,
+  and attach the successful wire resolution as `:routed/reasoning-effort`.
+
+### Fixed
+- fix(zai): send GLM-5.2 effort as `thinking.type=enabled` plus
+  `reasoning_effort`, while keeping older GLM models on binary
+  `:zai-thinking` behavior. Raw effort bypasses the abstract
+  `quick|balanced|deep` API without changing that existing API.
+
 ## [v0.7.60] - 2026-07-14
 
 ### Changed

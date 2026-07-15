@@ -133,6 +133,12 @@
         (expect (true? (:require-reasoning? prefs)))
         (expect (= :cost (:prefer prefs)))))
 
+    (it "`:reasoning-effort` is retained as an exact routing constraint"
+      (let [{:keys [prefs]} (router/resolve-routing router
+                              {:optimize :cost :reasoning-effort "max"})]
+        (expect (= "max" (:reasoning-effort prefs)))
+        (expect (nil? (:require-reasoning? prefs)))))
+
     (it "absent `:reasoning` leaves `:require-reasoning?` unset"
       (let [{:keys [prefs]} (router/resolve-routing router {:optimize :cost})]
         (expect (nil? (:require-reasoning? prefs)))))
@@ -1181,6 +1187,77 @@
       ;; the filter excludes cheap-dumb and pricey-smart wins despite being
       ;; ~25x more expensive.
       (expect (= "pricey-smart" (:model @captured))))))
+
+(defdescribe provider-native-reasoning-effort-routing-test
+  (let [supported {:type "effort" :values ["high" "max"]}]
+    (it "skips unsupported candidates and attaches actual resolution evidence"
+      (let [r (llm/make-router
+                [{:id :synth :api-key "k" :base-url "http://x"
+                  :models [{:name "binary-only"
+                            :reasoning? true :reasoning-style :zai-thinking}
+                           {:name "glm-5.2"
+                            :reasoning? true :reasoning-style :zai-effort
+                            :reasoning-options [supported]}]}])
+            calls (atom [])
+            result (router/with-provider-fallback
+                     r {:strategy :root :reasoning-effort "max"}
+                     (fn [_provider model]
+                       (swap! calls conj (:name model))
+                       (success-result 12)))]
+        (expect (= ["glm-5.2"] @calls))
+        (expect (= "glm-5.2" (:routed/model result)))
+        (expect (= {:requested "max"
+                    :effective "max"
+                    :supported ["high" "max"]
+                    :wire-style :zai-effort
+                    :extra-body {:thinking {:type "enabled"}
+                                 :reasoning_effort "max"}}
+                  (:routed/reasoning-effort result)))))
+
+    (it "a transient compatible candidate can fall through past an incompatible one"
+      (let [r (llm/make-router
+                [{:id :p1 :api-key "k" :base-url "http://1"
+                  :models [{:name "glm-a" :reasoning? true
+                            :reasoning-style :zai-effort
+                            :reasoning-options [supported]}]}
+                 {:id :p2 :api-key "k" :base-url "http://2"
+                  :models [{:name "binary" :reasoning? true
+                            :reasoning-style :zai-thinking}]}
+                 {:id :p3 :api-key "k" :base-url "http://3"
+                  :models [{:name "glm-b" :reasoning? true
+                            :reasoning-style :zai-effort
+                            :reasoning-options [supported]}]}]
+                {:rate-limit {:same-provider-delays-ms []
+                              :fallback-after-ms 0}})
+            calls (atom [])
+            result (router/with-provider-fallback
+                     r {:strategy :root :reasoning-effort "high"}
+                     (fn [provider _model]
+                       (swap! calls conj (:id provider))
+                       (if (= :p1 (:id provider))
+                         (transient-error 503)
+                         (success-result 12))))]
+        (expect (= [:p1 :p3] @calls))
+        (expect (= :p3 (:routed/provider-id result)))
+        (expect (true? (:routed/fallback? result)))))
+
+    (it "rejects unsupported effort before invoking a provider"
+      (let [r (llm/make-router
+                [{:id :synth :api-key "k" :base-url "http://x"
+                  :models [{:name "glm-5.2" :reasoning? true
+                            :reasoning-style :zai-effort
+                            :reasoning-options [supported]}]}])
+            calls (atom 0)
+            thrown (try
+                     (router/with-provider-fallback
+                       r {:strategy :root :reasoning-effort "medium"}
+                       (fn [_ _] (swap! calls inc)))
+                     nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+        (expect (= 0 @calls))
+        (expect (= :svar/unsupported-reasoning-effort
+                  (:type (ex-data thrown))))
+        (expect (= ["high" "max"] (:supported (ex-data thrown))))))))
 
 (defdescribe rate-limited-provider-not-replayed-as-fallback-test
   ;; Regression: before this fix `with-provider-fallback` only tracked

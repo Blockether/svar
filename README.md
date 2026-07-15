@@ -46,7 +46,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 
 ```clojure lazytest/skip=true
 ;; deps.edn
-{:deps {com.blockether/svar {:mvn/version "0.7.60"}}}
+{:deps {com.blockether/svar {:mvn/version "0.7.61"}}}
 ```
 
 ```clojure
@@ -316,6 +316,16 @@ They are independent. Example: `:reasoning :deep` + `:verbosity :low` means thin
 ```
 
 `:reasoning` is provider-agnostic — svar translates it to the right wire shape for the selected model. `:verbosity` is honored on providers that expose a visible-output verbosity control (notably OpenAI Responses-style endpoints such as `:openai-codex`) and ignored elsewhere.
+
+For provider-controlled evaluations, `:reasoning-effort` is a separate exact
+control. It accepts only the provider-native strings `"high"` and `"max"`,
+requires the selected model to advertise that value in its models.dev
+`:reasoning-options`, and bypasses abstract reasoning aliases, caps, and
+translations. GLM-5.2 sends `{:thinking {:type "enabled"}
+:reasoning_effort "<high|max>"}`. Routed results retain the actual resolution
+under `:routed/reasoning-effort`; callers can preflight with
+`resolve-reasoning-effort`, which returns `:requested`, `:effective`,
+`:supported`, `:wire-style`, and `:extra-body`.
 
 ### Provider-noise hardening (`:format-retries`, `:json-object-mode?`, `:on-format-error`)
 

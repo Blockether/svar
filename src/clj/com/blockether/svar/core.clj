@@ -54,6 +54,11 @@
    their own extra-body."
   router/reasoning-extra-body)
 
+(def resolve-reasoning-effort
+  "Resolve exact provider-native `high|max` support and wire evidence.
+   No abstract reasoning aliases or automatic translations are applied."
+  router/resolve-reasoning-effort)
+
 ;; =============================================================================
 ;; Provider defaults (single source of truth — consumers override these)
 ;; =============================================================================

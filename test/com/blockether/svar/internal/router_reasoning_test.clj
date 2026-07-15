@@ -9,6 +9,7 @@
    - Anthropic max_tokens clamp when thinking is enabled."
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
+   [com.blockether.svar.internal.modelsdev :as modelsdev]
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.llm :as llm]))
 
@@ -226,6 +227,59 @@
         (expect (= {:reasoning_effort "high"}
                   (router/reasoning-extra-body :anthropic weird :deep)))))))
 
+(defdescribe provider-native-reasoning-effort-test
+  "Exact provider-native effort is catalog-gated and does not use aliases."
+  (let [glm {:name "glm-5.2"
+             :reasoning? true
+             :reasoning-style :zai-effort
+             :reasoning-options [{:type "effort" :values ["high" "max"]}]}]
+    (it "emits the exact GLM-5.2 high body"
+      (expect (= {:requested "high"
+                  :effective "high"
+                  :supported ["high" "max"]
+                  :wire-style :zai-effort
+                  :extra-body {:thinking {:type "enabled"}
+                               :reasoning_effort "high"}}
+                (router/resolve-reasoning-effort :anthropic glm "high"))))
+
+    (it "emits the exact GLM-5.2 max body"
+      (expect (= {:thinking {:type "enabled"}
+                  :reasoning_effort "max"}
+                (:extra-body
+                 (router/resolve-reasoning-effort :anthropic glm "max")))))
+
+    (it "rejects abstract levels and unsupported exact values"
+      (doseq [effort ["deep" "medium" :high nil]]
+        (let [resolved (router/resolve-reasoning-effort :anthropic glm effort)]
+          (expect (nil? (:effective resolved)))
+          (expect (= ["high" "max"] (:supported resolved))))))
+
+    (it "rejects a model without catalog-declared effort options"
+      (let [resolved (router/resolve-reasoning-effort
+                       :anthropic (dissoc glm :reasoning-options) "high")]
+        (expect (nil? (:effective resolved)))
+        (expect (= [] (:supported resolved)))))))
+
+(defdescribe modelsdev-reasoning-options-test
+  (it "normalizes reasoning options while preserving the catalog contract"
+    (expect (= [{:type "effort"
+                 :values ["high" "max"]
+                 :min 1
+                 :max 2}]
+              (:reasoning-options
+               (modelsdev/normalize-model
+                 {:id "m"
+                  :reasoning_options [{:type "effort"
+                                       :values ["high" "max"]
+                                       :min 1
+                                       :max 2
+                                       :ignored true}]})))))
+
+  (it "retains GLM-5.2 high/max from the bundled catalog"
+    (expect (= [{:type "effort" :values ["high" "max"]}]
+              (:reasoning-options
+               (router/provider-model-entry :zai-coding-plan "glm-5.2"))))))
+
 (defdescribe known-model-reasoning-flags-test
   "Sanity check that KNOWN_MODEL_METADATA flags the expected reasoning models."
 
@@ -253,14 +307,13 @@
     (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "deepseek-v3"))))
     (expect (not (:reasoning? (get router/KNOWN_MODEL_METADATA "minimax-m2.5")))))
 
-  (it "flags GLM-4.6+ as reasoning-capable with :anthropic-thinking style"
-    ;; GLM is served via Z.ai's Anthropic-compatible wire, so its native
-    ;; reasoning convention is :anthropic-thinking (signed thinking blocks +
-    ;; cache_control), not the OpenAI-wire :zai-thinking reasoning_content echo.
+  (it "flags older GLM models with binary :zai-thinking style"
     (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
       (let [m (get router/KNOWN_MODEL_METADATA name)]
         (expect (true? (:reasoning? m)))
-        (expect (= :anthropic-thinking (:reasoning-style m))))))
+        (expect (= :zai-thinking (:reasoning-style m)))))
+    (expect (= :zai-effort
+              (:reasoning-style (get router/KNOWN_MODEL_METADATA "glm-5.2")))))
 
   (it ":zai provider has per-token pricing for every reasoning-capable GLM"
     (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
@@ -287,7 +340,7 @@
       (expect (= :anthropic-thinking (:reasoning-style resolved))))
     (let [resolved (router/infer-model-metadata {:name "glm-4.6"})]
       (expect (true? (:reasoning? resolved)))
-      (expect (= :anthropic-thinking (:reasoning-style resolved))))
+      (expect (= :zai-thinking (:reasoning-style resolved))))
     (let [resolved (router/infer-model-metadata {:name "gpt-4o"})]
       (expect (not (:reasoning? resolved))))))
 

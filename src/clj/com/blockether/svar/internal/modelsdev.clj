@@ -47,6 +47,7 @@
      :context          — input + output budget (tokens)
      :input-limit      — input-only cap (when separate)
      :output-limit     — max output tokens
+     :reasoning-options — provider-native reasoning controls
      :reasoning?       — reasoning model flag
      :tool-call?       — supports tools
      :attachment?      — supports file/image input
@@ -85,6 +86,10 @@
       (:context lim)     (assoc :context (:context lim))
       (:input lim)       (assoc :input-limit (:input lim))
       (:output lim)      (assoc :output-limit (:output lim))
+      (:reasoning_options m)
+      (assoc :reasoning-options
+        (mapv #(select-keys % [:type :values :min :max])
+          (:reasoning_options m)))
       (some? (:reasoning m))    (assoc :reasoning? (boolean (:reasoning m)))
       (some? (:tool_call m))    (assoc :tool-call? (boolean (:tool_call m)))
       (some? (:attachment m))   (assoc :attachment? (boolean (:attachment m)))

@@ -4478,6 +4478,7 @@
   "Merges svar-level opts that influence routing/fallback into the `:routing`
    map so `resolve-routing` can build a complete prefs map:
      - `:reasoning`         → implies `:require-reasoning? true`
+     - `:reasoning-effort`  → exact provider-native `high|max`
      - `:on-format-error`   → enables format-error provider fallback
      - `:format-retry-on`   → customises the format-error type set
      - `:on-chunk`          → surfaced to the router so routing events
@@ -4491,6 +4492,7 @@
   [opts]
   (cond-> (or (:routing opts) {})
     (:reasoning opts)            (assoc :reasoning (:reasoning opts))
+    (:reasoning-effort opts)     (assoc :reasoning-effort (:reasoning-effort opts))
     (:on-format-error opts)      (assoc :on-format-error (:on-format-error opts))
     (:format-retry-on opts)      (assoc :format-retry-on (:format-retry-on opts))
     (contains? opts :on-chunk)   (assoc :on-chunk (:on-chunk opts))))
@@ -4532,9 +4534,14 @@
         quarter (long (* 0.25 ctx))
         auto-params {:max_tokens (if output-cap (min quarter (long output-cap)) quarter)}
         api-style (or (:api-style model-map) (:api-style provider))
-        reasoning-params (router/reasoning-extra-body
-                           api-style model-map (:reasoning opts)
-                           {:preserved-thinking? (:preserved-thinking? opts)})
+        effort-resolution (when (some? (:reasoning-effort opts))
+                            (router/resolve-reasoning-effort
+                              api-style model-map (:reasoning-effort opts)))
+        reasoning-params (if effort-resolution
+                           (:extra-body effort-resolution)
+                           (router/reasoning-extra-body
+                             api-style model-map (:reasoning opts)
+                             {:preserved-thinking? (:preserved-thinking? opts)}))
         merged-body (cond-> (merge (:extra-body provider) (:extra-body model-map) auto-params reasoning-params (:extra-body opts))
                       (:verbosity opts) (assoc :verbosity (:verbosity opts)))
         merged-headers (not-empty (merge (:llm-headers provider) (:llm-headers opts)))
@@ -4545,7 +4552,7 @@
                             (:json-object-mode? opts)
                             (:json-object-mode? model-map))]
     (-> opts
-      (dissoc :reasoning :preserved-thinking?)
+      (dissoc :reasoning :reasoning-effort :preserved-thinking?)
       (assoc
         :model (:name model-map)
         :api-key (:api-key provider)

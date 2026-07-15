@@ -255,13 +255,13 @@
    ;; Z.ai's chat/completions endpoint is OpenAI-compatible for everything
    ;; EXCEPT reasoning — it uses a binary `thinking` object at the top level.
    ;; Streaming delta surfaces reasoning_content (already handled).
-   "glm-4.6"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
-   "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
-   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-4.6"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
+   "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
+   "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
+   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
    "glm-5.2"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-effort}
-   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :anthropic-thinking}
-   "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
+   "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
 
    ;; ── DeepSeek (reasoning_effort on reasoner only) ────────────────────────
    "deepseek-v3"               {:intelligence :high     :speed :medium :capabilities #{:chat}}
@@ -343,6 +343,61 @@
   [api-style model-map]
   (or (:reasoning-style model-map)
     (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
+
+(def ^:private PROVIDER_NATIVE_REASONING_EFFORTS ["high" "max"])
+
+(defn- normalize-reasoning-effort [effort]
+  (when (string? effort)
+    (let [normalized (str/lower-case (str/trim effort))]
+      (when (contains? (set PROVIDER_NATIVE_REASONING_EFFORTS) normalized)
+        normalized))))
+
+(defn- effort-option-values [model-map]
+  (->> (:reasoning-options model-map)
+    (filter #(= "effort" (:type %)))
+    (mapcat :values)
+    (filter (set PROVIDER_NATIVE_REASONING_EFFORTS))
+    distinct
+    vec))
+
+(defn resolve-reasoning-effort
+  "Resolve an exact provider-native reasoning effort for one model.
+
+   Unlike `reasoning-extra-body`, this API does no abstract-level aliasing or
+   translation: only the literal strings \"high\" and \"max\" are accepted,
+   and the requested value must appear in the model catalog's effort options.
+   The returned map is stable evidence callers can retain with a routed result."
+  ([model-map effort]
+   (resolve-reasoning-effort nil model-map effort))
+  ([api-style model-map effort]
+   (let [requested (when (string? effort)
+                     (str/lower-case (str/trim effort)))
+         effective (normalize-reasoning-effort effort)
+         supported (effort-option-values model-map)
+         raw-style (infer-reasoning-style api-style model-map)
+         wire-style (if (and (= raw-style :anthropic-thinking)
+                          (not= api-style :anthropic))
+                      :openai-effort
+                      raw-style)
+         effective (when (and effective
+                           (some #{effective} supported)
+                           (contains? #{:openai-effort :anthropic-thinking :zai-effort}
+                             wire-style))
+                     effective)
+         extra-body (when effective
+                      (case wire-style
+                        :openai-effort {:reasoning_effort effective}
+                        :anthropic-thinking {:thinking {:type "adaptive"
+                                                        :display "summarized"}
+                                             :output_config {:effort effective}}
+                        :zai-effort {:thinking {:type "enabled"}
+                                     :reasoning_effort effective}
+                        nil))]
+     {:requested requested
+      :effective effective
+      :supported supported
+      :wire-style wire-style
+      :extra-body extra-body})))
 
 (defn- anthropic-adaptive-thinking-model?
   "Fable 5 / Mythos 5 / Opus 4.8–4.7 reject manual budget_tokens. Opus 4.6
@@ -1229,10 +1284,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-              (assoc ps
-                :cb-state :open
-                :cb-failures new-failures
-                :cb-open-until (+ now recovery-ms)))
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1244,7 +1299,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1378,7 +1433,15 @@
         forever."
   [provider prefs]
   (let [require-reasoning? (:require-reasoning? prefs)
+        reasoning-effort (:reasoning-effort prefs)
         reasoning-ok? (fn [m] (if require-reasoning? (:reasoning? m) true))
+        effort-ok? (fn [m]
+                     (if reasoning-effort
+                       (some? (:effective
+                               (resolve-reasoning-effort
+                                 (or (:api-style m) (:api-style provider))
+                                 m reasoning-effort)))
+                       true))
         exclude-set (or (:exclude-models prefs) #{})
         not-excluded? (fn [m] (and m (not (contains? exclude-set (:name m)))))]
     (cond
@@ -1390,7 +1453,7 @@
       ;; — not the caller — chooses among models.
       (:force-model prefs)
       (let [m (first (filter #(= (:name %) (:force-model prefs)) (:models provider)))]
-        (when (not-excluded? m) m))
+        (when (and (not-excluded? m) (effort-ok? m)) m))
 
       ;; Root model: there's nothing to choose between, so honor it regardless
       ;; of `:require-reasoning?` (same best-effort reasoning semantics as
@@ -1398,7 +1461,10 @@
       ;; serve `:reasoning`-flagged turns instead of "all providers exhausted".
       (= (:strategy prefs) :root)
       (let [root-name (:root provider)
-            m (first (filter #(= (:name %) root-name) (:models provider)))]
+            models (if reasoning-effort
+                     (:models provider)
+                     (filter #(= (:name %) root-name) (:models provider)))
+            m (first (filter #(and (not-excluded? %) (effort-ok? %)) models))]
         (when (not-excluded? m) m))
 
       :else
@@ -1407,6 +1473,7 @@
             candidates (->> (:models provider)
                          (filter #(every? (:capabilities %) required-caps))
                          (filter reasoning-ok?)
+                         (filter effort-ok?)
                          (filter #(if exclude (not= (:name %) exclude) true))
                          (remove #(contains? exclude-set (:name %))))]
         (when (seq candidates)
@@ -1440,8 +1507,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                    (keyword? prefer) [prefer]
-                    :else nil)
+                        (keyword? prefer) [prefer]
+                        :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)
@@ -1785,7 +1852,35 @@
 
 (defn with-provider-fallback [router prefs f]
   (budget-check! router)
-  (let [tried (atom #{})
+  (let [reasoning-effort (:reasoning-effort prefs)
+        scoped-providers (force-provider-filter prefs (:providers router))
+        scoped-models (for [provider scoped-providers
+                            model (:models provider)
+                            :when (or (nil? (:force-model prefs))
+                                    (= (:force-model prefs) (:name model)))]
+                        [provider model])
+        effort-resolutions (when reasoning-effort
+                             (mapv (fn [[provider model]]
+                                     (resolve-reasoning-effort
+                                       (or (:api-style model) (:api-style provider))
+                                       model reasoning-effort))
+                               scoped-models))
+        supported-efforts (when reasoning-effort
+                            (vec (distinct (mapcat :supported effort-resolutions))))
+        _ (when (and reasoning-effort
+                  (not-any? :effective effort-resolutions))
+            (throw (ex-info
+                     (str "Reasoning effort " (pr-str reasoning-effort)
+                       " is unsupported; accepted values: "
+                       (if (seq supported-efforts)
+                         (str/join ", " supported-efforts)
+                         "none"))
+                     {:type :svar/unsupported-reasoning-effort
+                      :requested reasoning-effort
+                      :supported supported-efforts
+                      :provider (:force-provider prefs)
+                      :model (:force-model prefs)})))
+        tried (atom #{})
         ;; Providers that hit a non-format failure (rate-limit budget
         ;; exhausted, transient 5xx, etc.) get added here so the next
         ;; `select-and-claim!` skips them. Without this guard the loop
@@ -1875,6 +1970,10 @@
               (cond
                 (:success result)
                 (let [result (:success result)
+                      effort-resolution (when reasoning-effort
+                                          (resolve-reasoning-effort
+                                            (or (:api-style model-map) (:api-style provider))
+                                            model-map reasoning-effort))
                       token-count (or (get-in result [:api-usage :total-tokens])
                                     (get-in result [:tokens :total])
                                     0)
@@ -1895,6 +1994,7 @@
                             :routed/actual {:provider (provider-label provider)
                                             :model (:name model-map)}
                             :routed/fallback? (boolean (seq (filter #(not= :llm.routing/provider-retry (:event/type %)) trace-value))))
+                    effort-resolution (assoc :routed/reasoning-effort effort-resolution)
                     (seq trace-value) (assoc :routed/trace trace-value)))
 
                 (:format-error result)
@@ -2122,7 +2222,7 @@
    *reasoning-capable* model rather than silently dropping `:deep` when the
    cost-cheapest model happens to be non-reasoning."
   [router routing-opts]
-  (let [{:keys [optimize provider model on-transient-error reasoning
+  (let [{:keys [optimize provider model on-transient-error reasoning reasoning-effort
                 prefer-providers on-format-error format-retry-on on-chunk]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
@@ -2172,6 +2272,7 @@
                      {:strategy :root})
         prefs (cond-> base-prefs
                 reasoning            (assoc :require-reasoning? true)
+                reasoning-effort     (assoc :reasoning-effort reasoning-effort)
                 ;; Format-error fallback opts — honored by
                 ;; `with-provider-fallback`. When `:on-format-error
                 ;; :fallback-provider`, schema/format-typed exceptions are
@@ -2788,5 +2889,3 @@
                   :intelligence (:intelligence model-map)
                   :speed        (:speed model-map)}
            reasoning-level (assoc :reasoning reasoning-level)))))))
-
-
