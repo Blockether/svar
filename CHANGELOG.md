@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.61] - 2026-07-15
+
+### Changed
+- feat(reasoning): add provider-native effort routing
+- release: update version files for v0.7.60, bump to next dev version
+
+
 ### Added
 - feat(reasoning): preserve models.dev `reasoning_options` as normalized
   `:reasoning-options` and expose `resolve-reasoning-effort` for exact,
@@ -1569,7 +1576,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.60...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.61...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1669,3 +1676,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.58]: https://github.com/Blockether/svar/releases/tag/v0.7.58
 [v0.7.59]: https://github.com/Blockether/svar/releases/tag/v0.7.59
 [v0.7.60]: https://github.com/Blockether/svar/releases/tag/v0.7.60
+[v0.7.61]: https://github.com/Blockether/svar/releases/tag/v0.7.61
