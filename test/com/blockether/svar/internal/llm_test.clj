@@ -830,8 +830,13 @@
   (let [classify (var-get #'sut/empty-reply-anomaly-type)]
     (it "a CLEAN stop is a legit empty completion (nil = fall through, no throw)"
       (expect (nil? (classify "end_turn")))       ;; Anthropic
-      (expect (nil? (classify "stop")))           ;; OpenAI
-      (expect (nil? (classify "stop_sequence")))) ;; Anthropic stop sequence
+      (expect (nil? (classify "stop")))           ;; OpenAI chat
+      (expect (nil? (classify "stop_sequence")))  ;; Anthropic stop sequence
+      ;; OpenAI Responses terminal status ([:response :status] via
+      ;; stream-finish-reason). Pre-fix a reasoning-only Responses turn
+      ;; (gpt-5 via Codex) was misread as :empty-content -> retried into
+      ;; a bogus "Provider unavailable".
+      (expect (nil? (classify "completed"))))
     (it "a token cap is :max-tokens-exceeded for BOTH OpenAI (length) and Anthropic (max_tokens)"
       (expect (= :svar.llm/max-tokens-exceeded (classify "length")))
       (expect (= :svar.llm/max-tokens-exceeded (classify "max_tokens"))))

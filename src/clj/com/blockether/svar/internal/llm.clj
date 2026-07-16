@@ -5325,22 +5325,29 @@
    Returns the anomaly `:type` to throw, or `nil` when the blank reply is a
    LEGITIMATE empty completion that should fall through and return normally.
 
-   A clean stop (Anthropic `end_turn`/`stop_sequence`, OpenAI `stop`) with empty
-   text is NOT an error: extended thinking can return a turn whose only content
-   is a thinking block with empty text, and the Messages API treats `end_turn` as
-   \"done\". Mature agent loops (pi, Codex, opencode) treat a no-tool-call turn as
-   final, not an error.
+   A clean stop (Anthropic `end_turn`/`stop_sequence`, OpenAI chat `stop`,
+   OpenAI Responses `completed`) with empty text is NOT an error: extended
+   thinking / reasoning models can return a turn whose only output is a
+   reasoning item with no message text, and the API treats the turn as
+   \"done\". Mature agent loops (pi, Codex, opencode) treat a no-tool-call turn
+   as final, not an error.
      - `length` (OpenAI) / `max_tokens` (Anthropic) -> :max-tokens-exceeded
        (pre-fix only `length` matched, so an Anthropic cap was misread as a
         generic empty-content blip instead of a token-cap error)
-     - `stop` / `end_turn` / `stop_sequence`         -> nil (legit empty completion)
+     - `stop` / `end_turn` / `stop_sequence` / `completed` -> nil (legit empty
+       completion; `completed` is the Responses API terminal status surfaced
+       by `stream-finish-reason` via [:response :status] — pre-fix a
+       reasoning-only Responses turn (e.g. gpt-5 via Codex) was misread as
+       :empty-content and retried into a bogus \"Provider unavailable\";
+       a truncated Responses stream never reaches here, it throws
+       :svar.core/stream-incomplete earlier)
      - anything else (nil / mid-stream truncation)   -> :empty-content (retry)"
   [finish-reason]
   (let [fr (some-> finish-reason str)]
     (cond
-      (contains? #{"length" "max_tokens"} fr)             :svar.llm/max-tokens-exceeded
-      (contains? #{"stop" "end_turn" "stop_sequence"} fr) nil
-      :else                                               :svar.llm/empty-content)))
+      (contains? #{"length" "max_tokens"} fr)                         :svar.llm/max-tokens-exceeded
+      (contains? #{"stop" "end_turn" "stop_sequence" "completed"} fr) nil
+      :else                                                           :svar.llm/empty-content)))
 
 (defn ask-code!*
   "Low-level native-tool-calling completion — no routing. Prefer `ask-code!`
