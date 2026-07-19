@@ -4895,6 +4895,8 @@
       (some? cached) (assoc :cached cached)
       (some? cache-created) (assoc :cache-created cache-created))))
 
+(declare empty-reply-anomaly-type call-with-empty-reply-resend sum-api-usage)
+
 (defn ask!*
   "Low-level ask - calls the LLM directly without routing. Use ask! instead.
 
@@ -4928,6 +4930,10 @@
        #{:svar.spec/schema-rejected :svar.spec/required-field-missing}.
        Callers can opt in to retrying `:svar.llm/empty-content` (provider
        returned reasoning but no content) by including it in the set.
+     - :on-empty-reply-resend - Fn of 1 arg, optional. Observability hook
+       fired before each transparent empty-reply re-send with
+       {:model :provider-id :attempt :max-resends :delay-ms :error}.
+       Exceptions thrown by the hook are logged and swallowed.
      - :json-object-mode? - Boolean, optional. When true AND the selected
        provider uses `:openai-compatible-chat` api-style, auto-injects
        `response_format: {type: \"json_object\"}` into the request body.
@@ -5088,9 +5094,10 @@
         effective-retries (if streaming-on-chunk 0 format-retries)
         do-attempt
         (fn do-attempt [msgs attempt-n]
-          (let [[{:keys [content reasoning provider-state api-usage http-response]} attempt-duration-ms]
+          (let [[{:keys [content reasoning provider-state api-usage http-response stream-finalization]} attempt-duration-ms]
                 (util/with-elapsed
-                  (chat-completion msgs model api-key chat-url retry-opts))]
+                  (chat-completion msgs model api-key chat-url retry-opts))
+                stream-finalization (or stream-finalization (:stream-finalization http-response))]
             (trove/log! {:level :info
                          :data (log-data {:model model
                                           :duration-ms attempt-duration-ms
@@ -5106,32 +5113,41 @@
                                                               (subs content 0 (min 200 (count content))))
                                           :attempt          attempt-n})
                          :msg "HTTP response received"})
-            ;; Some providers (notably reasoning-capable models) return HTTP 200
-            ;; with a non-empty `reasoning_content` but an empty or nil `content`
-            ;; field - usually because the output budget was consumed by reasoning
-            ;; or the spec could not be satisfied for the given input. Letting this
-            ;; propagate into `jsonish/parse-json` leaks a parser-internal
-            ;; "Input cannot be nil or empty" IllegalArgumentException to callers.
-            ;; Instead surface a typed, prompt-quality error with the model's
-            ;; reasoning attached, so RLM loops can feed an actionable message back
-            ;; to the model and persist the reasoning for triage. Full envelope,
-            ;; never truncated.
+            ;; Structured output REQUIRES content, so ANY blank reply throws -
+            ;; but the finish reason (same classifier as `ask-code!*`) decides
+            ;; WHICH type and whether a transparent re-send can help:
+            ;;   - token cap         -> :svar.llm/max-tokens-exceeded (a
+            ;;     re-send cannot fix it; propagates immediately)
+            ;;   - clean stop        -> :svar.llm/empty-content marked NOT
+            ;;     resend-eligible: the model DELIBERATELY emitted nothing, a
+            ;;     prompt-quality problem for `:format-retry-on`, not a stall
+            ;;   - unknown/truncated -> :svar.llm/empty-content, resend-eligible
+            ;;     (emission stall on an accepted request; healed by
+            ;;     `call-with-empty-reply-resend` before callers ever see it)
             (when (str/blank? content)
-              (throw (ex-info
-                       (str "The model produced reasoning but no structured JSON output. "
-                         "This usually means the response budget was consumed by reasoning, "
-                         "the spec could not be satisfied for the given input, or the task "
-                         "is ambiguous. Retry by emitting a minimal valid JSON matching the "
-                         "iteration spec; if the task is ambiguous, clarify intent or shrink "
-                         "context.")
-                       (assoc (envelope-data
-                                {:model model :api-style api-style :chat-url chat-url
-                                 :duration-ms attempt-duration-ms :api-usage api-usage
-                                 :reasoning reasoning :content content
-                                 :provider-state provider-state
-                                 :http-response http-response :provider-id provider-id})
-                         :type :svar.llm/empty-content
-                         :attempt attempt-n))))
+              (let [anomaly-type (empty-reply-anomaly-type
+                                   (some-> stream-finalization :finish-reason str))
+                    throw-type   (or anomaly-type :svar.llm/empty-content)]
+                (throw (ex-info
+                         (if (= :svar.llm/max-tokens-exceeded throw-type)
+                           "Stream truncated at max_tokens before any structured output. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
+                           (str "The model produced reasoning but no structured JSON output. "
+                             "This usually means the response budget was consumed by reasoning, "
+                             "the spec could not be satisfied for the given input, or the task "
+                             "is ambiguous. Retry by emitting a minimal valid JSON matching the "
+                             "iteration spec; if the task is ambiguous, clarify intent or shrink "
+                             "context."))
+                         (cond-> (assoc (envelope-data
+                                          {:model model :api-style api-style :chat-url chat-url
+                                           :duration-ms attempt-duration-ms :api-usage api-usage
+                                           :reasoning reasoning :content content
+                                           :provider-state provider-state
+                                           :http-response http-response
+                                           :stream-finalization stream-finalization
+                                           :provider-id provider-id})
+                                   :type throw-type
+                                   :attempt attempt-n)
+                           (nil? anomaly-type) (assoc :empty-reply-resend-eligible? false))))))
             {:content        content
              :reasoning      reasoning
              :provider-state provider-state
@@ -5151,7 +5167,11 @@
       ;; step failed.
       (let [http-outcome
             (try
-              (assoc (do-attempt msgs attempt) :ok? true)
+              (-> (call-with-empty-reply-resend
+                    {:model model :provider-id provider-id
+                     :on-resend (:on-empty-reply-resend opts)}
+                    #(do-attempt msgs attempt))
+                (assoc :ok? true))
               (catch clojure.lang.ExceptionInfo e
                 (let [data (ex-data e)
                       ex-type (:type data)]
@@ -5212,7 +5232,17 @@
           ;; SUCCESS - parse worked; fire done callback, return.
           (:ok? outcome)
           (let [{:keys [result token-stats http-response]} outcome
+                {:keys [empty-reply-resends empty-reply-resend-usage]} http-outcome
                 rate-limit     (ratelimit/parse api-style (:headers http-response))
+                ;; Burned empty-reply re-sends are billed by the provider -
+                ;; cost is recomputed over the SUMMED usage so :cost stays
+                ;; honest, while :tokens stays last-attempt (context-accurate).
+                cost-stats     (if empty-reply-resend-usage
+                                 (router/count-and-estimate model msgs content
+                                   {:pricing pricing
+                                    :api-usage (sum-api-usage [api-usage empty-reply-resend-usage])
+                                    :api-style api-style})
+                                 token-stats)
                 final-result result
                 attempt-record {:attempt     attempt
                                 :ok?         true
@@ -5227,15 +5257,17 @@
                          :reasoning reasoning
                          :provider-state provider-state
                          :tokens (token-stats->tokens token-stats)
-                         :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+                         :cost (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
                          :done? true}))
             (cond-> {:result final-result
                      :tokens (token-stats->tokens token-stats)
-                     :cost (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+                     :cost (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
                      :duration-ms duration-ms}
               reasoning              (assoc :reasoning reasoning)
               rate-limit             (assoc :rate-limit rate-limit)
               provider-state         (assoc :provider-state provider-state)
+              empty-reply-resends      (assoc :empty-reply-resends empty-reply-resends)
+              empty-reply-resend-usage (assoc :empty-reply-resend-usage empty-reply-resend-usage)
               ;; Only surface :format-attempts when retries actually happened.
               ;; Empty / single-element vec is noise on the happy path.
               (> (count all-attempts) 1) (assoc :format-attempts all-attempts)))
@@ -5349,6 +5381,129 @@
       (contains? #{"stop" "end_turn" "stop_sequence" "completed"} fr) nil
       :else                                                           :svar.llm/empty-content)))
 
+(def ^:private EMPTY_REPLY_RESEND_LIMIT
+  "How many times a call that came back EMPTY (`:svar.llm/empty-content` — an
+   HTTP-200 stream carrying no text and no tool call) is transparently re-sent
+   to the SAME model before the typed error propagates to the caller. Empty
+   reply = model-side emission stall on an ACCEPTED request: nothing durable
+   was delivered, so re-sending the identical request is the safest retry
+   there is, and observed stalls clear with time — not with a different
+   request. Deliberately NOT a model or provider hop: routing stays exactly
+   where the caller pinned it."
+  3)
+
+(def ^:private EMPTY_REPLY_RESEND_BASE_DELAY_MS
+  "Base backoff for empty-reply re-sends; resend n sleeps `base * 2^(n-1)` ms
+   -> 2s / 4s / 8s."
+  2000)
+
+(defn- empty-reply-resend-delay-ms
+  "Backoff (ms) before re-send `attempt` (1-based): 2s, 4s, 8s."
+  [attempt]
+  (* EMPTY_REPLY_RESEND_BASE_DELAY_MS (bit-shift-left 1 (dec attempt))))
+
+(defn- sum-api-usage
+  "Key-wise sum of api-usage maps (nil entries skipped). Numeric values add;
+   non-numeric values keep the last non-nil one. Returns nil when every input
+   is nil so callers can `cond->` on the result without fabricating keys."
+  [usages]
+  (let [ms (remove nil? usages)]
+    (when (seq ms)
+      (apply merge-with
+        (fn [a b] (if (and (number? a) (number? b)) (+ a b) (or b a)))
+        ms))))
+
+(defn- empty-reply-resend-eligible?
+  "True when `e` is an empty-reply error the resend ladder may re-send: typed
+   `:svar.llm/empty-content` and not explicitly marked
+   `:empty-reply-resend-eligible? false` (a clean-stop blank reply in `ask!*`
+   sets that flag - a deliberate stop is a prompt-quality problem, not a
+   transport stall)."
+  [e]
+  (let [data (ex-data e)]
+    (and (= :svar.llm/empty-content (:type data))
+      (not (false? (:empty-reply-resend-eligible? data))))))
+
+(defn- annotate-empty-reply-ex
+  "Rebuilds an empty-reply exception with the resend bookkeeping merged into
+   ex-data: `:empty-reply-resends` (re-sends burned) and, when any attempts
+   were discarded, `:empty-reply-resend-usage` (their summed api-usage)."
+  [e resends burned-usage]
+  (ex-info (ex-message e)
+    (cond-> (assoc (ex-data e) :empty-reply-resends resends)
+      burned-usage (assoc :empty-reply-resend-usage burned-usage))
+    e))
+
+(defn- call-with-empty-reply-resend
+  "Runs `send!` (ONE full provider call), transparently re-sending the SAME
+   request to the SAME model when it throws a resend-eligible
+   `:svar.llm/empty-content` - up to `EMPTY_REPLY_RESEND_LIMIT` times with
+   exponential backoff (`empty-reply-resend-delay-ms`). Honors the caller's
+   `*cancel-fn*` between attempts and never swallows interrupts (an interrupt
+   during backoff re-interrupts and throws the pending empty-reply error,
+   annotated exactly like an exhaustion). Every other failure - including
+   `:svar.llm/max-tokens-exceeded`, which a re-send cannot fix, and clean-stop
+   empties marked `:empty-reply-resend-eligible? false` - propagates
+   immediately.
+
+   Accounting: each discarded attempt's `:api-usage` (billed by the provider)
+   is accumulated. A HEALED call returns `send!`'s value with
+   `:empty-reply-resends` + `:empty-reply-resend-usage` assoc'ed (absent on a
+   clean first try); an EXHAUSTED call throws with the same two keys in
+   ex-data.
+
+   `opts` may carry `:on-resend`, an observability hook fired before each
+   re-send with {:model :provider-id :attempt :max-resends :delay-ms :error};
+   hook exceptions are logged and swallowed."
+  [{:keys [model provider-id on-resend]} send!]
+  (let [cancel-fn  *cancel-fn*
+        cancelled? (fn [] (boolean (and cancel-fn (try (cancel-fn) (catch Throwable _ false)))))]
+    (loop [attempt 0
+           burned  []]
+      (let [burned-usage (sum-api-usage burned)
+            outcome (try
+                      {:ok? true :value (send!)}
+                      (catch clojure.lang.ExceptionInfo e
+                        (if (and (empty-reply-resend-eligible? e)
+                              (< attempt EMPTY_REPLY_RESEND_LIMIT)
+                              (not (cancelled?)))
+                          {:ok? false :error e}
+                          (throw (if (= :svar.llm/empty-content (:type (ex-data e)))
+                                   (annotate-empty-reply-ex e attempt burned-usage)
+                                   e)))))]
+        (if (:ok? outcome)
+          (let [value (:value outcome)]
+            (if (pos? attempt)
+              (cond-> (assoc value :empty-reply-resends attempt)
+                burned-usage (assoc :empty-reply-resend-usage burned-usage))
+              value))
+          (let [error        (:error outcome)
+                next-attempt (inc attempt)
+                delay-ms     (empty-reply-resend-delay-ms next-attempt)]
+            (trove/log! {:level :warn :id ::empty-reply-resend
+                         :data (log-data {:model model :provider-id provider-id
+                                          :attempt next-attempt
+                                          :max-resends EMPTY_REPLY_RESEND_LIMIT
+                                          :delay-ms delay-ms})
+                         :msg "empty reply (no text, no tool call) -> re-sending identical request to same model after backoff"})
+            (when on-resend
+              (try
+                (on-resend {:model model :provider-id provider-id
+                            :attempt next-attempt
+                            :max-resends EMPTY_REPLY_RESEND_LIMIT
+                            :delay-ms delay-ms
+                            :error error})
+                (catch Throwable t
+                  (trove/log! {:level :debug :id ::empty-reply-resend-hook-failed
+                               :data (log-data {:model model :error (ex-message t)})
+                               :msg "empty-reply :on-resend hook threw; ignored"}))))
+            (try
+              (Thread/sleep (long delay-ms))
+              (catch InterruptedException _
+                (.interrupt (Thread/currentThread))
+                (throw (annotate-empty-reply-ex error attempt burned-usage))))
+            (recur next-attempt (conj burned (:api-usage (ex-data error))))))))))
+
 (defn ask-code!*
   "Low-level native-tool-calling completion — no routing. Prefer `ask-code!`
    which routes + falls back into this.
@@ -5440,45 +5595,68 @@
                      (seq extra-body) (assoc :extra-body extra-body)
                      responses-path (assoc :responses-path responses-path)
                      llm-headers (assoc :llm-headers llm-headers))
-        [{:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
-                 stream-finalization]} duration-ms]
-        (util/with-elapsed
-          (chat-completion in-msgs model api-key chat-url retry-opts))
-        stream-finalization (or stream-finalization (:stream-finalization http-response))]
-    (trove/log! {:level :info
-                 :data (log-data {:model model :duration-ms duration-ms
-                                  :input-tokens (:input-tokens api-usage)
-                                  :output-tokens (:output-tokens api-usage)
-                                  :tool-call-count (count tool-calls)
-                                  :content-length (when content (count content))})
-                 :msg "chat! HTTP response received"})
-    ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
-    ;; blank content is normal and terminates as :tool-calls. A blank reply with a
-    ;; CLEAN stop reason is a legitimate empty completion (see
-    ;; `empty-reply-anomaly-type`) and falls through to return normally; only a
-    ;; token cap or a truncated/unknown finish reason is thrown.
-    (when (and (empty? tool-calls) (str/blank? content))
-      (when-let [anomaly-type (empty-reply-anomaly-type
-                                (some-> stream-finalization :finish-reason str))]
-        (let [base-envelope (envelope-data
-                              {:model model :api-style api-style :chat-url chat-url
-                               :duration-ms duration-ms :api-usage api-usage
-                               :reasoning reasoning :content content
-                               :provider-state provider-state
-                               :assistant-message assistant-message
-                               :http-response http-response
-                               :stream-finalization stream-finalization
-                               :provider-id provider-id})]
-          (throw (ex-info
-                   (if (= :svar.llm/max-tokens-exceeded anomaly-type)
-                     "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
-                     "The model produced neither text nor a tool call.")
-                   (assoc base-envelope :type anomaly-type))))))
+        send-once!
+        (fn []
+          (let [[{:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
+                         stream-finalization] :as response} duration-ms]
+                (util/with-elapsed
+                  (chat-completion in-msgs model api-key chat-url retry-opts))
+                stream-finalization (or stream-finalization (:stream-finalization http-response))]
+            (trove/log! {:level :info
+                         :data (log-data {:model model :duration-ms duration-ms
+                                          :input-tokens (:input-tokens api-usage)
+                                          :output-tokens (:output-tokens api-usage)
+                                          :tool-call-count (count tool-calls)
+                                          :content-length (when content (count content))})
+                         :msg "chat! HTTP response received"})
+            ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
+            ;; blank content is normal and terminates as :tool-calls. A blank reply with a
+            ;; CLEAN stop reason is a legitimate empty completion (see
+            ;; `empty-reply-anomaly-type`) and falls through to return normally; only a
+            ;; token cap or a truncated/unknown finish reason is thrown. The
+            ;; `:svar.llm/empty-content` throw is caught by
+            ;; `call-with-empty-reply-resend` below and re-sent bounded times before
+            ;; it ever reaches the caller.
+            (when (and (empty? tool-calls) (str/blank? content))
+              (when-let [anomaly-type (empty-reply-anomaly-type
+                                        (some-> stream-finalization :finish-reason str))]
+                (let [base-envelope (envelope-data
+                                      {:model model :api-style api-style :chat-url chat-url
+                                       :duration-ms duration-ms :api-usage api-usage
+                                       :reasoning reasoning :content content
+                                       :provider-state provider-state
+                                       :assistant-message assistant-message
+                                       :http-response http-response
+                                       :stream-finalization stream-finalization
+                                       :provider-id provider-id})]
+                  (throw (ex-info
+                           (if (= :svar.llm/max-tokens-exceeded anomaly-type)
+                             "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
+                             "The model produced neither text nor a tool call.")
+                           (assoc base-envelope :type anomaly-type))))))
+            (assoc response
+              :duration-ms duration-ms
+              :stream-finalization stream-finalization)))
+        {:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
+                stream-finalization duration-ms empty-reply-resends empty-reply-resend-usage]}
+        (call-with-empty-reply-resend
+          {:model model :provider-id provider-id
+           :on-resend (:on-empty-reply-resend opts)}
+          send-once!)]
     (let [tool-calls        (vec (or tool-calls []))
           token-stats   (router/count-and-estimate model in-msgs (or content "")
                           {:pricing pricing :api-usage api-usage :api-style api-style})
+          ;; Burned empty-reply re-sends are billed by the provider - cost is
+          ;; recomputed over the SUMMED usage so :cost stays honest, while
+          ;; :tokens / :api-usage stay last-attempt (context-accurate).
+          cost-stats    (if empty-reply-resend-usage
+                          (router/count-and-estimate model in-msgs (or content "")
+                            {:pricing pricing
+                             :api-usage (sum-api-usage [api-usage empty-reply-resend-usage])
+                             :api-style api-style})
+                          token-stats)
           tokens        (token-stats->tokens token-stats)
-          cost          (select-keys (:cost token-stats) [:input-cost :output-cost :total-cost])
+          cost          (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
           stop-reason   (if (seq tool-calls) :tool-calls :end)
           rate-limit    (ratelimit/parse api-style (:headers http-response))]
       (when on-chunk
@@ -5497,7 +5675,9 @@
         api-usage           (assoc :api-usage api-usage)
         http-response       (assoc :http-response http-response)
         rate-limit          (assoc :rate-limit rate-limit)
-        stream-finalization (assoc :stream-finalization stream-finalization)))))
+        stream-finalization (assoc :stream-finalization stream-finalization)
+        empty-reply-resends      (assoc :empty-reply-resends empty-reply-resends)
+        empty-reply-resend-usage (assoc :empty-reply-resend-usage empty-reply-resend-usage)))))
 
 (defn ask-code!
   "Native tool-calling completion. Routed sibling of `ask!` (which is for
@@ -5537,7 +5717,15 @@
     :http-response {:status :streaming? :stream-finalization ...}}
 
    Throws ex-info on transport-level failure, and `:svar.llm/empty-content`
-   when the provider returns neither text nor a tool call."
+   when the provider returns neither text nor a tool call. An empty reply is
+   first transparently re-sent to the SAME model a bounded number of times
+   with exponential backoff (2s/4s/8s) before it propagates; the terminal
+   ex-data then carries `:empty-reply-resends` with the re-send count and
+   `:empty-reply-resend-usage` with the summed api-usage of the discarded
+   attempts. A HEALED call surfaces the same two keys on the result map, and
+   its `:cost` includes the usage billed for the discarded attempts. Pass
+   `:on-empty-reply-resend` (fn of 1 arg) to observe each re-send live:
+   {:model :provider-id :attempt :max-resends :delay-ms :error}."
   [router opts]
   ;; Bind the caller's cancellation hook for the whole routed call so every
   ;; provider-fallback attempt (and its backoff sleeps) honours it. See

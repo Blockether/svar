@@ -179,7 +179,13 @@
   (describe ":svar.llm/empty-content with default :format-retry-on"
     (it "does not retry empty-content by default"
       (let [calls (atom [])
-            responses [{:content nil}
+            responses [{:content nil
+                        ;; CLEAN stop: format-layer territory. A missing finish
+                        ;; reason would classify as a transient stall and be
+                        ;; healed by the transport-level resend ladder before
+                        ;; format-retry logic ever saw it.
+                        :http-response {:status 200
+                                        :stream-finalization {:finish-reason "stop"}}}
                        {:content "{\"answer\":\"ok\"}"}]]
         (with-redefs [llm/chat-completion (mock-chat-completion responses calls)]
           (let [thrown (try (svar/ask! (test-router)
@@ -195,7 +201,11 @@
   (describe ":svar.llm/empty-content with :format-retry-on extended"
     (it "retries empty-content when caller opts in"
       (let [calls (atom [])
-            responses [{:content nil :reasoning "thinking..."}
+            responses [{:content nil :reasoning "thinking..."
+                        ;; CLEAN stop — see above: keeps this a format-retry
+                        ;; case, not a transport resend.
+                        :http-response {:status 200
+                                        :stream-finalization {:finish-reason "stop"}}}
                        {:content "{\"answer\":\"opted-in\"}"}]]
         (with-redefs [llm/chat-completion (mock-chat-completion responses calls)]
           (let [result (svar/ask! (test-router)
