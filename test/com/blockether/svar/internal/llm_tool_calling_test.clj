@@ -2,6 +2,7 @@
   "Native tool calling: per-wire tool/tool-choice shaping, request-body
    injection, response tool_use extraction, and the anthropic round-trip."
   (:require
+   [charred.api :as json]
    [lazytest.core :refer [defdescribe describe expect it]]
    [com.blockether.svar.internal.llm :as sut]))
 
@@ -105,6 +106,54 @@
         (expect (= "run_python" (:name (first (:tools body)))))
         (expect (= "auto" (:tool_choice body)))
         (expect (not (contains? body :svar/tools)))))))
+
+(defdescribe large-tool-argument-fidelity-test
+  (it "preserves large arguments byte-for-byte on every provider wire"
+    (let [payload (apply str (take 20000 (cycle ["x" "\"" "\n" "\\" "λ"])))
+          msgs [{:role "user" :content "write it"}
+                {:role "assistant"
+                 :content [{:type "tool_use"
+                            :id "call_big"
+                            :name "write"
+                            :input {"path" "generated.txt" "content" payload}}]}
+                {:role "user"
+                 :content [{:type "tool_result"
+                            :tool_use_id "call_big"
+                            :content "ok"}]}]
+          anthropic (build-anthropic msgs "claude" {})
+          chat (build-chat msgs "gpt" {})
+          responses (build-responses msgs "gpt" {})
+          gemini (build-gemini msgs "gemini" {})
+          anthropic-input (->> (:messages anthropic)
+                            (filter #(= "assistant" (:role %)))
+                            first
+                            :content
+                            (filter #(= "tool_use" (:type %)))
+                            first
+                            :input)
+          chat-args (->> (:messages chat)
+                      (filter #(= "assistant" (:role %)))
+                      first
+                      :tool_calls
+                      first
+                      :function
+                      :arguments)
+          responses-args (->> (:input responses)
+                           (filter #(= "function_call" (:type %)))
+                           first
+                           :arguments)
+          gemini-args (->> (:contents gemini)
+                        (filter #(= "model" (:role %)))
+                        first
+                        :parts
+                        (filter :functionCall)
+                        first
+                        :functionCall
+                        :args)]
+      (expect (= payload (get anthropic-input "content")))
+      (expect (= payload (get (json/read-json chat-args :key-fn identity) "content")))
+      (expect (= payload (get (json/read-json responses-args :key-fn identity) "content")))
+      (expect (= payload (get gemini-args "content"))))))
 
 (defdescribe anthropic-tool-call-extraction-test
   (it "extracts tool_use blocks as canonical :tool-calls and keeps them on assistant-message"
@@ -397,4 +446,3 @@
       (expect (some #(= "tool_use" (:type %)) (:content asst)))
       (expect (= "toolu_1" (:tool_use_id (first (:content usr)))))
       (expect (= "tool_result" (:type (first (:content usr))))))))
-
