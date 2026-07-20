@@ -17,6 +17,7 @@
 (def ^:private assemble-chat-frags @#'sut/assemble-chat-tool-call-fragments)
 (def ^:private openai-responses-state @#'sut/openai-responses-state)
 (def ^:private merge-provider-state @#'sut/merge-provider-state)
+(def ^:private enrich-tool-schema-rejection @#'sut/enrich-tool-schema-rejection)
 (def ^:private fn-item->tool-call @#'sut/function-call-item->tool-call)
 (def ^:private extract-stream-delta @#'sut/extract-stream-delta)
 (def ^:private make-anthropic-stream-delta-fn @#'sut/make-anthropic-stream-delta-fn)
@@ -154,6 +155,20 @@
       (expect (= payload (get (json/read-json chat-args :key-fn identity) "content")))
       (expect (= payload (get (json/read-json responses-args :key-fn identity) "content")))
       (expect (= payload (get gemini-args "content"))))))
+
+(defdescribe tool-schema-rejection-context-test
+  (it "resolves a provider tool-array index to the exact canonical name"
+    (let [body "{\"error\":{\"message\":\"tools.1.custom.input_schema: unsupported root\"}}"
+          cause (ex-info "Provider unavailable" {:status 400 :body body})
+          enriched (enrich-tool-schema-rejection cause
+                     [{:name "python_execution"} {:name "patch"}])]
+      (expect (= 1 (:tool-index (ex-data enriched))))
+      (expect (= "patch" (:tool-name (ex-data enriched))))
+      (expect (= "input_schema" (:tool-schema-field (ex-data enriched))))
+      (expect (= "tools.1.custom.input_schema" (:tool-schema-path (ex-data enriched))))))
+  (it "leaves an out-of-range provider index untouched"
+    (let [cause (ex-info "bad tools.9.function.parameters" {:status 400})]
+      (expect (identical? cause (enrich-tool-schema-rejection cause [{:name "patch"}]))))))
 
 (defdescribe anthropic-tool-call-extraction-test
   (it "extracts tool_use blocks as canonical :tool-calls and keeps them on assistant-message"

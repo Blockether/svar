@@ -1195,6 +1195,28 @@
 (defn- tools->wire [api-style tools]
   (mapv #(tool-def->wire api-style %) tools))
 
+(def ^:private tool-schema-path-pattern
+  #"(?i)(tools\.(\d+)(?:\.(?:custom|function))?\.(input_schema|parameters))")
+
+(defn- enrich-tool-schema-rejection
+  "Attach the canonical tool name to a provider schema error that only names
+   the request-array index, e.g. `tools.11.custom.input_schema`."
+  [^Exception e tools]
+  (let [text (str (or (:body (ex-data e)) "") "\n" (or (ex-message e) ""))]
+    (if-let [[_ path index-str field] (re-find tool-schema-path-pattern text)]
+      (let [index (parse-long index-str)
+            tool (when index (nth (vec tools) index nil))]
+        (if tool
+          (ex-info (ex-message e)
+            (assoc (ex-data e)
+              :tool-index index
+              :tool-name (str (:name tool))
+              :tool-schema-field (str/lower-case field)
+              :tool-schema-path path)
+            e)
+          e))
+      e)))
+
 (defn- tool-choice->wire
   "Shape a canonical tool-choice for `api-style`.
    Canonical: :auto | :required | :none | {:name \"x\"} | \"x\" (force a tool)."
@@ -5735,11 +5757,14 @@
   ;; provider-fallback attempt (and its backoff sleeps) honours it. See
   ;; `*cancel-fn*`. `or` preserves an outer binding when opts omits it.
   (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
-    (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
-      (router/with-provider-fallback
-        router (:prefs resolved)
-        (fn [provider model-map]
-          (ask-code!* router (inject-routed-params opts provider model-map)))))))
+    (try
+      (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+        (router/with-provider-fallback
+          router (:prefs resolved)
+          (fn [provider model-map]
+            (ask-code!* router (inject-routed-params opts provider model-map)))))
+      (catch Exception e
+        (throw (enrich-tool-schema-rejection e (:tools opts)))))))
 
 ;; =============================================================================
 ;; models! - Fetch available models
