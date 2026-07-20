@@ -1124,6 +1124,17 @@
 ;; Provider normalization
 ;; =============================================================================
 
+(defn- add-catalog-vision
+  "Ensure the `:vision` capability whenever the models.dev catalog reports
+   image input for a model. Catalog modalities are authoritative: a model that
+   accepts image input supports vision even when the static metadata heuristic
+   (KNOWN_MODEL_METADATA / regex) does not flag it — notably GitHub Copilot's
+   Claude / GPT / Gemini tiers, which proxy upstream vision-capable models."
+  [model]
+  (cond-> model
+    (contains? (set (get-in model [:modalities :input])) :image)
+    (update :capabilities (fnil conj #{:chat}) :vision)))
+
 (defn normalize-provider
   "Normalizes a provider entry:
     - resolves :base-url from KNOWN_PROVIDERS if not provided
@@ -1146,8 +1157,9 @@
                  (keep (fn [m]
                          (when-let [normalized (normalize-model m)]
                            (when-not (contains? exclude-models (:name normalized))
-                             (merge normalized
-                               (provider-model-entry id (:name normalized)))))))
+                             (add-catalog-vision
+                               (merge normalized
+                                 (provider-model-entry id (:name normalized))))))))
                  (reduce conj-model-once []))
         root-name (:name (first models))]
     (when-not id
