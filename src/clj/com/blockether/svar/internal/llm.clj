@@ -5381,7 +5381,7 @@
       (contains? #{"stop" "end_turn" "stop_sequence" "completed"} fr) nil
       :else                                                           :svar.llm/empty-content)))
 
-(def ^:private EMPTY_REPLY_RESEND_LIMIT
+(def ^:private ^:const EMPTY_REPLY_RESEND_LIMIT
   "How many times a call that came back EMPTY (`:svar.llm/empty-content` — an
    HTTP-200 stream carrying no text and no tool call) is transparently re-sent
    to the SAME model before the typed error propagates to the caller. Empty
@@ -5392,14 +5392,14 @@
    where the caller pinned it."
   3)
 
-(def ^:private EMPTY_REPLY_RESEND_BASE_DELAY_MS
+(def ^:private ^:const EMPTY_REPLY_RESEND_BASE_DELAY_MS
   "Base backoff for empty-reply re-sends; resend n sleeps `base * 2^(n-1)` ms
    -> 2s / 4s / 8s."
   2000)
 
 (defn- empty-reply-resend-delay-ms
   "Backoff (ms) before re-send `attempt` (1-based): 2s, 4s, 8s."
-  [attempt]
+  ^long [^long attempt]
   (* EMPTY_REPLY_RESEND_BASE_DELAY_MS (bit-shift-left 1 (dec attempt))))
 
 (defn- sum-api-usage
@@ -5410,7 +5410,11 @@
   (let [ms (remove nil? usages)]
     (when (seq ms)
       (apply merge-with
-        (fn [a b] (if (and (number? a) (number? b)) (+ a b) (or b a)))
+        (fn [a b]
+          (if (and (number? a) (number? b))
+            (let [add +]
+              (add a b))
+            (or b a)))
         ms))))
 
 (defn- empty-reply-resend-eligible?
