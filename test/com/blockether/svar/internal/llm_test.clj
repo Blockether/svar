@@ -823,6 +823,45 @@
     (it "OpenAI chat shape still wins its own field"
       (expect (= "stop" (finish {:choices [{:finish_reason "stop"}]}))))))
 
+(defdescribe stream-semantic-event-test
+  "Status-only Responses events prove transport liveness, not model progress.
+   They must not postpone the semantic watchdog indefinitely."
+  (let [semantic? (var-get #'sut/stream-semantic-event?)
+        extract (var-get #'sut/extract-stream-delta)
+        classify (fn [event]
+                   (let [{:keys [content-delta reasoning-delta] :as extracted} (extract event)]
+                     (semantic? event extracted content-delta reasoning-delta)))]
+    (it "ignores transport and nonterminal lifecycle events"
+      (expect
+        (= {"ping" false
+            "heartbeat" false
+            "response.created" false
+            "response.in_progress" false
+            "response.queued" false
+            "provider.status" false}
+          (into {}
+            (map (fn [event] [(:type event) (classify event)]))
+            [{:type "ping"}
+             {:type "heartbeat"}
+             {:type "response.created" :response {:status "in_progress"}}
+             {:type "response.in_progress" :response {:status "in_progress"}}
+             {:type "response.queued" :response {:status "queued"}}
+             {:type "provider.status" :status "running"}]))))
+    (it "still recognizes model output and terminal progress"
+      (expect
+        (= {"response.output_text.delta" true
+            "response.reasoning_summary_text.delta" true
+            "response.output_item.added" true
+            "response.completed" true
+            "message_start" true}
+          (into {}
+            (map (fn [event] [(:type event) (classify event)]))
+            [{:type "response.output_text.delta" :delta "x"}
+             {:type "response.reasoning_summary_text.delta" :delta "plan"}
+             {:type "response.output_item.added" :item {:type "reasoning" :summary []}}
+             {:type "response.completed" :response {:status "completed"}}
+             {:type "message_start"}]))))))
+
 (defdescribe empty-reply-anomaly-type-test
   "A blank reply (no tool call, no text) is only an ERROR when the finish reason
    says so. A clean stop is a legitimate empty completion (thinking-only turn),

@@ -2881,6 +2881,9 @@
   #{:svar.core/stream-incomplete
     :svar.core/stream-truncated
     :svar.core/stream-semantic-timeout
+    ;; Provider-reported `response.failed` / SSE `error` — already typed with
+    ;; the provider's code+message; must not be rewrapped as a connection blip.
+    :svar.core/stream-failed
     ;; Caller cancellation must propagate verbatim (not be reclassified as
     ;; a connection error or retried) — it's a clean terminal outcome.
     :svar.core/stream-cancelled})
@@ -3139,25 +3142,65 @@
     (get-in chunk [:response :status])
     (:status chunk)))
 
+(def ^:private nonterminal-stream-statuses
+  #{"in_progress" "queued" "running"})
+
+(def ^:private transport-only-stream-event-types
+  #{"heartbeat" "keepalive" "ping"
+    "response.created" "response.in_progress" "response.queued"})
+
 (defn- stream-semantic-event?
   "True when parsed stream event means model/progress, not transport keepalive."
   [parsed extracted content-piece reasoning-piece]
   (let [event-type (stream-event-type parsed)
-        finish-reason (stream-finish-reason parsed)]
+        finish-reason (stream-finish-reason parsed)
+        terminal-finish? (and finish-reason
+                           (not (contains? nonterminal-stream-statuses finish-reason)))]
     (boolean
-      (or content-piece
-        reasoning-piece
-        finish-reason
-        (:provider-state extracted)
-        (:api-usage extracted)
-        (:terminal? extracted)
-        (:incomplete? extracted)
-        (and event-type
-          (not (contains? #{"ping" "heartbeat" "keepalive"} event-type))
-          (or (str/starts-with? event-type "response.")
-            (str/includes? event-type ".delta")
-            (str/includes? event-type ".done")
-            (str/includes? event-type "message")))))))
+      (and
+        (not (contains? transport-only-stream-event-types event-type))
+        (or content-piece
+          reasoning-piece
+          terminal-finish?
+          (:provider-state extracted)
+          (:api-usage extracted)
+          (:terminal? extracted)
+          (:incomplete? extracted)
+          (and event-type
+            (or (str/starts-with? event-type "response.")
+              (str/includes? event-type ".delta")
+              (str/includes? event-type ".done")
+              (str/includes? event-type "message"))))))))
+
+(defn- stream-failed-error
+  "Provider-failure payload carried by an OpenAI Responses `response.failed`
+   (or bare SSE `error`) event, else nil. The OpenAI Codex CLI parses this SAME
+   event into a typed, rate-limit-aware error; pre-fix svar dropped it in the
+   `:else` extractor branch, the stream ended \"cleanly\" with no output, and
+   the turn was misread as an EMPTY REPLY — blind same-model resends hiding
+   the provider's actual error (rate limit, upstream failure)."
+  [parsed]
+  (let [event-type (stream-event-type parsed)
+        failed?    (or (= "response.failed" event-type)
+                     (= "error" event-type)
+                     (= "failed" (get-in parsed [:response :status])))]
+    (when failed?
+      (let [err (or (get-in parsed [:response :error])
+                  (:error parsed)
+                  (when (= "error" event-type) parsed))]
+        {:code (some-> (:code err) str)
+         :message (or (:message err) "provider reported stream failure")
+         :event-type event-type}))))
+
+(def ^:private stream-failed-code->status
+  "Best-effort HTTP-status equivalent for a `response.failed` error code, so
+   the router's transient-status classification (429/5xx) applies to streamed
+   failures exactly as it does to pre-stream HTTP errors."
+  {"rate_limit_exceeded" 429
+   "server_error"        500
+   "internal_error"      500
+   "overloaded"          529
+   "overloaded_error"    529})
 
 (defn- stream-finalization-summary
   [{:keys [terminal incomplete last-event-type last-finish-reason
@@ -3321,11 +3364,20 @@
     "response.output_item.added"
     (let [item (:item event)]
       (when (= "reasoning" (:type item))
-        (reset! current-reasoning-item item))
+        ;; Carry the cross-ITEM summary boundary: when a PRIOR reasoning item
+        ;; already produced summary text, the FIRST summary part of this new
+        ;; item still needs its "\n\n" separator - without it two items' bold
+        ;; headlines glue together as `...**` + `**...` (the `****` artifact).
+        (reset! current-reasoning-item
+          (cond-> item
+            (or (:svar/prior-summary? @current-reasoning-item)
+              (seq (:summary @current-reasoning-item)))
+            (assoc :svar/prior-summary? true))))
       event)
 
     "response.reasoning_summary_part.added"
-    (let [boundary? (seq (:summary @current-reasoning-item))]
+    (let [boundary? (or (seq (:summary @current-reasoning-item))
+                      (:svar/prior-summary? @current-reasoning-item))]
       (swap! current-reasoning-item update :summary (fnil conj []) (:part event))
       (cond-> event
         boundary? (assoc :svar/reasoning-summary-part-boundary? true)))
@@ -3343,8 +3395,11 @@
     "response.output_item.done"
     (let [item (:item event)]
       (if (= "reasoning" (:type item))
-        (let [merged (merge @current-reasoning-item item)]
-          (reset! current-reasoning-item nil)
+        (let [merged (merge (dissoc @current-reasoning-item :svar/prior-summary?) item)]
+          ;; Keep ONLY the boundary flag alive across the item gap so the next
+          ;; reasoning item's first summary part still gets its separator.
+          (reset! current-reasoning-item
+            (when (seq (:summary merged)) {:svar/prior-summary? true}))
           (assoc event :item merged))
         event))
 
@@ -3711,6 +3766,7 @@
         last-event-type (atom nil)
         last-finish-reason (atom nil)
         incomplete-response (atom nil)
+        failed-response (atom nil)
         last-byte-ns (atom (System/nanoTime))
         last-semantic-ns (atom (System/nanoTime))
         idle-fired? (atom false)
@@ -3774,7 +3830,7 @@
                       (when-let [finish-reason (stream-finish-reason parsed)]
                         (reset! last-finish-reason finish-reason)
                         (when (and (not @terminal-event)
-                                (not (contains? #{"in_progress" "queued" "running"} finish-reason)))
+                                (not (contains? nonterminal-stream-statuses finish-reason)))
                           (reset! terminal-event {:kind :finish-reason
                                                   :event-type (stream-event-type parsed)})))
                       (when terminal?
@@ -3782,6 +3838,8 @@
                                                 :event-type (stream-event-type parsed)}))
                       (when incomplete?
                         (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
+                      (when-let [err (stream-failed-error parsed)]
+                        (reset! failed-response err))
                       (when (stream-semantic-event? parsed extracted content-piece reasoning-piece)
                         (reset! last-semantic-ns (System/nanoTime)))
                       (when content-piece (.append content-acc content-piece))
@@ -3897,6 +3955,37 @@
                     :reasoning-acc-len (.length reasoning-acc)
                     :partial-content (when (pos? (.length content-acc)) (str content-acc))
                     :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
+      ;; A provider-reported failure event (`response.failed` / SSE `error`)
+      ;; is the REAL outcome of this call - surface it as a typed error
+      ;; instead of letting the empty stream be misread as an EMPTY REPLY
+      ;; (pre-fix: the `failed` status set terminal-event, the stream ended
+      ;; "cleanly" with no output, and the empty-reply ladder blindly re-sent
+      ;; the SAME request 3x into the SAME failure while hiding the provider's
+      ;; actual error). Mirrors the OpenAI Codex CLI, which parses this event
+      ;; into a typed rate-limit-aware error. Checked BEFORE `incomplete`:
+      ;; failed is strictly more specific.
+      (when-let [{:keys [code message]} @failed-response]
+        (let [stream-finalization (stream-finalization-summary
+                                    {:terminal @terminal-event
+                                     :incomplete @incomplete-response
+                                     :last-event-type @last-event-type
+                                     :last-finish-reason @last-finish-reason
+                                     :content-acc content-acc
+                                     :reasoning-acc reasoning-acc
+                                     :response response})
+              status (get stream-failed-code->status code)]
+          (throw (ex-info (str "Provider stream failed"
+                            (when code (str " (" code ")"))
+                            ": " message)
+                   (cond-> {:type :svar.core/stream-failed
+                            :stream? true
+                            :url url
+                            :provider-error-code code
+                            :provider-message message
+                            :stream-finalization stream-finalization
+                            :content-acc-len (.length content-acc)
+                            :reasoning-acc-len (.length reasoning-acc)}
+                     status (assoc :status status))))))
       (when-let [incomplete @incomplete-response]
         ;; A Responses stream that ends `incomplete` (reason max_output_tokens /
         ;; content_filter / — on some proxies, notably GitHub Copilot — NULL) is
