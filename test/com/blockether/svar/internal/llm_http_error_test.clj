@@ -379,7 +379,61 @@
                        (java.net.BindException. "Can't assign requested address"))))
             {:max-retries 5 :initial-delay-ms 0})
           (catch clojure.lang.ExceptionInfo _ nil))
-        (expect (= 1 @calls))))))
+        (expect (= 1 @calls))))
+
+    ;; ── mid-stream 529 / overloaded classifiers honor the same guard ──
+    ;; The Codex/ChatGPT backend drops mid-stream with response.failed
+    ;; server_is_overloaded → HTTP 529 (retryable). Once reasoning/content has
+    ;; already streamed to the TUI, a blind same-provider retry replays the
+    ;; visible trace ("restream/jumping"), so `retryable-status?` and
+    ;; `retryable-message?` are gated on `(not (stream-output-started? e))` too.
+    (it "does NOT retry a retryable 529 status once stream output started"
+      (let [calls (atom 0)]
+        (try
+          (with-retry
+            (fn []
+              (swap! calls inc)
+              (throw (ex-info "Exceptional status code: 529"
+                       {:type :svar.core/http-error
+                        :status 529
+                        :stream? true
+                        :content-acc-len 128
+                        :partial-content "already streamed"})))
+            {:max-retries 5 :initial-delay-ms 0})
+          (catch clojure.lang.ExceptionInfo _ nil))
+        (expect (= 1 @calls))))
+
+    (it "does NOT retry a transient overloaded message once stream output started"
+      (let [calls (atom 0)]
+        (try
+          (with-retry
+            (fn []
+              (swap! calls inc)
+              (throw (ex-info "server_is_overloaded"
+                       {:type :svar.core/http-error
+                        :stream? true
+                        :reasoning-acc-len 64
+                        :reasoning "thinking..."})))
+            {:max-retries 5 :initial-delay-ms 0})
+          (catch clojure.lang.ExceptionInfo _ nil))
+        (expect (= 1 @calls))))
+
+    ;; Sanity: the SAME classifiers still retry when nothing has streamed yet.
+    (it "still retries a retryable 529 status before any output started"
+      (let [calls (atom 0)
+            result (with-retry
+                     (fn []
+                       (if (= 1 (swap! calls inc))
+                         (throw (ex-info "Exceptional status code: 529"
+                                  {:type :svar.core/http-error
+                                   :status 529
+                                   :stream? true
+                                   :content-acc-len 0
+                                   :reasoning-acc-len 0}))
+                         :ok))
+                     {:max-retries 5 :initial-delay-ms 0})]
+        (expect (= :ok result))
+        (expect (= 2 @calls))))))
 
 ;;; ── connect-phase failure: human-readable message ──────────────────────
 
