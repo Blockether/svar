@@ -307,7 +307,10 @@
                 [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
                  {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
                 {:clock clock
-                 :failure-threshold 1})   ;; open CB on first failure
+                 :failure-threshold 1   ;; open CB on first failure
+                 ;; [] schedule → transient falls over now; same-provider retry
+                 ;; timing proven by the dedicated non-429 retry test below
+                 :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
             calls (atom 0)
             result (router/with-provider-fallback r {}
                      (fn [provider _model]
@@ -332,7 +335,8 @@
               [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
                {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
               {:clock clock
-               :failure-threshold 1})
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
           calls (atom [])
           result (router/with-provider-fallback r {}
                    (fn [provider _model]
@@ -578,7 +582,8 @@
           r (llm/make-router
               [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
                {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
-              {:clock clock})]
+              {:clock clock
+               :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})]
       (try
         (router/with-provider-fallback r {}
           (fn [_ _] (transient-error 503)))
@@ -604,7 +609,8 @@
     (let [[clock _] (mock-clock)
           r (llm/make-router
               [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
-              {:clock clock})]
+              {:clock clock
+               :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})]
       (try
         (router/with-provider-fallback r {}
           (fn [_ _] (transient-error 503)))
@@ -618,6 +624,125 @@
           (let [attempts (:attempts (ex-data e))]
             (expect (= 1 (count attempts)))
             (expect (= :solo (:provider (first attempts))))))))))
+
+(defdescribe with-provider-fallback-non-429-transient-same-provider-retry-test
+  "Regression (Vis burst 'Provider unavailable'): 529 (Anthropic / OpenAI
+   'Overloaded') and other 5xx transients now run the SAME same-provider backoff
+   schedule as 429. Pre-fix only 429 retried, so a burst killed a tab on the
+   first 529/503 with zero retries. Here P1 retries per schedule, then falls over."
+  (doseq [status [529 503 500 502 504]]
+    (it (str "status " status " retries same provider then falls over to P2")
+      (let [[clock _] (mock-clock)
+            r (llm/make-router
+                [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                 {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                {:clock clock
+                 :failure-threshold 1
+                 :rate-limit {:same-provider-delays-ms [0 0]  ;; 0ms → retry, no real sleep
+                              :fallback-after-ms 60000
+                              :respect-retry-after? true
+                              :fallback-provider? true}})
+            calls (atom [])
+            result (router/with-provider-fallback r {}
+                     (fn [provider _model]
+                       (swap! calls conj (:id provider))
+                       (case (:id provider)
+                         :p1 (transient-error status)
+                         :p2 (success-result 100))))]
+        ;; P1 exercised 3× (initial + 2 scheduled retries) BEFORE fallover.
+        (expect (= [:p1 :p1 :p1 :p2] @calls))
+        (expect (= :p2 (:routed/provider-id result)))
+        (let [trace (:routed/trace result)]
+          (expect (= [:llm.routing/provider-retry
+                      :llm.routing/provider-retry
+                      :llm.routing/provider-fallback]
+                    (mapv :event/type trace)))
+          ;; A 5xx/529 is transient, NOT a rate limit — label stays :transient-error.
+          (expect (= status (:status (last trace)))))))))
+
+(defdescribe with-provider-fallback-single-provider-transient-retries-test
+  "The core Vis symptom: a SINGLE (pinned / only) provider hitting a transient
+   burst must retry the same provider per schedule before giving up — not die on
+   the first 529/503. Pre-fix only 429 retried; every other transient threw
+   :provider-unavailable with ZERO retries."
+  (doseq [status [529 503]]
+    (it (str "single provider retries on " status " then throws :provider-unavailable")
+      (let [[clock _] (mock-clock)
+            r (llm/make-router
+                [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
+                {:clock clock
+                 :rate-limit {:same-provider-delays-ms [0 0 0]  ;; 3 retries, no real sleep
+                              :fallback-after-ms 60000
+                              :respect-retry-after? true
+                              :fallback-provider? true}})
+            calls (atom 0)]
+        (try
+          (router/with-provider-fallback r {}
+            (fn [_ _] (swap! calls inc) (transient-error status)))
+          (expect false "should have thrown")
+          (catch clojure.lang.ExceptionInfo e
+            ;; initial attempt + 3 same-provider retries = 4 invocations.
+            (expect (= 4 @calls))
+            (expect (= :svar.llm/provider-unavailable (:type (ex-data e))))
+            (expect (= status (:status (ex-data e))))))))))
+
+(defdescribe with-provider-fallback-524-cloudflare-retried-test
+  "pi parity: Cloudflare 524 (origin connection timeout) is a transient upstream
+   failure, so it must run the same-provider backoff schedule like any other 5xx.
+   Pre-fix 524 was absent from :transient-status-codes, so a single-provider tab
+   threw :provider-unavailable on the first 524 with zero retries."
+  (it "single provider retries on 524 then throws :provider-unavailable"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
+              {:clock clock
+               :rate-limit {:same-provider-delays-ms [0 0 0]
+                            :fallback-after-ms 60000
+                            :respect-retry-after? true
+                            :fallback-provider? true}})
+          calls (atom 0)]
+      (try
+        (router/with-provider-fallback r {}
+          (fn [_ _] (swap! calls inc) (transient-error 524)))
+        (expect false "should have thrown")
+        (catch clojure.lang.ExceptionInfo e
+          ;; initial attempt + 3 same-provider retries = 4 invocations.
+          (expect (= 4 @calls))
+          (expect (= :svar.llm/provider-unavailable (:type (ex-data e))))
+          (expect (= 524 (:status (ex-data e)))))))))
+
+(defdescribe with-provider-fallback-quota-billing-429-not-retried-test
+  "pi parity (NON_RETRYABLE_PROVIDER_LIMIT_ERROR): a 429 whose body names
+   subscription/quota/billing EXHAUSTION (insufficient_quota, quota exceeded,
+   monthly usage limit, billing) is a hard account state, NOT a transient
+   throttle. It must NOT run the same-provider retry schedule — the original
+   error surfaces immediately after a single attempt, so a burst-retry loop
+   can't hammer an already-exhausted account."
+  (doseq [body ["insufficient_quota" "quota exceeded" "monthly usage limit reached"
+                "billing hard limit reached"]]
+    (it (str "429 body '" body "' surfaces immediately with ZERO retries")
+      (let [[clock _] (mock-clock)
+            r (llm/make-router
+                [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
+                {:clock clock
+                 :rate-limit {:same-provider-delays-ms [0 0 0]
+                              :fallback-after-ms 60000
+                              :respect-retry-after? true
+                              :fallback-provider? true}})
+            calls (atom 0)]
+        (try
+          (router/with-provider-fallback r {}
+            (fn [_ _]
+              (swap! calls inc)
+              (throw (ex-info "HTTP 429"
+                       {:type :svar.core/http-error :status 429 :body body}))))
+          (expect false "should have thrown")
+          (catch clojure.lang.ExceptionInfo e
+            ;; account-state error: exactly ONE attempt, no same-provider retries,
+            ;; and the original transient error is surfaced verbatim (not wrapped).
+            (expect (= 1 @calls))
+            (expect (= :svar.core/http-error (:type (ex-data e))))
+            (expect (= 429 (:status (ex-data e))))))))))
 
 ;; =============================================================================
 ;; Tier 1 — Circuit breaker state machine
@@ -633,7 +758,8 @@
               [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
                {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
               {:clock clock
-               :failure-threshold 5})]
+               :failure-threshold 5
+               :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})]
       ;; Drive 5 P1 failures (each attempt also falls through to P2 success).
       (dotimes [_ 5]
         (router/with-provider-fallback r {:strategy :root}
@@ -665,12 +791,13 @@
                                  :models   [{:name "m2"}]}]
                                {:clock             clock
                                 :failure-threshold 2
-                                :recovery-ms       10000})]
+                                :recovery-ms       10000
+                                :rate-limit        {:same-provider-delays-ms [] :fallback-after-ms 0}})]
       ;; Open the CB on P1 by pushing 2 failures.
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -689,18 +816,19 @@
                {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
               {:clock clock
                :failure-threshold 2
-               :recovery-ms 10000})]
+               :recovery-ms 10000
+               :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})]
       ;; Open CB
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                               :p2 (success-result 10))))
+                           :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)
@@ -1093,7 +1221,8 @@
               {:clock clock
                :failure-threshold 1
                :cooldown-ms 7777
-               :recovery-ms 99999})
+               :recovery-ms 99999
+               :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
           _ (advance! clock-atom 0)
           _ (router/with-provider-fallback r {:strategy :root}
               (fn [provider _]

@@ -894,7 +894,7 @@
    :multiplier 2.0})
 
 (def DEFAULT_RATE_LIMIT_ROUTING
-  "Default router-owned 429 policy.
+  "Default router-owned transient-retry policy (429/5xx/network).
 
    `:same-provider-delays-ms` — sleep schedule for same-provider retries.
    `:fallback-after-ms`       — hard cap on wall time the 429 phase can
@@ -1220,7 +1220,7 @@
   {:window-ms              60000
    :cooldown-ms            60000
    :max-wait-ms            30000
-   :transient-status-codes #{429 500 502 503 504 529}
+   :transient-status-codes #{429 500 502 503 504 524 529}
    :rate-limit DEFAULT_RATE_LIMIT_ROUTING
    ;; Circuit breaker defaults
    :failure-threshold   5
@@ -1296,10 +1296,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1311,7 +1311,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1519,8 +1519,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
+                    (keyword? prefer) [prefer]
+                    :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)
@@ -1604,6 +1604,23 @@
     (swap! (:state router) update-in [provider-id :tokens]
       (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
 
+(def ^:private NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS
+  "Lower-cased substrings that mark provider subscription/quota/billing
+   exhaustion — a hard account state, NOT a transient throttle. Even on HTTP
+   429 these must NOT retry (mirrors pi's NON_RETRYABLE_PROVIDER_LIMIT_ERROR
+   pattern in packages/ai/src/utils/retry.ts)."
+  ["gousagelimiterror" "freeusagelimiterror" "monthly usage limit reached"
+   "available balance" "insufficient_quota" "out of budget" "quota exceeded"
+   "billing"])
+
+(defn- provider-limit-error?
+  "True when error text/body names a subscription/quota/billing exhaustion
+   (account state) that must never be retried as a transient throttle."
+  [hay]
+  (boolean
+    (and hay
+      (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS))))
+
 (defn- router-transient-error? [router e]
   (let [data (ex-data e)
         status (:status data)
@@ -1611,36 +1628,41 @@
         codes (:transient-status-codes router)
         msg (ex-message e)
         msg-lower (str/lower-case (or msg ""))
+        hay (str msg-lower " " (str/lower-case (or (:body data) "")))
         stream-output-started? (or (pos? (long (or (:content-acc-len data) 0)))
                                  (pos? (long (or (:reasoning-acc-len data) 0)))
                                  (some? (:partial-content data))
                                  (some? (:reasoning data)))]
     (boolean
-      (or (and status (contains? codes status))
-        (and (= etype :svar.core/http-error)
-          (or (some-> msg (str/includes? "timed out"))
-            (and (:stream? data)
-              (not stream-output-started?)
-              (or (str/includes? msg-lower "stream connection error")
-                (str/includes? msg-lower "connection reset")
-                (str/includes? msg-lower "connection closed")
-                (str/includes? msg-lower "closed")))))
-        ;; SSE EOF before the provider terminal marker (`stream-truncated`) OR
-        ;; an explicit `response.incomplete` (`stream-incomplete`, e.g. Copilot's
-        ;; intermittent reason-null incomplete) — both before any visible content
-        ;; — are transport/provider failures, not a model answer. RETRY them
-        ;; (consistent with the OpenAI Codex CLI, which raises + retries on
-        ;; incomplete; early-close/incomplete usually succeeds on retry). If
-        ;; content already started, throw instead: svar can't rewind streamed
-        ;; chunks, so replaying would duplicate output (the caller's rewind-retry
-        ;; layer owns that case).
-        (and (contains? #{:svar.core/stream-truncated :svar.core/stream-incomplete} etype)
-          (not stream-output-started?))
-        (instance? java.net.ConnectException e)
-        (instance? java.net.SocketTimeoutException e)
-        (some-> (.getCause ^Throwable e)
-          ((fn [c] (or (instance? java.net.ConnectException c)
-                     (instance? java.net.SocketTimeoutException c)))))))))
+      (and
+        ;; Provider subscription/quota/billing exhaustion is a hard account
+        ;; state, never a transient throttle — do NOT retry (mirrors pi).
+        (not (provider-limit-error? hay))
+        (or (and status (contains? codes status))
+          (and (= etype :svar.core/http-error)
+            (or (some-> msg (str/includes? "timed out"))
+              (and (:stream? data)
+                (not stream-output-started?)
+                (or (str/includes? msg-lower "stream connection error")
+                  (str/includes? msg-lower "connection reset")
+                  (str/includes? msg-lower "connection closed")
+                  (str/includes? msg-lower "closed")))))
+          ;; SSE EOF before the provider terminal marker (`stream-truncated`) OR
+          ;; an explicit `response.incomplete` (`stream-incomplete`, e.g. Copilot's
+          ;; intermittent reason-null incomplete) — both before any visible content
+          ;; — are transport/provider failures, not a model answer. RETRY them
+          ;; (consistent with the OpenAI Codex CLI, which raises + retries on
+          ;; incomplete; early-close/incomplete usually succeeds on retry). If
+          ;; content already started, throw instead: svar can't rewind streamed
+          ;; chunks, so replaying would duplicate output (the caller's rewind-retry
+          ;; layer owns that case).
+          (and (contains? #{:svar.core/stream-truncated :svar.core/stream-incomplete} etype)
+            (not stream-output-started?))
+          (instance? java.net.ConnectException e)
+          (instance? java.net.SocketTimeoutException e)
+          (some-> (.getCause ^Throwable e)
+            ((fn [c] (or (instance? java.net.ConnectException c)
+                       (instance? java.net.SocketTimeoutException c))))))))))
 
 (def ^:private DEFAULT_FORMAT_ERROR_TYPES
   "Exception `:type`s that signal a structured-output schema/format failure
@@ -1761,7 +1783,7 @@
     (throw e)))
 
 (defn- handle-rate-limit-retries
-  "Same-provider retry loop for 429 before any streamed content.
+  "Same-provider retry loop for any transient error (429/5xx/network) before any streamed content.
 
    Policy keys consulted:
      - `:same-provider-delays-ms` — vector of pre-retry sleeps;
@@ -1842,17 +1864,15 @@
                               (propagate-interrupt! next-error)
                               {:error next-error}))]
               (if (and (:error outcome)
-                    (= 429 (:status (ex-data (:error outcome))))
                     (router-transient-error? router (:error outcome)))
                 (if (stream-content-started? (:error outcome))
                   (throw (:error outcome))
                   (recur (inc retry-index) (:error outcome)))
-                ;; Non-429 outcome (success OR different transient).
-                ;; Forward as-is so the outer handler labels the reason
-                ;; correctly (a 503 after a 429 retry is `:transient-error`,
-                ;; NOT `:rate-limit-budget-exhausted`). Attach `:elapsed-ms`
-                ;; on the error path so the fallback event still carries
-                ;; the wall-time the same-provider phase consumed.
+                ;; Non-transient outcome (success, or a terminal error like
+                ;; 401 / format-reject that retrying cannot cure). Forward as-is
+                ;; so the outer handler classifies it. Attach `:elapsed-ms` on
+                ;; the error path so the fallback event still carries the
+                ;; wall-time the same-provider phase consumed.
                 (cond-> outcome
                   (:error outcome) (assoc :elapsed-ms (long (elapsed*)))))))
 
@@ -1965,12 +1985,8 @@
                                  (stream-content-started? e))
                                (throw e)
 
-                               (and (= 429 (:status (ex-data e)))
-                                 (router-transient-error? router e))
-                               (handle-rate-limit-retries router prefs trace provider model-map f e start-ms)
-
                                (router-transient-error? router e)
-                               {:error e}
+                               (handle-rate-limit-retries router prefs trace provider model-map f e start-ms)
 
                                (format-error? prefs e)
                                {:format-error e}
@@ -2054,10 +2070,11 @@
                 (:error result)
                 (let [e (:error result)
                       status (:status (ex-data e))
-                      reason (cond
-                               (:rate-limit-budget-exhausted? result) :rate-limit
-                               (= 429 status) :rate-limit
-                               :else :transient-error)]
+                      ;; :rate-limit reserved for TRUE 429 (drives CB cooldown vs
+                      ;; recovery + trace label). Other transients (5xx/529/network)
+                      ;; that exhaust the same-provider retry schedule stay
+                      ;; :transient-error — retrying them != a rate limit.
+                      reason (if (= 429 status) :rate-limit :transient-error)]
                   (trove/log! {:level :warn
                                :id ::provider-retry
                                :data {:provider-id pid
