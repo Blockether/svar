@@ -80,6 +80,57 @@
         (expect (= 429 (:status data)))
         (expect (str/includes? (ex-message ex) "Rate limit reached"))))))
 
+(defdescribe anthropic-mid-stream-error-surfaces-transient-status-test
+  ;; Regression: Anthropic (and Copilot-Claude on /v1/messages) signal a burst
+  ;; via a mid-stream SSE `error` event whose KIND is under `:type`
+  ;; (`overloaded_error` / `rate_limit_error` / `api_error`), NOT `:code`.
+  ;; stream-failed-error read only :code → status nil → router-transient-error?
+  ;; false → single-provider tab died instantly instead of retrying. Now the
+  ;; error :type maps to the transient HTTP-status equivalent.
+  (it "maps Anthropic error :type to a transient :status so the router retries"
+    (doseq [[etype expected-status] [["overloaded_error" 529]
+                                     ["rate_limit_error" 429]
+                                     ["api_error" 500]]]
+      (let [body (sse-body
+                   [["error"
+                     (str "{\"type\":\"error\",\"error\":{\"type\":\"" etype
+                       "\",\"message\":\"boom\"}}")]])
+            ex (try
+                 (with-redefs [http/post (fn [_url _opts] {:status 200 :headers {} :body body})]
+                   (http-post-stream! "http://localhost:1234/v1/messages"
+                     {:model "m"} {} 5000 0 0 extract-stream-delta (fn [_]))
+                   nil)
+                 (catch clojure.lang.ExceptionInfo e e))]
+        (expect (some? ex))
+        (let [data (ex-data ex)]
+          (expect (= :svar.core/stream-failed (:type data)))
+          (expect (= etype (:provider-error-code data)))
+          (expect (= expected-status (:status data)))))))
+  ;; Cross-validated with opencode `parseStreamError` (packages/opencode/src/provider/error.ts):
+  ;; it retries mid-stream `server_is_overloaded`/`server_error` (isRetryable true) and
+  ;; treats `insufficient_quota`/`usage_not_included`/`invalid_prompt` as non-retryable.
+  ;; These OpenAI Codex/ChatGPT-backend codes arrive under error `:code` (not `:type`).
+  (it "maps OpenAI Codex error :code to a transient :status (opencode parseStreamError parity)"
+    (doseq [[ecode expected-status] [["server_is_overloaded" 529]
+                                     ["server_error" 500]
+                                     ["overloaded" 529]
+                                     ["rate_limit_exceeded" 429]]]
+      (let [body (sse-body
+                   [["error"
+                     (str "{\"type\":\"error\",\"error\":{\"code\":\"" ecode
+                       "\",\"message\":\"boom\"}}")]])
+            ex (try
+                 (with-redefs [http/post (fn [_url _opts] {:status 200 :headers {} :body body})]
+                   (http-post-stream! "http://localhost:1234/v1/responses"
+                     {:model "m"} {} 5000 0 0 extract-stream-delta (fn [_]))
+                   nil)
+                 (catch clojure.lang.ExceptionInfo e e))]
+        (expect (some? ex))
+        (let [data (ex-data ex)]
+          (expect (= :svar.core/stream-failed (:type data)))
+          (expect (= ecode (:provider-error-code data)))
+          (expect (= expected-status (:status data))))))))
+
 (defdescribe reasoning-summary-cross-item-boundary-test
   ;; Regression: the "\n\n" summary-part separator was only emitted WITHIN one
   ;; reasoning item; a second reasoning item's first headline glued onto the

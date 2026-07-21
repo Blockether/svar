@@ -3209,18 +3209,22 @@
       (let [err (or (get-in parsed [:response :error])
                   (:error parsed)
                   (when (= "error" event-type) parsed))]
-        {:code (some-> (:code err) str)
+        {:code (some-> (or (:code err) (:type err)) str)
          :message (or (:message err) "provider reported stream failure")
          :event-type event-type}))))
 
 (def ^:private stream-failed-code->status
-  "Best-effort HTTP-status equivalent for a `response.failed` error code, so
-   the router's transient-status classification (429/5xx) applies to streamed
-   failures exactly as it does to pre-stream HTTP errors."
-  {"rate_limit_exceeded" 429
+  "Best-effort HTTP-status equivalent for a streamed failure's provider error
+   CODE (OpenAI `response.failed`) or error TYPE (Anthropic mid-stream `error`
+   event), so the router's transient-status classification (429/5xx) applies to
+   streamed failures exactly as it does to pre-stream HTTP errors."
+  {"rate_limit_exceeded" 429   ; OpenAI / Responses
+   "rate_limit_error"    429   ; Anthropic (also Copilot-Claude on /v1/messages)
    "server_error"        500
    "internal_error"      500
+   "api_error"           500   ; Anthropic transient server error
    "overloaded"          529
+   "server_is_overloaded" 529  ; OpenAI Codex/ChatGPT backend mid-stream overload (opencode parseStreamError → retryable)
    "overloaded_error"    529})
 
 (defn- stream-finalization-summary
