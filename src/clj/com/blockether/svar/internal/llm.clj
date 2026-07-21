@@ -1845,9 +1845,11 @@
                                   " " (str/lower-case (or (ex-message e) "")))
                             limit-error? (provider-limit-error? hay)
                             retryable-message? (and (not limit-error?)
+                                                 (not (stream-output-started? e))
                                                  (transient-message-error? hay status))
                             retryable-status? (and (contains? RETRYABLE_STATUS_CODES status)
                                                 (not limit-error?)
+                                                (not (stream-output-started? e))
                                                 (not (and router-handles-rate-limit?
                                                        (= 429 status))))
                             retryable-conn? (and (not (stream-output-started? e))
