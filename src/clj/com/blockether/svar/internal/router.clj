@@ -1621,6 +1621,38 @@
     (and hay
       (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS))))
 
+(def ^:private RETRYABLE_TRANSIENT_MESSAGE_PATTERN
+  "Regex over an error's already-lower-cased message+body marking a transient
+   provider/transport failure that carries NO mappable HTTP status in ex-data —
+   e.g. a gateway proxying an upstream failure as wrapper text (OpenRouter's
+   \"Provider returned error\"), a gRPC ResourceExhausted, or explicit mid-stream
+   retry guidance from OpenAI Responses / Bedrock. Mirrors the high-signal subset
+   of pi's RETRYABLE_PROVIDER_ERROR_PATTERN (packages/ai/src/utils/retry.ts).
+   Deliberately OMITS pi's bare numeric HTTP codes (already handled by
+   :transient-status-codes, and a bare \"503\" in prose is a false-positive risk)
+   and \"connection refused\" (svar treats ECONNREFUSED as a wrong/down endpoint,
+   not a blip). The quota/billing guard (provider-limit-error?) runs first, so a
+   429 that is really account exhaustion never reaches this."
+  (re-pattern
+    (str/join "|"
+      ["overloaded" "rate.?limit" "too many requests"
+       "service.?unavailable" "server.?error" "internal.?error"
+       "provider.?returned.?error" "network.?error" "upstream.?connect"
+       "fetch failed" "resource.?exhausted"
+       "you can retry your request" "try your request again"
+       "please retry your request"])))
+
+(defn- transient-message-error?
+  "True when a statusless / wrapper / gRPC transient shows up only in the error
+   TEXT (RETRYABLE_TRANSIENT_MESSAGE_PATTERN). `status` gates out definitive
+   client errors (4xx except 429) so a 400/404 whose body happens to contain
+   transient wording is never retried."
+  [hay status]
+  (boolean
+    (and hay
+      (not (and status (<= 400 (long status) 499) (not= 429 status)))
+      (re-find RETRYABLE_TRANSIENT_MESSAGE_PATTERN hay))))
+
 (defn- router-transient-error? [router e]
   (let [data (ex-data e)
         status (:status data)
@@ -1658,6 +1690,11 @@
           ;; layer owns that case).
           (and (contains? #{:svar.core/stream-truncated :svar.core/stream-incomplete} etype)
             (not stream-output-started?))
+          ;; Statusless / wrapper / gRPC transient that shows up only in the
+          ;; error text (e.g. gateway "Provider returned error", ResourceExhausted,
+          ;; explicit "you can retry your request") — pi retries these; svar's
+          ;; status/stream-marker classification used to miss them (mirrors pi).
+          (transient-message-error? hay status)
           (instance? java.net.ConnectException e)
           (instance? java.net.SocketTimeoutException e)
           (some-> (.getCause ^Throwable e)

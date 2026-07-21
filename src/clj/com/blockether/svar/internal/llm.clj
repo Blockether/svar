@@ -92,6 +92,36 @@
     (and hay
       (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS))))
 
+(def ^:private RETRYABLE_TRANSIENT_MESSAGE_PATTERN
+  "Regex over an error's already-lower-cased message+body marking a transient
+   provider/transport failure that carries NO mappable HTTP status — e.g. a
+   gateway proxying an upstream failure as wrapper text (OpenRouter's \"Provider
+   returned error\"), a gRPC ResourceExhausted, or explicit mid-stream retry
+   guidance. Mirrors the high-signal subset of pi's RETRYABLE_PROVIDER_ERROR
+   pattern (packages/ai/src/utils/retry.ts); OMITS pi's bare numeric HTTP codes
+   (already handled by RETRYABLE_STATUS_CODES) and \"connection refused\" (svar
+   treats ECONNREFUSED as a wrong/down endpoint, not a blip). The quota/billing
+   guard (provider-limit-error?) runs first."
+  (re-pattern
+    (str/join "|"
+      ["overloaded" "rate.?limit" "too many requests"
+       "service.?unavailable" "server.?error" "internal.?error"
+       "provider.?returned.?error" "network.?error" "upstream.?connect"
+       "fetch failed" "resource.?exhausted"
+       "you can retry your request" "try your request again"
+       "please retry your request"])))
+
+(defn- transient-message-error?
+  "True when a statusless / wrapper / gRPC transient shows up only in the error
+   TEXT (RETRYABLE_TRANSIENT_MESSAGE_PATTERN). `status` gates out definitive
+   client errors (4xx except 429) so a 400/404 whose body happens to contain
+   transient wording is never retried."
+  [hay status]
+  (boolean
+    (and hay
+      (not (and status (<= 400 (long status) 499) (not= 429 status)))
+      (re-find RETRYABLE_TRANSIENT_MESSAGE_PATTERN hay))))
+
 (def ^:private TRANSIENT_NETWORK_ERROR_SUBSTRINGS
   "Lower-cased substrings of transient OS/network-layer connection errors.
    A brief connectivity blip (wifi handoff, VPN reconnect, captive portal,
@@ -1811,9 +1841,11 @@
                     (catch Exception e
                       (let [ex-data-map (ex-data e)
                             status (:status ex-data-map)
-                            limit-error? (provider-limit-error?
-                                           (str (str/lower-case (or (:body ex-data-map) ""))
-                                             " " (str/lower-case (or (ex-message e) ""))))
+                            hay (str (str/lower-case (or (:body ex-data-map) ""))
+                                  " " (str/lower-case (or (ex-message e) "")))
+                            limit-error? (provider-limit-error? hay)
+                            retryable-message? (and (not limit-error?)
+                                                 (transient-message-error? hay status))
                             retryable-status? (and (contains? RETRYABLE_STATUS_CODES status)
                                                 (not limit-error?)
                                                 (not (and router-handles-rate-limit?
@@ -1825,11 +1857,12 @@
                                           (long anthropic-third-party-400-max-retries)
                                           (long max-retries))
                             can-retry? (< attempt attempt-cap)]
-                        (if (and (or retryable-status? retryable-conn? retryable-third-party-400?)
+                        (if (and (or retryable-status? retryable-conn? retryable-third-party-400? retryable-message?)
                               can-retry?)
                           {:retry true :error e :status status
                            :reason (cond retryable-conn?            :connection-error
                                      retryable-third-party-400? :anthropic-third-party-400
+                                     retryable-message?         :transient-message
                                      :else                      :http-status)}
                           {:error e}))))]
        (cond
@@ -3998,7 +4031,7 @@
                                      :content-acc content-acc
                                      :reasoning-acc reasoning-acc
                                      :response response})
-              status (get stream-failed-code->status code)]
+              status (get stream-failed-code->status (some-> code str/lower-case))]
           (throw (ex-info (str "Provider stream failed"
                             (when code (str " (" code ")"))
                             ": " message)

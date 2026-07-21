@@ -744,6 +744,66 @@
             (expect (= :svar.core/http-error (:type (ex-data e))))
             (expect (= 429 (:status (ex-data e))))))))))
 
+(defdescribe with-provider-fallback-statusless-wrapper-transient-retried-test
+  "pi parity (RETRYABLE_PROVIDER_ERROR_PATTERN): a statusless / wrapper / gRPC
+   transient whose signal lives only in the error TEXT — a gateway proxying an
+   upstream failure ('Provider returned error'), a gRPC ResourceExhausted, or an
+   explicit 'you can retry your request' — must run the same-provider backoff
+   schedule. Pre-fix svar classified transients only by HTTP status + stream
+   markers, so a statusless burst threw :provider-unavailable on the first hit
+   with ZERO retries (the Vis 'Provider unavailable' symptom for gateways that
+   don't propagate a 5xx into ex-data)."
+  (doseq [msg ["Provider returned error"
+               "upstream error: Service Unavailable"
+               "RESOURCE_EXHAUSTED for model"
+               "you can retry your request"]]
+    (it (str "single provider retries on statusless '" msg "' then throws :provider-unavailable")
+      (let [[clock _] (mock-clock)
+            r (llm/make-router
+                [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
+                {:clock clock
+                 :rate-limit {:same-provider-delays-ms [0 0 0]
+                              :fallback-after-ms 60000
+                              :respect-retry-after? true
+                              :fallback-provider? true}})
+            calls (atom 0)]
+        (try
+          (router/with-provider-fallback r {}
+            (fn [_ _]
+              (swap! calls inc)
+              (throw (ex-info msg {:type :svar.core/http-error}))))
+          (expect false "should have thrown")
+          (catch clojure.lang.ExceptionInfo e
+            ;; initial attempt + 3 same-provider retries = 4 invocations.
+            (expect (= 4 @calls))
+            (expect (= :svar.llm/provider-unavailable (:type (ex-data e))))))))))
+
+(defdescribe with-provider-fallback-client-4xx-transient-text-not-retried-test
+  "Hardening for the statusless message fallback: a DEFINITIVE client error
+   (4xx except 429) whose body happens to contain transient wording ('internal
+   server error') must NOT be dragged into the same-provider retry schedule — the
+   4xx status gate wins, so it surfaces after exactly ONE attempt."
+  (it "401 with 'internal server error' body surfaces immediately with ZERO retries"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
+              {:clock clock
+               :rate-limit {:same-provider-delays-ms [0 0 0]
+                            :fallback-after-ms 60000
+                            :respect-retry-after? true
+                            :fallback-provider? true}})
+          calls (atom 0)]
+      (try
+        (router/with-provider-fallback r {}
+          (fn [_ _]
+            (swap! calls inc)
+            (throw (ex-info "HTTP 401"
+                     {:type :svar.core/http-error :status 401 :body "internal server error"}))))
+        (expect false "should have thrown")
+        (catch clojure.lang.ExceptionInfo e
+          (expect (= 1 @calls))
+          (expect (= 401 (:status (ex-data e)))))))))
+
 ;; =============================================================================
 ;; Tier 1 — Circuit breaker state machine
 ;; =============================================================================
