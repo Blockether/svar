@@ -32,6 +32,9 @@
 (def ^:private transient-network-error? @#'sut/transient-network-error?)
 (def ^:private connection-error? @#'sut/connection-error?)
 (def ^:private connection-error->ex-info @#'sut/connection-error->ex-info)
+(def ^:private mark-connection-healthy! @#'sut/mark-connection-healthy!)
+(def ^:private host-connect-health* @#'sut/host-connect-health*)
+(def ^:private healthy-host-connect-blip? @#'sut/healthy-host-connect-blip?)
 
 (defdescribe truncate-error-body-test
   (describe "pure stringifier"
@@ -509,3 +512,51 @@
         (expect (= :svar.core/http-error (:type (:data captured))))
         (expect (true? (:connection-error? (:data captured))))
         (expect (str/includes? (:msg captured) "Could not connect to the model provider"))))))
+
+;; ── message-less ConnectException (JDK 25) is retried ONLY on a healthy host ──
+;; JDK 25 collapses ECONNREFUSED, host-down and transient blips into one
+;; indistinguishable, message-free `java.net.ConnectException`. svar rides it
+;; out ONLY when THAT host connected successfully moments ago (network proven
+;; healthy ⇒ transient blip); a host never reached fails fast.
+(defdescribe healthy-host-connect-blip-test
+  (describe "message-less ConnectException gated by prior host success"
+    (it "is NON-retryable when the host has NEVER connected (fail fast)"
+      (reset! host-connect-health* {})
+      (let [ex (connection-error->ex-info
+                 (java.net.ConnectException.)   ; message-less (JDK 25 shape)
+                 "https://never-reached.test/v1/chat")]
+        (expect (false? (boolean (healthy-host-connect-blip? ex))))
+        (expect (false? (boolean (retryable-exception? ex))))))
+
+    (it "becomes retryable once that exact host has connected successfully"
+      (reset! host-connect-health* {})
+      (mark-connection-healthy! "https://api.anthropic.com/v1/messages")
+      (let [ex (connection-error->ex-info
+                 (java.net.ConnectException.)
+                 "https://api.anthropic.com/v1/messages")]
+        (expect (true? (boolean (healthy-host-connect-blip? ex))))
+        (expect (true? (boolean (retryable-exception? ex))))))
+
+    (it "stays fail-fast for a DIFFERENT host even when another is healthy"
+      (reset! host-connect-health* {})
+      (mark-connection-healthy! "https://api.anthropic.com/v1/messages")
+      (let [ex (connection-error->ex-info
+                 (java.net.ConnectException.)
+                 "http://localhost:1234/v1/chat")] ; LM Studio down, never reached
+        (expect (false? (boolean (retryable-exception? ex))))))
+
+    (it "does NOT fire for a MESSAGE-bearing 'Connection refused' (older JDK)"
+      (reset! host-connect-health* {})
+      (mark-connection-healthy! "https://api.anthropic.com/v1/messages")
+      (let [ex (connection-error->ex-info
+                 (java.net.ConnectException. "Connection refused")
+                 "https://api.anthropic.com/v1/messages")]
+        (expect (false? (boolean (healthy-host-connect-blip? ex))))
+        (expect (false? (boolean (retryable-exception? ex))))))
+
+    (it "expires: a stale success no longer counts as healthy"
+      (reset! host-connect-health* {"api.anthropic.com" 1})   ; epoch-ms 1 ⇒ ancient
+      (let [ex (connection-error->ex-info
+                 (java.net.ConnectException.)
+                 "https://api.anthropic.com/v1/messages")]
+        (expect (false? (boolean (healthy-host-connect-blip? ex))))))))

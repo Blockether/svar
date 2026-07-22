@@ -257,6 +257,66 @@
     :svar.core/stream-semantic-timeout
     :svar.core/stream-cancelled})
 
+(defn- url->host
+  "Host component of a URL string, or nil when absent/unparseable."
+  [url]
+  (when url
+    (try (not-empty (.getHost (java.net.URI. (str url))))
+      (catch Exception _ nil))))
+
+(def ^:private connect-health-window-ms
+  "How long ONE successful connection keeps a host classified as 'healthy'.
+   A message-less `java.net.ConnectException` (JDK 25 collapses ECONNREFUSED,
+   host-down and transient blips into one indistinguishable, message-free
+   shape) is retried ONLY when THIS host connected successfully inside this
+   window — recent proof the network path works, so the failure is a transient
+   blip. A host never reached (LM Studio/Ollama down, wrong port) is absent
+   from the registry and fails fast instead of eating retry backoff."
+  (* 5 60 1000))
+
+(def ^:private host-connect-health*
+  "host -> epoch-ms of its most recent successful connection. Drives the health
+   gate for message-less ConnectExceptions (see `connect-health-window-ms`)."
+  (atom {}))
+
+(defn- mark-connection-healthy!
+  "Record that `url`'s host just connected successfully (HTTP response/headers
+   received). Marks the host healthy so a later transient message-less
+   ConnectException to the SAME host is retried instead of failing the turn."
+  [url]
+  (when-let [host (url->host url)]
+    (swap! host-connect-health* assoc host (System/currentTimeMillis)))
+  nil)
+
+(defn- host-connection-healthy?
+  "True when `url`'s host connected successfully within
+   `connect-health-window-ms` — recent proof the network path to it works."
+  [url]
+  (boolean
+    (when-let [t (get @host-connect-health* (url->host url))]
+      (< (- (System/currentTimeMillis) (long t)) (long connect-health-window-ms)))))
+
+(defn- message-less-connect-exception?
+  "True when the cause chain holds a `java.net.ConnectException` with a blank
+   message — the JDK-25 shape that collapses ECONNREFUSED, host-down and
+   transient connectivity blips into one indistinguishable, message-free
+   exception that cannot be classified by message substring alone."
+  [^Throwable e]
+  (boolean
+    (some (fn [^Throwable t]
+            (and (instance? java.net.ConnectException t)
+              (str/blank? (or (ex-message t) ""))))
+      (ex-chain e))))
+
+(defn- healthy-host-connect-blip?
+  "True when a message-less ConnectException hit a host that connected
+   successfully moments ago (`host-connection-healthy?`). The prior success is
+   evidence the network is healthy, so this is a transient blip worth retrying;
+   a host never reached stays non-retryable and fails fast."
+  [^Throwable e]
+  (and (message-less-connect-exception? e)
+    (host-connection-healthy? (:url (ex-data e)))))
+
 (defn- retryable-exception?
   "Returns true if the exception represents a transient connection/read error
    that should be retried (e.g., proxy dropping connection mid-response).
@@ -289,6 +349,13 @@
      ;; blip): EADDRNOTAVAIL, ENETUNREACH, EHOSTUNREACH, connect timeout,
      ;; transient DNS failures. Walks the full cause chain.
         (transient-network-error? e)
+     ;; JDK 25 collapses ECONNREFUSED, host-down and transient connect blips
+     ;; into ONE message-less java.net.ConnectException — indistinguishable by
+     ;; the exception alone. Retry it ONLY when this exact host connected
+     ;; successfully moments ago (network proven healthy ⇒ transient blip); a
+     ;; host never reached (LM Studio/Ollama down, wrong port) stays
+     ;; non-retryable and fails fast instead of eating retry backoff.
+        (healthy-host-connect-blip? e)
      ;; Peer ACCEPTED the connection but closed the socket before sending ANY
      ;; response byte — java.net.http surfaces this as "HTTP/1.1 header parser
      ;; received no bytes". It falls BETWEEN a connect-phase failure (the TCP/TLS
@@ -449,6 +516,7 @@
                      (if (connection-error? e)
                        (throw (connection-error->ex-info e url))
                        (throw e))))
+        _        (mark-connection-healthy! url)
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
                    (catch Exception _ nil))]
@@ -485,6 +553,7 @@
                      (seq query-params) (assoc :query-params query-params))
          response  (with-http-client-heal
                      (fn [client] (http/get url (assoc req-opts :client client))))
+         _         (mark-connection-healthy! url)
          status    (:status response)
          raw-body  (:body response)]
      (when-not (and (integer? status) (<= 200 status 299))
@@ -3794,6 +3863,7 @@
                      (reset! headers-received? true)
                      (when ttft-watchdog
                        (try (.interrupt ^Thread ttft-watchdog) (catch Throwable _ nil)))))
+        _ (mark-connection-healthy! url)
         _ (trove/log! {:level :debug :id ::stream-headers
                        :data (log-data {:url url
                                         :status (:status response)
