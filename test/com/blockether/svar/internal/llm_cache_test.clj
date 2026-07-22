@@ -373,6 +373,14 @@
                                                    "claude-haiku-4-5" (:extra-body opts))]
       (expect (not (contains? body :prompt_cache_key))))))
 
+(defdescribe anthropic-extra-body-sanitization-test
+  (it "strips OpenAI Responses text verbosity from Anthropic requests"
+    (let [body (#'sut/build-anthropic-request-body
+                [{:role "user" :content "hi"}]
+                "claude-haiku-4-5"
+                {:text {:verbosity "high"}})]
+      (expect (not (contains? body :text))))))
+
 (defdescribe apply-llm-opts-1h-beta-header-test
   (it "S6: :1h cache-ttl marker triggers extended-cache-ttl-2025-04-11 beta header"
     (let [msgs [{:role "system"

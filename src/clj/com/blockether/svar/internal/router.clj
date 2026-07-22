@@ -1,5 +1,5 @@
 (ns com.blockether.svar.internal.router
-  "Router: provider/model registry, circuit breakers, rate limiting, budget tracking,
+  "Router: provider/model registry, circuit breakers, retry routing, budget tracking,
    and routing resolution.
 
    Extracted from defaults.clj (provider/model metadata) and llm.clj (routing logic)
@@ -28,14 +28,14 @@
 ;; =============================================================================
 
 (def KNOWN_PROVIDERS
-  {:openai      {:base-url "https://api.openai.com/v1"           :rpm 500 :tpm 2000000
+  {:openai      {:base-url "https://api.openai.com/v1"
                  :env-keys ["OPENAI_API_KEY"]
                  :default-models [{:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"} {:name "gpt-4o-mini"} {:name "o3-mini"}]}
-   :anthropic   {:base-url "https://api.anthropic.com/v1"        :rpm 500 :tpm 2000000
+   :anthropic   {:base-url "https://api.anthropic.com/v1"
                  :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic
                  :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan
-   {:base-url "https://api.anthropic.com/v1" :rpm 500 :tpm 2000000
+   {:base-url "https://api.anthropic.com/v1"
     :env-keys [] :api-style :anthropic
     :provider-model-source :anthropic
     ;; OAuth coding plan: use retail Anthropic pricing for honest metering
@@ -43,10 +43,10 @@
     :pricing-source :anthropic
     :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
     :prepend-default-models? true}
-   :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000 ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
+   :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
                  :env-keys ["ZAI_API_KEY"]
                  :default-models [{:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
-   :zai-coding  {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000
+   :zai-coding  {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic
                  ;; Coding Plan endpoint, but for budget accounting we use
                  ;; retail :zai per-token rates (the plan meters overage at
                  ;; the same rates). `:provider-model-source :zai` lets the
@@ -60,7 +60,7 @@
    ;; catalog miss reproduces the same `max_tokens = 2048` bug observed
    ;; on Copilot. Same policy as `:zai-coding`; keep both keys in sync.
    :zai-coding-plan
-   {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic :rpm 500 :tpm 2000000
+   {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic
     :pricing-source :zai
     :provider-model-source :zai
     :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
@@ -70,12 +70,12 @@
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
    ;; function calling (unlike GLM-on-chat, which z.ai poisons with an XML
    ;; tool-call prompt).
-   :gemini      {:base-url "https://generativelanguage.googleapis.com/v1beta" :rpm 500 :tpm 2000000
+   :gemini      {:base-url "https://generativelanguage.googleapis.com/v1beta"
                  :api-style :gemini
                  :default-models [{:name "gemini-3-pro-preview"} {:name "gemini-3-flash-preview"}
                                   {:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}]
                  :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
-   :openrouter  {:base-url "https://openrouter.ai/api/v1"        :rpm 500 :tpm 2000000
+   :openrouter  {:base-url "https://openrouter.ai/api/v1"
                  :env-keys ["OPENROUTER_API_KEY"]}
    ;; Mistral — OpenAI-compatible `/v1/chat/completions`. No `:api-style` needed
    ;; (default OpenAI chat wire). The `:mistral` slug already exists in the bundled
@@ -84,13 +84,13 @@
    ;; `modelsdev/provider-models`; NO `KNOWN_PROVIDER_MODELS` overlay required.
    ;; See `provider-pricing-source` (router.clj) — it keys models.dev off `:id`,
    ;; and `:mistral` is already a known catalog slug.
-   :mistral     {:base-url "https://api.mistral.ai/v1"  :rpm 500 :tpm 2000000
+   :mistral     {:base-url "https://api.mistral.ai/v1"
                  :env-keys ["MISTRAL_API_KEY"]
                  :default-models [{:name "mistral-large-latest"}
                                   {:name "mistral-medium-latest"}
                                   {:name "mistral-small-latest"}
                                   {:name "codestral-latest"}]}
-   :github-copilot {:base-url "https://api.individual.githubcopilot.com" :rpm 500 :tpm 2000000
+   :github-copilot {:base-url "https://api.individual.githubcopilot.com"
                     :default-models [{:name "claude-opus-4.8"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
                     :llm-headers {"Editor-Version" "vscode/1.100.0"
                                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
@@ -133,7 +133,7 @@
    :github-copilot-enterprise
    {:base-url "https://api.enterprise.githubcopilot.com"
     :provider-model-source :github-copilot}
-   :openai-codex {:base-url "https://chatgpt.com/backend-api"     :rpm 500 :tpm 2000000
+   :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys [] :api-style :openai-compatible-responses
                   :default-models [{:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
@@ -180,7 +180,7 @@
    ;; locally — irrelevant for a local box.) Model discovery still uses the
    ;; OpenAI `/v1/models` (Ollama) / `/api/v0/models` (LM Studio) paths below,
    ;; independent of the chat api-style.
-   :ollama      {:base-url "http://localhost:11434/v1"            :rpm 1000 :tpm 10000000
+   :ollama      {:base-url "http://localhost:11434/v1"
                  :api-style :anthropic :api-key "ollama"
                  :env-keys []}
    ;; LM Studio's OpenAI-compatible `/v1/models` omits context length, so
@@ -189,7 +189,7 @@
    ;; (host root, NOT under `/v1`) reports `max_context_length`,
    ;; `loaded_context_length`, and `capabilities` — `models!` reads it via the
    ;; `:models-base :host` + `:models-shape :lmstudio` hooks below.
-   :lmstudio    {:base-url "http://localhost:1234/v1"             :rpm 1000 :tpm 10000000
+   :lmstudio    {:base-url "http://localhost:1234/v1"
                  :api-style :anthropic :api-key "lmstudio"
                  :env-keys []
                  :models-path "/api/v0/models"
@@ -701,7 +701,7 @@
    of `:github-copilot`; `:anthropic-coding-plan` of `:anthropic`;
    `:zai-coding-plan` / `:zai-coding` of `:zai` for model catalog) all
    pick up `:exclude-models`, `:min-gpt-version`, `:llm-headers`,
-   `:rpm`, `:tpm`, etc. from the shared base entry instead of having
+   etc. from the shared base entry instead of having
    the tier alias re-state them.
 
    Merge order: the source entry sits UNDER the alias entry so an
@@ -1143,15 +1143,13 @@
     - merges provider-independent model metadata with provider-scoped pricing/context
 
    Uses `known-provider` for the policy lookup so plan-tier aliases
-   inherit `:exclude-models`, `:llm-headers`, `:rpm`/`:tpm`, default
+   inherit `:exclude-models`, `:llm-headers`, default
    models, and any other shared field from their base entry; only the
    tier-local overrides (`:base-url`, ...) win on conflict."
   [idx provider-map]
   (let [id (:id provider-map)
         known (known-provider id)
         base-url (or (:base-url provider-map) (:base-url known))
-        rpm (or (:rpm provider-map) (:rpm known) 500)
-        tpm (or (:tpm provider-map) (:tpm known) 2000000)
         exclude-models (set (concat (:exclude-models known) (:exclude-models provider-map)))
         models (->> (configured-model-inputs known provider-map)
                  (keep (fn [m]
@@ -1175,8 +1173,6 @@
              :base-url base-url
              :api-style (or (:api-style provider-map) (:api-style known) :openai-compatible-chat)
              :priority idx
-             :rpm rpm
-             :tpm tpm
              :root root-name
              :models models}
       (some? (or (:responses-path provider-map) (:responses-path known)))
@@ -1213,7 +1209,7 @@
      (:default context-limits))))
 
 ;; =============================================================================
-;; Router internals — time / rate windows
+;; Router internals — time / observability windows
 ;; =============================================================================
 
 (def ^:private router-default-opts
@@ -1248,12 +1244,6 @@
                (let [^long ts (if (map? e) (:ts e) e)]
                  (> ts cutoff)))
       entries)))
-
-(defn- rpm-count ^long [router ps]
-  (count (router-prune-window router (:requests ps []))))
-
-(defn- tpm-count ^long [router ps]
-  (long (reduce + 0 (map :n (router-prune-window router (:tokens ps []))))))
 
 ;; =============================================================================
 ;; Circuit Breaker — three-state: :closed → :open → :half-open → :closed
@@ -1296,10 +1286,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-              (assoc ps
-                :cb-state :open
-                :cb-failures new-failures
-                :cb-open-until (+ now recovery-ms)))
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1311,7 +1301,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1380,10 +1370,12 @@
 ;; Provider availability + model selection
 ;; =============================================================================
 
-(defn- provider-available? [router provider ps]
-  (and (cb-available? router ps)
-    (< (rpm-count router ps) (long (:rpm provider Long/MAX_VALUE)))
-    (< (tpm-count router ps) (long (:tpm provider Long/MAX_VALUE)))))
+(defn- provider-available? [router _provider ps]
+  ;; Provider plans expose different, mutable limits. Guessed catalog RPM/TPM
+  ;; values caused local false positives before any request reached upstream.
+  ;; Route until the provider reports a real transient error; retry/fallback
+  ;; and the circuit breaker handle that evidence.
+  (cb-available? router ps))
 
 (defn- preference-sort-key
   "Returns a sort key fn for a single preference keyword.
@@ -1519,8 +1511,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                    (keyword? prefer) [prefer]
-                    :else nil)
+                        (keyword? prefer) [prefer]
+                        :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)
@@ -1548,7 +1540,7 @@
       (first (sort-by (candidate-sort-key prefs) candidates)))))
 
 (defn- select-and-claim!
-  "Atomically selects best provider and claims a request slot.
+  "Atomically selects best provider and records a request for observability.
    Uses the same cross-provider composite sort as `select-provider`.
 
    Honors `:exclude-providers` (a set of provider IDs) in `prefs`. Used by
@@ -1579,24 +1571,16 @@
 (defn- earliest-available [router prefs]
   (let [{:keys [providers state]} router
         current-state @state
-        _ts (router-now-ms router)
-        window-ms (:window-ms router)
         excluded (or (:exclude-providers prefs) #{})]
     (->> (force-provider-filter prefs providers)
       (remove #(contains? excluded (:id %)))
       (filter #(some? (resolve-model % prefs)))
       (keep (fn [p]
-              (let [ps (get current-state (:id p) {})
-                    ;; For circuit breaker: use open-until as earliest time
-                    cb-ready (when (= :open (or (:cb-state ps) :closed))
-                               (:cb-open-until ps))
-                    requests (sort (mapv #(if (map? %) (:ts %) %)
-                                     (router-prune-window router (:requests ps []))))
-                    rpm-ready (when (and (seq requests)
-                                      (>= (count requests) (long (:rpm p Long/MAX_VALUE))))
-                                (+ (long (first requests)) (long window-ms)))
-                    times (remove nil? [cb-ready rpm-ready])]
-                (when (seq times) (apply max times)))))
+              (let [ps (get current-state (:id p) {})]
+                ;; Real upstream failures open the circuit; local rolling
+                ;; request/token counters never delay a request.
+                (when (= :open (or (:cb-state ps) :closed))
+                  (:cb-open-until ps)))))
       sort first)))
 
 (defn- record-tokens! [router provider-id token-count]

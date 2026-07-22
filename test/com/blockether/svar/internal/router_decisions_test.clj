@@ -857,7 +857,7 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                             :p2 (success-result 10)))))
+                                 :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -882,13 +882,13 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                             :p2 (success-result 10)))))
+                                 :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                           :p2 (success-result 10))))
+                               :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)
@@ -1053,7 +1053,7 @@
         (expect (nil? selection))))))
 
 ;; =============================================================================
-;; Rate limiting — RPM / TPM gates, window pruning, CAS claim
+;; Rolling request/token observability never gates provider admission
 ;; =============================================================================
 
 (defn- seed-requests!
@@ -1069,11 +1069,10 @@
   (swap! (:state router) update-in [provider-id :tokens]
     (fn [ts] (into (or ts []) entries))))
 
-(defdescribe rate-limit-rpm-gate-test
-  "`provider-available?` must refuse providers whose in-window request count
-   meets or exceeds `:rpm`. Window length is `:window-ms` (default 60s)."
+(defdescribe catalog-rate-metadata-does-not-gate-test
+  "Provider-specific limits come from upstream responses, not guessed config."
 
-  (it "provider is unavailable when RPM is exhausted"
+  (it "ignores configured RPM when selecting a provider"
     (let [[clock clock-atom] (mock-clock)
           r (llm/make-router
               [{:id :p1 :api-key "k" :base-url "http://p1" :rpm 3
@@ -1082,61 +1081,26 @@
                 :models [{:name "m2"}]}]
               {:clock clock})
           _ (advance! clock-atom 1000)
-          _ (seed-requests! r :p1 @clock-atom 3)   ;; p1 is now at its RPM limit
-          ;; select-and-claim should skip p1 and pick p2
+          _ (seed-requests! r :p1 @clock-atom 3)
           result (router/with-provider-fallback r {}
                    (fn [_ _] (success-result 10)))]
-      (expect (= :p2 (:routed/provider-id result)))))
+      (expect (= :p1 (:routed/provider-id result)))))
 
-  (it "RPM slot frees up after `:window-ms` elapses"
-    (let [[clock clock-atom] (mock-clock)
-          r (llm/make-router
-              [{:id :p1 :api-key "k" :base-url "http://p1" :rpm 2
-                :models [{:name "m1"}]}]
-              {:clock clock :window-ms 10000})
-          _ (advance! clock-atom 0)
-          _ (seed-requests! r :p1 0 2)             ;; p1 at RPM limit at t=0
-          _ (advance! clock-atom 11000)]           ;; window elapsed
-      ;; Old entries pruned out; p1 should be selectable again
-      (expect (= :p1 (:routed/provider-id
-                      (router/with-provider-fallback r {}
-                        (fn [_ _] (success-result 10)))))))))
-
-(defdescribe rate-limit-tpm-gate-test
-  "`provider-available?` must refuse providers whose in-window summed token
-   count meets or exceeds `:tpm`."
-
-  (it "provider is unavailable when TPM sum is exhausted"
-    (let [[clock clock-atom] (mock-clock)
-          r (llm/make-router
-              [{:id :p1 :api-key "k" :base-url "http://p1" :tpm 1000
-                :models [{:name "m1"}]}
-               {:id :p2 :api-key "k" :base-url "http://p2" :tpm 1000
-                :models [{:name "m2"}]}]
-              {:clock clock})
-          _ (advance! clock-atom 500)
-          _ (seed-tokens! r :p1 [{:ts @clock-atom :n 600}
-                                 {:ts @clock-atom :n 500}])]  ;; sum = 1100 >= 1000
-      (expect (= :p2 (:routed/provider-id
-                      (router/with-provider-fallback r {}
-                        (fn [_ _] (success-result 10))))))))
-
-  (it "TPM slot frees up after window elapses"
+  (it "ignores configured TPM when selecting a provider"
     (let [[clock clock-atom] (mock-clock)
           r (llm/make-router
               [{:id :p1 :api-key "k" :base-url "http://p1" :tpm 100
-                :models [{:name "m1"}]}]
-              {:clock clock :window-ms 5000})
-          _ (seed-tokens! r :p1 [{:ts 0 :n 500}])
-          _ (advance! clock-atom 6000)]          ;; past window
+                :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :tpm 100
+                :models [{:name "m2"}]}]
+              {:clock clock})
+          _ (seed-tokens! r :p1 [{:ts @clock-atom :n 500}])]
       (expect (= :p1 (:routed/provider-id
                       (router/with-provider-fallback r {}
                         (fn [_ _] (success-result 10)))))))))
 
-(defdescribe select-and-claim-updates-request-window-test
-  "`select-and-claim!` MUST atomically append the claim timestamp to the
-   winning provider's `:requests` window so subsequent calls see the load.
-   Verified single-threaded by observing post-call state."
+(defdescribe select-and-claim-updates-observability-window-test
+  "Successful calls retain rolling request/token counts without gating."
 
   (it "successful call appends a request timestamp to the winning provider"
     (let [[clock clock-atom] (mock-clock)

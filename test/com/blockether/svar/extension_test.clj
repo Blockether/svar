@@ -19,7 +19,7 @@
 
 (defdescribe provider-limits-extension-test
   (describe "provider-limits"
-    (it "exposes rpm/tpm usage, remaining capacity, models, and budget"
+    (it "exposes rolling usage, models, circuit state, and budget"
       (let [clock (atom 0)
             r (svar/make-router
                 [{:id :ext-provider
@@ -41,12 +41,8 @@
         (let [limits (ext/provider-limits r)]
           (expect (= 60000 (:window-ms limits)))
           (expect (= ["m1"] (get-in limits [:providers :ext-provider :models])))
-          (expect (= 2 (get-in limits [:providers :ext-provider :rpm :limit])))
-          (expect (= 1 (get-in limits [:providers :ext-provider :rpm :used])))
-          (expect (= 1 (get-in limits [:providers :ext-provider :rpm :remaining])))
-          (expect (= 100 (get-in limits [:providers :ext-provider :tpm :limit])))
-          (expect (= 30 (get-in limits [:providers :ext-provider :tpm :used])))
-          (expect (= 70 (get-in limits [:providers :ext-provider :tpm :remaining])))
+          (expect (= {:requests 1 :tokens 30}
+                    (get-in limits [:providers :ext-provider :windowed])))
           (expect (= :closed (get-in limits [:providers :ext-provider :circuit-breaker])))
           (expect (= {:max-tokens 1000 :max-cost 10.0} (get-in limits [:budget :limit])))
           (expect (= 30 (get-in limits [:budget :spent :total-tokens])))
@@ -75,5 +71,4 @@
         (expect (true? (:ok? diagnosis)))
         (expect (= :parse (:phase diagnosis)))
         (expect (= {:city "Paris"} (:value diagnosis)))))))
-
 

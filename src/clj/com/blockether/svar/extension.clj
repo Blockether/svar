@@ -43,19 +43,6 @@
   [entries]
   (long (reduce + 0 (map #(long (or (:n %) 0)) entries))))
 
-(defn- reset-ms
-  [router entries used limit]
-  (if (and (pos? (long limit)) (>= (long used) (long limit)) (seq entries))
-    (let [window-ms (long (:window-ms router 60000))
-          now       (long (now-ms router))
-          oldest    (long (reduce (fn [^long acc entry]
-                                    (min acc (long (entry-ts entry))))
-                            Long/MAX_VALUE
-                            entries))
-          delta     (long (- (+ oldest window-ms) now))]
-      (max 0 (long delta)))
-    0))
-
 (defn- circuit-state
   [router provider-state]
   (let [state (or (:cb-state provider-state) :closed)]
@@ -88,8 +75,7 @@
 
    Shape:
    {:window-ms N
-    :providers {provider-id {:rpm {:limit N :used N :remaining N :reset-ms N}
-                             :tpm {:limit N :used N :remaining N :reset-ms N}
+    :providers {provider-id {:windowed {:requests N :tokens N}
                              :circuit-breaker :closed|:open|:half-open
                              :models [...]}}
     :budget {:limit ... :spent ... :remaining ...}}
@@ -103,20 +89,10 @@
             (let [pid (:id provider)
                   ps (get state pid {})
                   requests (prune-window router (:requests ps))
-                  tokens (prune-window router (:tokens ps))
-                  rpm-limit (long (:rpm provider Long/MAX_VALUE))
-                  tpm-limit (long (:tpm provider Long/MAX_VALUE))
-                  rpm-used (long (count requests))
-                  tpm-used (long (sum-token-window tokens))]
+                  tokens (prune-window router (:tokens ps))]
               (assoc acc pid
-                {:rpm {:limit rpm-limit
-                       :used rpm-used
-                       :remaining (max 0 (- rpm-limit rpm-used))
-                       :reset-ms (reset-ms router requests rpm-used rpm-limit)}
-                 :tpm {:limit tpm-limit
-                       :used tpm-used
-                       :remaining (max 0 (- tpm-limit tpm-used))
-                       :reset-ms (reset-ms router tokens tpm-used tpm-limit)}
+                {:windowed {:requests (long (count requests))
+                            :tokens (long (sum-token-window tokens))}
                  :circuit-breaker (circuit-state router ps)
                  :cb-failures (or (:cb-failures ps) 0)
                  :models (mapv :name (:models provider))})))
@@ -176,5 +152,4 @@
        {:ok? false
         :phase :parse
         :error (exception->data e)}))))
-
 
