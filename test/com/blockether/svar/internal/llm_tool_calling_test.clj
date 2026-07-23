@@ -308,6 +308,16 @@
       (expect (= [{:id "call_1" :name "run_python" :input {:code "print(6*7)"}}]
                 (get-in out [:provider-state :tool-calls])))))
 
+  (it "identifies a Responses function call before its arguments stream"
+    (let [out (extract-stream-delta
+                {:type "response.output_item.added"
+                 :item {:type "function_call" :call_id "call_early" :name "run_python"
+                        :arguments ""}})]
+      (expect (= {:id "call_early" :name "run_python"}
+                (:tool-call-preview out)))
+      (expect (nil? (:content-delta out)))
+      (expect (nil? (:reasoning-delta out)))))
+
   (it "surfaces function_call args delta as :tool-args-delta (live tool-call preview), no provider-state yet"
     ;; The finalized call still assembles at output_item.done; mid-stream the
     ;; raw argument fragment rides :tool-args-delta so the live bubble can paint
@@ -326,36 +336,57 @@
           b {:provider :openai-responses :tool-calls [{:id "c2" :name "g" :input {}}]}
           dup {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
           m (merge-provider-state (merge-provider-state a b) dup)]
-      (expect (= ["c1" "c2"] (mapv :id (:tool-calls m)))))))
+      (expect (= ["c1" "c2"] (mapv :id (:tool-calls m))))))
+
+  (it "propagates native-call identity through the public streaming callback"
+  (let [seen (atom nil)
+        fake-transport (fn [_url _body _headers _timeout _ttft _idle _delta-fn on-delta]
+                         (on-delta {:content-acc ""
+                                    :reasoning-acc ""
+                                    :tool-args-acc ""
+                                    :tool-call-preview {:id "call_early" :name "run_python"}})
+                         {})]
+    (with-redefs-fn {#'sut/http-post-stream! fake-transport}
+      #(sut/openai-responses-completion
+         {:model "gpt-test"}
+         {:api-key "test" :base-url "https://example.invalid"
+          :on-chunk (fn [chunk] (reset! seen chunk))}))
+    (expect (= {:id "call_early" :name "run_python"}
+               (:tool-call-preview @seen)))
+    (expect (nil? (:content @seen)))
+    (expect (nil? (:reasoning @seen))))))
 
 (defdescribe streaming-tool-args-delta-test
   ;; Native tool calling puts the model's work in the tool-call arguments. To
   ;; render that live (the "watch it code" UX), every wire surfaces the raw
   ;; argument fragments as :tool-args-delta on each stream tick.
-  (it "anthropic input_json_delta surfaces :tool-args-delta (and still accumulates the block)"
-    (let [f (make-anthropic-stream-delta-fn)]
-      (f {:type "content_block_start" :index 0
-          :content_block {:type "tool_use" :id "t1" :name "run_python"}})
-      (let [d1 (f {:type "content_block_delta" :index 0
-                   :delta {:type "input_json_delta" :partial_json "{\"code\":\""}})
-            d2 (f {:type "content_block_delta" :index 0
-                   :delta {:type "input_json_delta" :partial_json "print(1)\"}"}})]
-        (expect (= "{\"code\":\"" (:tool-args-delta d1)))
-        (expect (= "print(1)\"}" (:tool-args-delta d2)))
-        (expect (nil? (:content-delta d1)))
-        ;; The closed block still flushes the canonical tool_use via provider-state.
-        (let [stop (f {:type "content_block_stop" :index 0})]
-          (expect (= :anthropic (get-in stop [:provider-state :provider])))))))
+  (it "anthropic identifies the tool before input_json_delta and still accumulates the block"
+    (let [f (make-anthropic-stream-delta-fn)
+          start (f {:type "content_block_start" :index 0
+                    :content_block {:type "tool_use" :id "t1" :name "run_python"}})
+          d1 (f {:type "content_block_delta" :index 0
+                 :delta {:type "input_json_delta" :partial_json "{\"code\":\""}})
+          d2 (f {:type "content_block_delta" :index 0
+                 :delta {:type "input_json_delta" :partial_json "print(1)\"}"}})]
+      (expect (= {:id "t1" :name "run_python"} (:tool-call-preview start)))
+      (expect (= "{\"code\":\"" (:tool-args-delta d1)))
+      (expect (= "print(1)\"}" (:tool-args-delta d2)))
+      (expect (nil? (:content-delta d1)))
+      ;; The closed block still flushes the canonical tool_use via provider-state.
+      (let [stop (f {:type "content_block_stop" :index 0})]
+        (expect (= :anthropic (get-in stop [:provider-state :provider]))))))
 
-  (it "chat-completions tool_calls fragments surface concatenated :tool-args-delta"
+  (it "chat-completions identifies the tool and surfaces concatenated argument deltas"
     (let [out (extract-stream-delta
                 {:choices [{:delta {:tool_calls [{:index 0 :id "c1"
                                                   :function {:name "run_python" :arguments "{\"code\":\""}}]}}]})]
       (expect (= "{\"code\":\"" (:tool-args-delta out)))
+      (expect (= {:id "c1" :name "run_python"} (:tool-call-preview out)))
       (expect (= :openai-chat (get-in out [:provider-state :provider]))))
-    ;; A plain text delta carries no tool args.
+    ;; A plain text delta carries no tool args or native-call identity.
     (let [out (extract-stream-delta {:choices [{:delta {:content "hello"}}]})]
       (expect (nil? (:tool-args-delta out)))
+      (expect (nil? (:tool-call-preview out)))
       (expect (= "hello" (:content-delta out))))))
 
 (defdescribe responses-state-tool-calls-test

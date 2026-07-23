@@ -1791,7 +1791,9 @@
         (let [idx (:index chunk)
               block (:content_block chunk)]
           (swap! pending assoc idx (or block {}))
-          {:content-delta nil :reasoning-delta nil :api-usage nil})
+          (cond-> {:content-delta nil :reasoning-delta nil :api-usage nil}
+            (= "tool_use" (:type block))
+            (assoc :tool-call-preview (select-keys block [:id :name]))))
 
         "content_block_delta"
         (let [idx   (:index chunk)
@@ -3068,9 +3070,11 @@
         (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
           (http-post-stream! url request-body http-headers timeout-ms ttft-timeout-ms idle-timeout-ms extract-stream-delta
             (when on-chunk
-              (fn [{:keys [content-acc reasoning-acc tool-args-acc provider-state api-usage]}]
+              (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
+                            provider-state api-usage]}]
                 (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                            :tool-input (nonblank-str tool-args-acc)
+                           :tool-call-preview tool-call-preview
                            :provider-state provider-state
                            :api-usage api-usage :done? false})))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
@@ -3409,6 +3413,10 @@
         event-type)
       (let [item (:item chunk)
             done? (= "response.output_item.done" event-type)
+            function-call? (= "function_call" (:type item))
+            tool-call-preview (when function-call?
+                                {:id (or (:call_id item) (:id item))
+                                 :name (:name item)})
             ;; A completed `function_call` item carries its full arguments
             ;; here — codex with `store:false` does NOT echo it on
             ;; `response.completed`, so this is the only place to catch it.
@@ -3418,6 +3426,9 @@
          :content-fallback nil
          :reasoning-fallback (when (and (= "reasoning" (:type item)) done?)
                                (reasoning-part-text item))
+         ;; `output_item.added` identifies the native call before argument
+         ;; deltas arrive. Preserve that identity separately from reasoning/text.
+         :tool-call-preview tool-call-preview
          :provider-state (cond
                            tool-call {:provider :openai-responses :tool-calls [tool-call]}
                            done?     (reasoning-item-provider-state item))
@@ -3446,10 +3457,16 @@
     (let [delta       (get-in chunk [:choices 0 :delta])
           raw-content (:content delta)
           reasoning   (or (:reasoning_content delta)
-                        (:reasoning delta)
-                        (:reasoning_text delta)
-                        (:reasoning_summary delta))
-          tool-frags  (:tool_calls delta)]
+                          (:reasoning delta)
+                          (:reasoning_text delta)
+                          (:reasoning_summary delta))
+          tool-frags  (:tool_calls delta)
+          first-tool-frag (first tool-frags)
+          tool-name (get-in first-tool-frag [:function :name])
+          tool-call-preview (not-empty
+                              (cond-> {}
+                                (:id first-tool-frag) (assoc :id (:id first-tool-frag))
+                                tool-name (assoc :name tool-name)))]
       {:content-delta (cond
                         ;; Preserve exact string deltas, including a
                         ;; single-space token between adjacent code tokens.
@@ -3465,6 +3482,7 @@
        ;; finalizer assembles them (args arrive piecewise, paired by :index).
        :provider-state (when (seq tool-frags)
                          {:provider :openai-chat :tool-call-fragments (vec tool-frags)})
+       :tool-call-preview tool-call-preview
        ;; ALSO surface the raw argument fragments as `:tool-args-delta` so the
        ;; streaming loop can render the tool call's arguments live (the same
        ;; live-code affordance the anthropic input_json_delta path gives).
@@ -3876,11 +3894,11 @@
         _ (reset! stream-ref input-stream)
         content-acc (StringBuilder.)
         reasoning-acc (StringBuilder.)
-        ;; Accumulates streamed tool-call argument fragments (e.g. the raw
-        ;; `{"code": …}` JSON of a run_python call) so callers can render the
-        ;; tool call being written live. The authoritative tool call still
-        ;; assembles via provider-state at terminal; this is preview-only.
+        ;; Accumulates streamed tool-call argument fragments and the identity
+        ;; announced before them. Keeping this separate from content/reasoning
+        ;; lets callers render a native-call preview without reclassifying text.
         tool-args-acc (StringBuilder.)
+        tool-call-preview-atom (atom nil)
         ;; Diagnostics for a body that is NOT an SSE stream. Some gateways
         ;; (e.g. Z.ai) answer an error with HTTP 200 + a plain JSON body like
         ;; `{"code":500,"msg":"404 NOT_FOUND"}`. Read as a stream that yields
@@ -3946,7 +3964,7 @@
                     parsed
                     (let [parsed (enrich-responses-reasoning-event current-reasoning-item parsed)
                           {:keys [content-delta reasoning-delta content-fallback reasoning-fallback
-                                  tool-args-delta
+                                  tool-args-delta tool-call-preview
                                   provider-state api-usage terminal? incomplete? incomplete-reason]
                            :as extracted}
                           (delta-fn parsed)
@@ -3976,6 +3994,8 @@
                       (when content-piece (.append content-acc content-piece))
                       (when reasoning-piece (.append reasoning-acc reasoning-piece))
                       (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
+                      (when tool-call-preview
+                        (swap! tool-call-preview-atom merge tool-call-preview))
                       (when provider-state
                         (swap! provider-state-atom merge-provider-state provider-state))
                       (when api-usage (reset! usage-atom api-usage))
@@ -3985,6 +4005,7 @@
                                    :content-acc (str content-acc)
                                    :reasoning-acc (str reasoning-acc)
                                    :tool-args-acc (str tool-args-acc)
+                                   :tool-call-preview @tool-call-preview-atom
                                    :provider-state @provider-state-atom
                                    :api-usage api-usage})))))
                 (dispatch-event! [event-type data-lines]
@@ -4368,9 +4389,11 @@
         (fn []
           (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
             (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
-              (fn [{:keys [content-acc reasoning-acc tool-args-acc provider-state api-usage]}]
+              (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
+                            provider-state api-usage]}]
                 (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                            :tool-input (nonblank-str tool-args-acc)
+                           :tool-call-preview tool-call-preview
                            :provider-state provider-state
                            :api-usage api-usage :done? false})))))
         retry-opts)
@@ -5804,7 +5827,8 @@
                                               "or use a larger context model.")}))
                            check))
         streaming-on-chunk (when on-chunk
-                             (fn [{:keys [content reasoning tool-input provider-state api-usage]}]
+                             (fn [{:keys [content reasoning tool-input tool-call-preview
+                                          provider-state api-usage]}]
                                (let [tokens (api-usage->tokens api-usage)
                                      cost (when api-usage
                                             (router/estimate-cost model
@@ -5817,11 +5841,13 @@
                                  ;; with NO text content at all — fire on that too so
                                  ;; callers can render the call being written live.
                                  (when (or (not (str/blank? (or reasoning "")))
-                                         (not (str/blank? (or content "")))
-                                         (not (str/blank? (or tool-input ""))))
+                                           (not (str/blank? (or content "")))
+                                           (not (str/blank? (or tool-input "")))
+                                           (some? tool-call-preview))
                                    (on-chunk {:content   content
                                               :reasoning reasoning
                                               :tool-input tool-input
+                                              :tool-call-preview tool-call-preview
                                               :provider-state provider-state
                                               :tokens    tokens
                                               :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))

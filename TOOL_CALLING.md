@@ -84,11 +84,14 @@ Inject in: `build-anthropic-request-body` (1085), `build-request-body` (1970),
   assistant builders 1687 / 1673).
 
 ## Streaming deltas (accumulate partial tool calls)
+- Streaming callbacks receive `:tool-call-preview {:id … :name …}` as soon as
+  the provider identifies a native call, separately from `:reasoning` and
+  `:content`. Cumulative raw argument JSON remains available as `:tool-input`.
 - anthropic: `content_block_start{tool_use}` + `input_json_delta` (append) +
-  `content_block_stop` → finalize input json. (`make-anthropic-stream-delta-fn` 1272.)
-- chat: `choices[].delta.tool_calls[]` index-keyed arg fragments. (`extract-stream-delta` 2360.)
-- responses: `response.output_item.added{function_call}` +
-  `response.function_call_arguments.delta` + `.done`.
+  `content_block_stop` → finalize input json. (`make-anthropic-stream-delta-fn`.)
+- chat: `choices[].delta.tool_calls[]` index-keyed arg fragments.
+- responses: `response.output_item.added{function_call}` identifies the preview,
+  followed by `response.function_call_arguments.delta` + `.done`.
 
 ## Public API (core.clj) — FINAL SHAPE
 

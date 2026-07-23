@@ -655,6 +655,11 @@ Callback shape:
 | `:cost` | `nil` | `{:input-cost N :output-cost N :total-cost N}` |
 | `:done?` | `false` | `true` |
 
+For `ask-code!`, streaming callbacks also carry cumulative `:tool-input` and
+`:tool-call-preview {:id … :name …}`. The preview arrives when the provider
+identifies a native call, before argument deltas, and is never reported as
+`:reasoning` or `:content`.
+
 Streaming works with all routing options — `:optimize`, provider pinning, fallback:
 
 ```clojure
