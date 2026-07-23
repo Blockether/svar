@@ -30,6 +30,8 @@
 
 (def ^:private start-watchdog      @#'sut/start-idle-stream-watchdog!)
 (def ^:private start-ttft-watchdog @#'sut/start-ttft-watchdog!)
+(def ^:private deregister-watchdog @#'sut/deregister-watchdog!)
+(def ^:private watchdog-registry   @#'sut/watchdog-registry)
 
 (defn- close-tracking-stream
   "Wraps `delegate` and atomically sets `closed?` when `.close` is invoked.
@@ -69,7 +71,7 @@
             (>= waited 1000) :timed-out
             :else            (do (Thread/sleep 25) (recur (+ waited 25)))))
         (reset! alive? false)
-        (.interrupt ^Thread t)
+        (deregister-watchdog t)
         (expect (.get closed?))
         (expect (number? @fired-elapsed))
         (expect (>= (long @fired-elapsed) idle-ms)))))
@@ -97,7 +99,7 @@
             (reset! last-byte-ns (System/nanoTime)))
           (finally
             (reset! alive? false)
-            (.interrupt ^Thread t)
+            (deregister-watchdog t)
             (.close pipe-out)))
         (expect (false? (.get closed?)))
         (expect (false? @fired?)))))
@@ -117,9 +119,10 @@
         ;; should wake from sleep, see alive? false, exit the loop.
         (Thread/sleep 50)
         (reset! alive? false)
-        (.interrupt ^Thread t)
-        (.join ^Thread t 1000)
-        (expect (false? (.isAlive t)))
+        ;; One shared tick (~50ms) observes alive? false and self-deregisters.
+        (Thread/sleep 120)
+        (expect (not (.containsKey ^java.util.Map watchdog-registry t)))
+        (deregister-watchdog t)
         (expect (false? (.get closed?)))
         (expect (false? @fired?))))))
 
@@ -143,7 +146,7 @@
                                 (Thread/sleep 1000)
                                 false
                                 (catch InterruptedException _ true))]
-        (.interrupt ^Thread t)
+        (deregister-watchdog t)
         (expect interrupted?)
         (expect (true? @ttft-fired?))
         (expect (false? @headers-received?)))))
@@ -166,6 +169,6 @@
         ;; have observed an interrupt by now if the watchdog misbehaved.
         (let [interrupted? (try (Thread/sleep (+ ttft-ms 200)) false
                                 (catch InterruptedException _ true))]
-          (.interrupt ^Thread t)
+          (deregister-watchdog t)
           (expect (false? interrupted?))
           (expect (false? @ttft-fired?)))))))

@@ -20,6 +20,8 @@
    (java.util.concurrent.atomic AtomicBoolean)))
 
 (def ^:private start-cancel-watchdog @#'sut/start-cancel-watchdog!)
+(def ^:private deregister-watchdog   @#'sut/deregister-watchdog!)
+(def ^:private watchdog-registry     @#'sut/watchdog-registry)
 
 (defn- close-tracking-stream
   "Wraps `delegate`, setting `closed?` when `.close` is invoked, so the test
@@ -63,7 +65,7 @@
             (Thread/sleep 20)
             (recur (inc n))))
         (reset! alive? false)
-        (.interrupt ^Thread t)
+        (deregister-watchdog t)
         (expect (true? @cancel-fired?))
         (expect (.get closed?))
         ;; The caller must NOT have been interrupted on the stream-present path.
@@ -89,7 +91,7 @@
                             false
                             (catch InterruptedException _ true))]
         (reset! alive? false)
-        (.interrupt ^Thread t)
+        (deregister-watchdog t)
         (expect interrupted?)
         (expect (true? @cancel-fired?)))))
 
@@ -110,7 +112,7 @@
             interrupted?  (try (Thread/sleep 400) false
                                (catch InterruptedException _ true))]
         (reset! alive? false)
-        (.interrupt ^Thread t)
+        (deregister-watchdog t)
         (expect (false? interrupted?))
         (expect (false? @cancel-fired?))
         (expect (false? (.get closed?))))))
@@ -130,8 +132,9 @@
                             stream-ref cancel-fired? alive?)]
         (Thread/sleep 50)
         (reset! alive? false)
-        (.interrupt ^Thread t)
-        (.join ^Thread t 1000)
-        (expect (false? (.isAlive t)))
+        ;; One shared tick (~50ms) observes alive? false and self-deregisters.
+        (Thread/sleep 120)
+        (expect (not (.containsKey ^java.util.Map watchdog-registry t)))
+        (deregister-watchdog t)
         (expect (false? @cancel-fired?))
         (expect (false? (.get closed?)))))))

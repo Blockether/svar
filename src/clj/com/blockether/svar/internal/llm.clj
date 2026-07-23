@@ -3071,7 +3071,7 @@
           (http-post-stream! url request-body http-headers timeout-ms ttft-timeout-ms idle-timeout-ms extract-stream-delta
             (when on-chunk
               (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
-                            provider-state api-usage]}]
+                           provider-state api-usage]}]
                 (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                            :tool-input (nonblank-str tool-args-acc)
                            :tool-call-preview tool-call-preview
@@ -3457,9 +3457,9 @@
     (let [delta       (get-in chunk [:choices 0 :delta])
           raw-content (:content delta)
           reasoning   (or (:reasoning_content delta)
-                          (:reasoning delta)
-                          (:reasoning_text delta)
-                          (:reasoning_summary delta))
+                        (:reasoning delta)
+                        (:reasoning_text delta)
+                        (:reasoning_summary delta))
           tool-frags  (:tool_calls delta)
           first-tool-frag (first tool-frags)
           tool-name (get-in first-tool-frag [:function :name])
@@ -3558,161 +3558,168 @@
   [is]
   (try (slurp is) (catch Exception _ nil)))
 
+(def ^:private watchdog-registry
+  "token -> tick-fn for every in-flight stream watchdog. ONE shared
+   scheduler ticks over this map, replacing the former 4-daemon-threads-
+   per-request model (which fanned out to ~4*N threads under load)."
+  (java.util.concurrent.ConcurrentHashMap.))
+
+(def ^:private watchdog-token-seq (java.util.concurrent.atomic.AtomicLong.))
+
+(def ^:private ^:const watchdog-tick-ms 50)
+
+(defn- watchdog-tick!
+  "One scheduler pass: call every registered tick-fn. A fn returning falsey
+   (success/fired/dead) deregisters itself. Each call is isolated so one
+   throwing task cannot starve the rest."
+  []
+  (doseq [^java.util.Map$Entry e (into [] (.entrySet ^java.util.concurrent.ConcurrentHashMap watchdog-registry))]
+    (let [token (.getKey e)
+          f     (.getValue e)]
+      (when-not (try (f) (catch Throwable _ false))
+        (.remove ^java.util.concurrent.ConcurrentHashMap watchdog-registry token)))))
+
+(defonce ^:private watchdog-scheduler
+  ;; Lazy single-thread daemon scheduler. Started on first registration so a
+  ;; process that never streams pays nothing. Fixed 50ms tick over all
+  ;; requests: one thread, wakeups flat in N (was ~20/s/request just for the
+  ;; cancel poll -> 1000/s at 50 streams).
+  (delay
+    (let [tf   (reify java.util.concurrent.ThreadFactory
+                 (newThread [_ r]
+                   (doto (Thread. ^Runnable r "svar-stream-watchdog")
+                     (.setDaemon true))))
+          exec (java.util.concurrent.Executors/newSingleThreadScheduledExecutor tf)]
+      (.scheduleAtFixedRate exec ^Runnable watchdog-tick!
+        (long watchdog-tick-ms) (long watchdog-tick-ms)
+        java.util.concurrent.TimeUnit/MILLISECONDS)
+      exec)))
+
+(defn- register-watchdog!
+  "Register `tick-fn` with the shared scheduler; returns a handle token.
+   `tick-fn` is invoked every tick and must return truthy to stay armed,
+   falsey to disarm (after firing or on success). Lazily boots the scheduler."
+  [tick-fn]
+  @watchdog-scheduler
+  (let [token (.getAndIncrement ^java.util.concurrent.atomic.AtomicLong watchdog-token-seq)]
+    (.put ^java.util.concurrent.ConcurrentHashMap watchdog-registry token tick-fn)
+    token))
+
+(defn- deregister-watchdog!
+  "Remove a watchdog by its handle token. Idempotent and nil-safe."
+  [token]
+  (when token (.remove ^java.util.concurrent.ConcurrentHashMap watchdog-registry token)))
+
 (defn- start-ttft-watchdog!
-  "Daemon thread that interrupts `caller` if `headers-received?-atom` is
-   still false after `ttft-timeout-ms`. Used to bound the wait inside
-   `http/post` -> `HttpClient.send` -> `CompletableFuture.get` when the
-   upstream accepts the connection but never returns response headers.
+  "Arms a TTFT check on the shared scheduler: interrupts `caller` if
+   `headers-received?-atom` is still false after `ttft-timeout-ms`. Bounds the
+   wait inside `http/post` -> `HttpClient.send` -> `CompletableFuture.get`
+   when the upstream accepts the connection but never returns headers.
 
    Distinct from `start-idle-stream-watchdog!`: that one closes the body
-   `InputStream` (which is unavailable in this phase — the whole reason
-   we need a separate watchdog). `Thread.interrupt()` on the caller is
-   the lever that reaches the parked `CompletableFuture.get` cleanly:
-   `Signaller.block` checks the interrupted flag on unpark and surfaces
-   `InterruptedException`, which propagates out of `HttpClient.send` as
-   `IOException` (wrapped by babashka.http-client as ExceptionInfo).
-   Caller distinguishes via the `ttft-fired?-atom` flag we set BEFORE
-   the interrupt; on a successful return the caller flips
-   `headers-received?-atom` true and we exit without interrupting.
+   `InputStream` (unavailable in this phase — the whole reason for a separate
+   check). `Thread.interrupt()` on the caller is the lever that reaches the
+   parked `CompletableFuture.get` cleanly: `Signaller.block` checks the
+   interrupted flag on unpark and surfaces `InterruptedException`, which
+   propagates out of `HttpClient.send` as `IOException` (wrapped by
+   babashka.http-client as ExceptionInfo). Caller distinguishes via the
+   `ttft-fired?-atom` flag we set BEFORE the interrupt; on a successful return
+   the caller flips `headers-received?-atom` true and the check disarms.
 
-   Returns the thread so the caller can interrupt it on success."
+   Returns a handle token; pass to `deregister-watchdog!` on success."
   [^Thread caller ttft-timeout-ms headers-received?-atom ttft-fired?-atom]
-  (let [;; Clamp the per-tick sleep to [100, 5000] ms so the watchdog
-        ;; wakes within 5s of caller success regardless of the configured
-        ;; ttft-timeout-ms. Without this a 90s timeout would park the
-        ;; daemon thread for the full 90s after a healthy response
-        ;; returned in 50ms, wasting a thread slot.
-        check-ms    (-> (long ttft-timeout-ms) (quot 4) (max 100) (min 5000))
-        deadline-ns (+ (System/nanoTime) (* (long ttft-timeout-ms) 1000000))
-        runnable    (fn []
-                      (try
-                        (loop []
-                          (Thread/sleep (long check-ms))
-                          (cond
-                            ;; Caller signalled success between ticks; exit
-                            ;; without interrupting.
-                            @headers-received?-atom nil
-                            ;; Deadline crossed; recheck flag once more under
-                            ;; race-window guard, then fire.
-                            (>= (System/nanoTime) deadline-ns)
-                            (when-not @headers-received?-atom
-                              (reset! ttft-fired?-atom true)
-                              (.interrupt caller))
-                            :else (recur)))
-                        (catch InterruptedException _ nil)
-                        (catch Throwable _ nil)))
-        thread      (doto (Thread. ^Runnable runnable "svar-ttft-watchdog")
-                      (.setDaemon true)
-                      (.start))]
-    thread))
+  (let [deadline-ns (+ (System/nanoTime) (* (long ttft-timeout-ms) 1000000))]
+    (register-watchdog!
+      (fn []
+        (cond
+          ;; Caller signalled success; disarm without interrupting.
+          @headers-received?-atom false
+          ;; Deadline crossed; recheck flag once more under race-window
+          ;; guard, then fire and disarm.
+          (>= (System/nanoTime) deadline-ns)
+          (do (when-not @headers-received?-atom
+                (reset! ttft-fired?-atom true)
+                (.interrupt caller))
+              false)
+          :else true)))))
 
 (defn- start-idle-stream-watchdog!
-  "Daemon thread. Closes `stream` if `last-byte-ns-atom` stale > idle-ms.
-   Reader loop bumps the atom every line; when wall-clock gap exceeds the
-   threshold the close kicks the parked `.readLine` with an `IOException`
-   and the surrounding catch re-throws as `:svar.core/stream-idle-timeout`.
-   On normal completion the caller flips `alive?-atom` to false and
-   interrupts the thread—the watchdog exits without touching the stream.
+  "Arms an idle check on the shared scheduler: closes `stream` if
+   `last-byte-ns-atom` is stale > idle-ms. Reader loop bumps the atom every
+   line; when the wall-clock gap exceeds the threshold the close kicks the
+   parked `.readLine` with an `IOException` and the surrounding catch
+   re-throws as `:svar.core/stream-idle-timeout`. On normal completion the
+   caller flips `alive?-atom` false and the check disarms without touching
+   the stream.
 
    Why a separate timer, not `HttpRequest.timeout`: the JDK request timeout
    covers headers + total wall-clock, doesn't fire on a mid-stream idle
-   (HTTP/2 frames open, no body delta), and on JDK 25 + streaming bodies
-   is known to miss entirely. The idle watchdog is signal-driven: stalls
-   surface fast, slow-but-progressing reasoning streams (which emit deltas
-   every few seconds) keep flowing.
+   (HTTP/2 frames open, no body delta), and on JDK 25 + streaming bodies is
+   known to miss entirely. The idle check is signal-driven: stalls surface
+   fast, slow-but-progressing reasoning streams keep flowing.
 
    `on-fire` called once with elapsed-ms before the close; lets the caller
-   stamp telemetry. Returns the thread for shutdown."
+   stamp telemetry. Returns a handle token for shutdown."
   [^java.io.InputStream stream idle-timeout-ms last-byte-ns-atom alive?-atom on-fire]
-  (let [;; Clamp the per-tick sleep to [100, 5000] ms. The watchdog stays
-        ;; sensitive enough to fire close to the configured deadline while
-        ;; never blocking caller shutdown for longer than 5s on long
-        ;; timeouts (120s idle default would otherwise sleep 30s per tick).
-        check-ms (-> (long idle-timeout-ms) (quot 4) (max 100) (min 5000))
-        runnable (fn []
-                   (try
-                     (loop []
-                       (Thread/sleep (long check-ms))
-                       (when @alive?-atom
-                         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
-                           (if (>= elapsed-ms (long idle-timeout-ms))
-                             (do
-                               (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                               (try (.close stream) (catch Throwable _ nil)))
-                             (recur)))))
-                     (catch InterruptedException _ nil)
-                     (catch Throwable _ nil)))
-        thread   (doto (Thread. ^Runnable runnable "svar-idle-stream-watchdog")
-                   (.setDaemon true)
-                   (.start))]
-    thread))
+  (register-watchdog!
+    (fn []
+      (if @alive?-atom
+        (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
+          (if (>= elapsed-ms (long idle-timeout-ms))
+            (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
+                (try (.close stream) (catch Throwable _ nil))
+                false)
+            true))
+        false))))
 
 (defn- start-semantic-stream-watchdog!
-  "Daemon thread. Closes `stream` if model/progress events stop while
-   transport may still emit pings/comments."
+  "Arms a semantic check on the shared scheduler: closes `stream` if
+   model/progress events stop while transport may still emit pings/comments.
+   Returns a handle token for shutdown."
   [^java.io.InputStream stream semantic-timeout-ms last-semantic-ns-atom alive?-atom on-fire]
-  (let [check-ms (-> (long semantic-timeout-ms) (quot 4) (max 100) (min 5000))
-        runnable (fn []
-                   (try
-                     (loop []
-                       (Thread/sleep (long check-ms))
-                       (when @alive?-atom
-                         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
-                           (if (>= elapsed-ms (long semantic-timeout-ms))
-                             (do
-                               (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                               (try (.close stream) (catch Throwable _ nil)))
-                             (recur)))))
-                     (catch InterruptedException _ nil)
-                     (catch Throwable _ nil)))
-        thread   (doto (Thread. ^Runnable runnable "svar-semantic-stream-watchdog")
-                   (.setDaemon true)
-                   (.start))]
-    thread))
+  (register-watchdog!
+    (fn []
+      (if @alive?-atom
+        (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
+          (if (>= elapsed-ms (long semantic-timeout-ms))
+            (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
+                (try (.close stream) (catch Throwable _ nil))
+                false)
+            true))
+        false))))
 
 (defn- start-cancel-watchdog!
-  "Daemon thread driving caller-requested cancellation (`*cancel-fn*`).
-   Polls `cancel-requested?` every `CANCEL_POLL_MS`; on the first truthy
-   read it sets `cancel-fired?` then applies BOTH levers (a blocking socket
-   read ignores `Thread.interrupt()`, and a not-yet-arrived body has no
-   stream to close, so neither lever alone covers every phase):
+  "Arms caller-requested cancellation (`*cancel-fn*`) on the shared scheduler.
+   Polls `cancel-requested?` each tick; on the first truthy read it sets
+   `cancel-fired?` then applies BOTH levers (a blocking socket read ignores
+   `Thread.interrupt()`, and a not-yet-arrived body has no stream to close, so
+   neither lever alone covers every phase):
      - closes the body `InputStream` if present (`stream-ref`) — unblocks a
        parked `.readLine` mid-stream;
      - interrupts `caller` — unparks the pre-headers `CompletableFuture.get`
        and any retry/backoff `Thread/sleep`.
-   Exits when `alive?-atom` flips false (caller's `finally`) or after firing.
-   Returns the thread so the caller can interrupt it on normal completion."
+   Disarms when `alive?-atom` flips false (caller's `finally`) or after firing.
+   Returns a handle token for shutdown."
   [^Thread caller cancel-requested? stream-ref cancel-fired? alive?-atom]
-  (let [runnable (fn []
-                   (try
-                     (loop []
-                       (Thread/sleep 50)
-                       (when @alive?-atom
-                         (if (cancel-requested?)
-                           (do
-                             (reset! cancel-fired? true)
-                             (if-let [s @stream-ref]
-                               ;; Post-headers: closing the body unblocks the
-                               ;; parked `.readLine`. Do NOT interrupt — the
-                               ;; caller is in OUR read loop, and interrupting
-                               ;; the shared JDK client's send machinery can
-                               ;; wedge its SelectorManager, surfacing as
-                               ;; "selector manager closed" on every LATER
-                               ;; send. (with-http-client-heal recovers from
-                               ;; that, but not killing it is cheaper.)
-                               (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
-                               ;; Pre-headers: no body yet; the caller is parked
-                               ;; in HttpClient.send -> CompletableFuture.get.
-                               ;; Interrupt to unpark it (the TTFT watchdog's
-                               ;; lever) — unavoidable here, but rare.
-                               (try (.interrupt caller) (catch Throwable _ nil))))
-                           (recur))))
-                     (catch InterruptedException _ nil)
-                     (catch Throwable _ nil)))
-        thread   (doto (Thread. ^Runnable runnable "svar-cancel-watchdog")
-                   (.setDaemon true)
-                   (.start))]
-    thread))
+  (register-watchdog!
+    (fn []
+      (if @alive?-atom
+        (if (cancel-requested?)
+          (do (reset! cancel-fired? true)
+              (if-let [s @stream-ref]
+                ;; Post-headers: closing the body unblocks the parked
+                ;; `.readLine`. Do NOT interrupt — the caller is in OUR read
+                ;; loop, and interrupting the shared JDK client's send
+                ;; machinery can wedge its SelectorManager, surfacing as
+                ;; "selector manager closed" on every LATER send.
+                (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
+                ;; Pre-headers: no body yet; the caller is parked in
+                ;; HttpClient.send -> CompletableFuture.get. Interrupt to
+                ;; unpark it (the TTFT lever) — unavoidable here, but rare.
+                (try (.interrupt caller) (catch Throwable _ nil)))
+              false)
+          true)
+        false))))
 
 (defn- reclassify-pre-headers-interrupt!
   "Reclassify a RAW `InterruptedException` surfaced by the pre-headers
@@ -3874,14 +3881,11 @@
                      ;; genuinely external interrupt verbatim (flag restored).
                      (reclassify-pre-headers-interrupt! e cancel-fired? ttft-fired? url ttft-timeout-ms))
                    (finally
-                     ;; Order matters: flip the flag BEFORE interrupting
-                     ;; the watchdog so the watchdog's recheck sees the
-                     ;; success. Then interrupt to wake it from sleep
-                     ;; immediately; without this it'd live until the
-                     ;; full ttft-timeout-ms.
+                     ;; Order matters: flip the flag BEFORE deregistering so
+                     ;; a racing tick sees the success and never fires. Then
+                     ;; deregister so the shared scheduler drops this check.
                      (reset! headers-received? true)
-                     (when ttft-watchdog
-                       (try (.interrupt ^Thread ttft-watchdog) (catch Throwable _ nil)))))
+                     (deregister-watchdog! ttft-watchdog)))
         _ (mark-connection-healthy! url)
         _ (trove/log! {:level :debug :id ::stream-headers
                        :data (log-data {:url url
@@ -4350,13 +4354,10 @@
         ;; check sees the flag, then interrupt the sleep loop. Idempotent
         ;; if no watchdog was started (nil thread).
         (reset! watchdog-alive? false)
-        (when watchdog
-          (try (.interrupt ^Thread watchdog) (catch Throwable _ nil)))
-        (when semantic-watchdog
-          (try (.interrupt ^Thread semantic-watchdog) (catch Throwable _ nil)))
+        (deregister-watchdog! watchdog)
+        (deregister-watchdog! semantic-watchdog)
         (reset! cancel-alive? false)
-        (when cancel-watchdog
-          (try (.interrupt ^Thread cancel-watchdog) (catch Throwable _ nil)))
+        (deregister-watchdog! cancel-watchdog)
         ;; The cancel watchdog interrupts the caller thread to break parks;
         ;; clear any residual interrupt so it can't poison the caller's next
         ;; blocking op now that cancellation is captured as an exception.
@@ -4390,7 +4391,7 @@
           (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
             (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
               (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
-                            provider-state api-usage]}]
+                           provider-state api-usage]}]
                 (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
                            :tool-input (nonblank-str tool-args-acc)
                            :tool-call-preview tool-call-preview
@@ -5841,9 +5842,9 @@
                                  ;; with NO text content at all — fire on that too so
                                  ;; callers can render the call being written live.
                                  (when (or (not (str/blank? (or reasoning "")))
-                                           (not (str/blank? (or content "")))
-                                           (not (str/blank? (or tool-input "")))
-                                           (some? tool-call-preview))
+                                         (not (str/blank? (or content "")))
+                                         (not (str/blank? (or tool-input "")))
+                                         (some? tool-call-preview))
                                    (on-chunk {:content   content
                                               :reasoning reasoning
                                               :tool-input tool-input
