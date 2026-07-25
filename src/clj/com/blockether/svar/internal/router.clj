@@ -33,7 +33,7 @@
                  :default-models [{:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"} {:name "gpt-4o-mini"} {:name "o3-mini"}]}
    :anthropic   {:base-url "https://api.anthropic.com/v1"
                  :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic
-                 :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+                 :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan
    {:base-url "https://api.anthropic.com/v1"
     :env-keys [] :api-style :anthropic
@@ -41,7 +41,7 @@
     ;; OAuth coding plan: use retail Anthropic pricing for honest metering
     ;; once the included quota is exhausted (see internal/modelsdev).
     :pricing-source :anthropic
-    :default-models [{:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
+    :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
                  :env-keys ["ZAI_API_KEY"]
@@ -91,7 +91,7 @@
                                   {:name "mistral-small-latest"}
                                   {:name "codestral-latest"}]}
    :github-copilot {:base-url "https://api.individual.githubcopilot.com"
-                    :default-models [{:name "claude-opus-4.8"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
+                    :default-models [{:name "claude-opus-5"} {:name "claude-opus-4.8"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4.6"} {:name "claude-haiku-4.5"} {:name "gpt-5.4"} {:name "gpt-5.4-mini"} {:name "gpt-5.3-codex"}]
                     :llm-headers {"Editor-Version" "vscode/1.100.0"
                                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                                   "Copilot-Integration-Id" "vscode-chat"
@@ -229,6 +229,7 @@
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
    "claude-fable-5"            {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-mythos-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
+   "claude-opus-5"             {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-8"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-7"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
    "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
@@ -406,7 +407,7 @@
    dot/dash aliases so Copilot-style names do not regress."
   [model-name]
   (boolean
-    (re-find #"(?i)^claude-(?:fable-5|mythos-5|sonnet-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
+    (re-find #"(?i)^claude-(?:fable-5|mythos-5|sonnet-5|opus-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
       (str model-name))))
 
 (defn- anthropic-thinking-extra-body
@@ -554,6 +555,7 @@
    ;; catalog drifts from our metered retail rate (sonnet-5 → catalog 2/10 vs 3/15).
    {"claude-fable-5"            {:pricing {:cache-write-1h 20.00} :context 1000000}
     "claude-mythos-5"           {:pricing {:input 10.00 :cached-input 1.00  :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00} :context 1000000}
+    "claude-opus-5"             {:pricing {:cache-write-1h 10.00} :context 1000000}
     "claude-opus-4-8"           {:pricing {:cache-write-1h 10.00} :context 1000000}
     "claude-opus-4-7"           {:pricing {:cache-write-1h 10.00} :context 1000000}
     "claude-opus-4-6"           {:pricing {:cache-write-1h 10.00} :context 1000000}
@@ -620,7 +622,8 @@
    ;; resolves to nil in REASONING_LEVELS, so `reasoning-extra-body` emits
    ;; no `thinking` field at all — Claude thinks on its own (visible in the
    ;; response) and we don't push the lever that caused the spiral.
-   {"claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+   {"claude-opus-5"             {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     "claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
     ;; Several Claude rows once carried Anthropic-native context copied
     ;; verbatim (`:context 1000000`) or stale Copilot caps (`144000`).
