@@ -353,6 +353,67 @@
         (expect (= "p1" (get-in trace [0 :from-provider])))
         (expect (= "p2" (get-in trace [0 :to-provider])))))))
 
+(defdescribe with-provider-fallback-stream-watchdog-test
+  "Stream watchdogs already spent their wait budget. Route to the next provider
+   immediately and visibly instead of multiplying the stall with hidden local retries."
+  (it "falls back once for TTFT, idle, and semantic watchdogs"
+    (doseq [timeout-type [:svar.core/stream-ttft-timeout
+                          :svar.core/stream-idle-timeout
+                          :svar.core/stream-semantic-timeout]]
+      (let [[clock _] (mock-clock)
+            r (llm/make-router
+                [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                 {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                {:clock clock
+                 :failure-threshold 1
+                 :rate-limit {:same-provider-delays-ms [0 0]
+                              :fallback-after-ms 1000}})
+            calls (atom [])
+            live (atom [])
+            result (router/with-provider-fallback r {:on-chunk #(swap! live conj %)}
+                     (fn [provider _model]
+                       (swap! calls conj (:id provider))
+                       (case (:id provider)
+                         :p1 (throw (ex-info "stream watchdog fired"
+                                      {:type timeout-type
+                                       :stream? true
+                                       :content-acc-len 0
+                                       :reasoning-acc-len 0}))
+                         :p2 (success-result 100))))
+            trace (:routed/trace result)]
+        (expect (= [:p1 :p2] @calls))
+        (expect (= :p2 (:routed/provider-id result)))
+        (expect (= [:llm.routing/provider-fallback] (mapv :event/type trace)))
+        (expect (= :stream-timeout (get-in trace [0 :reason])))
+        (expect (= [:llm.routing/provider-fallback] (mapv :event/type @live))))))
+
+  (it "does not replay after visible output started"
+    (doseq [timeout-type [:svar.core/stream-ttft-timeout
+                          :svar.core/stream-idle-timeout
+                          :svar.core/stream-semantic-timeout]]
+      (let [[clock _] (mock-clock)
+            r (llm/make-router
+                [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                 {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                {:clock clock
+                 :rate-limit {:same-provider-delays-ms [0 0]
+                              :fallback-after-ms 0}})
+            calls (atom [])
+            failure (ex-info "stream watchdog fired after output"
+                      {:type timeout-type
+                       :stream? true
+                       :content-acc-len 1
+                       :reasoning-acc-len 0})
+            caught (try
+                     (router/with-provider-fallback r {}
+                       (fn [provider _model]
+                         (swap! calls conj (:id provider))
+                         (throw failure)))
+                     nil
+                     (catch Exception e e))]
+        (expect (identical? failure caught))
+        (expect (= [:p1] @calls))))))
+
 (defdescribe with-provider-fallback-rate-limit-trace-test
   "429 retries are router-owned trace events, not hidden llm/with-retry logs."
 

@@ -1645,6 +1645,18 @@
       (not (and status (<= 400 (long status) 499) (not= 429 status)))
       (re-find RETRYABLE_TRANSIENT_MESSAGE_PATTERN hay))))
 
+(def ^:private STREAM_WATCHDOG_ERROR_TYPES
+  "Typed stream aborts safe to retry only before visible output. The low-level
+   HTTP retry layer excludes these to avoid silently waiting one timeout per
+   same-provider retry; the router instead performs observable provider fallback."
+  #{:svar.core/stream-ttft-timeout
+    :svar.core/stream-idle-timeout
+    :svar.core/stream-semantic-timeout})
+
+(defn- stream-watchdog-error?
+  [e]
+  (contains? STREAM_WATCHDOG_ERROR_TYPES (:type (ex-data e))))
+
 (defn- router-transient-error? [router e]
   (let [data (ex-data e)
         status (:status data)
@@ -1662,7 +1674,8 @@
         ;; Provider subscription/quota/billing exhaustion is a hard account
         ;; state, never a transient throttle — do NOT retry (mirrors pi).
         (not (provider-limit-error? hay))
-        (or (and status (contains? codes status))
+        (or (and (stream-watchdog-error? e) (not stream-output-started?))
+          (and status (contains? codes status))
           (and (= etype :svar.core/http-error)
             (or (some-> msg (str/includes? "timed out"))
               (and (:stream? data)
@@ -2010,9 +2023,16 @@
                              ;; Cancellation MUST escape — see propagate-interrupt!.
                              (propagate-interrupt! e)
                              (cond
-                               (and (router-transient-error? router e)
+                               (and (or (router-transient-error? router e)
+                                      (stream-watchdog-error? e))
                                  (stream-content-started? e))
                                (throw e)
+
+                               ;; Watchdog already consumed its full wait budget. Fall across
+                               ;; providers now; same-provider retry would multiply the hang.
+                               (stream-watchdog-error? e)
+                               {:error e
+                                :elapsed-ms (- (router-now-ms router) start-ms)}
 
                                (router-transient-error? router e)
                                (handle-rate-limit-retries router prefs trace provider model-map f e start-ms)
@@ -2099,11 +2119,12 @@
                 (:error result)
                 (let [e (:error result)
                       status (:status (ex-data e))
-                      ;; :rate-limit reserved for TRUE 429 (drives CB cooldown vs
-                      ;; recovery + trace label). Other transients (5xx/529/network)
-                      ;; that exhaust the same-provider retry schedule stay
-                      ;; :transient-error — retrying them != a rate limit.
-                      reason (if (= 429 status) :rate-limit :transient-error)]
+                      ;; :rate-limit drives cooldown; watchdogs retain a distinct
+                      ;; trace reason; other exhausted transients stay generic.
+                      reason (cond
+                               (= 429 status) :rate-limit
+                               (stream-watchdog-error? e) :stream-timeout
+                               :else :transient-error)]
                   (trove/log! {:level :warn
                                :id ::provider-retry
                                :data {:provider-id pid
