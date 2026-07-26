@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.78] - 2026-07-26
+
+### Changed
+- fix(streaming): disable the semantic watchdog on the Responses api-style
+- release: update version files for v0.7.77, bump to next dev version
+
+
 ## [v0.7.77] - 2026-07-25
 
 ### Changed
@@ -1690,7 +1697,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.77...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.78...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1807,3 +1814,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.75]: https://github.com/Blockether/svar/releases/tag/v0.7.75
 [v0.7.76]: https://github.com/Blockether/svar/releases/tag/v0.7.76
 [v0.7.77]: https://github.com/Blockether/svar/releases/tag/v0.7.77
+[v0.7.78]: https://github.com/Blockether/svar/releases/tag/v0.7.78
