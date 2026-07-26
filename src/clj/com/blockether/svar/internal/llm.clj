@@ -3008,13 +3008,11 @@
 (def ^:private stream-finalization-error-types
   #{:svar.core/stream-incomplete
     :svar.core/stream-truncated
+    :svar.core/stream-idle-timeout
     :svar.core/stream-semantic-timeout
-    ;; Provider-reported `response.failed` / SSE `error` — already typed with
-    ;; the provider's code+message; must not be rewrapped as a connection blip.
+    :svar.core/stream-cancelled
     :svar.core/stream-failed
-    ;; Caller cancellation must propagate verbatim (not be reclassified as
-    ;; a connection error or retried) — it's a clean terminal outcome.
-    :svar.core/stream-cancelled})
+    :svar.tokens/context-overflow})
 
 (defn- stream-finalization-error? [e]
   (contains? stream-finalization-error-types (:type (ex-data e))))
@@ -3055,7 +3053,10 @@
         codex?        (= "/codex/responses" responses-path)
         stream?       (or on-chunk codex?)
         request-body  (cond-> request-body
-                        codex? (dissoc :max_tokens :max_output_tokens)
+                        ;; ChatGPT's Codex backend rejects the public Responses
+                        ;; API `text` envelope with `text: Extra inputs are not
+                        ;; permitted`. It also owns output formatting itself.
+                        codex? (dissoc :max_tokens :max_output_tokens :text)
                         stream? (assoc :stream true))
         http-headers  (merge {"Authorization" (str "Bearer " api-key)
                               "Content-Type"  "application/json"}
@@ -3341,6 +3342,20 @@
    "overloaded"          529
    "server_is_overloaded" 529  ; OpenAI Codex/ChatGPT backend mid-stream overload (opencode parseStreamError → retryable)
    "overloaded_error"    529})
+
+(def ^:private context-overflow-codes
+  #{"context_length_exceeded" "context_window_exceeded" "prompt_too_long" "input_too_long"})
+
+(defn- context-overflow-failure?
+  [code message]
+  (let [code (some-> code str/lower-case)
+        message (some-> message str/lower-case)]
+    (or (contains? context-overflow-codes code)
+      (boolean
+        (some #(str/includes? (or message "") %)
+          ["context length exceeded" "context window exceeded"
+           "maximum context length" "prompt is too long" "input is too long"
+           "too many tokens"])))))
 
 (defn- stream-finalization-summary
   [{:keys [terminal incomplete last-event-type last-finish-reason
@@ -4135,12 +4150,20 @@
                                      :content-acc content-acc
                                      :reasoning-acc reasoning-acc
                                      :response response})
-              status (get stream-failed-code->status (some-> code str/lower-case))]
+              context-overflow? (context-overflow-failure? code message)
+              status (if context-overflow?
+                       400
+                       (get stream-failed-code->status (some-> code str/lower-case)))]
           (throw (ex-info (str "Provider stream failed"
                             (when code (str " (" code ")"))
                             ": " message)
-                   (cond-> {:type :svar.core/stream-failed
+                   (cond-> {:type (if context-overflow?
+                                    :svar.tokens/context-overflow
+                                    :svar.core/stream-failed)
+                            :source :provider
                             :stream? true
+                            :output-started? (or (pos? (.length content-acc))
+                                               (pos? (.length reasoning-acc)))
                             :url url
                             :provider-error-code code
                             :provider-message message

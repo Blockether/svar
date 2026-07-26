@@ -161,3 +161,50 @@
             (when (seq reasoning-acc) (reset! reasoning-final reasoning-acc)))))
       (expect (= "**First**\n\n**Second**" @reasoning-final))
       (expect (not (str/includes? (str @reasoning-final) "****"))))))
+
+(defn- stream-failure-ex
+  [code message]
+  (let [body (sse-body
+               [["response.failed"
+                 (str "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\","
+                   "\"error\":{" (when code (str "\"code\":\"" code "\","))
+                   "\"message\":\"" message "\"}}}")]])]
+    (try
+      (with-redefs [http/post (fn [_url _opts] {:status 200 :headers {} :body body})]
+        (http-post-stream! "http://localhost:1234/v1/responses"
+          {:model "m"} {} 5000 0 0 extract-stream-delta (fn [_])))
+      nil
+      (catch clojure.lang.ExceptionInfo e e))))
+
+(defdescribe context-overflow-stream-normalization-test
+  (it "normalizes every known provider context code to one typed error"
+    (doseq [code ["context_length_exceeded" "context_window_exceeded"
+                  "prompt_too_long" "input_too_long"]]
+      (let [data (ex-data (stream-failure-ex code "request too large"))]
+        (expect (= :svar.tokens/context-overflow (:type data)))
+        (expect (= :provider (:source data)))
+        (expect (= 400 (:status data)))
+        (expect (= code (:provider-error-code data)))
+        (expect (false? (:output-started? data))))))
+  (it "normalizes message-only provider variants"
+    (doseq [message ["Context length exceeded"
+                     "This model's maximum context length is 128000 tokens"
+                     "Prompt is too long"
+                     "Input is too long"
+                     "Request contains too many tokens"]]
+      (let [data (ex-data (stream-failure-ex nil message))]
+        (expect (= :svar.tokens/context-overflow (:type data)))
+        (expect (= message (:provider-message data))))))
+  (it "matches codes case-insensitively while preserving the provider value"
+    (let [data (ex-data (stream-failure-ex "CONTEXT_LENGTH_EXCEEDED" "too large"))]
+      (expect (= :svar.tokens/context-overflow (:type data)))
+      (expect (= "CONTEXT_LENGTH_EXCEEDED" (:provider-error-code data)))))
+  (it "does not misclassify unrelated 400-style failures"
+    (let [data (ex-data (stream-failure-ex "invalid_request_error" "Extra inputs are not permitted"))]
+      (expect (= :svar.core/stream-failed (:type data)))
+      (expect (nil? (:status data)))
+      (expect (= "invalid_request_error" (:provider-error-code data)))))
+  (it "keeps transient stream failures on their existing typed path"
+    (let [data (ex-data (stream-failure-ex "rate_limit_exceeded" "slow down"))]
+      (expect (= :svar.core/stream-failed (:type data)))
+      (expect (= 429 (:status data))))))
