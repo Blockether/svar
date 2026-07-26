@@ -1724,6 +1724,22 @@
           retry-set (or (:format-retry-on prefs) DEFAULT_FORMAT_ERROR_TYPES)]
       (contains? retry-set t))))
 
+(def ^:private AUTH_ERROR_PATTERNS
+  ["authentication" "authorization" "unauthorized" "forbidden"
+   "api key" "api-key" "access token" "oauth" "credential" "revoked"])
+
+(defn- auth-error?
+  "True for provider-scoped credential rejection. Message matching is limited to
+   statusless/4xx errors so a 5xx body mentioning auth does not churn providers."
+  [e]
+  (let [data (ex-data e)
+        status (:status data)
+        hay (str/lower-case (str (or (:body data) "") " " (or (ex-message e) "")))]
+    (boolean
+      (or (contains? #{401 403} status)
+        (and (or (nil? status) (contains? #{400 401 403} status))
+          (some #(str/includes? hay %) AUTH_ERROR_PATTERNS))))))
+
 (def ^:private MODEL_UNSUPPORTED_PATTERNS
   "Substrings (lower-cased) in an upstream 400/404 error body that mean the
    SELECTED MODEL is unusable on this endpoint — the provider advertises it
@@ -1771,7 +1787,9 @@
   [e]
   (let [data (ex-data e)]
     (or (pos? (long (or (:content-acc-len data) 0)))
-      (some? (:partial-content data)))))
+      (pos? (long (or (:reasoning-acc-len data) 0)))
+      (some? (:partial-content data))
+      (some? (:reasoning data)))))
 
 (defn- retry-after-header-ms
   [e]
@@ -1964,17 +1982,13 @@
         ;; repeatedly (every fallback resolved back to the offender).
         rate-limited (atom #{})
         format-failed (atom #{})
-        ;; Last format-error caught — surfaced verbatim when no provider can
-        ;; take call. Keeps schema-rejected ex-data, not opaque exhaustion.
         last-format-error (atom nil)
-        ;; Models the provider advertises but rejects at inference time
-        ;; (400/404 `model_not_supported`). Excluded by NAME (not provider)
-        ;; so a sibling model on the SAME provider can still serve the call.
+        ;; Auth fallback is opt-in. Failed provider ids become fleet exclusions.
+        auth-failed (atom #{})
+        last-auth-error (atom nil)
+        ;; Unsupported model excludes name, not provider; siblings remain eligible.
         model-unsupported (atom #{})
         last-unsupported-error (atom nil)
-        ;; Last transient (5xx / network) error caught — surfaced verbatim when a
-        ;; SINGLE provider was ever in play, so a pinned / only-provider failure
-        ;; reads as ONE provider being unavailable, not a fleet "all exhausted".
         last-transient-error (atom nil)
         trace (atom [])
         selected (atom nil)
@@ -1987,11 +2001,18 @@
         failed-attempts (atom [])
         max-wait-ms (:max-wait-ms router)]
     (loop [attempts 0]
-      (let [iter-prefs (cond-> prefs
+      (let [auth-fallback? (seq @auth-failed)
+            ;; An opted-in auth failure releases an explicit pin only AFTER the
+            ;; pinned provider rejects credentials. Known-bad providers stay out.
+            iter-prefs (cond-> (if auth-fallback?
+                                 (dissoc prefs :force-provider :force-model)
+                                 prefs)
                          (seq @format-failed) (update :exclude-providers
                                                 (fnil into #{}) @format-failed)
-                         (seq @rate-limited)  (update :exclude-providers
-                                                (fnil into #{}) @rate-limited)
+                         (seq @rate-limited) (update :exclude-providers
+                                               (fnil into #{}) @rate-limited)
+                         auth-fallback? (update :exclude-providers
+                                          (fnil into #{}) @auth-failed)
                          (seq @model-unsupported) (update :exclude-models
                                                     (fnil into #{}) @model-unsupported))]
         (if-let [[provider model-map] (select-and-claim! router iter-prefs)]
@@ -2024,12 +2045,13 @@
                              (propagate-interrupt! e)
                              (cond
                                (and (or (router-transient-error? router e)
-                                      (stream-watchdog-error? e))
+                                      (stream-watchdog-error? e)
+                                      (and (= :fallback-provider (:on-auth-error prefs))
+                                        (auth-error? e)))
                                  (stream-content-started? e))
                                (throw e)
 
-                               ;; Watchdog already consumed its full wait budget. Fall across
-                               ;; providers now; same-provider retry would multiply the hang.
+                               ;; Watchdog spent its wait budget. Cross providers now.
                                (stream-watchdog-error? e)
                                {:error e
                                 :elapsed-ms (- (router-now-ms router) start-ms)}
@@ -2039,6 +2061,10 @@
 
                                (format-error? prefs e)
                                {:format-error e}
+
+                               (and (= :fallback-provider (:on-auth-error prefs))
+                                 (auth-error? e))
+                               {:auth-error e}
 
                                (model-unsupported-error? e)
                                {:model-unsupported e}
@@ -2091,6 +2117,27 @@
                                             :error (ex-message e)})
                   (swap! failed-attempts conj {:provider pid :model (:name model-map)
                                                :status (:status (ex-data e)) :reason :format-error
+                                               :error (ex-message e)})
+                  (recur (inc attempts)))
+
+                (:auth-error result)
+                (let [e (:auth-error result)
+                      status (:status (ex-data e))]
+                  (trove/log! {:level :warn
+                               :id ::auth-provider-fallback
+                               :data {:provider-id pid :model (:name model-map) :status status}
+                               :msg "provider auth rejected: trying next provider"})
+                  (swap! auth-failed conj pid)
+                  (reset! last-auth-error e)
+                  (reset! pending-fallback {:from-provider pid
+                                            :from-model (:name model-map)
+                                            :status status
+                                            :reason :authentication
+                                            :error (ex-message e)})
+                  (swap! failed-attempts conj {:provider pid
+                                               :model (:name model-map)
+                                               :status status
+                                               :reason :authentication
                                                :error (ex-message e)})
                   (recur (inc attempts)))
 
@@ -2161,6 +2208,18 @@
                          {:routed/trace @trace
                           :tried @tried
                           :format-failed @format-failed
+                          :attempts @failed-attempts})
+                       e)))
+
+            ;; Preserve concrete auth rejection after the auth-fallback fleet ends.
+            (and @last-auth-error
+              (= :authentication (:reason (peek @failed-attempts))))
+            (let [e @last-auth-error]
+              (throw (ex-info (ex-message e)
+                       (merge (ex-data e)
+                         {:routed/trace @trace
+                          :tried @tried
+                          :auth-failed @auth-failed
                           :attempts @failed-attempts})
                        e)))
 
@@ -2286,23 +2345,20 @@
    Returns {:prefs prefs-map :error-strategy kw}.
    Throws on invalid provider/model combinations.
 
-   `:prefer-providers` (vector of provider ids) declares an ordered provider
-   preference: svar picks the `:optimize`-best model WITHIN each provider and
-   walks the list (via `with-provider-fallback`) on failure. Providers not in
-   the list are tried last. This is the framework primitive for cheap
-   side-channel tasks (e.g. auto-titling) that want a deliberate plan order +
-   smallest model per plan instead of one global cost winner — callers no
-   longer hand-roll a per-provider retry loop.
+   `:prefer-providers` declares ordered provider preference. Providers omitted
+   from the list remain eligible afterward.
 
-   `:reasoning` in the routing opts (abstract level — :quick/:balanced/:deep
-   or strings/aliases) implies `:require-reasoning? true` in prefs, which
-   filters model selection to `:reasoning? true` models in `resolve-model`.
-   This makes `{:optimize :cost :reasoning :deep}` pick the cheapest
-   *reasoning-capable* model rather than silently dropping `:deep` when the
-   cost-cheapest model happens to be non-reasoning."
+   `:on-auth-error :fallback-provider` opts into provider-scoped credential
+   failover. `:exclude-providers` seeds providers already known unusable for this
+   call. Auth fallback may release a provider/model pin only after that provider
+   rejects auth, and never after visible streamed output.
+
+   `:reasoning` implies `:require-reasoning? true`, filtering selection to
+   reasoning-capable models."
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning reasoning-effort
-                prefer-providers on-format-error format-retry-on on-chunk]} routing-opts
+                prefer-providers on-format-error format-retry-on on-auth-error
+                exclude-providers on-chunk]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
         base-prefs (cond
@@ -2352,19 +2408,12 @@
         prefs (cond-> base-prefs
                 reasoning            (assoc :require-reasoning? true)
                 reasoning-effort     (assoc :reasoning-effort reasoning-effort)
-                ;; Format-error fallback opts — honored by
-                ;; `with-provider-fallback`. When `:on-format-error
-                ;; :fallback-provider`, schema/format-typed exceptions are
-                ;; treated as transient and the next provider/model in the
-                ;; fleet (excluding the offender) is tried.
-                on-format-error     (assoc :on-format-error on-format-error)
-                format-retry-on     (assoc :format-retry-on format-retry-on)
-                ;; Routing trace events fire live through this callback
-                ;; (same map shape later present in `:routed/trace`).
-                ;; Without this passthrough, routing events surface only
-                ;; in the final result — caller/TUI sees no progress
-                ;; during multi-second 429 retry sleeps.
-                on-chunk            (assoc :on-chunk on-chunk))]
+                on-format-error      (assoc :on-format-error on-format-error)
+                format-retry-on      (assoc :format-retry-on format-retry-on)
+                on-auth-error        (assoc :on-auth-error on-auth-error)
+                (seq exclude-providers) (assoc :exclude-providers (set exclude-providers))
+                ;; Routing events fire live and remain in final `:routed/trace`.
+                on-chunk             (assoc :on-chunk on-chunk))]
     {:prefs prefs
      :error-strategy error-strategy}))
 

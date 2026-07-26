@@ -1654,6 +1654,106 @@
       (expect (= 400 (:status (ex-data thrown))))
       (expect (= #{"m1" "m2"} (:model-unsupported (ex-data thrown)))))))
 
+(defdescribe provider-auth-fallback-test
+  "Auth fallback is opt-in, provider-scoped, observable, and never replays after output."
+
+  (it "falls across providers after an auth rejection when explicitly enabled"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          calls (atom [])
+          live (atom [])
+          result (router/with-provider-fallback
+                   r
+                   {:on-auth-error :fallback-provider
+                    :on-chunk #(swap! live conj %)}
+                   (fn [provider model]
+                     (swap! calls conj [(:id provider) (:name model)])
+                     (if (= :p1 (:id provider))
+                       (throw (ex-info "OAuth access token has been revoked"
+                                {:type :svar.core/http-error :status 401}))
+                       (success-result 100))))]
+      (expect (= [[:p1 "m1"] [:p2 "m2"]] @calls))
+      (expect (= :p2 (:routed/provider-id result)))
+      (expect (:routed/fallback? result))
+      (expect (= (:routed/trace result) @live))
+      (expect (= [:authentication] (mapv :reason (:routed/trace result))))))
+
+  (it "breaks an explicit provider/model pin only after the pinned provider rejects auth"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          calls (atom [])
+          result (router/with-provider-fallback
+                   r
+                   {:strategy :root
+                    :force-provider :p1
+                    :force-model "m1"
+                    :on-auth-error :fallback-provider}
+                   (fn [provider model]
+                     (swap! calls conj [(:id provider) (:name model)])
+                     (if (= :p1 (:id provider))
+                       (throw (ex-info "Unauthorized"
+                                {:type :svar.core/http-error :status 401}))
+                       (success-result 100))))]
+      (expect (= [[:p1 "m1"] [:p2 "m2"]] @calls))
+      (expect (= :p2 (:routed/provider-id result)))))
+
+  (it "honors initial provider exclusions passed through public routing opts"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          {:keys [prefs]} (router/resolve-routing
+                            r
+                            {:exclude-providers #{:p1}
+                             :on-auth-error :fallback-provider})
+          calls (atom [])
+          result (router/with-provider-fallback
+                   r prefs
+                   (fn [provider model]
+                     (swap! calls conj [(:id provider) (:name model)])
+                     (success-result 100)))]
+      (expect (= #{:p1} (:exclude-providers prefs)))
+      (expect (= :fallback-provider (:on-auth-error prefs)))
+      (expect (= [[:p2 "m2"]] @calls))
+      (expect (= :p2 (:routed/provider-id result)))))
+
+  (it "does not replay an auth-shaped error after visible reasoning output"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          calls (atom [])]
+      (expect
+        (throws? clojure.lang.ExceptionInfo
+          #(router/with-provider-fallback
+             r
+             {:on-auth-error :fallback-provider}
+             (fn [provider _model]
+               (swap! calls conj (:id provider))
+               (throw (ex-info "Unauthorized"
+                        {:type :svar.core/http-error
+                         :status 401
+                         :reasoning-acc-len 7}))))))
+      (expect (= [:p1] @calls))))
+
+  (it "all-auth exhaustion preserves the concrete upstream error and attempt audit"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          thrown (try
+                   (router/with-provider-fallback
+                     r
+                     {:on-auth-error :fallback-provider}
+                     (fn [provider _model]
+                       (throw (ex-info (str "revoked " (name (:id provider)))
+                                {:type :svar.core/http-error :status 401}))))
+                   :no-throw
+                   (catch clojure.lang.ExceptionInfo e e))]
+      (expect (not= :no-throw thrown))
+      (expect (= 401 (:status (ex-data thrown))))
+      (expect (= 2 (count (:attempts (ex-data thrown)))))
+      (expect (= #{:p1 :p2} (:auth-failed (ex-data thrown)))))))
+
 (defdescribe copilot-claude-dotted-or-dashed-test
   ;; Regression: vis's canonical Claude id is DASHED (claude-opus-4-8) but the
   ;; Copilot overlay (KNOWN_PROVIDER_MODELS) is keyed DOTTED (claude-opus-4.8).

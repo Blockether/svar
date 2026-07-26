@@ -4932,6 +4932,9 @@
        :model - string, override specific model
        :on-transient-error - :hybrid (default), :auto-route-cross-providers,
                              :fallback-model-in-the-same-provider, :fail
+       :on-auth-error - :fallback-provider opts into provider-scoped credential
+                        failover before visible output; unset means fail.
+       :exclude-providers - set of provider ids to skip for this call.
      :reasoning - Abstract reasoning depth: :quick, :balanced, or :deep
        (strings + OpenAI-style :low/:medium/:high aliases also accepted).
        Automatically translated per the selected model's api-style:
