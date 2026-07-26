@@ -285,9 +285,9 @@
                              DeepSeek Reasoner, Copilot GPT-5+, and most
                              OpenAI-compatible reasoners.
      `:anthropic-thinking` → Claude thinking controls.
-                             Claude Opus 4.8 / Opus 4.7 / Opus 4.6 / Sonnet 4.6 use
-                             adaptive thinking + output_config.effort. Older
-                             Claude 4 models use manual budget_tokens.
+                             Claude Opus 5 / Opus 4.8 / Opus 4.7 / Opus 4.6 /
+                             Sonnet 4.6 use adaptive thinking + output_config.effort.
+                             Older Claude 4 models use manual budget_tokens.
      `:zai-thinking`       → binary `:thinking {:type \"enabled\"|\"disabled\"}` on
                              Z.ai / GLM-4.6+. No budget_tokens — thinking is on/off.
                              `:quick` disables, `:balanced`/`:deep` enable.
@@ -401,10 +401,10 @@
       :extra-body extra-body})))
 
 (defn- anthropic-adaptive-thinking-model?
-  "Fable 5 / Mythos 5 / Opus 4.8–4.7 reject manual budget_tokens. Opus 4.6
-   and Sonnet 4.6 still accept manual thinking today, but Anthropic marks it
-   deprecated. Use adaptive thinking for all families listed here. Accept
-   dot/dash aliases so Copilot-style names do not regress."
+  "Fable 5 / Mythos 5 / Opus 5 / Opus 4.8–4.7 reject manual budget_tokens.
+   Opus 4.6 and Sonnet 4.6 still accept manual thinking today, but Anthropic
+   marks it deprecated. Use adaptive thinking for all families listed here.
+   Accept dot/dash aliases so Copilot-style names do not regress."
   [model-name]
   (boolean
     (re-find #"(?i)^claude-(?:fable-5|mythos-5|sonnet-5|opus-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
@@ -886,7 +886,12 @@
 
    Distinct from `DEFAULT_IDLE_TIMEOUT_MS`: idle watches transport
    liveness; semantic watches model progress. Enable per-call with e.g.
-   `:semantic-timeout-ms 180000`."
+   `:semantic-timeout-ms 180000`.
+
+   NOT honored on the `:openai-compatible-responses` api-style: that
+   transport hard-disables the semantic watchdog and runs the idle watchdog
+   alone (Codex's `DEFAULT_STREAM_IDLE_TIMEOUT_MS` model). A caller value is
+   accepted there and ignored."
   nil)
 
 (def DEFAULT_RETRY

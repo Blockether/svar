@@ -467,6 +467,56 @@
                           :responses-path "/codex/responses"})]
             (expect (= "```clojure\n(answer \"4\")\n```" (:content result)))))))
 
+    (it "responses transport never arms the semantic watchdog, even when the caller passes one"
+      (let [seen   (atom :unset)
+            stream (str
+                     "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
+                     "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  (reset! seen sut/*stream-semantic-timeout-ms*)
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :responses-path "/codex/responses"
+                          :semantic-timeout-ms 50})]
+            (expect (= "ok" (:content result)))
+            ;; Caller asked for 50ms; the Responses transport drops it to nil.
+            (expect (nil? @seen))))))
+
+    (it "responses stream survives a model-silence gap longer than the caller's semantic timeout"
+      (let [payload (.getBytes (str
+                                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"late\"}\n\n"
+                                 "data: [DONE]\n\n")
+                      "UTF-8")
+            ;; No model/progress event for 250ms — 5x the caller's semantic
+            ;; timeout. With the watchdog armed this closed the stream.
+            served  (atom false)]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (proxy [java.io.InputStream] []
+                                           (read
+                                             ([] -1)
+                                             ([^bytes buf off len]
+                                              (if @served
+                                                -1
+                                                (do (Thread/sleep 250)
+                                                    (reset! served true)
+                                                    (let [n (min (int len) (alength payload))]
+                                                      (System/arraycopy payload 0 buf off n)
+                                                      n))))))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :responses-path "/codex/responses"
+                          :semantic-timeout-ms 50})]
+            (expect (= "late" (:content result)))))))
+
     (it "responses transport backfills terminal reasoning without duplicating prior content"
       (let [events (atom [])
             stream (str

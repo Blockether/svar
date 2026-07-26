@@ -339,22 +339,26 @@
       (expect (= ["c1" "c2"] (mapv :id (:tool-calls m))))))
 
   (it "propagates native-call identity through the public streaming callback"
-  (let [seen (atom nil)
-        fake-transport (fn [_url _body _headers _timeout _ttft _idle _delta-fn on-delta]
-                         (on-delta {:content-acc ""
-                                    :reasoning-acc ""
-                                    :tool-args-acc ""
-                                    :tool-call-preview {:id "call_early" :name "run_python"}})
-                         {})]
-    (with-redefs-fn {#'sut/http-post-stream! fake-transport}
-      #(sut/openai-responses-completion
-         {:model "gpt-test"}
-         {:api-key "test" :base-url "https://example.invalid"
-          :on-chunk (fn [chunk] (reset! seen chunk))}))
-    (expect (= {:id "call_early" :name "run_python"}
-               (:tool-call-preview @seen)))
-    (expect (nil? (:content @seen)))
-    (expect (nil? (:reasoning @seen))))))
+    (let [seen (atom nil)
+          fake-transport (fn [_url _body _headers _timeout _ttft _idle _delta-fn on-delta]
+                           (on-delta {:content-acc ""
+                                      :reasoning-acc ""
+                                      :tool-args-acc ""
+                                      :tool-call-preview {:id "call_early" :name "run_python"}})
+                           {})]
+      (with-redefs-fn {#'sut/http-post-stream! fake-transport}
+        #(sut/openai-responses-completion
+           {:model "gpt-test"}
+           {:api-key "test" :base-url "https://example.invalid"
+            :on-chunk (fn [chunk] (reset! seen chunk))}))
+      (expect (= {:id "call_early" :name "run_python"}
+                (:tool-call-preview @seen)))
+      ;; `:content` is the RAW accumulator, never blank-normalized: a
+      ;; whitespace-only delta can be semantically required source, so an
+      ;; empty accumulation stays "" rather than collapsing to nil.
+      ;; `:reasoning` IS blank-normalized, hence nil here.
+      (expect (= "" (:content @seen)))
+      (expect (nil? (:reasoning @seen))))))
 
 (defdescribe streaming-tool-args-delta-test
   ;; Native tool calling puts the model's work in the tool-call arguments. To

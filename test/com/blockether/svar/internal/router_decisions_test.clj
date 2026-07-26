@@ -949,19 +949,17 @@
         (expect (= :openai (:id provider)))))))
 
 (defdescribe anthropic-coding-plan-default-model-test
-  (it "prepends Claude Opus 4.8 to existing subscription provider configs"
+  (it "prepends Claude Opus 5 to existing subscription provider configs"
     (let [r (llm/make-router
               [{:id :anthropic-coding-plan
                 :api-key "sk-ant-oat01-test"
                 :models [{:name "claude-opus-4-6"}
                          {:name "claude-sonnet-4-6"}]}])
           provider (first (:providers r))]
-      (expect (= "claude-opus-4-8" (:root provider)))
-      ;; `:anthropic-coding-plan` prepends its FULL default catalog
-      ;; (opus-4-8 → opus-4-7 → opus-4-6 → fable-5 → sonnet-5 → sonnet-4-6 → haiku-4-5),
-      ;; deduped against the caller's configured models via `conj-model-once`.
-      ;; The caller's opus-4-6 / sonnet-4-6 collapse into the prepended defaults.
-      (expect (= ["claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
+      (expect (= "claude-opus-5" (:root provider)))
+      ;; `:anthropic-coding-plan` prepends its FULL default catalog,
+      ;; deduped against the caller's configured models.
+      (expect (= ["claude-opus-5" "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
                   "claude-fable-5" "claude-sonnet-5" "claude-sonnet-4-6" "claude-haiku-4-5"]
                 (mapv :name (:models provider))))
       (expect (= :anthropic (:api-style provider)))
