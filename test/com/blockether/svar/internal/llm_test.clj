@@ -467,7 +467,7 @@
                           :responses-path "/codex/responses"})]
             (expect (= "```clojure\n(answer \"4\")\n```" (:content result)))))))
 
-    (it "responses transport never arms the semantic watchdog, even when the caller passes one"
+    (it "responses transport arms the caller's semantic watchdog"
       (let [seen   (atom :unset)
             stream (str
                      "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
@@ -484,38 +484,40 @@
                           :responses-path "/codex/responses"
                           :semantic-timeout-ms 50})]
             (expect (= "ok" (:content result)))
-            ;; Caller asked for 50ms; the Responses transport drops it to nil.
-            (expect (nil? @seen))))))
+            (expect (= 50 @seen))))))
 
-    (it "responses stream survives a model-silence gap longer than the caller's semantic timeout"
-      (let [payload (.getBytes (str
-                                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"late\"}\n\n"
-                                 "data: [DONE]\n\n")
-                      "UTF-8")
-            ;; No model/progress event for 250ms — 5x the caller's semantic
-            ;; timeout. With the watchdog armed this closed the stream.
-            served  (atom false)]
-        (with-redefs [http/post (fn [_url _opts]
-                                  {:status 200
-                                   :body (proxy [java.io.InputStream] []
-                                           (read
-                                             ([] -1)
-                                             ([^bytes buf off len]
-                                              (if @served
-                                                -1
-                                                (do (Thread/sleep 250)
-                                                    (reset! served true)
-                                                    (let [n (min (int len) (alength payload))]
-                                                      (System/arraycopy payload 0 buf off n)
-                                                      n))))))})]
-          (let [result (sut/openai-responses-completion
-                         {:model "test-model"
-                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
-                         {:api-key "sk-test"
-                          :base-url "https://example.invalid/v1"
-                          :responses-path "/codex/responses"
-                          :semantic-timeout-ms 50})]
-            (expect (= "late" (:content result)))))))
+    (it "responses heartbeats cannot postpone the semantic deadline"
+      (let [heartbeat (.getBytes
+                        "data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n"
+                        "UTF-8")
+            closed?   (atom false)
+            body      (proxy [java.io.InputStream] []
+                        (read
+                          ([] -1)
+                          ([^bytes buf off len]
+                           (if @closed?
+                             -1
+                             (do
+                               (Thread/sleep 10)
+                               (let [n (min (int len) (alength heartbeat))]
+                                 (System/arraycopy heartbeat 0 buf off n)
+                                 n)))))
+                        (close [] (reset! closed? true)))]
+        (with-redefs [http/post (fn [_url _opts] {:status 200 :body body})]
+          (let [error (try
+                        (sut/openai-responses-completion
+                          {:model "test-model"
+                           :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                          {:api-key "sk-test"
+                           :base-url "https://example.invalid/v1"
+                           :responses-path "/codex/responses"
+                           :idle-timeout-ms 1000
+                           :semantic-timeout-ms 50})
+                        nil
+                        (catch Exception e e))]
+            (expect (= :svar.core/stream-semantic-timeout
+                      (:type (ex-data error))))
+            (expect (true? @closed?))))))
 
     (it "responses transport backfills terminal reasoning without duplicating prior content"
       (let [events (atom [])

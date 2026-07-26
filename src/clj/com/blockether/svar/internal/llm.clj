@@ -3033,32 +3033,24 @@
      - :base-url        - Provider base URL.
      - :responses-path  - Endpoint path, default `/responses`.
      - :headers         - Extra headers merged over the default auth headers.
-     - :timeout-ms      - Request timeout.
-     - :on-chunk        - Optional streaming callback.
+     - :timeout-ms          - Request timeout.
+     - :semantic-timeout-ms - Maximum time without meaningful model progress.
+                              SSE heartbeats do not reset this deadline.
+     - :on-chunk            - Optional streaming callback.
 
-   NOTE: `:semantic-timeout-ms` is accepted for call-shape parity and then
-   IGNORED — the semantic watchdog is always off on the Responses api-style
-   (see the comment in the body). Transport liveness is covered by
-   `:ttft-timeout-ms` + `:idle-timeout-ms`.
+   Transport liveness is covered separately by `:ttft-timeout-ms` and
+   `:idle-timeout-ms`.
 
    Returns same normalized shape as `chat-completion`:
    {:content :reasoning :provider-state :api-usage :http-response}"
-  [request-body {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms idle-timeout-ms on-chunk]
+  [request-body {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms
+                        idle-timeout-ms semantic-timeout-ms on-chunk]
                  :or   {responses-path "/responses"
                         timeout-ms router/DEFAULT_TIMEOUT_MS
                         ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS
-                        idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS}}]
-  (let [;; Responses api-style DISABLES the semantic watchdog, unconditionally.
-        ;; The Responses SSE wire already emits a dense `response.*` event
-        ;; stream, so "bytes arrive but the model made no progress" is not a
-        ;; state this transport can actually reach: any real stall is a byte
-        ;; stall, which `idle-timeout-ms` already owns. Codex runs exactly one
-        ;; watchdog here (`DEFAULT_STREAM_IDLE_TIMEOUT_MS`) and no semantic
-        ;; timer; a second timer only adds a way to hang up on a model that is
-        ;; legitimately thinking for a long time. Caller-supplied
-        ;; `:semantic-timeout-ms` is accepted and ignored on this api-style.
-        semantic-timeout-ms nil
-        url           (responses-url base-url responses-path)
+                        idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS
+                        semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS}}]
+  (let [url           (responses-url base-url responses-path)
         model         (:model request-body)
         codex?        (= "/codex/responses" responses-path)
         stream?       (or on-chunk codex?)
@@ -4382,10 +4374,6 @@
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
   [messages model api-key base-url retry-opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style]
   (let [api-style    (or api-style :openai-compatible-chat)
-        ;; Mirror of `openai-responses-completion`: the Responses api-style
-        ;; never arms the semantic watchdog, whichever transport fn it reaches.
-        semantic-timeout-ms (when-not (= api-style :openai-compatible-responses)
-                              semantic-timeout-ms)
         provider-id  (:provider-id retry-opts)
         llm-headers  (:llm-headers retry-opts)
         anthropic?   (= api-style :anthropic)
