@@ -252,3 +252,31 @@
       (expect (some #(and (= "message" (:type %))
                        (= "assistant" (:role %)))
                 input)))))
+
+(defdescribe persisted-wire-thinking-replay-test
+  (it "normalizes Vis JSON-restored thinking without leaking canonical metadata"
+    (let [body (build-anthropic
+                 [{:role "assistant"
+                   :content [{"type" "thinking"
+                              "thinking" "reason"
+                              "thinking_signature" "sig"
+                              "is_redacted" false}]}]
+                 "claude-opus-5"
+                 nil)
+          block (get-in body [:messages 0 :content 0])]
+      (expect (= {:type "thinking"
+                  :thinking "reason"
+                  :signature "sig"}
+                block))
+      (expect (not (contains? block "thinking_signature")))
+      (expect (not (contains? block "is_redacted")))))
+  (it "normalizes persisted redacted thinking"
+    (let [body (build-anthropic
+                 [{:role "assistant"
+                   :content [{"type" "thinking"
+                              "thinking_signature" "encrypted"
+                              "is_redacted" true}]}]
+                 "claude-opus-5"
+                 nil)]
+      (expect (= {:type "redacted_thinking" :data "encrypted"}
+                (get-in body [:messages 0 :content 0]))))))

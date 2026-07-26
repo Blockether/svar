@@ -219,7 +219,7 @@
   [^Throwable e url]
   (let [reason (connection-error-reason e)
         host   (try (.getHost (java.net.URI. (str url)))
-                    (catch Exception _ nil))]
+                 (catch Exception _ nil))]
     (ex-info (str "Could not connect to the model provider"
                (when-not (str/blank? host) (str " at " host))
                ": " reason
@@ -262,7 +262,7 @@
   [url]
   (when url
     (try (not-empty (.getHost (java.net.URI. (str url))))
-         (catch Exception _ nil))))
+      (catch Exception _ nil))))
 
 (def ^:private connect-health-window-ms
   "How long ONE successful connection keeps a host classified as 'healthy'.
@@ -519,7 +519,7 @@
         _        (mark-connection-healthy! url)
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                      (catch Exception _ nil))]
+                   (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -761,7 +761,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-          (assoc body :max_tokens required-min))
+        (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -797,25 +797,37 @@
 
 (defn- normalize-content
   "Coerces message :content into a vec of canonical content blocks.
-   Accepts string, text-block map, image block, or vec of those.
-   Returns `[]` for nil/empty so downstream walkers can rely on a vec."
+   Also accepts JSON-restored canonical thinking maps with string keys."
   [content]
   (cond
-    (nil? content)        []
-    (string? content)     [{:type "text" :text content}]
-    (text-block? content) [content]
-    (and (map? content)
-      (= "image_url" (:type content)))     [content]
-    (vector? content)     (mapv (fn [b]
-                                  (cond
-                                    (string? b)        {:type "text" :text b}
-                                    (and (map? b) (string? (:type b))) b
-                                    :else (throw (ex-info
-                                                   "Content block must be a string or {:type \"...\" ...}"
-                                                   {:type :svar.core/invalid-content-block :got b}))))
-                            content)
-    :else (throw (ex-info "Unsupported :content shape"
-                   {:type :svar.core/invalid-content :got (type content)}))))
+    (nil? content) []
+    (string? content) [{:type "text" :text content}]
+    (map? content) (normalize-content [content])
+    (vector? content)
+    (mapv
+      (fn [block]
+        (cond
+          (string? block)
+          {:type "text" :text block}
+
+          (and (map? block) (string? (:type block)))
+          block
+
+          (and (map? block) (= "thinking" (get block "type")))
+          (cond-> {:type "thinking"
+                   :thinking (get block "thinking")
+                   :thinking-signature (get block "thinking_signature")}
+            (contains? block "is_redacted")
+            (assoc :redacted? (get block "is_redacted")))
+
+          :else
+          (throw (ex-info
+                   "Content block must be a string or {:type \"...\" ...}"
+                   {:type :svar.core/invalid-content-block :got block}))))
+      content)
+    :else
+    (throw (ex-info "Unsupported :content shape"
+             {:type :svar.core/invalid-content :got (type content)}))))
 
 (defn- cache-control-for
   "Returns Anthropic `cache_control` map for a `:svar/cache true` block,
@@ -1149,42 +1161,34 @@
     :else                        (recur (str body))))
 
 (defn- canonical-thinking-block?
-  "Recognizes svar's canonical preserved-thinking content block. Mirrors
-   pi-ai's shape: `{:type \"thinking\" :thinking str :thinking-signature
-   str :redacted? bool}`. The thinking-signature is an opaque
-   per-provider payload that has to round-trip verbatim on the next
-   call - Anthropic's HMAC `signature`, Anthropic redacted-thinking's
-   encrypted `data`, OpenAI Responses' JSON-encoded reasoning item,
-   z.ai's exact `reasoning_content` text, etc. Wire serializers per
-   api-style read this canonical shape and emit native wire blocks."
+  "Recognizes canonical preserved thinking, including persisted Vis wire maps.
+   String-key acceptance keeps replay robust across JSON storage boundaries."
   [block]
-  (and (map? block) (= "thinking" (:type block))))
+  (and (map? block)
+    (= "thinking" (or (:type block) (get block "type")))))
 
 (defn- canonical-thinking->anthropic-block
-  "Translates one canonical thinking block to its Anthropic wire shape.
-   `:redacted? true` becomes `redacted_thinking` carrying the encrypted
-   data under `:data`; otherwise emits a normal `thinking` block whose
-   `:signature` round-trips Anthropic's HMAC verbatim. Blocks that
-   never received a signature (e.g. an aborted stream) degrade to a
-   plain text block so Anthropic doesn't reject the request - this
-   matches pi-ai's behavior."
-  [{:keys [thinking thinking-signature redacted?]}]
-  (cond
-    redacted?
-    {:type "redacted_thinking"
-     :data thinking-signature}
+  "Translates canonical or persisted-wire thinking to Anthropic wire shape."
+  [block]
+  (let [thinking (or (:thinking block) (get block "thinking"))
+        thinking-signature (or (:thinking-signature block)
+                             (get block "thinking_signature"))
+        redacted? (if (contains? block :redacted?)
+                    (:redacted? block)
+                    (get block "is_redacted"))]
+    (cond
+      redacted?
+      {:type "redacted_thinking"
+       :data thinking-signature}
 
-    (and (string? thinking-signature) (not (str/blank? thinking-signature)))
-    {:type "thinking"
-     :thinking (or thinking "")
-     :signature thinking-signature}
+      (and (string? thinking-signature) (not (str/blank? thinking-signature)))
+      {:type "thinking"
+       :thinking (or thinking "")
+       :signature thinking-signature}
 
-    :else
-    ;; Missing signature - fall back to a text block so Anthropic doesn't
-    ;; reject the next request and Claude doesn't start mimicking the
-    ;; <thinking> tags in subsequent responses.
-    {:type "text"
-     :text (or thinking "")}))
+      :else
+      {:type "text"
+       :text (or thinking "")})))
 
 (defn- demote-interior-thinking-blocks
   "Anthropic's contract: in any assistant message, all `thinking` /
@@ -1801,15 +1805,15 @@
           (case (:type delta)
             "text_delta"
             (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic emits input_json_delta for tool_use blocks (the
             ;; tool arguments, e.g. run_python's `{"code": …}`, arrive as a
@@ -1820,8 +1824,8 @@
             ;; work, not just its reasoning).
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-                {:content-delta nil :reasoning-delta nil :api-usage nil
-                 :tool-args-delta (:partial_json delta)})
+              {:content-delta nil :reasoning-delta nil :api-usage nil
+               :tool-args-delta (:partial_json delta)})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -1935,9 +1939,9 @@
                               can-retry?)
                           {:retry true :error e :status status
                            :reason (cond retryable-conn?            :connection-error
-                                         retryable-third-party-400? :anthropic-third-party-400
-                                         retryable-message?         :transient-message
-                                         :else                      :http-status)}
+                                     retryable-third-party-400? :anthropic-third-party-400
+                                     retryable-message?         :transient-message
+                                     :else                      :http-status)}
                           {:error e}))))]
        (cond
          (:success result) (:success result)
@@ -2256,7 +2260,7 @@
   [{:keys [thinking thinking-signature]}]
   (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
                    (try (json/read-json thinking-signature :key-fn keyword)
-                        (catch Exception _ nil)))
+                     (catch Exception _ nil)))
                (when (and (string? thinking) (not (str/blank? thinking)))
                  {:type "reasoning"
                   :summary [{:type "summary_text" :text thinking}]}))]
@@ -2661,8 +2665,8 @@
 
 (defn- gemini-part-text [part]
   (cond (string? part)          part
-        (string? (:text part))  (:text part)
-        :else                   nil))
+    (string? (:text part))  (:text part)
+    :else                   nil))
 
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
@@ -3661,7 +3665,7 @@
           (do (when-not @headers-received?-atom
                 (reset! ttft-fired?-atom true)
                 (.interrupt caller))
-              false)
+            false)
           :else true)))))
 
 (defn- start-idle-stream-watchdog!
@@ -3688,8 +3692,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long idle-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                (try (.close stream) (catch Throwable _ nil))
-                false)
+              (try (.close stream) (catch Throwable _ nil))
+              false)
             true))
         false))))
 
@@ -3704,8 +3708,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long semantic-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                (try (.close stream) (catch Throwable _ nil))
-                false)
+              (try (.close stream) (catch Throwable _ nil))
+              false)
             true))
         false))))
 
@@ -3727,18 +3731,18 @@
       (if @alive?-atom
         (if (cancel-requested?)
           (do (reset! cancel-fired? true)
-              (if-let [s @stream-ref]
+            (if-let [s @stream-ref]
                 ;; Post-headers: closing the body unblocks the parked
                 ;; `.readLine`. Do NOT interrupt — the caller is in OUR read
                 ;; loop, and interrupting the shared JDK client's send
                 ;; machinery can wedge its SelectorManager, surfacing as
                 ;; "selector manager closed" on every LATER send.
-                (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
+              (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
                 ;; Pre-headers: no body yet; the caller is parked in
                 ;; HttpClient.send -> CompletableFuture.get. Interrupt to
                 ;; unpark it (the TTFT lever) — unavoidable here, but rare.
-                (try (.interrupt caller) (catch Throwable _ nil)))
-              false)
+              (try (.interrupt caller) (catch Throwable _ nil)))
+            false)
           true)
         false))))
 
@@ -3757,28 +3761,28 @@
   (cond
     @cancel-fired?
     (do (Thread/interrupted)
-        (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                 {:type :svar.core/stream-cancelled :stream? true :url url} e)))
+      (throw (ex-info "Stream cancelled by caller (pre-headers)."
+               {:type :svar.core/stream-cancelled :stream? true :url url} e)))
 
     @ttft-fired?
     (do (Thread/interrupted)
-        (trove/log! {:level :warn :id ::stream-ttft-timeout
-                     :data (log-data {:url url
-                                      :ttft-timeout-ms ttft-timeout-ms})
-                     :msg "TTFT timeout, no headers received"})
-        (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                          "ms with no response headers): " (ex-message e))
-                 {:type :svar.core/stream-ttft-timeout
-                  :stream? true :url url
-                  :ttft-timeout-ms ttft-timeout-ms
-                  :cause-class (.getName (class e))}
-                 e)))
+      (trove/log! {:level :warn :id ::stream-ttft-timeout
+                   :data (log-data {:url url
+                                    :ttft-timeout-ms ttft-timeout-ms})
+                   :msg "TTFT timeout, no headers received"})
+      (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                        "ms with no response headers): " (ex-message e))
+               {:type :svar.core/stream-ttft-timeout
+                :stream? true :url url
+                :ttft-timeout-ms ttft-timeout-ms
+                :cause-class (.getName (class e))}
+               e)))
 
     :else
     ;; Not our watchdog — a real external interrupt. Restore the flag and
     ;; propagate as-is (clean cancellation).
     (do (.interrupt (Thread/currentThread))
-        (throw e))))
+      (throw e))))
 
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
@@ -4089,9 +4093,9 @@
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
                       "event" (do (vreset! saw-sse? true)
-                                  (recur value data-lines (unchecked-inc line-count) now-ns))
+                                (recur value data-lines (unchecked-inc line-count) now-ns))
                       "data"  (do (vreset! saw-sse? true)
-                                  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
+                                (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
                       (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
@@ -4331,8 +4335,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                  idle?     :svar.core/stream-idle-timeout
-                                  :else     :svar.core/http-error)
+                              idle?     :svar.core/stream-idle-timeout
+                              :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4366,8 +4370,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                idle?     :svar.core/stream-idle-timeout
-                                :else     :svar.core/http-error)
+                            idle?     :svar.core/stream-idle-timeout
+                            :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -5351,7 +5355,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
+                                                 (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
