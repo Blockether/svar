@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.7.84] - 2026-07-27
 
 ### Changed
+- feat: refresh current GitHub Copilot models
+- Trim repository agent guidance
+- Streamline agent guidance
+- release: update version files for v0.7.83, bump to next dev version
+
+
+## [v0.7.84] - 2026-07-27
+
+### Changed
 - feat(models): refresh models.dev and make Copilot's GPT-5.6 Luna, Sol, and Terra models first-class Responses models
 - chore(copilot): keep the default fleet focused on current Claude 5 and GPT-5.6 models
 
@@ -1739,7 +1748,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.83...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.84...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1862,3 +1871,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.81]: https://github.com/Blockether/svar/releases/tag/v0.7.81
 [v0.7.82]: https://github.com/Blockether/svar/releases/tag/v0.7.82
 [v0.7.83]: https://github.com/Blockether/svar/releases/tag/v0.7.83
+[v0.7.84]: https://github.com/Blockether/svar/releases/tag/v0.7.84
