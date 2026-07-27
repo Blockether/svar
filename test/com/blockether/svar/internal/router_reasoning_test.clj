@@ -349,35 +349,28 @@
 (defdescribe provider-model-filter-test
   "Provider-scoped model filters."
 
-  (it "flags GitHub Copilot known models with provider-specific API styles"
+  (it "flags current GitHub Copilot models with provider-specific API styles"
     (let [provider (router/normalize-provider 0 {:id :github-copilot
                                                  :api-key "test"
-                                                 :models [{:name "claude-sonnet-4.6"}
-                                                          {:name "gpt-5.4"}
-                                                          {:name "gpt-5.5"}
-                                                          {:name "gpt-5.3-codex"}
-                                                          {:name "grok-code-fast-1"}
-                                                          {:name "gpt-4o"}]})
+                                                 :models [{:name "claude-opus-5"}
+                                                          {:name "gpt-5.6-luna"}
+                                                          {:name "gpt-5.6-sol"}
+                                                          {:name "gpt-5.6-terra"}
+                                                          {:name "gpt-5.2"}
+                                                          {:name "grok-code-fast-1"}]})
           by-name (zipmap (map :name (:models provider)) (:models provider))]
-      (expect (= #{"claude-sonnet-4.6" "gpt-5.4" "gpt-5.5" "gpt-5.3-codex"}
+      (expect (= #{"claude-opus-5" "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"}
                 (set (keys by-name))))
-      ;; Claude on Copilot routes the native Anthropic wire (/v1/messages) so
-      ;; cache_control prompt caching works; reasoning stays server-managed.
-      (expect (= :anthropic (:api-style (get by-name "claude-sonnet-4.6"))))
-      (expect (= :server-managed (:reasoning-style (get by-name "claude-sonnet-4.6"))))
-      (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.4"))))
-      (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.5"))))
-      (expect (= :openai-compatible-responses (:api-style (get by-name "gpt-5.3-codex"))))
-      (expect (= :openai-effort (:reasoning-style (get by-name "gpt-5.4"))))
-      (expect (= :openai-effort (:reasoning-style (get by-name "gpt-5.5"))))
-      (expect (= 272000 (:context (get by-name "gpt-5.4"))))
-      (expect (= 272000 (:context (get by-name "gpt-5.5"))))
-      (expect (nil? (get by-name "gpt-4o")))
-      (expect (nil? (get by-name "grok-code-fast-1")))
-      (expect (not (router/provider-model-visible? :github-copilot "grok-code-fast-1")))
-      (expect (not (router/provider-model-visible? :github-copilot-individual "grok-code-fast-1")))
-      (expect (= {:effort "medium" :summary "detailed"}
-                (get-in by-name ["gpt-5.4" :extra-body :reasoning])))))
+      (expect (= :anthropic (:api-style (get by-name "claude-opus-5"))))
+      (expect (= :server-managed (:reasoning-style (get by-name "claude-opus-5"))))
+      (doseq [model ["gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]]
+        (expect (= :openai-compatible-responses (:api-style (get by-name model))))
+        (expect (= :openai-effort (:reasoning-style (get by-name model))))
+        (expect (= 922000 (:context (get by-name model))))
+        (expect (= {:effort "medium" :summary "detailed"}
+                  (get-in by-name [model :extra-body :reasoning]))))
+      (expect (nil? (get by-name "gpt-5.2")))
+      (expect (nil? (get by-name "grok-code-fast-1")))))
 
   (it "filters OpenAI Codex GPT models below GPT-5.3"
     (let [provider (router/normalize-provider 0 {:id :openai-codex

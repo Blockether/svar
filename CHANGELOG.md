@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.84] - 2026-07-27
+
+### Changed
+- feat(models): refresh models.dev and make Copilot's GPT-5.6 Luna, Sol, and Terra models first-class Responses models
+- chore(copilot): keep the default fleet focused on current Claude 5 and GPT-5.6 models
+
 ## [v0.7.83] - 2026-07-26
 
 ### Changed
