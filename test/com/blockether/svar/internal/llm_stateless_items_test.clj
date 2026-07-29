@@ -100,3 +100,26 @@
   (it "does not fire on unrelated failures"
     (expect (not (failure/item-affinity-error? (ex-info "Overloaded" {:status 529}))))
     (expect (not (failure/item-affinity-error? (ex-info "connection reset by peer" {}))))))
+
+(defdescribe stateless-retry-verdict-test
+  (it "self-heals only before any visible output"
+    (let [affinity (fn [data]
+                     (ex-info "the requested item was created under a different Azure OpenAI resource"
+                       (merge {:status 400} data)))]
+      (expect (failure/retry-without-server-item-ids? (affinity {})))
+      ;; already streamed bytes: a resend would duplicate them
+      (expect (not (failure/retry-without-server-item-ids? (affinity {:content-acc-len 12}))))
+      (expect (not (failure/retry-without-server-item-ids? (affinity {:reasoning-acc-len 3}))))
+      ;; unrelated failure never triggers the stateless replay
+      (expect (not (failure/retry-without-server-item-ids? (ex-info "Overloaded" {:status 529}))))))
+  (it "remembers the host that rejected replayed item ids"
+    (let [url "https://stateless-test.example.invalid/v1"]
+      (try
+        (expect (not (failure/stateless-items-host? url)))
+        (failure/mark-stateless-items! url)
+        (expect (failure/stateless-items-host? url))
+        ;; sticky per HOST, not per path
+        (expect (failure/stateless-items-host? "https://stateless-test.example.invalid/other"))
+        (expect (not (failure/stateless-items-host? "https://other.example.invalid/v1")))
+        (finally
+          (swap! failure/stateless-item-hosts* disj "stateless-test.example.invalid"))))))

@@ -2334,20 +2334,8 @@
 ;; `:stateless-items? true` (vis: `is_stateless: true`), or let the first such
 ;; 400 mark the host and self-heal on the spot.
 
-(defonce ^:private stateless-item-hosts
-  (atom #{}))
-
-(defn- mark-stateless-items!
-  "Remember that `base-url`'s host cannot resolve server-minted item ids."
-  [base-url]
-  (when-let [h (failure/url->host base-url)]
-    (swap! stateless-item-hosts conj h))
-  nil)
-
-(defn- stateless-items-host?
-  "True once this host has rejected a replayed server-minted item id."
-  [base-url]
-  (boolean (some-> (failure/url->host base-url) (@stateless-item-hosts))))
+;; The host registry and the retry verdict live in `failure` — this namespace
+;; only reshapes the payload (`strip-server-item-ids`).
 
 (defn- strip-server-item-ids
   "Drop every SERVER-minted id from a Responses `:input` vector: the `id` of a
@@ -4322,14 +4310,13 @@
            ;; that already rejected a replayed server item id. Otherwise try the
            ;; full replay once and self-heal on THAT exact 400 — but never after
            ;; the stream has emitted output, which a resend would duplicate.
-           (if (or (:stateless-items? opts) (stateless-items-host? base-url))
+           (if (or (:stateless-items? opts) (failure/stateless-items-host? base-url))
              (responses-call true)
              (try
                (responses-call false)
                (catch Exception e
-                 (if (and (failure/item-affinity-error? e)
-                       (not (failure/stream-output-started? e)))
-                   (do (mark-stateless-items! base-url)
+                 (if (failure/retry-without-server-item-ids? e)
+                   (do (failure/mark-stateless-items! base-url)
                      (responses-call true))
                    (throw e))))))
 

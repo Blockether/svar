@@ -704,6 +704,44 @@
     (host-connection-healthy? (:url (ex-data e)))))
 
 ;; -----------------------------------------------------------------------------
+;; Stateless item-id registry (server-minted item affinity)
+;; -----------------------------------------------------------------------------
+;;
+;; A Responses replay carries SERVER-minted ids (a `reasoning` item's `rs_…` id
+;; and its `encrypted_content`, a `function_call` item's `fc_…` id). Public
+;; OpenAI resolves those anywhere; a gateway load-balancing across several Azure
+;; OpenAI resources does not, and answers with HTTP 400 "The requested item was
+;; created under a different Azure OpenAI resource" (Blockether/vis#59). Every
+;; blind retry lands on another replica and fails identically, so the RETRY
+;; DECISION lives here next to the classification it is derived from; the
+;; transport layer only reshapes the payload it was told to reshape.
+
+(def stateless-item-hosts*
+  "Hosts proven unable to resolve replayed server-minted item ids. Sticky for
+   the process: the affinity is a property of the deployment, not of one turn."
+  (atom #{}))
+
+(defn mark-stateless-items!
+  "Remember that `base-url`'s host cannot resolve server-minted item ids."
+  [base-url]
+  (when-let [h (url->host base-url)]
+    (swap! stateless-item-hosts* conj h))
+  nil)
+
+(defn stateless-items-host?
+  "True once this host has rejected a replayed server-minted item id."
+  [base-url]
+  (boolean (some-> (url->host base-url) (@stateless-item-hosts*))))
+
+(defn retry-without-server-item-ids?
+  "THE verdict for the stateless-replay self-heal: this exact failure is an item
+   affinity rejection AND nothing was streamed yet, so re-sending the turn
+   without server-minted ids cannot duplicate visible output."
+  [^Throwable e]
+  (and (item-affinity-error? e)
+    (not (stream-output-started? e))))
+
+;; -----------------------------------------------------------------------------
 ;; The two verdicts every layer asks for
 ;; -----------------------------------------------------------------------------
 
