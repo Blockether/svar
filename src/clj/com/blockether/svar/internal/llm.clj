@@ -2319,46 +2319,96 @@
            fn-call-items
            fn-output-items))))
 
-(defn- build-openai-responses-request-body [messages model extra-body]
-  (let [messages (sanitize-replayed-messages messages model true)
-        [tools tool-choice extra-body] (extra-body-tools extra-body)
-        system-text (->> messages
-                      (filter #(= "system" (:role %)))
-                      (map (comp responses-text-content :content))
-                      (remove str/blank?)
-                      (str/join "\n\n"))
+;; ── Stateless replay (server-minted item ids) ──────────────────────────────
+;; The OpenAI Responses wire lets the CLIENT replay items the SERVER minted:
+;; a `reasoning` item's `rs_…` id + `encrypted_content`, and a `function_call`
+;; item's `fc_…` id. Public OpenAI resolves those ids anywhere. A gateway that
+;; load-balances across several backends does NOT: LiteLLM in front of two
+;; Azure OpenAI resources answers the replay with HTTP 400 "The requested item
+;; was created under a different Azure OpenAI resource", and every retry lands
+;; on another replica and fails identically (Blockether/vis#59).
+;;
+;; The fix is to stop sending what that endpoint cannot resolve. `call_id` is
+;; CLIENT-visible pairing and always stays; only the server-owned ids and the
+;; encrypted reasoning payload go. Turn it on per provider with
+;; `:stateless-items? true` (vis: `is_stateless: true`), or let the first such
+;; 400 mark the host and self-heal on the spot.
+
+(defonce ^:private stateless-item-hosts
+  (atom #{}))
+
+(defn- mark-stateless-items!
+  "Remember that `base-url`'s host cannot resolve server-minted item ids."
+  [base-url]
+  (when-let [h (failure/url->host base-url)]
+    (swap! stateless-item-hosts conj h))
+  nil)
+
+(defn- stateless-items-host?
+  "True once this host has rejected a replayed server-minted item id."
+  [base-url]
+  (boolean (some-> (failure/url->host base-url) (@stateless-item-hosts))))
+
+(defn- strip-server-item-ids
+  "Drop every SERVER-minted id from a Responses `:input` vector: the `id` of a
+   `reasoning` item (plus its `encrypted_content`, which is resource-bound too)
+   and the `id` — never the `call_id` — of a `function_call` item. A reasoning
+   item left with no summary and no content carries nothing the model can use,
+   so it is dropped rather than sent empty."
+  [input]
+  (into []
+    (keep (fn [item]
+            (if (= "reasoning" (:type item))
+              (let [item* (dissoc item :id :encrypted_content)]
+                (when (or (seq (:summary item*)) (seq (:content item*)))
+                  item*))
+              (dissoc item :id))))
+    input))
+
+(defn- build-openai-responses-request-body
+  ([messages model extra-body]
+   (build-openai-responses-request-body messages model extra-body false))
+  ([messages model extra-body stateless-items?]
+   (let [messages (sanitize-replayed-messages messages model true)
+         [tools tool-choice extra-body] (extra-body-tools extra-body)
+         system-text (->> messages
+                       (filter #(= "system" (:role %)))
+                       (map (comp responses-text-content :content))
+                       (remove str/blank?)
+                       (str/join "\n\n"))
         ;; Canonical thinking blocks live inline on assistant messages.
         ;; Each one is hoisted out as a `reasoning` input entry placed
         ;; right before its parent message - the OpenAI Responses API
         ;; pairs reasoning items with the assistant turn that produced
         ;; them by ordering, not by id, so positional faithfulness here
         ;; is what keeps the thinking session valid.
-        input       (->> messages
-                      (remove #(= "system" (:role %)))
-                      (mapcat responses-message-input-entries)
-                      vec)
-        effort      (:reasoning_effort extra-body)
-        text-format (or (get-in extra-body [:text :format])
-                      (response-format->text-format (:response_format extra-body)))
-        text-verbosity (or (normalize-text-verbosity (:verbosity extra-body))
-                         (normalize-text-verbosity (get-in extra-body [:text :verbosity])))
-        max-output-tokens (or (:max_output_tokens extra-body) (:max_tokens extra-body))
-        base-extra  (dissoc extra-body :reasoning_effort :response_format :verbosity :provider-state
-                      :max_tokens :max_output_tokens)
-        reasoning   (cond-> (:reasoning base-extra)
-                      effort (assoc :effort effort))
-        base-extra* (dissoc base-extra :reasoning)
-        base-text   (or (:text base-extra) {})
-        base-text   (cond-> base-text text-verbosity (assoc :verbosity text-verbosity))]
-    (cond-> {:model model
-             :input input}
-      (not (str/blank? system-text)) (assoc :instructions system-text)
-      max-output-tokens (assoc :max_output_tokens max-output-tokens)
-      (seq reasoning) (assoc :reasoning reasoning)
-      text-format (assoc :text (assoc base-text :format text-format))
-      (seq tools) (assoc :tools (tools->wire :openai-compatible-responses tools))
-      (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :openai-compatible-responses tool-choice))
-      (seq base-extra*) (merge (cond-> base-extra* text-format (dissoc :text))))))
+         input       (cond-> (->> messages
+                               (remove #(= "system" (:role %)))
+                               (mapcat responses-message-input-entries)
+                               vec)
+                       stateless-items? strip-server-item-ids)
+         effort      (:reasoning_effort extra-body)
+         text-format (or (get-in extra-body [:text :format])
+                       (response-format->text-format (:response_format extra-body)))
+         text-verbosity (or (normalize-text-verbosity (:verbosity extra-body))
+                          (normalize-text-verbosity (get-in extra-body [:text :verbosity])))
+         max-output-tokens (or (:max_output_tokens extra-body) (:max_tokens extra-body))
+         base-extra  (dissoc extra-body :reasoning_effort :response_format :verbosity :provider-state
+                       :max_tokens :max_output_tokens)
+         reasoning   (cond-> (:reasoning base-extra)
+                       effort (assoc :effort effort))
+         base-extra* (dissoc base-extra :reasoning)
+         base-text   (or (:text base-extra) {})
+         base-text   (cond-> base-text text-verbosity (assoc :verbosity text-verbosity))]
+     (cond-> {:model model
+              :input input}
+       (not (str/blank? system-text)) (assoc :instructions system-text)
+       max-output-tokens (assoc :max_output_tokens max-output-tokens)
+       (seq reasoning) (assoc :reasoning reasoning)
+       text-format (assoc :text (assoc base-text :format text-format))
+       (seq tools) (assoc :tools (tools->wire :openai-compatible-responses tools))
+       (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :openai-compatible-responses tool-choice))
+       (seq base-extra*) (merge (cond-> base-extra* text-format (dissoc :text)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Google Gemini wire — generateContent / streamGenerateContent
@@ -4255,17 +4305,33 @@
             :on-chunk   on-chunk})
 
          (= api-style :openai-compatible-responses)
-         (openai-responses-completion
-           (build-openai-responses-request-body messages model extra-body)
-           {:api-key         api-key
-            :base-url        base-url
-            :responses-path  (or responses-path "/responses")
-            :headers         headers
-            :timeout-ms      timeout-ms
-            :ttft-timeout-ms ttft-timeout-ms
-            :idle-timeout-ms idle-timeout-ms
-            :semantic-timeout-ms semantic-timeout-ms
-            :on-chunk        on-chunk})
+         (let [responses-call
+               (fn [stateless?]
+                 (openai-responses-completion
+                   (build-openai-responses-request-body messages model extra-body stateless?)
+                   {:api-key         api-key
+                    :base-url        base-url
+                    :responses-path  (or responses-path "/responses")
+                    :headers         headers
+                    :timeout-ms      timeout-ms
+                    :ttft-timeout-ms ttft-timeout-ms
+                    :idle-timeout-ms idle-timeout-ms
+                    :semantic-timeout-ms semantic-timeout-ms
+                    :on-chunk        on-chunk}))]
+           ;; Stateless is sticky per host: an explicit provider opt, or a host
+           ;; that already rejected a replayed server item id. Otherwise try the
+           ;; full replay once and self-heal on THAT exact 400 — but never after
+           ;; the stream has emitted output, which a resend would duplicate.
+           (if (or (:stateless-items? opts) (stateless-items-host? base-url))
+             (responses-call true)
+             (try
+               (responses-call false)
+               (catch Exception e
+                 (if (and (failure/item-affinity-error? e)
+                       (not (failure/stream-output-started? e)))
+                   (do (mark-stateless-items! base-url)
+                     (responses-call true))
+                   (throw e))))))
 
          :else
          (if on-chunk
@@ -4406,7 +4472,7 @@
   [router {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve api-key
                   base-url provider-id api-style extra-body provider-state cache-system?
                   format-retries format-retry-on on-format-error
-                  responses-path llm-headers verbosity context]
+                  responses-path llm-headers verbosity context stateless-items?]
            :as opts}]
   (let [{:keys [network tokens]} router
         default-pricing (or (:pricing tokens) router/MODEL_PRICING)
@@ -4463,7 +4529,8 @@
       (some? on-format-error)                (assoc :on-format-error on-format-error)
       (some? responses-path)                 (assoc :responses-path responses-path)
       (some? llm-headers)                    (assoc :llm-headers llm-headers)
-      (some? verbosity)                      (assoc :verbosity verbosity))))
+      (some? verbosity)                      (assoc :verbosity verbosity)
+      (some? stateless-items?)               (assoc :stateless-items? stateless-items?))))
 
 ;; =============================================================================
 ;; Provider Router (fallback, rate limiting, provider selection)
@@ -4594,6 +4661,8 @@
         (assoc :context (:context model-map)))
       (cond-> (some? (:responses-path provider))
         (assoc :responses-path (:responses-path provider)))
+      (cond-> (some? (:stateless-items? provider))
+        (assoc :stateless-items? (:stateless-items? provider)))
       (cond-> merged-headers
         (assoc :llm-headers merged-headers)))))
 

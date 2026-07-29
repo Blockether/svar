@@ -1192,6 +1192,10 @@
              :priority idx
              :root root-name
              :models models}
+      (some? (or (:stateless-items? provider-map) (:stateless-items? known)))
+      (assoc :stateless-items? (boolean (or (:stateless-items? provider-map)
+                                          (:stateless-items? known))))
+
       (some? (or (:responses-path provider-map) (:responses-path known)))
       (assoc :responses-path (or (:responses-path provider-map) (:responses-path known)))
 

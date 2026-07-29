@@ -257,6 +257,16 @@
       " "
       (str/lower-case (str (ex-message e))))))
 
+(defn item-affinity-error?
+  "True when the failure says the request replayed a SERVER-MINTED item the
+   answering backend does not own — Azure OpenAI stored-item affinity behind a
+   load-balancing gateway (LiteLLM fronting several Azure resources) is the
+   canonical case. The REQUEST has to change (stop sending those ids); a blind
+   retry lands on another replica and fails identically. The transport layer
+   uses this to fall back to a stateless replay, `classify` to say so."
+  [^Throwable e]
+  (any-substring? (haystack e) RESOURCE_MISMATCH_PATTERNS))
+
 (def ^:private REQUEST_ID_PATTERN
   "Correlation ids gateways print bare in an error body — a UUID, or an
    explicitly labelled request id. Preserved so a backend operator can grep

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `:stateless-items? true` on a provider stops replaying SERVER-MINTED OpenAI
+  Responses item ids (a `reasoning` item's `rs_…` id + `encrypted_content`, a
+  `function_call` item's `fc_…` id). Gateways that load-balance across several
+  Azure OpenAI resources cannot resolve an id minted by another replica and
+  answer HTTP 400 "the requested item was created under a different Azure
+  OpenAI resource" — retrying just hits another replica. The client-owned
+  `call_id` always survives, so tool-call pairing is unaffected.
+- `failure/item-affinity-error?` names that failure, and the Responses
+  transport self-heals: the first such 400 (before any output was streamed)
+  marks the host and replays the request statelessly, sticky for the process.
+
 ## [v0.7.86] - 2026-07-29
 
 ### Changed
