@@ -126,6 +126,9 @@
       ;; have to special-case OAuth headers per-provider. Use a
       ;; variadic stub here so the test contract follows the
       ;; production signature.
+      ;; `models!` memoizes a successful catalog per endpoint, so a test
+      ;; that stubs `http-get!` must start from an empty cache.
+      (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                          {:data [{:id "gpt-4o"}
                                                  {:id "gpt-5"}
@@ -141,6 +144,7 @@
     (let [router (svar/make-router [{:id :github-copilot
                                      :api-key "sk-test"
                                      :models [{:name "gpt-5.4"}]}])]
+      (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                          {:data [{:id "claude-sonnet-4.6"}
                                                  {:id "gpt-4o"}
@@ -157,6 +161,7 @@
     (let [router (svar/make-router [{:id :zai-coding
                                      :api-key "sk-test"
                                      :models [{:name "glm-4.7"}]}])]
+      (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                          {:data [{:id "glm-4.7"}
                                                  {:id "glm-5-turbo"}
@@ -171,6 +176,7 @@
                                      :llm-headers {"chatgpt-account-id" "acct_123"}
                                      :models [{:name "gpt-5.5"}]}])
           captured (atom nil)]
+      (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [url _api-key & [opts]]
                                          (reset! captured (assoc opts :url url))
                                          {:models [{:slug "gpt-5.5" :id "gpt-5.5"}]})}
@@ -191,6 +197,7 @@
     (let [router (svar/make-router [{:id :openai-codex
                                      :api-key "sk-test"
                                      :models [{:name "gpt-5.5"}]}])]
+      (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
                                          {:models [{:slug "gpt-5.5" :display_name "GPT-5.5"}
                                                    {:slug "gpt-5.4"}

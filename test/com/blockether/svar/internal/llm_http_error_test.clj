@@ -21,6 +21,7 @@
   (:require
    [clojure.string :as str]
    [lazytest.core :refer [defdescribe describe expect it throws?]]
+   [com.blockether.svar.internal.failure :as failure]
    [com.blockether.svar.internal.llm :as sut]))
 
 ;;; ── helper ─────────────────────────────────────────────────────────────
@@ -28,13 +29,15 @@
 (def ^:private truncate-error-body @#'sut/truncate-error-body)
 (def ^:private with-retry @#'sut/with-retry)
 (def ^:private MAX-CHARS @#'sut/MAX_HTTP_ERROR_BODY_CHARS)
-(def ^:private retryable-exception? @#'sut/retryable-exception?)
-(def ^:private transient-network-error? @#'sut/transient-network-error?)
-(def ^:private connection-error? @#'sut/connection-error?)
-(def ^:private connection-error->ex-info @#'sut/connection-error->ex-info)
-(def ^:private mark-connection-healthy! @#'sut/mark-connection-healthy!)
-(def ^:private host-connect-health* @#'sut/host-connect-health*)
-(def ^:private healthy-host-connect-blip? @#'sut/healthy-host-connect-blip?)
+;; Transport-level classification now lives in ONE place (`internal.failure`);
+;; `llm` and `router` only delegate, so these tests target the source of truth.
+(def ^:private retryable-exception? failure/transport-retryable?)
+(def ^:private transient-network-error? failure/transient-network-error?)
+(def ^:private connection-error? failure/connection-error?)
+(def ^:private connection-error->ex-info failure/connection-error->ex-info)
+(def ^:private mark-connection-healthy! failure/mark-connection-healthy!)
+(def ^:private host-connect-health* failure/host-connect-health*)
+(def ^:private healthy-host-connect-blip? failure/healthy-host-connect-blip?)
 
 (defdescribe truncate-error-body-test
   (describe "pure stringifier"

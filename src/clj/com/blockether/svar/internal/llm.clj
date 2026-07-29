@@ -7,6 +7,7 @@
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
    [com.blockether.svar.internal.jsonish :as jsonish]
+   [com.blockether.svar.internal.failure :as failure]
    [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.ratelimit :as ratelimit]
    [com.blockether.svar.internal.spec :as spec]
@@ -71,313 +72,34 @@
 ;; HTTP Utilities
 ;; =============================================================================
 
-(def ^:private RETRYABLE_STATUS_CODES
-  "HTTP status codes that should trigger a retry."
-  #{429 500 502 503 504 524 529})
+(def ^:private provider-limit-error?
+  "See `failure/provider-limit-error?`."
+  failure/provider-limit-error?)
 
-(def ^:private NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS
-  "Lower-cased substrings that mark provider subscription/quota/billing
-   exhaustion — a hard account state, NOT a transient throttle. Even on HTTP
-   429 these must NOT retry (mirrors pi's NON_RETRYABLE_PROVIDER_LIMIT_ERROR
-   pattern in packages/ai/src/utils/retry.ts)."
-  ["gousagelimiterror" "freeusagelimiterror" "monthly usage limit reached"
-   "available balance" "insufficient_quota" "out of budget" "quota exceeded"
-   "billing"])
+(def ^:private transient-message-error?
+  "See `failure/transient-message-error?`."
+  failure/transient-message-error?)
 
-(defn- provider-limit-error?
-  "True when error text/body names a subscription/quota/billing exhaustion
-   (account state) that must never be retried as a transient throttle."
-  [hay]
-  (boolean
-    (and hay
-      (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS))))
+(def ^:private connection-error?
+  "See `failure/connection-error?`."
+  failure/connection-error?)
 
-(def ^:private RETRYABLE_TRANSIENT_MESSAGE_PATTERN
-  "Regex over an error's already-lower-cased message+body marking a transient
-   provider/transport failure that carries NO mappable HTTP status — e.g. a
-   gateway proxying an upstream failure as wrapper text (OpenRouter's \"Provider
-   returned error\"), a gRPC ResourceExhausted, or explicit mid-stream retry
-   guidance. Mirrors the high-signal subset of pi's RETRYABLE_PROVIDER_ERROR
-   pattern (packages/ai/src/utils/retry.ts); OMITS pi's bare numeric HTTP codes
-   (already handled by RETRYABLE_STATUS_CODES) and \"connection refused\" (svar
-   treats ECONNREFUSED as a wrong/down endpoint, not a blip). The quota/billing
-   guard (provider-limit-error?) runs first."
-  (re-pattern
-    (str/join "|"
-      ["overloaded" "rate.?limit" "too many requests"
-       "service.?unavailable" "server.?error" "internal.?error"
-       "provider.?returned.?error" "network.?error" "upstream.?connect"
-       "fetch failed" "resource.?exhausted"
-       "you can retry your request" "try your request again"
-       "please retry your request"])))
+(def ^:private connection-error->ex-info
+  "See `failure/connection-error->ex-info`."
+  failure/connection-error->ex-info)
 
-(defn- transient-message-error?
-  "True when a statusless / wrapper / gRPC transient shows up only in the error
-   TEXT (RETRYABLE_TRANSIENT_MESSAGE_PATTERN). `status` gates out definitive
-   client errors (4xx except 429) so a 400/404 whose body happens to contain
-   transient wording is never retried."
-  [hay status]
-  (boolean
-    (and hay
-      (not (and status (<= 400 (long status) 499) (not= 429 status)))
-      (re-find RETRYABLE_TRANSIENT_MESSAGE_PATTERN hay))))
+(def ^:private stream-output-started?
+  "See `failure/stream-output-started?`."
+  failure/stream-output-started?)
 
-(def ^:private TRANSIENT_NETWORK_ERROR_SUBSTRINGS
-  "Lower-cased substrings of transient OS/network-layer connection errors.
-   A brief connectivity blip (wifi handoff, VPN reconnect, captive portal,
-   laptop sleep/wake) surfaces these while the local stack is momentarily
-   down - they clear once the network returns, so they're safe to retry
-   with backoff instead of failing the whole call.
+(def ^:private mark-connection-healthy!
+  "See `failure/mark-connection-healthy!`."
+  failure/mark-connection-healthy!)
 
-   Deliberately excludes \"connection refused\" (ECONNREFUSED): a RST from
-   the peer usually means a wrong endpoint / down service, not a transient
-   blip, and retrying just hammers it."
-  ["can't assign requested address"        ; EADDRNOTAVAIL - local stack churning
-   "cannot assign requested address"
-   "network is unreachable"                ; ENETUNREACH - interface down
-   "network is down"
-   "no route to host"                      ; EHOSTUNREACH - routing not up yet
-   "host is unreachable"
-   "connection timed out"                  ; connect-phase timeout
-   "connect timed out"
-   "operation timed out"
-   "temporary failure in name resolution"  ; DNS resolver had no network
-   "name or service not known"
-   "no address associated with hostname"
-   "nodename nor servname provided"])      ; macOS DNS during blip
-
-(defn- ex-chain
-  "Lazy seq of an exception and its causes, capped to avoid pathological
-   self-referential chains."
-  [^Throwable e]
-  (take 16 (take-while some? (iterate (fn [^Throwable t] (.getCause t)) e))))
-
-(defn- transient-network-error?
-  "True when any link in the cause chain looks like a transient OS/network
-   connection error (see `TRANSIENT_NETWORK_ERROR_SUBSTRINGS`). Walks the
-   whole chain because babashka.http-client and the router wrap the raw
-   `java.net.*` exception several layers deep."
-  [^Throwable e]
-  (boolean
-    (some (fn [^Throwable t]
-            (or
-              ;; UnknownHostException's message is just the hostname, so
-              ;; match it by class - a DNS miss during a blip is transient.
-              (instance? java.net.UnknownHostException t)
-              (let [m (some-> (ex-message t) str/lower-case)]
-                (and m (some #(str/includes? m %) TRANSIENT_NETWORK_ERROR_SUBSTRINGS)))))
-      (ex-chain e))))
-
-(defn- connection-error?
-  "True when any link in the cause chain is a connect-phase network failure:
-   the TCP/TLS connection to the provider could not be established at all
-   (refused, host down/unreachable, DNS miss, connect-phase timeout). Distinct
-   from mid-stream transport drops, which already carry an HTTP envelope and
-   `:stream?` data and are classified by `retryable-exception?`."
-  [^Throwable e]
-  (boolean
-    (some (fn [^Throwable t]
-            (or (instance? java.net.ConnectException t)
-              (instance? java.net.UnknownHostException t)
-              (instance? java.net.NoRouteToHostException t)
-              (instance? java.net.http.HttpConnectTimeoutException t)
-              (instance? java.nio.channels.UnresolvedAddressException t)))
-      (ex-chain e))))
-
-(defn- connection-error-reason
-  "Human phrase for a connect-phase failure. Prefers a real (non-blank)
-   message from the cause chain, but on JDK 25 / `java.net.http` the
-   `ConnectException` chain is frequently all-nil messages, so fall back to a
-   class-derived phrase instead of leaking a raw classname to the user."
-  [^Throwable e]
-  (or (some (fn [^Throwable t]
-              (let [m (some-> (ex-message t) str/trim)]
-                (when-not (str/blank? m) m)))
-        (ex-chain e))
-    (some (fn [^Throwable t]
-            (condp instance? t
-              java.net.UnknownHostException             "host not found (DNS lookup failed)"
-              java.nio.channels.UnresolvedAddressException "could not resolve the host address"
-              java.net.NoRouteToHostException           "no route to host"
-              java.net.http.HttpConnectTimeoutException  "connection timed out"
-              ;; JDK 25 / java.net.http collapses refused, host-down and some
-              ;; DNS failures into a message-less ConnectException, so stay
-              ;; general rather than falsely asserting "refused".
-              java.net.ConnectException                 "the connection could not be established (the host may be down, or the base URL/port may be wrong)"
-              nil))
-      (ex-chain e))
-    "connection failed"))
-
-(defn- connection-error->ex-info
-  "Wrap a connect-phase failure in an `ex-info` carrying a human-readable,
-   provider-aware message plus the `:url` that could not be reached - the raw
-   `java.net.ConnectException` message is often nil/terse with no hint of which
-   provider/endpoint died. Keeps the original throwable as cause so
-   `retryable-exception?` still walks the real `java.net.*` exception
-   (transient blips like ENETUNREACH stay retryable; ECONNREFUSED stays
-   non-retryable - retrying a down/misconfigured endpoint just hammers it)."
-  [^Throwable e url]
-  (let [reason (connection-error-reason e)
-        host   (try (.getHost (java.net.URI. (str url)))
-                 (catch Exception _ nil))]
-    (ex-info (str "Could not connect to the model provider"
-               (when-not (str/blank? host) (str " at " host))
-               ": " reason
-               ". The provider may be down or unreachable - check your network "
-               "connection and the provider's base URL.")
-      {:type              :svar.core/http-error
-       :url               url
-       :connection-error? true
-       :cause-class       (.getName (class e))}
-      e)))
-
-(defn- stream-output-started?
-  "True when a failed stream already emitted anything to the caller.
-   Do not retry after reasoning either: TUI already displayed it, so replaying
-   the stream duplicates/rewinds the visible trace."
-  [^Exception e]
-  (let [data (ex-data e)]
-    (or (pos? (long (or (:content-acc-len data) 0)))
-      (pos? (long (or (:reasoning-acc-len data) 0)))
-      (some? (:partial-content data))
-      (some? (:reasoning data)))))
-
-(def ^:private deliberate-stream-abort-types
-  "svar's OWN watchdog/caller stream aborts. Each is a DELIBERATE `InputStream`
-   `.close` (idle/semantic watchdog fired, or caller cancel) — NOT a transient
-   peer connection drop. The JDK surfaces the intentional close as an
-   `IOException` whose message is 'Stream closed', which then trips
-   `retryable-exception?`'s broad 'closed' substring heuristic. Left unguarded,
-   `with-retry` misreads a watchdog abort as a retryable connection blip and
-   silently re-hammers the SAME provider (idle 180s × max-retries ⇒ a
-   multi-minute 'calling the provider, nothing moving' hang, emitting no
-   on-chunk). These belong to bounded, observable router-level fallback — never
-   blind same-provider retry."
-  #{:svar.core/stream-idle-timeout
-    :svar.core/stream-semantic-timeout
-    :svar.core/stream-cancelled})
-
-(defn- url->host
-  "Host component of a URL string, or nil when absent/unparseable."
-  [url]
-  (when url
-    (try (not-empty (.getHost (java.net.URI. (str url))))
-      (catch Exception _ nil))))
-
-(def ^:private connect-health-window-ms
-  "How long ONE successful connection keeps a host classified as 'healthy'.
-   A message-less `java.net.ConnectException` (JDK 25 collapses ECONNREFUSED,
-   host-down and transient blips into one indistinguishable, message-free
-   shape) is retried ONLY when THIS host connected successfully inside this
-   window — recent proof the network path works, so the failure is a transient
-   blip. A host never reached (LM Studio/Ollama down, wrong port) is absent
-   from the registry and fails fast instead of eating retry backoff."
-  (* 5 60 1000))
-
-(def ^:private host-connect-health*
-  "host -> epoch-ms of its most recent successful connection. Drives the health
-   gate for message-less ConnectExceptions (see `connect-health-window-ms`)."
-  (atom {}))
-
-(defn- mark-connection-healthy!
-  "Record that `url`'s host just connected successfully (HTTP response/headers
-   received). Marks the host healthy so a later transient message-less
-   ConnectException to the SAME host is retried instead of failing the turn."
-  [url]
-  (when-let [host (url->host url)]
-    (swap! host-connect-health* assoc host (System/currentTimeMillis)))
-  nil)
-
-(defn- host-connection-healthy?
-  "True when `url`'s host connected successfully within
-   `connect-health-window-ms` — recent proof the network path to it works."
-  [url]
-  (boolean
-    (when-let [t (get @host-connect-health* (url->host url))]
-      (< (- (System/currentTimeMillis) (long t)) (long connect-health-window-ms)))))
-
-(defn- message-less-connect-exception?
-  "True when the cause chain holds a `java.net.ConnectException` with a blank
-   message — the JDK-25 shape that collapses ECONNREFUSED, host-down and
-   transient connectivity blips into one indistinguishable, message-free
-   exception that cannot be classified by message substring alone."
-  [^Throwable e]
-  (boolean
-    (some (fn [^Throwable t]
-            (and (instance? java.net.ConnectException t)
-              (str/blank? (or (ex-message t) ""))))
-      (ex-chain e))))
-
-(defn- healthy-host-connect-blip?
-  "True when a message-less ConnectException hit a host that connected
-   successfully moments ago (`host-connection-healthy?`). The prior success is
-   evidence the network is healthy, so this is a transient blip worth retrying;
-   a host never reached stays non-retryable and fails fast."
-  [^Throwable e]
-  (and (message-less-connect-exception? e)
-    (host-connection-healthy? (:url (ex-data e)))))
-
-(defn- retryable-exception?
-  "Returns true if the exception represents a transient connection/read error
-   that should be retried (e.g., proxy dropping connection mid-response).
-
-   These errors have no HTTP status code because the response body was truncated
-   or the connection was reset before a complete response was received."
-  [^Exception e]
-  (let [msg (or (ex-message e) "")
-        msg-lower (str/lower-case msg)
-        data (ex-data e)
-        cause (ex-cause e)
-        cause-msg (when cause (or (ex-message cause) ""))
-        cause-lower (str/lower-case (or cause-msg ""))]
-    (and
-     ;; svar's own watchdog/caller aborts close the stream on purpose; their
-     ;; 'Stream closed' message must NOT be mistaken for a transient drop.
-      (not (contains? deliberate-stream-abort-types (:type data)))
-      (or
-     ;; charred.api/read-json fails on truncated response body
-        (str/includes? msg "EOF reached while reading")
-        (str/includes? msg "Unexpected end of input")
-     ;; java.net.http connection errors
-        (instance? java.io.EOFException e)
-        (instance? java.io.EOFException cause)
-        (instance? java.net.SocketTimeoutException e)
-        (instance? java.net.SocketTimeoutException cause)
-        (and cause-msg (str/includes? cause-msg "Connection reset"))
-        (and cause-msg (str/includes? cause-msg "EOF"))
-     ;; transient OS/network-layer connection errors (brief connectivity
-     ;; blip): EADDRNOTAVAIL, ENETUNREACH, EHOSTUNREACH, connect timeout,
-     ;; transient DNS failures. Walks the full cause chain.
-        (transient-network-error? e)
-     ;; JDK 25 collapses ECONNREFUSED, host-down and transient connect blips
-     ;; into ONE message-less java.net.ConnectException — indistinguishable by
-     ;; the exception alone. Retry it ONLY when this exact host connected
-     ;; successfully moments ago (network proven healthy ⇒ transient blip); a
-     ;; host never reached (LM Studio/Ollama down, wrong port) stays
-     ;; non-retryable and fails fast instead of eating retry backoff.
-        (healthy-host-connect-blip? e)
-     ;; Peer ACCEPTED the connection but closed the socket before sending ANY
-     ;; response byte — java.net.http surfaces this as "HTTP/1.1 header parser
-     ;; received no bytes". It falls BETWEEN a connect-phase failure (the TCP/TLS
-     ;; connection succeeded, so `connection-error?` misses it) and a mid-stream
-     ;; drop (no byte ever arrived, so `:stream?` is not set and the block below
-     ;; misses it) — the exact hole that let proxies / tunnels / load-balancers
-     ;; (e.g. a Cloudflare quick tunnel dropping an idle connection) fail a call
-     ;; that should just retry. Idempotent: nothing was produced, so it is the
-     ;; safest retry of all (`stream-output-started?` still gates the rest).
-        (str/includes? msg-lower "received no bytes")
-        (str/includes? cause-lower "received no bytes")
-        (and (:stream? data)
-          (or (str/includes? msg-lower "stream connection error")
-            (str/includes? msg-lower "connection reset")
-            (str/includes? msg-lower "connection closed")
-            (str/includes? msg-lower "closed")
-            (str/includes? cause-lower "connection reset")
-            (str/includes? cause-lower "connection closed")
-            (str/includes? cause-lower "closed")))
-     ;; babashka.http-client wraps errors in ExceptionInfo
-        (and (instance? clojure.lang.ExceptionInfo e)
-          (some-> cause retryable-exception?))))))
+(def ^:private retryable-exception?
+  "See `failure/transport-retryable?` — the single transport-level retry
+   verdict, shared with the router."
+  failure/transport-retryable?)
 
 (def ^:private shared-http-executor
   "Cached thread pool that backs the shared HttpClient.
@@ -1923,7 +1645,7 @@
                             retryable-message? (and (not limit-error?)
                                                  (not (stream-output-started? e))
                                                  (transient-message-error? hay status))
-                            retryable-status? (and (contains? RETRYABLE_STATUS_CODES status)
+                            retryable-status? (and (contains? failure/TRANSIENT_STATUS_CODES status)
                                                 (not limit-error?)
                                                 (not (stream-output-started? e))
                                                 (not (and router-handles-rate-limit?
@@ -1945,15 +1667,17 @@
                           {:error e}))))]
        (cond
          (:success result) (:success result)
-         (:retry result) (do
+         (:retry result) (let [err (:error result)
+                               sleep-ms (long (failure/next-delay-ms err delay-ms max-delay-ms))]
                            (trove/log! {:level :warn :id ::http-retry
                                         :data (log-data {:attempt attempt
                                                          :reason (:reason result)
-                                                         :delay-ms (long delay-ms)
+                                                         :delay-ms sleep-ms
                                                          :status (:status result)
-                                                         :error (ex-message (:error result))})
+                                                         :request-id (failure/request-id err)
+                                                         :error (ex-message err)})
                                         :msg "retrying transient HTTP failure"})
-                           (Thread/sleep (long delay-ms))
+                           (Thread/sleep sleep-ms)
                            (recur (inc attempt)
                              (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
          :else (throw (:error result)))))))
@@ -6097,12 +5821,58 @@
       (some #{"tool_use"} (:capabilities m)) (assoc :tool-call? true)
       (some? (:state m))               (assoc :loaded? (= "loaded" (:state m))))))
 
+(def ^:private GATEWAY_CAPABILITY_KEYS
+  "LiteLLM `model_info` capability flags -> svar model keys.
+
+   An OpenAI-compatible gateway (LiteLLM in particular) already publishes
+   everything svar needs to drive a model it has never seen: context window,
+   output cap, tool support, vision, reasoning. Reading it means a user config
+   needs nothing but base-url + api-key + model name."
+  {:supports_function_calling          :tool-call?
+   :supports_tool_choice               :tool-choice?
+   :supports_parallel_function_calling :parallel-tool-calls?
+   :supports_vision                    :vision?
+   :supports_reasoning                 :reasoning?
+   :supports_response_schema           :structured-output?
+   :supports_prompt_caching            :prompt-caching?})
+
+(defn- enrich-gateway-model
+  "Map an OpenAI-compatible gateway's model entry onto svar model keys.
+
+   Reads LiteLLM's `model_info` block (or the same keys inline) for the window,
+   the output cap and the capability flags. Absent fields stay ABSENT: svar
+   never invents a capability, and an explicit key already on the model (e.g.
+   set by `enrich-lmstudio-model`) always wins."
+  [m]
+  (if-not (map? m)
+    m
+    (let [info (merge m (when (map? (:model_info m)) (:model_info m)))
+          ctx  (or (:max_input_tokens info) (:context_window info))
+          out  (or (:max_output_tokens info) (:max_tokens info))
+          caps (reduce-kv (fn [acc wire-k svar-k]
+                            (if (contains? info wire-k)
+                              (assoc acc svar-k (boolean (get info wire-k)))
+                              acc))
+                 {} GATEWAY_CAPABILITY_KEYS)]
+      (merge caps
+        (cond-> m
+          (and (not (:context m)) (number? ctx))
+          (assoc :context (long ctx))
+
+          (and (not (:max-output-tokens m)) (number? out))
+          (assoc :max-output-tokens (long out))
+
+          (string? (:litellm_provider info))
+          (assoc :upstream-provider (:litellm_provider info)))))))
+
 (defn- shape-models
-  "Apply provider-specific model normalization keyed by `:models-shape`."
+  "Apply provider-specific model normalization keyed by `:models-shape`, then the
+   provider-agnostic gateway enrichment."
   [models-shape models]
-  (case models-shape
-    :lmstudio (mapv enrich-lmstudio-model models)
-    models))
+  (mapv enrich-gateway-model
+    (case models-shape
+      :lmstudio (mapv enrich-lmstudio-model models)
+      models)))
 
 (defn- normalize-models-response
   "Normalize a `/models` response body to a vector of model maps with
@@ -6129,6 +5899,23 @@
                 (and (not (:id m)) (:slug m)) (assoc :id (:slug m))))))
 
     :else []))
+
+(def ^:private MODELS_CACHE_TTL_MS
+  "How long a successful `/models` catalog is reused before re-fetching. The
+   catalog changes on the scale of deploys, not requests, so caching it keeps a
+   busy shared gateway from being polled on every query."
+  60000)
+
+(def ^:private models-cache
+  "`{cache-key {:at epoch-ms :models [...]}}` - the last SUCCESSFUL catalog per
+   endpoint. A stale entry is still served when a fetch fails, so a transient
+   gateway outage degrades to 'slightly old model list' instead of '[]'."
+  (atom {}))
+
+(defn clear-models-cache!
+  "Drops every cached `/models` catalog. For tests and after a config reload."
+  []
+  (reset! models-cache {}))
 
 (defn models!
   "Fetches available models from the LLM API. Provider-scoped model exclusions
@@ -6187,10 +5974,39 @@
                                         :llm-headers llm-headers}
                                  (seq models-query-params)
                                  (assoc :query-params models-query-params))
-         body                  (try
-                                 (http-get! models-url api-key http-opts)
-                                 (catch clojure.lang.ExceptionInfo ex
-                                   (when strict? (throw ex))
-                                   nil))
-         models                (shape-models models-shape (normalize-models-response body))]
+         ;; The api-key is part of the identity: a LiteLLM virtual key sees
+         ;; only the models its team is entitled to, so two keys against the
+         ;; SAME url legitimately return different catalogs. Hashed, never
+         ;; stored raw.
+         cache-key             [models-url provider-id api-style
+                                (some-> api-key hash)]
+         cached                (get @models-cache cache-key)
+         fresh?                (and (some? cached)
+                                 (< (- (System/currentTimeMillis) (long (:at cached)))
+                                   (long MODELS_CACHE_TTL_MS)))
+         body                  (when-not fresh?
+                                 (try
+                                   ;; Retried: a shared gateway's 502/timeout must not be
+                                   ;; reported to the caller as \"this endpoint has no models\".
+                                   (with-retry #(http-get! models-url api-key http-opts)
+                                     {:max-retries 3 :initial-delay-ms 500 :max-delay-ms 5000})
+                                   (catch clojure.lang.ExceptionInfo ex
+                                     (when strict? (throw ex))
+                                     (trove/log! {:level :warn :id ::models-fetch-failed
+                                                  :data (log-data {:url    models-url
+                                                                   :status (:status (ex-data ex))
+                                                                   :stale? (some? cached)
+                                                                   :error  (ex-message ex)})
+                                                  :msg  "models fetch failed; serving cached catalog"})
+                                     nil)))
+         models                (if fresh?
+                                 (:models cached)
+                                 (let [fetched (shape-models models-shape
+                                                 (normalize-models-response body))]
+                                   (if (seq fetched)
+                                     (do (swap! models-cache assoc cache-key
+                                           {:at (System/currentTimeMillis) :models fetched})
+                                       fetched)
+                                     ;; Empty = the fetch failed or the gateway hiccuped.
+                                     (or (:models cached) fetched))))]
      (filter-provider-models provider-id models))))

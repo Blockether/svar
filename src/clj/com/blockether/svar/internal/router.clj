@@ -7,6 +7,7 @@
   (:require
    [clojure.string :as str]
    [com.blockether.anomaly.core :as anomaly]
+   [com.blockether.svar.internal.failure :as failure]
    [com.blockether.svar.internal.modelsdev :as modelsdev]
    [taoensso.trove :as trove])
   (:import
@@ -1232,7 +1233,7 @@
   {:window-ms              60000
    :cooldown-ms            60000
    :max-wait-ms            30000
-   :transient-status-codes #{429 500 502 503 504 524 529}
+   :transient-status-codes failure/TRANSIENT_STATUS_CODES
    :rate-limit DEFAULT_RATE_LIMIT_ROUTING
    ;; Circuit breaker defaults
    :failure-threshold   5
@@ -1604,115 +1605,20 @@
     (swap! (:state router) update-in [provider-id :tokens]
       (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
 
-(def ^:private NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS
-  "Lower-cased substrings that mark provider subscription/quota/billing
-   exhaustion — a hard account state, NOT a transient throttle. Even on HTTP
-   429 these must NOT retry (mirrors pi's NON_RETRYABLE_PROVIDER_LIMIT_ERROR
-   pattern in packages/ai/src/utils/retry.ts)."
-  ["gousagelimiterror" "freeusagelimiterror" "monthly usage limit reached"
-   "available balance" "insufficient_quota" "out of budget" "quota exceeded"
-   "billing"])
-
-(defn- provider-limit-error?
-  "True when error text/body names a subscription/quota/billing exhaustion
-   (account state) that must never be retried as a transient throttle."
-  [hay]
-  (boolean
-    (and hay
-      (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS))))
-
-(def ^:private RETRYABLE_TRANSIENT_MESSAGE_PATTERN
-  "Regex over an error's already-lower-cased message+body marking a transient
-   provider/transport failure that carries NO mappable HTTP status in ex-data —
-   e.g. a gateway proxying an upstream failure as wrapper text (OpenRouter's
-   \"Provider returned error\"), a gRPC ResourceExhausted, or explicit mid-stream
-   retry guidance from OpenAI Responses / Bedrock. Mirrors the high-signal subset
-   of pi's RETRYABLE_PROVIDER_ERROR_PATTERN (packages/ai/src/utils/retry.ts).
-   Deliberately OMITS pi's bare numeric HTTP codes (already handled by
-   :transient-status-codes, and a bare \"503\" in prose is a false-positive risk)
-   and \"connection refused\" (svar treats ECONNREFUSED as a wrong/down endpoint,
-   not a blip). The quota/billing guard (provider-limit-error?) runs first, so a
-   429 that is really account exhaustion never reaches this."
-  (re-pattern
-    (str/join "|"
-      ["overloaded" "rate.?limit" "too many requests"
-       "service.?unavailable" "server.?error" "internal.?error"
-       "provider.?returned.?error" "network.?error" "upstream.?connect"
-       "fetch failed" "resource.?exhausted"
-       "you can retry your request" "try your request again"
-       "please retry your request"])))
-
-(defn- transient-message-error?
-  "True when a statusless / wrapper / gRPC transient shows up only in the error
-   TEXT (RETRYABLE_TRANSIENT_MESSAGE_PATTERN). `status` gates out definitive
-   client errors (4xx except 429) so a 400/404 whose body happens to contain
-   transient wording is never retried."
-  [hay status]
-  (boolean
-    (and hay
-      (not (and status (<= 400 (long status) 499) (not= 429 status)))
-      (re-find RETRYABLE_TRANSIENT_MESSAGE_PATTERN hay))))
-
 (def ^:private STREAM_WATCHDOG_ERROR_TYPES
-  "Typed stream aborts safe to retry only before visible output. The low-level
-   HTTP retry layer excludes these to avoid silently waiting one timeout per
-   same-provider retry; the router instead performs observable provider fallback."
-  #{:svar.core/stream-ttft-timeout
-    :svar.core/stream-idle-timeout
-    :svar.core/stream-semantic-timeout})
+  "See `failure/STREAM_WATCHDOG_ERROR_TYPES`."
+  failure/STREAM_WATCHDOG_ERROR_TYPES)
 
 (defn- stream-watchdog-error?
   [e]
   (contains? STREAM_WATCHDOG_ERROR_TYPES (:type (ex-data e))))
 
-(defn- router-transient-error? [router e]
-  (let [data (ex-data e)
-        status (:status data)
-        etype (:type data)
-        codes (:transient-status-codes router)
-        msg (ex-message e)
-        msg-lower (str/lower-case (or msg ""))
-        hay (str msg-lower " " (str/lower-case (or (:body data) "")))
-        stream-output-started? (or (pos? (long (or (:content-acc-len data) 0)))
-                                 (pos? (long (or (:reasoning-acc-len data) 0)))
-                                 (some? (:partial-content data))
-                                 (some? (:reasoning data)))]
-    (boolean
-      (and
-        ;; Provider subscription/quota/billing exhaustion is a hard account
-        ;; state, never a transient throttle — do NOT retry (mirrors pi).
-        (not (provider-limit-error? hay))
-        (or (and (stream-watchdog-error? e) (not stream-output-started?))
-          (and status (contains? codes status))
-          (and (= etype :svar.core/http-error)
-            (or (some-> msg (str/includes? "timed out"))
-              (and (:stream? data)
-                (not stream-output-started?)
-                (or (str/includes? msg-lower "stream connection error")
-                  (str/includes? msg-lower "connection reset")
-                  (str/includes? msg-lower "connection closed")
-                  (str/includes? msg-lower "closed")))))
-          ;; SSE EOF before the provider terminal marker (`stream-truncated`) OR
-          ;; an explicit `response.incomplete` (`stream-incomplete`, e.g. Copilot's
-          ;; intermittent reason-null incomplete) — both before any visible content
-          ;; — are transport/provider failures, not a model answer. RETRY them
-          ;; (consistent with the OpenAI Codex CLI, which raises + retries on
-          ;; incomplete; early-close/incomplete usually succeeds on retry). If
-          ;; content already started, throw instead: svar can't rewind streamed
-          ;; chunks, so replaying would duplicate output (the caller's rewind-retry
-          ;; layer owns that case).
-          (and (contains? #{:svar.core/stream-truncated :svar.core/stream-incomplete} etype)
-            (not stream-output-started?))
-          ;; Statusless / wrapper / gRPC transient that shows up only in the
-          ;; error text (e.g. gateway "Provider returned error", ResourceExhausted,
-          ;; explicit "you can retry your request") — pi retries these; svar's
-          ;; status/stream-marker classification used to miss them (mirrors pi).
-          (transient-message-error? hay status)
-          (instance? java.net.ConnectException e)
-          (instance? java.net.SocketTimeoutException e)
-          (some-> (.getCause ^Throwable e)
-            ((fn [c] (or (instance? java.net.ConnectException c)
-                       (instance? java.net.SocketTimeoutException c))))))))))
+(defn- router-transient-error?
+  "Router-level soft/hard verdict. All the evidence rules live in
+   `failure/transient-error?`; the router only supplies its configured
+   `:transient-status-codes`."
+  [router e]
+  (failure/transient-error? e {:transient-status-codes (:transient-status-codes router)}))
 
 (def ^:private DEFAULT_FORMAT_ERROR_TYPES
   "Exception `:type`s that signal a structured-output schema/format failure
@@ -1799,17 +1705,9 @@
       (some? (:partial-content data))
       (some? (:reasoning data)))))
 
-(defn- retry-after-header-ms
-  [e]
-  (let [headers (:headers (ex-data e))
-        retry-after (or (get headers "retry-after")
-                      (get headers "Retry-After")
-                      (get headers :retry-after)
-                      (get headers :Retry-After))]
-    (when retry-after
-      (try
-        (* 1000 (Long/parseLong (str/trim (str retry-after))))
-        (catch Exception _ nil)))))
+(def ^:private retry-after-header-ms
+  "See `failure/retry-after-ms`."
+  failure/retry-after-ms)
 
 (defn- rate-limit-delay-ms
   "Raw delay candidate for the next same-provider retry, in ms.
