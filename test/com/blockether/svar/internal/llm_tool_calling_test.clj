@@ -18,6 +18,7 @@
 (def ^:private openai-responses-state @#'sut/openai-responses-state)
 (def ^:private merge-provider-state @#'sut/merge-provider-state)
 (def ^:private enrich-tool-schema-rejection @#'sut/enrich-tool-schema-rejection)
+(def ^:private sanitize-tools-for-gateway @#'sut/sanitize-tools-for-gateway)
 (def ^:private fn-item->tool-call @#'sut/function-call-item->tool-call)
 (def ^:private extract-stream-delta @#'sut/extract-stream-delta)
 (def ^:private make-anthropic-stream-delta-fn @#'sut/make-anthropic-stream-delta-fn)
@@ -176,6 +177,37 @@
   (it "leaves an out-of-range provider index untouched"
     (let [cause (ex-info "bad tools.9.function.parameters" {:status 400})]
       (expect (identical? cause (enrich-tool-schema-rejection cause [{:name "patch"}]))))))
+
+(defdescribe gateway-tool-field-sanitizing-test
+  (it "strips a gateway-forwardable field from the tool def and its schema"
+    (let [tools     [{:name "grep"
+                      :strict true
+                      :schema {:type "object"
+                               :additionalProperties false
+                               :properties {:query {:type "string"}
+                                            :opts {:type "object"
+                                                   :additionalProperties false
+                                                   :properties {:n {:type "integer"}}}}}}]
+          sanitized (sanitize-tools-for-gateway tools)
+          tool      (first sanitized)]
+      (expect (nil? (:strict tool)))
+      (expect (nil? (get-in tool [:schema :additionalProperties])))
+      ;; nested objects lose it too — the gateway hoists the ROOT, but a nested
+      ;; one survives a schema rewrite and is equally advisory-only.
+      (expect (nil? (get-in tool [:schema :properties :opts :additionalProperties])))
+      ;; everything else is untouched
+      (expect (= "grep" (:name tool)))
+      (expect (= {:type "string"} (get-in tool [:schema :properties :query])))
+      (expect (= "object" (get-in tool [:schema :properties :opts :type])))))
+  (it "keeps string-keyed schemas working"
+    (let [tool (first (sanitize-tools-for-gateway
+                        [{:name "cat" :schema {"type" "object" "additionalProperties" false}}]))]
+      (expect (= {"type" "object"} (:schema tool)))))
+  (it "returns nil when there is nothing a gateway could forward"
+    (expect (nil? (sanitize-tools-for-gateway
+                    [{:name "grep" :schema {:type "object" :properties {}}}])))
+    (expect (nil? (sanitize-tools-for-gateway [])))
+    (expect (nil? (sanitize-tools-for-gateway nil)))))
 
 (defdescribe anthropic-tool-call-extraction-test
   (it "extracts tool_use blocks as canonical :tool-calls and keeps them on assistant-message"

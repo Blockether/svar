@@ -1059,6 +1059,56 @@
           e))
       e)))
 
+(def ^:private gateway-injected-tool-fields
+  "Tool fields a GATEWAY can graft onto the wire tool and the upstream model
+   then rejects (`tools.0.custom.strict: Extra inputs are not permitted`).
+
+   LiteLLM's Bedrock Converse path builds `toolSpec` from the request tool:
+   it copies `function.strict` and hoists the schema ROOT `additionalProperties`
+   into `inputSchema.json`, then Bedrock validates that toolSpec against the
+   native Anthropic tool shape, which has neither key. Both are advisory-only
+   for tool calling, so dropping them is always safe and lets svar heal itself
+   instead of failing the turn. Lower-cased to match `:tool-schema-field`."
+  #{"strict" "additionalproperties"})
+
+(defn- strip-schema-fields
+  "Recursively remove `fields` (lower-cased key names) from a JSON-Schema value."
+  [x fields]
+  (cond
+    (map? x)        (reduce-kv (fn [m k v]
+                                 (if (contains? fields
+                                       (str/lower-case (if (keyword? k) (name k) (str k))))
+                                   m
+                                   (assoc m k (strip-schema-fields v fields))))
+                      (empty x)
+                      x)
+    (sequential? x) (mapv #(strip-schema-fields % fields) x)
+    :else           x))
+
+(defn- sanitize-tools-for-gateway
+  "Drop `gateway-injected-tool-fields` from every canonical tool def and its
+   `:schema`, so a gateway has nothing to forward upstream. Returns nil when
+   the tools carry none of those fields (nothing to heal by re-sending)."
+  [tools]
+  (when (seq tools)
+    (let [sanitized (mapv (fn [tool]
+                            (cond-> (strip-schema-fields (dissoc tool :schema)
+                                      gateway-injected-tool-fields)
+                              (:schema tool)
+                              (assoc :schema (strip-schema-fields (:schema tool)
+                                               gateway-injected-tool-fields))))
+                      tools)]
+      (when (not= (vec tools) sanitized)
+        sanitized))))
+
+(defonce ^:private gateway-tool-field-quirks
+  ;; Models seen rejecting a gateway-injected tool field. Sanitising is a pure
+  ;; subtraction, so remembering the model keeps later calls first-try clean.
+  (atom #{}))
+
+(defn- tool-quirk-key [opts]
+  (str (:model opts)))
+
 (defn- tool-choice->wire
   "Shape a canonical tool-choice for `api-style`.
    Canonical: :auto | :required | :none | {:name \"x\"} | \"x\" (force a tool)."
@@ -5814,20 +5864,57 @@
    attempts. A HEALED call surfaces the same two keys on the result map, and
    its `:cost` includes the usage billed for the discarded attempts. Pass
    `:on-empty-reply-resend` (fn of 1 arg) to observe each re-send live:
-   {:model :provider-id :attempt :max-resends :delay-ms :error}."
+   {:model :provider-id :attempt :max-resends :delay-ms :error}.
+
+   SELF-HEALING TOOL SCHEMAS: when the provider rejects a tool field a GATEWAY
+   grafted onto the request from our tools (`tools.0.custom.strict: Extra inputs
+   are not permitted` — LiteLLM's Bedrock Converse `toolSpec` forwards
+   `strict` and hoists a schema-root `additionalProperties`), the call is
+   re-sent ONCE with those fields stripped from every tool, and the model is
+   remembered so later calls send the sanitized shape first. When our tools
+   never carried the field, the gateway invented it: the error propagates with
+   `:tool-schema-field-source :gateway` next to `:tool-name`/`:tool-schema-field`."
   [router opts]
   ;; Bind the caller's cancellation hook for the whole routed call so every
   ;; provider-fallback attempt (and its backoff sleeps) honours it. See
   ;; `*cancel-fn*`. `or` preserves an outer binding when opts omits it.
   (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
-    (try
-      (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
-        (router/with-provider-fallback
-          router (:prefs resolved)
-          (fn [provider model-map]
-            (ask-code!* router (inject-routed-params opts provider model-map)))))
-      (catch Exception e
-        (throw (enrich-tool-schema-rejection e (:tools opts)))))))
+    (let [run   (fn [opts]
+                  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+                    (router/with-provider-fallback
+                      router (:prefs resolved)
+                      (fn [provider model-map]
+                        (ask-code!* router (inject-routed-params opts provider model-map))))))
+          quirk (tool-quirk-key opts)
+          ;; A model already caught rejecting a gateway-grafted tool field gets
+          ;; sanitized tools on the FIRST try, so the round trip is never wasted twice.
+          opts  (if-let [tools (and (contains? @gateway-tool-field-quirks quirk)
+                                 (sanitize-tools-for-gateway (:tools opts)))]
+                  (assoc opts :tools tools)
+                  opts)]
+      (try
+        (run opts)
+        (catch Exception e
+          (let [enriched (enrich-tool-schema-rejection e (:tools opts))
+                field    (:tool-schema-field (ex-data enriched))
+                healable (contains? gateway-injected-tool-fields field)
+                tools    (when healable (sanitize-tools-for-gateway (:tools opts)))]
+            (cond
+              ;; The upstream model rejects a field the gateway forwarded FROM our
+              ;; tools — drop it and re-send once instead of failing the turn.
+              tools    (do (trove/log! {:level :warn :id ::gateway-tool-field-sanitized
+                                        :data {:model (:model opts)
+                                               :tool-name (:tool-name (ex-data enriched))
+                                               :tool-schema-field field}
+                                        :msg "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
+                         (swap! gateway-tool-field-quirks conj quirk)
+                         (run (assoc opts :tools tools)))
+              ;; Same field, but our tools never carried it: the gateway invented
+              ;; it, so only a gateway/model change can fix this. Say so.
+              healable (throw (ex-info (ex-message enriched)
+                                (assoc (ex-data enriched) :tool-schema-field-source :gateway)
+                                enriched))
+              :else    (throw enriched))))))))
 
 ;; =============================================================================
 ;; models! - Fetch available models
