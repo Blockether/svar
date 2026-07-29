@@ -166,6 +166,13 @@
       (expect (= "patch" (:tool-name (ex-data enriched))))
       (expect (= "input_schema" (:tool-schema-field (ex-data enriched))))
       (expect (= "tools.1.custom.input_schema" (:tool-schema-path (ex-data enriched))))))
+  (it "resolves a gateway-injected `strict` field the same way"
+    (let [body (str "{\"error\":{\"message\":\"BedrockException - tools.0.custom.strict: "
+                 "Extra inputs are not permitted\"}}")
+          cause (ex-info "Provider unavailable" {:status 400 :body body})
+          enriched (enrich-tool-schema-rejection cause [{:name "grep"} {:name "patch"}])]
+      (expect (= "grep" (:tool-name (ex-data enriched))))
+      (expect (= "strict" (:tool-schema-field (ex-data enriched))))))
   (it "leaves an out-of-range provider index untouched"
     (let [cause (ex-info "bad tools.9.function.parameters" {:status 400})]
       (expect (identical? cause (enrich-tool-schema-rejection cause [{:name "patch"}]))))))

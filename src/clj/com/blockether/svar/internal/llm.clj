@@ -1038,7 +1038,7 @@
   (mapv #(tool-def->wire api-style %) tools))
 
 (def ^:private tool-schema-path-pattern
-  #"(?i)(tools\.(\d+)(?:\.(?:custom|function))?\.(input_schema|parameters))")
+  #"(?i)(tools\.(\d+)(?:\.(?:custom|function))?\.(input_schema|parameters|strict|additionalProperties))")
 
 (defn- enrich-tool-schema-rejection
   "Attach the canonical tool name to a provider schema error that only names
