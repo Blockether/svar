@@ -70,10 +70,20 @@
   ["gousagelimiterror" "freeusagelimiterror" "monthly usage limit reached"
    "available balance" "insufficient_quota" "out of budget" "quota exceeded"
    "billing"
-   ;; Anthropic / OpenAI / LiteLLM budget walls: same class, different words.
-   "credit balance is too low" "insufficient credits" "insufficient_credits"
-   "exceeded your current quota" "usage limit reached" "budget has been exceeded"
-   "exceeded budget" "payment required"])
+   ;; Anthropic / OpenAI / LiteLLM / OpenRouter budget walls: same class,
+   ;; different words. Every phrasing below is an account state, never a
+   ;; throttle — retrying it burns attempts and still fails.
+   "credit balance is too low" "balance is too low" "balance too low"
+   "insufficient credits" "insufficient_credits" "insufficient balance"
+   "insufficient_balance" "insufficient funds" "not enough credits"
+   "no credits" "add credits" "credit limit"
+   "exceeded your current quota" "usage limit reached" "over quota"
+   "quota_exhausted" "quota_exceeded"
+   "budget has been exceeded" "budget exceeded" "exceeded budget"
+   "exceeded your budget" "budget limit" "exceededbudget" "crossed spend"
+   "spend limit" "spending limit" "max budget"
+   "plan limit reached" "subscription expired" "account_deactivated"
+   "payment required" "payment_required"])
 
 (defn provider-limit-error?
   "True when error text/body names a subscription/quota/billing exhaustion
@@ -82,6 +92,19 @@
   (boolean
     (and hay
       (some #(str/includes? hay %) NON_RETRYABLE_PROVIDER_LIMIT_PATTERNS))))
+
+(def PROVIDER_LIMIT_STATUS_CODES
+  "HTTP statuses that ARE an account/billing wall on their own, whatever the
+   body says. 402 Payment Required is the whole point of the code."
+  #{402})
+
+(defn provider-limit-failure?
+  "The single hard-account-state question: does this status or body mean the
+   account is out of quota/credit/budget? Never retryable, never re-routable."
+  [status hay]
+  (boolean
+    (or (contains? PROVIDER_LIMIT_STATUS_CODES (some-> status long))
+      (provider-limit-error? hay))))
 
 ;; =============================================================================
 ;; Transient wording
@@ -371,7 +394,7 @@
         base {:status status
               :request-id (request-id e)
               :error-type etype}
-        limit? (provider-limit-error? hay)
+        limit? (provider-limit-failure? status hay)
         answer (fn [category retryable? reached? summary next-step]
                  (assoc base
                    :category category
@@ -690,6 +713,9 @@
         cause-lower (str/lower-case (or cause-msg ""))]
     (and
       (not (contains? DELIBERATE_STREAM_ABORT_TYPES (:type data)))
+      ;; A quota/credit/budget wall is a hard account state: never a soft
+      ;; transport drop, however the body is worded.
+      (not (provider-limit-failure? (:status data) (haystack e)))
       (boolean
         (or
           ;; charred.api/read-json fails on a truncated response body
@@ -747,7 +773,7 @@
        (and
          ;; Subscription/quota/billing exhaustion is a hard account state,
          ;; never a transient throttle.
-         (not (provider-limit-error? hay))
+         (not (provider-limit-failure? status hay))
          (or (and (contains? STREAM_WATCHDOG_ERROR_TYPES etype) (not started?))
            (and status (contains? codes status))
            (and (= etype :svar.core/http-error)

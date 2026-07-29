@@ -307,3 +307,36 @@
     (it "the router's watchdog set IS failure/STREAM_WATCHDOG_ERROR_TYPES"
       (expect (identical? sut/STREAM_WATCHDOG_ERROR_TYPES
                 @(requiring-resolve 'com.blockether.svar.internal.router/STREAM_WATCHDOG_ERROR_TYPES))))))
+
+(defdescribe budget-wall-is-hard-test
+  (describe "every phrasing of a quota/credit/budget wall"
+    (it "is a hard :quota-exhausted failure even on a 429"
+      (doseq [msg ["Your budget has been exceeded"
+                   "ExceededBudget: Crossed spend within budget"
+                   "Budget exceeded for key sk-***"
+                   "Max budget reached for this key"
+                   "Monthly spend limit reached"
+                   "Your credit balance is too low to run this request"
+                   "Insufficient credits — add credits to continue"
+                   "You exceeded your current quota, please check your plan"
+                   "Payment Required"]]
+        (let [e (ex-info msg {:type :svar.core/http-error :status 429})
+              c (sut/classify e)]
+          (expect (= :quota-exhausted (:category c)) msg)
+          (expect (false? (:retryable? c)) msg)
+          (expect (false? (sut/transient-error? e)) msg)
+          (expect (false? (sut/transport-retryable? e)) msg))))
+
+    (it "treats a bare HTTP 402 as the same account wall"
+      (let [e (ex-info "Exceptional status code: 402"
+                {:type :svar.core/http-error :status 402})
+            c (sut/classify e)]
+        (expect (= :quota-exhausted (:category c)))
+        (expect (false? (:retryable? c)))
+        (expect (false? (sut/transient-error? e)))
+        (expect (false? (sut/transport-retryable? e)))))
+
+    (it "does not swallow genuinely soft overload"
+      (let [e (ex-info "Overloaded" {:type :svar.core/http-error :status 529})]
+        (expect (true? (:retryable? (sut/classify e))))
+        (expect (true? (sut/transient-error? e)))))))

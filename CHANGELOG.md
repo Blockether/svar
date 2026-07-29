@@ -7,12 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Quota/credit/budget walls are always a HARD failure. `internal.failure` now
+  recognises every common phrasing ("budget has been exceeded", "budget
+  exceeded", "ExceededBudget/crossed spend", "max budget", "spend limit",
+  "insufficient credits/balance/funds", "add credits", "over quota",
+  "plan limit reached", "payment required") plus a bare HTTP **402** via the new
+  `PROVIDER_LIMIT_STATUS_CODES` / `provider-limit-failure?`. Such a failure
+  classifies as `:quota-exhausted` and is non-retryable for `classify`,
+  `transient-error?` (router re-route) and `transport-retryable?` (HTTP layer)
+  alike, even when the provider dresses it up as a 429.
+
 ## [v0.7.85] - 2026-07-29
 
 ### Changed
 - feat(failure): consolidate all transport/provider failure handling into internal.failure
 - release: update version files for v0.7.84, bump to next dev version
-
 
 ## [v0.7.84] - 2026-07-27
 
