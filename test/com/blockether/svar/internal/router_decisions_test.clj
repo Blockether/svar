@@ -918,7 +918,7 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -943,13 +943,13 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                               :p2 (success-result 10))))
+                           :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)
@@ -1677,6 +1677,24 @@
       (expect (= :p2 (:routed/provider-id result)))
       (expect (:routed/fallback? result))
       (expect (= (:routed/trace result) @live))
+      (expect (= [:authentication] (mapv :reason (:routed/trace result))))))
+
+  (it "falls across providers for an expired token mislabelled as HTTP 429"
+    (let [r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+          calls (atom [])
+          result (router/with-provider-fallback
+                   r
+                   {:on-auth-error :fallback-provider}
+                   (fn [provider model]
+                     (swap! calls conj [(:id provider) (:name model)])
+                     (if (= :p1 (:id provider))
+                       (throw (ex-info "Token expired"
+                                {:type :svar.core/http-error :status 429}))
+                       (success-result 100))))]
+      (expect (= [[:p1 "m1"] [:p2 "m2"]] @calls))
+      (expect (= :p2 (:routed/provider-id result)))
       (expect (= [:authentication] (mapv :reason (:routed/trace result))))))
 
   (it "breaks an explicit provider/model pin only after the pinned provider rejects auth"

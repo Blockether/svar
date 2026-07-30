@@ -213,7 +213,9 @@
    "unknown model" "invalid model" "not a valid model"
    "model does not exist" "does not exist or you do not have access"
    "not a valid model id" "invalid model name passed in"
-   "llm provider not provided" "you passed in model="])
+   "llm provider not provided" "you passed in model="
+   ;; Anthropic uses backticks in its ordinary unavailable-model response.
+   "the model `"])
 
 (def ^:private RESOURCE_MISMATCH_PATTERNS
   "The conversation/item is pinned to a specific backend deployment: Azure
@@ -849,3 +851,58 @@
            (some-> (ex-cause e)
              ((fn [c] (or (instance? java.net.ConnectException c)
                         (instance? java.net.SocketTimeoutException c)))))))))))
+
+(defn- anthropic-third-party-400?
+  "The one known server-side 400 that is safe to retry. Anthropic intermittently
+   gates otherwise-valid Claude subscription OAuth calls with this message; the
+   identical request succeeds seconds later. Keep this exception here—not in
+   `llm`—so all retry policy has one owner."
+  [^Throwable e]
+  (let [{:keys [status body]} (ex-data e)
+        body (some-> body str str/lower-case)]
+    (and (= 400 status)
+      body
+      (some #(str/includes? body %)
+        ["third-party apps now draw from your extra usage"
+         "draw from your extra usage"
+         "draw from extra usage"]))))
+
+(defn low-level-retry-decision
+  "Canonical same-provider HTTP retry policy for `llm/with-retry`.
+
+   The returned map contains `:retry?`, a stable `:reason`, and the canonical
+   `:classification`. Router policy (provider selection and whether it owns a
+   429 cooldown) is supplied as options; it never changes failure evidence.
+   Deliberate stream watchdog aborts remain router-owned and are not retried
+   here, even before output."
+  ([e] (low-level-retry-decision e nil))
+  ([^Throwable e {:keys [router-handles-rate-limit?]}]
+   (let [classification (classify e)
+         {:keys [category status retryable?]} classification
+         started? (stream-output-started? e)
+         ;; A known hard canonical category vetoes every generic retry path. The
+         ;; Anthropic exception below is deliberate and narrowly identified.
+         hard-category? (contains? #{:auth :quota-exhausted :resource-mismatch
+                                     :tool-schema-unsupported :context-length-exceeded
+                                     :model-unavailable :invalid-request}
+                          category)
+         transport? (and (not hard-category?) (not started?) (transport-retryable? e))
+         third-party? (and (not started?) (anthropic-third-party-400? e))
+         ;; Low-level retry may retry response failures and genuine transport
+         ;; drops, but never after visible output, router-owned watchdogs, or a
+         ;; router-owned 429.
+         response-retry? (and (not started?)
+                           retryable?
+                           (contains? #{:rate-limited :upstream-timeout
+                                        :gateway-unavailable} category)
+                           (not (and router-handles-rate-limit?
+                                  (= :rate-limited category))))
+         retry? (boolean (or transport? third-party? response-retry?))]
+     {:retry? retry?
+      :reason (when retry?
+                (cond
+                  transport? :connection-error
+                  third-party? :anthropic-third-party-400
+                  (and (= :gateway-unavailable category) (nil? status)) :transient-message
+                  :else :http-status))
+      :classification classification})))

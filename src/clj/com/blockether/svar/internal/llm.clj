@@ -72,18 +72,6 @@
 ;; HTTP Utilities
 ;; =============================================================================
 
-(def ^:private provider-limit-error?
-  "See `failure/provider-limit-error?`."
-  failure/provider-limit-error?)
-
-(def ^:private auth-error?
-  "See `failure/auth-error?`."
-  failure/auth-error?)
-
-(def ^:private transient-message-error?
-  "See `failure/transient-message-error?`."
-  failure/transient-message-error?)
-
 (def ^:private connection-error?
   "See `failure/connection-error?`."
   failure/connection-error?)
@@ -92,18 +80,9 @@
   "See `failure/connection-error->ex-info`."
   failure/connection-error->ex-info)
 
-(def ^:private stream-output-started?
-  "See `failure/stream-output-started?`."
-  failure/stream-output-started?)
-
 (def ^:private mark-connection-healthy!
   "See `failure/mark-connection-healthy!`."
   failure/mark-connection-healthy!)
-
-(def ^:private retryable-exception?
-  "See `failure/transport-retryable?` — the single transport-level retry
-   verdict, shared with the router."
-  failure/transport-retryable?)
 
 (def ^:private shared-http-executor
   "Cached thread pool that backs the shared HttpClient.
@@ -1640,46 +1619,16 @@
    (`(< attempt cap)`), so 4 ⇒ up to 3 retries (~7s of 1s/2s/4s backoff)."
   4)
 
-(defn- anthropic-third-party-400?
-  "True for Anthropic's intermittent 'third-party app routing' 400 — an
-   `invalid_request_error` whose message says third-party apps now draw from
-   extra usage, returned for a Claude subscription OAuth token (`sk-ant-oat-*`)
-   even when the request is first-party-correct (correct `anthropic-beta`,
-   `x-app`, `user-agent`, and Claude Code system identity). Empirically this is
-   a transient SERVER-side gate, not a request defect: the identical request
-   that 400s returns HTTP 200 seconds later (verified by replay against
-   api.anthropic.com), and a burst has been observed persisting ~10s. So we
-   retry the chosen Claude model to ride the gate out instead of immediately
-   abandoning it to a provider fallback. Matched on stable lower-cased
-   substrings of the raw `:body` so it survives minor wording changes."
-  [ex-data-map]
-  (and (= 400 (:status ex-data-map))
-    (let [body (some-> (:body ex-data-map) str/lower-case)]
-      (and body
-        (some #(str/includes? body %)
-          ["third-party apps now draw from your extra usage"
-           "draw from your extra usage"
-           "draw from extra usage"])))))
+(def ^:private retry-decision
+  "See `failure/low-level-retry-decision`: the canonical low-level HTTP retry policy."
+  failure/low-level-retry-decision)
 
 (defn- with-retry
-  "Executes a function with exponential backoff retry for transient errors.
+  "Executes a function with exponential backoff retry for canonical transient failures.
 
-   Retries on HTTP status codes 429, 500, 502, 503, 504, 524, 529, and on the transient
-   Anthropic 'third-party app routing' 400 (see `anthropic-third-party-400?`,
-
-   Params:
-   `f` - Function to execute (no args).
-   `opts` - Map, optional:
-     - :max-retries - Integer. Max retry attempts (default: 5).
-     - :initial-delay-ms - Integer. Initial backoff (default: 1000ms).
-     - :max-delay-ms - Integer. Max backoff cap (default: 60000ms).
-     - :multiplier - Number. Backoff multiplier (default: 2.0).
-
-   Returns:
-   Result of f.
-
-   Throws:
-   ExceptionInfo if all retries exhausted."
+   Provider/gateway evidence and the retry verdict live in
+   `failure/low-level-retry-decision`; this function only runs the attempt,
+   sleeps, and logs the supplied decision."
   ([f] (with-retry f {}))
   ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier router-handles-rate-limit?]
        :or {max-retries 5
@@ -1691,35 +1640,14 @@
      (let [result (try
                     {:success (f)}
                     (catch Exception e
-                      (let [ex-data-map (ex-data e)
-                            status (:status ex-data-map)
-                            hay (str (str/lower-case (or (:body ex-data-map) ""))
-                                  " " (str/lower-case (or (ex-message e) "")))
-                            limit-error? (provider-limit-error? hay)
-                            auth-error? (auth-error? hay)
-                            retryable-message? (and (not limit-error?)
-                                                 (not (stream-output-started? e))
-                                                 (transient-message-error? hay status))
-                            retryable-status? (and (contains? failure/TRANSIENT_STATUS_CODES status)
-                                                (not limit-error?)
-                                                (not (stream-output-started? e))
-                                                (not (and router-handles-rate-limit?
-                                                       (= 429 status))))
-                            retryable-conn? (and (not (stream-output-started? e))
-                                              (retryable-exception? e))
-                            retryable-third-party-400? (anthropic-third-party-400? ex-data-map)
-                            attempt-cap (if retryable-third-party-400?
+                      (let [{:keys [retry? reason classification]}
+                            (retry-decision e {:router-handles-rate-limit? router-handles-rate-limit?})
+                            attempt-cap (if (= :anthropic-third-party-400 reason)
                                           (long anthropic-third-party-400-max-retries)
-                                          (long max-retries))
-                            can-retry? (< attempt attempt-cap)]
-                        (if (and (not auth-error?)
-                              (or retryable-status? retryable-conn? retryable-third-party-400? retryable-message?)
-                              can-retry?)
-                          {:retry true :error e :status status
-                           :reason (cond retryable-conn?            :connection-error
-                                     retryable-third-party-400? :anthropic-third-party-400
-                                     retryable-message?         :transient-message
-                                     :else                      :http-status)}
+                                          (long max-retries))]
+                        (if (and retry? (< attempt attempt-cap))
+                          {:retry true :error e :reason reason
+                           :status (:status classification)}
                           {:error e}))))]
        (cond
          (:success result) (:success result)

@@ -79,7 +79,13 @@
               c (sut/classify e)]
           (expect (= :auth (:category c)) msg)
           (expect (false? (:retryable? c)) msg)
-          (expect (false? (sut/transient-error? e)) msg))))))
+          (expect (false? (sut/transient-error? e)) msg))))
+
+    (it "lets hard auth veto a transport-looking retry message"
+      (let [e (err "Token expired; stream connection closed"
+                {:type :svar.core/http-error :status 429 :stream? true})]
+        (expect (sut/transport-retryable? e))
+        (expect (false? (:retry? (sut/low-level-retry-decision e))))))))
 
 (defdescribe reached-model-test
   (describe ":reached-model? answers 'can I safely send this again'"
@@ -302,21 +308,22 @@
 
 (defdescribe single-source-of-truth-test
   (describe "no layer keeps its own copy of the heuristics"
-    (it "llm's transport verdict IS failure/transport-retryable?"
-      (expect (identical? sut/transport-retryable?
-                @(requiring-resolve 'com.blockether.svar.internal.llm/retryable-exception?))))
 
     (it "llm's connect-phase check IS failure/connection-error?"
       (expect (identical? sut/connection-error?
                 @(requiring-resolve 'com.blockether.svar.internal.llm/connection-error?))))
 
-    (it "llm's stream-output gate IS failure/stream-output-started?"
-      (expect (identical? sut/stream-output-started?
-                @(requiring-resolve 'com.blockether.svar.internal.llm/stream-output-started?))))
-
     (it "the router's watchdog set IS failure/STREAM_WATCHDOG_ERROR_TYPES"
       (expect (identical? sut/STREAM_WATCHDOG_ERROR_TYPES
-                @(requiring-resolve 'com.blockether.svar.internal.router/STREAM_WATCHDOG_ERROR_TYPES))))))
+                @(requiring-resolve 'com.blockether.svar.internal.router/STREAM_WATCHDOG_ERROR_TYPES))))
+
+    (it "llm's HTTP retry policy IS failure/low-level-retry-decision"
+      (expect (identical? sut/low-level-retry-decision
+                @(requiring-resolve 'com.blockether.svar.internal.llm/retry-decision))))
+
+    (it "the router's auth/model policy IS failure/classify"
+      (expect (identical? sut/classify
+                @(requiring-resolve 'com.blockether.svar.internal.router/classify-failure))))))
 
 (defdescribe budget-wall-is-hard-test
   (describe "every phrasing of a quota/credit/budget wall"

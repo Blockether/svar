@@ -1642,46 +1642,9 @@
           retry-set (or (:format-retry-on prefs) DEFAULT_FORMAT_ERROR_TYPES)]
       (contains? retry-set t))))
 
-(def ^:private AUTH_ERROR_PATTERNS
-  ["authentication" "authorization" "unauthorized" "forbidden"
-   "api key" "api-key" "access token" "oauth" "credential" "revoked"])
-
-(defn- auth-error?
-  "True for provider-scoped credential rejection. Message matching is limited to
-   statusless/4xx errors so a 5xx body mentioning auth does not churn providers."
-  [e]
-  (let [data (ex-data e)
-        status (:status data)
-        hay (str/lower-case (str (or (:body data) "") " " (or (ex-message e) "")))]
-    (boolean
-      (or (contains? #{401 403} status)
-        (and (or (nil? status) (contains? #{400 401 403} status))
-          (some #(str/includes? hay %) AUTH_ERROR_PATTERNS))))))
-
-(def ^:private MODEL_UNSUPPORTED_PATTERNS
-  "Substrings (lower-cased) in an upstream 400/404 error body that mean the
-   SELECTED MODEL is unusable on this endpoint — the provider advertises it
-   but rejects inference. Distinct from auth / quota / request-shape 400s
-   (e.g. `authorization header is badly formatted`), which must NOT match so
-   we don't churn the whole fleet on a credential problem."
-  ["model_not_supported" "model not supported" "unsupported model"
-   "model_not_found" "model not found" "no such model"
-   "unknown model" "invalid model" "not a valid model"
-   "model does not exist" "the model `" "does not exist or you do not have access"])
-
-(defn- model-unsupported-error?
-  "True when a 400/404 indicates the SELECTED MODEL is unusable on this
-   endpoint, as opposed to an auth/quota/request-shape failure. Detected
-   from the captured upstream error body so `with-provider-fallback` can
-   route to a sibling model (same or another provider) instead of failing
-   the whole call. Body-driven, not status-driven: a bare 400 is NOT enough."
-  [e]
-  (let [data (ex-data e)
-        status (:status data)
-        hay (str/lower-case (str (or (:body data) "") " " (or (ex-message e) "")))]
-    (boolean
-      (and (contains? #{400 404} status)
-        (some #(str/includes? hay %) MODEL_UNSUPPORTED_PATTERNS)))))
+(def ^:private classify-failure
+  "See `failure/classify`: canonical provider/gateway failure classification."
+  failure/classify)
 
 (defn- routing-event
   [router event-type data]
@@ -1957,7 +1920,7 @@
                                (and (or (router-transient-error? router e)
                                       (stream-watchdog-error? e)
                                       (and (= :fallback-provider (:on-auth-error prefs))
-                                        (auth-error? e)))
+                                        (= :auth (:category (classify-failure e)))))
                                  (stream-content-started? e))
                                (throw e)
 
@@ -1973,10 +1936,10 @@
                                {:format-error e}
 
                                (and (= :fallback-provider (:on-auth-error prefs))
-                                 (auth-error? e))
+                                 (= :auth (:category (classify-failure e))))
                                {:auth-error e}
 
-                               (model-unsupported-error? e)
+                               (= :model-unavailable (:category (classify-failure e)))
                                {:model-unsupported e}
 
                                :else (throw e))))]
