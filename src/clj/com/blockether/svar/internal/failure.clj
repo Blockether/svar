@@ -199,7 +199,10 @@
 
 (def ^:private AUTH_PATTERNS
   ["authentication" "authorization" "unauthorized" "forbidden"
-   "api key" "api-key" "access token" "oauth" "credential" "revoked"])
+   "api key" "api-key" "access token" "oauth" "credential" "revoked"
+   ;; An expired bearer/JWT/session token is a hard credential failure even when
+   ;; a gateway incorrectly wraps it in a retryable status (for example 429).
+   "token expired" "expired token" "token_expired" "jwt expired"])
 
 (def ^:private MODEL_UNAVAILABLE_PATTERNS
   "The SELECTED MODEL is unusable on this endpoint — the gateway advertises it
@@ -241,6 +244,12 @@
 
 (defn- any-substring? [hay patterns]
   (boolean (and hay (some #(str/includes? hay %) patterns))))
+
+(defn auth-error?
+  "True when provider text identifies unusable credentials, including expiry.
+   These are hard failures regardless of an incorrect transient HTTP status."
+  [hay]
+  (any-substring? hay AUTH_PATTERNS))
 
 ;; =============================================================================
 ;; Exception → evidence
@@ -418,8 +427,7 @@
         "the account's quota/billing limit is exhausted"
         "top up or switch to another provider — retrying cannot help")
 
-      (and (contains? #{400 401 403} (some-> status long))
-        (any-substring? hay AUTH_PATTERNS))
+      (auth-error? hay)
       (answer :auth false false
         "the provider rejected the credentials"
         "check the API key/token for this provider")
@@ -819,8 +827,9 @@
          started?  (stream-output-started? e)]
      (boolean
        (and
-         ;; Subscription/quota/billing exhaustion is a hard account state,
-         ;; never a transient throttle.
+         ;; Credential expiry and subscription/quota/billing exhaustion are hard
+         ;; account states, never transient throttles.
+         (not (auth-error? hay))
          (not (provider-limit-failure? status hay))
          (or (and (contains? STREAM_WATCHDOG_ERROR_TYPES etype) (not started?))
            (and status (contains? codes status))

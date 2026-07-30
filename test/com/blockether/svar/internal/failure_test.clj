@@ -69,7 +69,17 @@
 
     (it "classifies an invalid-api-key 400 as :auth, not invalid-request"
       (expect (= :auth (:category (sut/classify (err "Invalid API key provided"
-                                                  {:status 400}))))))))
+                                                  {:status 400}))))))
+
+    (it "treats expired credentials as auth, even behind a transient status"
+      (doseq [msg ["Token expired"
+                   "The access token has expired"
+                   "JWT token_expired"]]
+        (let [e (err msg {:status 429})
+              c (sut/classify e)]
+          (expect (= :auth (:category c)) msg)
+          (expect (false? (:retryable? c)) msg)
+          (expect (false? (sut/transient-error? e)) msg))))))
 
 (defdescribe reached-model-test
   (describe ":reached-model? answers 'can I safely send this again'"

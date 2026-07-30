@@ -73,7 +73,17 @@
                    {:max-retries 2
                     :initial-delay-ms 0})]
       (expect (= :ok result))
-      (expect (= 2 @calls)))))
+      (expect (= 2 @calls))))
+
+  (it "does not re-send an expired token mislabelled as HTTP 429"
+    (let [calls (atom 0)]
+      (expect (throws? clojure.lang.ExceptionInfo
+                #(with-retry
+                   (fn []
+                     (swap! calls inc)
+                     (throw (ex-info "Token expired" {:status 429})))
+                   {:max-retries 5 :initial-delay-ms 0})))
+      (expect (= 1 @calls)))))
 
 ;;; ── deliberate watchdog/cancel aborts must NOT be retried ────────────────
 

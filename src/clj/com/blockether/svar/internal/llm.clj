@@ -76,6 +76,10 @@
   "See `failure/provider-limit-error?`."
   failure/provider-limit-error?)
 
+(def ^:private auth-error?
+  "See `failure/auth-error?`."
+  failure/auth-error?)
+
 (def ^:private transient-message-error?
   "See `failure/transient-message-error?`."
   failure/transient-message-error?)
@@ -1692,6 +1696,7 @@
                             hay (str (str/lower-case (or (:body ex-data-map) ""))
                                   " " (str/lower-case (or (ex-message e) "")))
                             limit-error? (provider-limit-error? hay)
+                            auth-error? (auth-error? hay)
                             retryable-message? (and (not limit-error?)
                                                  (not (stream-output-started? e))
                                                  (transient-message-error? hay status))
@@ -1707,7 +1712,8 @@
                                           (long anthropic-third-party-400-max-retries)
                                           (long max-retries))
                             can-retry? (< attempt attempt-cap)]
-                        (if (and (or retryable-status? retryable-conn? retryable-third-party-400? retryable-message?)
+                        (if (and (not auth-error?)
+                              (or retryable-status? retryable-conn? retryable-third-party-400? retryable-message?)
                               can-retry?)
                           {:retry true :error e :status status
                            :reason (cond retryable-conn?            :connection-error
