@@ -7,6 +7,213 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.93] - 2026-08-01
+
+### Changed
+- refactor(router): size images from their header bytes, not javax.imageio
+- fix(llm): key the prefix cache per conversation and log the cache outcome
+- release: update version files for v0.7.91, bump to next dev version
+- refactor(failure): centralize retry and fallback policy
+- release: update version files for v0.7.90, bump to next dev version
+- fix(failure): do not retry expired credentials
+- release: update version files for v0.7.89, bump to next dev version
+- fix(llm): self-heal gateway-injected strict/additionalProperties in tool schemas
+- fix(llm): name the tool behind a gateway-injected strict/additionalProperties rejection
+- refactor(failure): own the stateless-item retry policy in failure, not llm
+- release: update version files for v0.7.88, bump to next dev version
+- release: update version files for v0.7.87, bump to next dev version
+- feat(responses): stateless replay for gateways that cannot resolve server-minted item ids
+- release: update version files for v0.7.86, bump to next dev version
+- fix(failure): treat every quota/credit/budget wall as a hard error
+- release: update version files for v0.7.85, bump to next dev version
+- feat(failure): consolidate all transport/provider failure handling into internal.failure
+- release: update version files for v0.7.84, bump to next dev version
+- feat: refresh current GitHub Copilot models
+- Trim repository agent guidance
+- Streamline agent guidance
+- release: update version files for v0.7.83, bump to next dev version
+- fix(llm): normalize restored canonical content blocks
+- release: update version files for v0.7.82, bump to next dev version
+- fix: normalize context overflow and Codex requests
+- release: update version files for v0.7.81, bump to next dev version
+- fix(router): fail over revoked provider credentials
+- release: update version files for v0.7.80, bump to next dev version
+- fix(router): fall back after stream watchdog timeouts
+- release: update version files for v0.7.79, bump to next dev version
+- Merge remote-tracking branch 'origin/main'
+- fix(streaming): enforce Responses semantic timeout
+- release: update version files for v0.7.78, bump to next dev version
+- fix(streaming): disable the semantic watchdog on the Responses api-style
+- release: update version files for v0.7.77, bump to next dev version
+- feat(router): add claude-opus-5, prefer it over opus-4-8; refresh models.dev
+- release: update version files for v0.7.76, bump to next dev version
+- perf(streaming): replace per-request watchdog threads with one shared scheduler
+- release: update version files for v0.7.75, bump to next dev version
+- fix(streaming): identify native calls before argument deltas
+- release: update version files for v0.7.74, bump to next dev version
+- fix(router): remove synthetic RPM and TPM gates
+- release: update version files for v0.7.73, bump to next dev version
+- fix(llm): retry JDK-25 message-less ConnectException only for proven-healthy hosts
+- release: update version files for v0.7.72, bump to next dev version
+- test(llm): cover mid-stream 529/overloaded retry guard
+- release: update version files for v0.7.71, bump to next dev version
+- fix(llm): gate status/message retries on stream-output-started?
+- release: update version files for v0.7.70, bump to next dev version
+- fix(router,llm): retry statusless/wrapper/gRPC transient errors by message text
+- release: update version files for v0.7.69, bump to next dev version
+- fix(llm): map mid-stream SSE error :type + opencode/anthropic codes to transient status
+- release: update version files for v0.7.68, bump to next dev version
+- fix(router,llm): retry all transient errors same-provider, not just 429; align classifier with pi
+- release: update version files for v0.7.67, bump to next dev version
+- feat(router): derive :vision from models.dev image modality; refresh catalog
+- release: update version files for v0.7.66, bump to next dev version
+- chore(test): bump lazytest 1.9.1 -> 2.0.0
+- fix(llm): surface provider stream failures and separate reasoning summaries across items
+- release: update version files for v0.7.65, bump to next dev version
+- fix(tools): name rejected tool schemas
+- release: update version files for v0.7.64, bump to next dev version
+- test(llm): verify large tool argument fidelity
+- fix(llm): restore Graal-safe resend math
+- release: update version files for v0.7.63, bump to next dev version
+- feat(llm): transparently re-send empty replies to the same model
+- release: update version files for v0.7.62, bump to next dev version
+- fix(llm): treat Responses-API "completed" status as clean stop in empty-reply-anomaly-type
+- release: update version files for v0.7.61, bump to next dev version
+- feat(reasoning): add provider-native effort routing
+- release: update version files for v0.7.60, bump to next dev version
+- refactor(router): slim anthropic/zai overlays to catalog deltas + refresh models.dev
+- release: update version files for v0.7.59, bump to next dev version
+- feat(router,ratelimit): catalog gpt-5.6-terra + surface provider quota-reset clock
+- release: update version files for v0.7.58, bump to next dev version
+- fix(llm): catch raw InterruptedException on pre-headers stream path
+- release: update version files for v0.7.57, bump to next dev version
+- fix(llm): never retry svar's own watchdog/cancel stream aborts
+- release: update version files for v0.7.56, bump to next dev version
+- feat(router): surface claude-fable-5 + add gpt-5.6-sol (openai-codex)
+- feat(router): add claude-sonnet-5 (anthropic wire) + refresh models.dev catalog
+- fix(llm) drops unreplayable gh copilot gpt ids
+- release: update version files for v0.7.55, bump to next dev version
+- fix(router): surface single-provider failure as :provider-unavailable, not fleet exhaustion
+- release: update version files for v0.7.54, bump to next dev version
+- fix(llm): drop hallucinated sdk-cli billing headers on Claude OAuth path
+- release: update version files for v0.7.53, bump to next dev version
+- fix(llm): bump claude-cli-version to 2.1.202 for accurate billing attribution
+- release: update version files for v0.7.52, bump to next dev version
+- fix: OpenAI Responses id<=64, zai native anthropic wire (drop XML), Claude OAuth billing attribution
+- release: update version files for v0.7.51, bump to next dev version
+- fix(llm): clamp decoded OpenAI Responses reasoning item ids to <=64 chars
+- release: update version files for v0.7.49, bump to next dev version
+- release: update changelog and VERSION for v0.7.49
+- fix(mistral): strip per-message :model and fill curated default models
+- release: update version files for v0.7.48, bump to next dev version
+- fix(llm): retry pre-response "received no bytes" socket drops
+- release: update version files for v0.7.47, bump to next dev version
+- Update changelog for Mistral provider
+- Add Mistral provider
+- release: update version files for v0.7.46, bump to next dev version
+- fix(llm): translate canonical image_url blocks to native image on anthropic wire
+- chore(lint): clear baseline lint, boxed math, and dead test helpers
+- docs(readme): document native tool-calling ask-code!, drop deleted fence API
+- fix(spec): canonicalize keyword enum values in validate-data
+- release: update version files for v0.7.45, bump to next dev version
+- feat(router): attach per-provider :attempts to all-providers-exhausted
+- release: update version files for v0.7.44, bump to next dev version
+- fix(llm): a clean end_turn/stop with empty text is a legit completion, not an error
+- fix(gemini): tool-result uses {output}/{error} per Gemini 3 contract
+- release: update version files for v0.7.42, bump to next dev version
+- fix(tools): pi-faithful tool-call handling — orphans, is_error, id-norm, Responses composite ids
+- fix(replay): guard cross-model reasoning replay + skip aborted turns (match pi)
+- release: update version files for v0.7.41, bump to next dev version
+- release: update version files for v0.7.40, bump to next dev version
+- feat(streaming): surface tool-call argument deltas as :tool-input (live code)
+- release: update version files for v0.7.39, bump to next dev version
+- release: update version files for v0.7.38, bump to next dev version
+- fix(responses): tag input message items with :type "message" (Codex 400)
+- release: update version files for v0.7.36, bump to next dev version
+- fix(router): tolerant dotted/dashed model lookup (fixes Claude-on-Copilot 404)
+- test: blank env vars must gate live tests OFF (not run against empty key)
+- test(router): fix stale anthropic-coding-plan default-model expectation
+- release: update version files for v0.7.35, bump to next dev version
+- feat(reasoning): glm-5.2 :quick disables thinking (no light effort rung)
+- release: update version files for v0.7.33, bump to next dev version
+- fix: ship version at namespaced svar/VERSION (avoid classpath VERSION collision)
+- release: update version files for v0.7.32, bump to next dev version
+- refactor: remove dead fence machinery (Java + code-tail-pointer)
+- feat(tools): native tool calling across all wires; remove ask-code! fences
+- feat(router): GLM-5.2 reasoning effort + provider defaults single-source
+- release: update version files for v0.7.31, bump to next dev version
+- release: update version files for v0.7.30, bump to next dev version
+- fix(copilot): route Claude through native Anthropic /v1/messages
+- release: update version files for v0.7.29, bump to next dev version
+- fix(responses): make response.incomplete a retryable hard error (Codex-consistent)
+- release: update version files for v0.7.28, bump to next dev version
+- fix(responses): soft-finish incomplete-with-content; Ollama/LM Studio → Anthropic wire
+- release: update version files for v0.7.27, bump to next dev version
+- fix(codes): lenient-block extracts fenced code (drops prose) instead of running it verbatim
+- release: update version files for v0.7.26, bump to next dev version
+- feat(copilot): apply Copilot auth/headers to ALL github-copilot* ids, every wire
+- release: update version files for v0.7.25, bump to next dev version
+- fix(router): reasoning body must match the WIRE, not just the model
+- release: update version files for v0.7.23, bump to next dev version
+- feat(router): GLM → Anthropic wire (anthropic-thinking + bounded output)
+- test(llm-cancel): fix stale/flaky cancel-watchdog test to match either-or levers
+- fix(llm): surface non-SSE response bodies instead of "Stream ended before terminal marker"
+- release: update version files for v0.7.22, bump to next dev version
+- fix(llm): self-heal the shared HttpClient (selector manager closed)
+- release: update version files for v0.7.21, bump to next dev version
+- fix(router): clamp GLM-5 output to 131072 (:output-limit) — was 400ing
+- release: update version files for v0.7.20, bump to next dev version
+- chore(models): refresh models.dev snapshot — adds glm-5.2 (1M ctx)
+- feat(llm): caller-driven streaming cancellation via *cancel-fn*
+- release: update version files for v0.7.19, bump to next dev version
+- release: update version files for v0.7.18, bump to next dev version
+- fix(router): glm-5.2 context is 1M, not 200k
+- release: update version files for v0.7.17, bump to next dev version
+- feat(router): add z.ai glm-5.2 (mirrors glm-5.1 pricing/context)
+- release: update version files for v0.7.16, bump to next dev version
+- Revert "fix(llm): lenient reminder forbids transcript fabrication"
+- release: update version files for v0.7.15, bump to next dev version
+- fix(llm): lenient reminder forbids transcript fabrication
+- release: update version files for v0.7.14, bump to next dev version
+- fix(llm): surface Anthropic stop_reason in stream finalization
+- release: update version files for v0.7.13, bump to next dev version
+- fix(llm): reasoning_content echo never leaks foreign thinking signatures
+- release: update version files for v0.7.12, bump to next dev version
+- release: v0.7.12
+- fix(test): swap gpt-5-mini for glm-5-turbo in live Blockether tests
+- feat(router): add Claude Fable 5 + Mythos 5, fix adaptive thinking predicate
+- release: update version files for v0.7.11, bump to next dev version
+- fix(llm): lenient reminder warns against non-ASCII punctuation in code
+- release: update version files for v0.7.10, bump to next dev version
+- fix(llm): lenient ask-code reminder is pure-code, drops fence talk
+- release: update version files for v0.7.9, bump to next dev version
+- fix(llm): reassemble multi-part assistant message body verbatim
+- release: update version files for v0.7.8, bump to next dev version
+- fix(llm): wrap connect-phase failures with a provider-aware message
+- chore(ci): bump GitHub Actions to Node 24 runtimes
+- release: update version files for v0.7.7, bump to next dev version
+- feat(ask-code): add :lenient mode — whole reply IS the code, no fence required
+- release: update version files for v0.7.6, bump to next dev version
+- fix(llm): retry transient OS/network connection errors
+- release: update version files for v0.7.5, bump to next dev version
+- fix(llm): pin streaming POST to the HTTP/1.1 shared client
+- release: update version files for v0.7.4, bump to next dev version
+- fix(router): reasoning is a hint for explicit selection, not a hard gate
+- release: update version files for v0.7.3, bump to next dev version
+- fix(router): route detected :context into the pre-flight context-overflow check
+- release: update version files for v0.7.2, bump to next dev version
+- feat(router): LM Studio context auto-detection via native /api/v0/models
+- release: update version files for v0.7.1, bump to next dev version
+- fix(graal): remove boxed math warnings
+- fix(anthropic): drop empty text content blocks in wire serializer
+- feat(router): :prefer-providers — declarative ordered provider preference
+- feat(router): per-model 400 model_unsupported fallback + provider-pinned optimize
+- Exclude unsupported Grok Copilot model
+- docs: skip deps.edn block in README doctest; show correct unquoted coordinate
+- docs: clarify deps.edn quote is a README-doctest artifact, not for real deps.edn
+- release: update version files for v0.7.0, bump to next dev version
+
+
 ### Changed
 - refactor(router): read image dimensions from file headers instead of `javax.imageio`, so svar no longer drags the `java.desktop` module (AWT toolkit, fontconfig, image-reader SPI) into token counting or into a GraalVM native image. The header parsing is plain Java (`com.blockether.svar.ImageHeader`, `src/java`): PNG, JPEG, GIF, BMP and WebP (VP8 / VP8L / VP8X) are parsed directly; anything unrecognised, truncated or malformed falls back to the fixed estimate exactly as before.
 - fix(llm): the auto-generated `prompt_cache_key` fallback (used only when the caller passes no `:cache-key`) now identifies the CONVERSATION, not just the system prompt: `svar-auto-<sha1(system)>-<sha1(first non-system message)>`. Previously every concurrent session sharing one system prompt hashed to the SAME key — one routing bucket with a per-key request ceiling, so the sessions overflowed it onto cold replicas and evicted each other's prefixes. The same conversation keeps one key for its whole life (appending turns never touches the head). Callers that compact history away should still pass an explicit `:cache-key`.
@@ -1825,7 +2032,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.91...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.93...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -1956,3 +2163,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.89]: https://github.com/Blockether/svar/releases/tag/v0.7.89
 [v0.7.90]: https://github.com/Blockether/svar/releases/tag/v0.7.90
 [v0.7.91]: https://github.com/Blockether/svar/releases/tag/v0.7.91
+[v0.7.93]: https://github.com/Blockether/svar/releases/tag/v0.7.93
