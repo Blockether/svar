@@ -7,12 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- fix(llm): the auto-generated `prompt_cache_key` fallback (used only when the caller passes no `:cache-key`) now identifies the CONVERSATION, not just the system prompt: `svar-auto-<sha1(system)>-<sha1(first non-system message)>`. Previously every concurrent session sharing one system prompt hashed to the SAME key — one routing bucket with a per-key request ceiling, so the sessions overflowed it onto cold replicas and evicted each other's prefixes. The same conversation keeps one key for its whole life (appending turns never touches the head). Callers that compact history away should still pass an explicit `:cache-key`.
+- feat(llm): new `::cache-outcome` debug log, fired once per completed call with the cache efficiency the provider actually DELIVERED (`:cached-tokens`, `:uncached-tokens`, `:cache-hit-ratio`, `:cache-key`). `::cache-decision` only records what svar asked for, so a degraded server-side prefix cache — stale replica, overflowing key, silently rotated key — was previously invisible in svar's own logs and could only be reconstructed by mining a downstream usage database.
+
 ## [v0.7.91] - 2026-07-30
 
 ### Changed
 - refactor(failure): centralize retry and fallback policy
 - release: update version files for v0.7.90, bump to next dev version
-
 
 ## [v0.7.90] - 2026-07-30
 

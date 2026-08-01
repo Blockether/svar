@@ -36,9 +36,9 @@
       (expect
         (try (#'sut/build-anthropic-request-body
               [bad-msg] "claude-haiku-4-5" nil)
-             false
-             (catch clojure.lang.ExceptionInfo e
-               (= :svar.core/invalid-cache-ttl (:type (ex-data e)))))))))
+          false
+          (catch clojure.lang.ExceptionInfo e
+            (= :svar.core/invalid-cache-ttl (:type (ex-data e)))))))))
 
 ;;; ── Anthropic body shape ──────────────────────────────────────────────
 
@@ -312,13 +312,47 @@
         (expect (string? key))
         (expect (clojure.string/starts-with? key "svar-auto-")))))
 
-  (it "S7: auto-gen key is DETERMINISTIC — same system prompt across calls produces same key"
+  (it "S7: auto-gen key is DETERMINISTIC — same system + same conversation head produces same key"
+    (let [run #(get-in (second (sut/apply-llm-opts
+                                 (into [{:role "system" :content "identical"}
+                                        {:role "user" :content "opening turn"}]
+                                   %)
+                                 {:api-style :openai-compatible-chat}))
+                 [:extra-body :prompt_cache_key])]
+      (expect (= (run [])
+                (run [{:role "assistant" :content "a"}])
+                (run [{:role "assistant" :content "a"}
+                      {:role "user" :content "and then?"}])))))
+
+  (it "S7: auto-gen key SEPARATES conversations that share one system prompt"
+    ;; The whole point: one key = one routing bucket with a per-key request
+    ;; ceiling. Every concurrent session hashing to the SAME key overflows it
+    ;; and the sessions evict each other's prefixes.
     (let [run #(get-in (second (sut/apply-llm-opts
                                  [{:role "system" :content "identical"}
                                   {:role "user" :content %}]
                                  {:api-style :openai-compatible-chat}))
                  [:extra-body :prompt_cache_key])]
-      (expect (= (run "call 1") (run "call 2") (run "call 3")))))
+      (expect (not= (run "session one") (run "session two")))
+      ;; ...while the system half still keeps them on a common prefix.
+      (expect (= (subs (run "session one") 0 (count "svar-auto-"))
+                (subs (run "session two") 0 (count "svar-auto-"))))))
+
+  (it "S7: auto-gen key changes when the SYSTEM prompt changes"
+    (let [run #(get-in (second (sut/apply-llm-opts
+                                 [{:role "system" :content %}
+                                  {:role "user" :content "same head"}]
+                                 {:api-style :openai-compatible-chat}))
+                 [:extra-body :prompt_cache_key])]
+      (expect (not= (run "system A") (run "system B")))))
+
+  (it "S7: system-only conversation still gets a key (head half simply absent)"
+    (let [[_ opts] (sut/apply-llm-opts
+                     [{:role "system" :content "stable system prompt"}]
+                     {:api-style :openai-compatible-chat})
+          key      (get-in opts [:extra-body :prompt_cache_key])]
+      (expect (string? key))
+      (expect (clojure.string/starts-with? key "svar-auto-"))))
 
   (it "S7: explicit :cache-key wins over auto-gen"
     (let [[_ opts] (sut/apply-llm-opts
@@ -412,3 +446,36 @@
           beta    (get headers "anthropic-beta")]
       (expect (re-find #"extended-cache-ttl-2025-04-11" beta))
       (expect (re-find #"claude-code-20250219" beta)))))
+
+;;; ── cache OUTCOME log ─────────────────────────────────────────────────
+
+(defdescribe log-cache-outcome-test
+  "`::cache-decision` says what svar asked for; `::cache-outcome` says what the
+   provider delivered. Only the second one can catch a degraded server-side
+   prefix cache."
+  (it "reports the DELIVERED hit ratio and the re-prefilled remainder"
+    (let [data (#'sut/log-cache-outcome!
+                {:api-style   :openai-compatible-responses
+                 :model       "gpt-5.6-terra"
+                 :provider-id :openai-codex
+                 :cache-key   "session-abc"
+                 :api-usage   {:input-tokens         100000
+                               :input-tokens-details {:regular     25000
+                                                      :cache-write 0
+                                                      :cache-read  75000}}
+                 :duration-ms 1200})]
+      (expect (= 0.75 (:cache-hit-ratio data)))
+      (expect (= 25000 (:uncached-tokens data)))
+      (expect (= 75000 (:cached-tokens data)))
+      (expect (= "session-abc" (:cache-key data)))))
+
+  (it "a COLD call is reported as 0.0 — not as missing data"
+    (let [data (#'sut/log-cache-outcome!
+                {:api-usage {:input-tokens         4096
+                             :input-tokens-details {:cache-read 0 :cache-write 0}}})]
+      (expect (= 0.0 (:cache-hit-ratio data)))
+      (expect (= 4096 (:uncached-tokens data)))))
+
+  (it "no usage / zero input → nil (nothing to say)"
+    (expect (nil? (#'sut/log-cache-outcome! {:api-usage nil})))
+    (expect (nil? (#'sut/log-cache-outcome! {:api-usage {:input-tokens 0}})))))

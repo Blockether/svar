@@ -642,40 +642,75 @@
               (update blocks (dec n) assoc :svar/cache true)))))
       messages)))
 
-(defn- stable-hash-of-system
-  "Deterministic short hex hash of every `:role \"system\"` message's
-   text content. Used as a fallback `:cache-key` when the caller did
-   not provide one — ensures OpenAI / Codex / Z.ai requests with the
-   SAME stable system prompt land on the same inference engine across
-   calls (boosts cache hit-rate AND makes Codex surface
-   `cached_tokens`, which it otherwise reports as 0 even when the
-   cache fires server-side).
+(defn- message-text
+  "Concatenated text of ONE message's content. Handles both the plain-string
+   and the block-vector shapes; returns nil when the message carries no text
+   (pure image / tool-result blocks)."
+  [m]
+  (let [c (:content m)]
+    (-> (cond
+          (string? c)     c
+          (sequential? c) (str/join "\n" (keep :text c))
+          :else           nil)
+      not-empty)))
 
-   Returns nil when no system content is present — keep auto-routing."
+(defn- sha1-hex
+  "Lowercase hex SHA-1 of `s`, truncated to the first `n` BYTES of the digest
+   (2n hex chars). Only the first 4096 chars of `s` are hashed — that is
+   plenty, since OpenAI's own routing hash consumes roughly the first 256
+   tokens of the prompt. Stable across processes; idempotent for identical
+   content."
+  [^String s ^long n]
+  (let [bytes  (.getBytes ^String (subs s 0 (min 4096 (count s))) "UTF-8")
+        md     (doto (java.security.MessageDigest/getInstance "SHA-1")
+                 (.update bytes))
+        digest (.digest md)]
+    (apply str (take n (map #(format "%02x" (bit-and (long %) 0xff))
+                         (vec digest))))))
+
+(defn- stable-auto-cache-key
+  "Deterministic fallback `:cache-key` for callers that did not pass one.
+
+   Identifies the CONVERSATION, not just the system prompt:
+
+     svar-auto-<sha1(system text):16B>-<sha1(first non-system message):8B>
+
+   Both halves matter.
+
+   - The SYSTEM half keeps every call of one agent on one routing bucket, so
+     the shared prefix actually hits the server-side prefix cache. It also
+     makes Codex surface `cached_tokens`, which it otherwise reports as 0 even
+     when the cache fires server-side.
+
+   - The HEAD half (first non-system message — the conversation's opening user
+     turn, which never changes as the conversation grows) is what stops every
+     concurrent session that shares a system prompt from COLLIDING on one key.
+     A single key is a single bucket with a per-key request ceiling: aggregate
+     traffic on it overflows onto cold replicas and the sessions evict each
+     other's prefixes, which is exactly the pathology this key shape exists to
+     avoid. Distinct conversations now get distinct keys; the same conversation
+     keeps ONE key for its whole life, because appending turns never touches
+     the head.
+
+   Returns nil when there is no system content — nothing stable to anchor on,
+   so keep provider auto-routing.
+
+   Caveat: a caller that COMPACTS its history away (dropping the opening turn)
+   rotates the key. Pass an explicit `:cache-key` — a session id — when the
+   conversation identity must survive trimming; `vis` does exactly that."
   [messages]
-  (let [sys-text (->> messages
-                   (filter #(= "system" (some-> (:role %) name)))
-                   (mapcat (fn [m]
-                             (let [c (:content m)]
-                               (cond
-                                 (string? c) [c]
-                                 (sequential? c) (keep :text c)
-                                 :else []))))
-                   (str/join "\n")
-                   not-empty)]
+  (let [sys-text  (->> messages
+                    (filter #(= "system" (some-> (:role %) name)))
+                    (keep message-text)
+                    (str/join "\n")
+                    not-empty)
+        head-text (->> messages
+                    (remove #(= "system" (some-> (:role %) name)))
+                    (some message-text))]
     (when sys-text
-      ;; SHA-1 over the first 4096 chars is enough — OpenAI's routing
-      ;; hash itself only consumes ~first 256 tokens of the prompt.
-      ;; Stable across processes; idempotent for identical content.
-      (let [bytes (.getBytes ^String
-                    (subs sys-text 0 (min 4096 (count sys-text)))
-                    "UTF-8")
-            md    (doto (java.security.MessageDigest/getInstance "SHA-1")
-                    (.update bytes))
-            digest (.digest md)]
-        (str "svar-auto-"
-          (apply str (take 16 (map #(format "%02x" (bit-and (long %) 0xff))
-                                (vec digest)))))))))
+      (str "svar-auto-"
+        (sha1-hex sys-text 16)
+        (when head-text (str "-" (sha1-hex head-text 8)))))))
 
 (defn- openai-style? [api-style]
   (or (= api-style :openai-compatible-chat)
@@ -685,8 +720,8 @@
   "Forward the caller's `:cache-key` opt onto `:extra-body` as
    `:prompt_cache_key`. When the caller did NOT pass `:cache-key`
    AND the api-style is OpenAI / Responses / Z.ai (openai-compatible-*),
-   AUTO-GENERATE a stable key derived from the system-prompt SHA-1
-   prefix. Codex specifically refuses to surface `cached_tokens` in
+   AUTO-GENERATE a stable PER-CONVERSATION key (`stable-auto-cache-key`).
+   Codex specifically refuses to surface `cached_tokens` in
    `response.completed` unless `prompt_cache_key` is on the wire, so
    the auto-key turns Codex cache hits from invisible (latency-only
    evidence) into reported (canonical-shape `:cached` field non-zero).
@@ -704,7 +739,7 @@
             ;; stripped from the wire anyway, so spending a hash on a
             ;; doomed value is wasted work.
             (when (openai-style? (:api-style opts))
-              (stable-hash-of-system messages)))]
+              (stable-auto-cache-key messages)))]
     (cond-> opts
       k (update :extra-body (fn [eb] (assoc (or eb {}) :prompt_cache_key k))))))
 
@@ -739,6 +774,39 @@
               :auto-cache-marker-added? (not= msgs0 msgs)
               :system-msg-count         (count (filter #(= "system" (some-> (:role %) name)) msgs))}})
     [msgs opts']))
+
+(defn- log-cache-outcome!
+  "Telemere `::cache-outcome` debug log, fired ONCE per COMPLETED call with the
+   cache efficiency the provider actually DELIVERED. Counterpart of
+   `::cache-decision`, which only records what svar ASKED for.
+
+   Without an outcome log a degraded server-side prefix cache — a stale
+   replica, an overflowing key, a key that silently rotated — is invisible in
+   svar's own logs and can only be reconstructed afterwards by mining a
+   downstream usage database. `:cache-hit-ratio` (cache-read / input-tokens)
+   and `:uncached-tokens` (what was re-prefilled and billed at the full input
+   rate) are the two numbers that make the regression obvious in place.
+
+   Returns the logged data map, or nil when the provider reported no usage or
+   a zero input count (nothing to say)."
+  [{:keys [api-style model provider-id cache-key api-usage duration-ms]}]
+  (let [input  (long (or (:input-tokens api-usage) 0))
+        cached (long (or (get-in api-usage [:input-tokens-details :cache-read]) 0))
+        write  (long (or (get-in api-usage [:input-tokens-details :cache-write]) 0))]
+    (when (pos? input)
+      (let [data {:api-style          api-style
+                  :model              model
+                  :provider-id        provider-id
+                  :cache-key          cache-key
+                  :input-tokens       input
+                  :cached-tokens      cached
+                  :cache-write-tokens write
+                  :uncached-tokens    (- input cached)
+                  :cache-hit-ratio    (/ (Math/round (* 1000.0 (/ (double cached) input)))
+                                        1000.0)
+                  :duration-ms        duration-ms}]
+        (trove/log! {:level :debug :id ::cache-outcome :data data})
+        data))))
 
 (defn- messages-have-1h-cache?
   "True when any content block in `messages` is tagged for the 1-hour
@@ -5318,6 +5386,12 @@
                                 :reasoning   reasoning
                                 :provider-state provider-state}
                 all-attempts (conj prior-attempts attempt-record)]
+            (log-cache-outcome! {:api-style   api-style
+                                 :model       model
+                                 :provider-id provider-id
+                                 :cache-key   (get-in opts [:extra-body :prompt_cache_key])
+                                 :api-usage   api-usage
+                                 :duration-ms duration-ms})
             (when on-chunk
               (on-chunk {:result final-result
                          :reasoning reasoning
@@ -5732,6 +5806,12 @@
           cost          (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
           stop-reason   (if (seq tool-calls) :tool-calls :end)
           rate-limit    (ratelimit/parse api-style (:headers http-response))]
+      (log-cache-outcome! {:api-style   api-style
+                           :model       model
+                           :provider-id provider-id
+                           :cache-key   (get-in opts [:extra-body :prompt_cache_key])
+                           :api-usage   api-usage
+                           :duration-ms duration-ms})
       (when on-chunk
         (on-chunk {:content content :reasoning reasoning :tool-calls tool-calls
                    :stop-reason stop-reason :provider-state provider-state
