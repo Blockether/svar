@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.95] - 2026-08-01
+
+### Changed
+- release: republish the 0.7.93 tree as 0.7.95
+- release: update version files for v0.7.93, bump to next dev version
+- refactor(router): size images from their header bytes, not javax.imageio
+
+
 ### Fixed
 - release(0.7.95): `0.7.94` was tagged and deployed concurrently from the commit *before* the `javax.imageio` removal, so the higher version number carried strictly LESS than `0.7.93` and anyone resolving the newest svar lost `ImageHeader`. `0.7.95` re-publishes the `0.7.93` tree so the newest version is again a superset. Nothing to do for consumers other than pinning `0.7.95` (or staying on `0.7.93`); `0.7.94` is best avoided.
 
@@ -2035,7 +2043,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.93...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.95...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2167,3 +2175,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.90]: https://github.com/Blockether/svar/releases/tag/v0.7.90
 [v0.7.91]: https://github.com/Blockether/svar/releases/tag/v0.7.91
 [v0.7.93]: https://github.com/Blockether/svar/releases/tag/v0.7.93
+[v0.7.95]: https://github.com/Blockether/svar/releases/tag/v0.7.95
