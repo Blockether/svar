@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- release(0.7.95): `0.7.94` was tagged and deployed concurrently from the commit *before* the `javax.imageio` removal, so the higher version number carried strictly LESS than `0.7.93` and anyone resolving the newest svar lost `ImageHeader`. `0.7.95` re-publishes the `0.7.93` tree so the newest version is again a superset. Nothing to do for consumers other than pinning `0.7.95` (or staying on `0.7.93`); `0.7.94` is best avoided.
+
 ## [v0.7.93] - 2026-08-01
 
 ### Changed
