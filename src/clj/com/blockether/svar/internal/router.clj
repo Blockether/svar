@@ -11,6 +11,7 @@
    [com.blockether.svar.internal.modelsdev :as modelsdev]
    [taoensso.trove :as trove])
   (:import
+   (com.blockether.svar ImageHeader)
    (com.knuddels.jtokkit Encodings)
    (com.knuddels.jtokkit.api
      Encoding
@@ -18,11 +19,8 @@
      EncodingType
      IntArrayList
      ModelType)
-   (java.io ByteArrayInputStream)
    (java.net HttpURLConnection URI)
-   (java.util Base64 Locale UUID)
-   (javax.imageio ImageIO ImageReader)
-   (javax.imageio.stream ImageInputStream)))
+   (java.util Base64 Locale UUID)))
 
 ;; =============================================================================
 ;; Known Providers
@@ -2387,32 +2385,23 @@
   "Timeout in milliseconds for fetching image headers from URLs."
   3000)
 
-(defn- image-dimensions-from-stream
-  "Reads image width and height from an ImageInputStream without
-   decoding pixel data. Returns [width height] or nil."
-  [^ImageInputStream iis]
-  (let [readers (ImageIO/getImageReaders iis)]
-    (when (.hasNext readers)
-      (let [^ImageReader reader (.next readers)]
-        (try
-          (.setInput reader iis true true)
-          [(.getWidth reader 0) (.getHeight reader 0)]
-          (finally
-            (.dispose reader)))))))
+(defn- image-dimensions
+  "Reads [width height] straight out of an image's HEADER bytes, without
+   decoding pixels and without `javax.imageio` (which drags in `java.desktop`).
+
+   The parsing itself is plain Java — [[com.blockether.svar.ImageHeader]] —
+   which understands PNG, JPEG, GIF, BMP and WebP, every format an LLM vision
+   endpoint accepts. Returns nil for anything unrecognised or truncated, and
+   the caller then falls back to [[IMAGE_TOKEN_FALLBACK]]."
+  [^bytes b]
+  (when-some [wh (ImageHeader/dimensions b)]
+    [(aget ^ints wh 0) (aget ^ints wh 1)]))
 
 (defn- image-dimensions-from-base64
   "Extracts image dimensions from a base64-encoded image string."
   [^String base64-str]
   (try
-    (let [decoder (Base64/getDecoder)
-          bytes (.decode decoder base64-str)
-          bais (ByteArrayInputStream. bytes)
-          iis (ImageIO/createImageInputStream bais)]
-      (when iis
-        (try
-          (image-dimensions-from-stream iis)
-          (finally
-            (.close iis)))))
+    (image-dimensions (.decode (Base64/getDecoder) base64-str))
     (catch Exception _ nil)))
 
 (defn- image-dimensions-from-url
@@ -2427,14 +2416,8 @@
       (.setRequestMethod conn "GET")
       (.setRequestProperty conn "Range" "bytes=0-65535")
       (try
-        (let [is (.getInputStream conn)
-              iis (ImageIO/createImageInputStream is)]
-          (when iis
-            (try
-              (image-dimensions-from-stream iis)
-              (finally
-                (.close iis)
-                (.close is)))))
+        (with-open [is (.getInputStream conn)]
+          (image-dimensions (.readAllBytes is)))
         (finally
           (.disconnect conn))))
     (catch Exception _ nil)))
