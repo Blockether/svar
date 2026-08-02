@@ -60,20 +60,40 @@
   (some? (ts/first-env "BLOCKETHER_LLM_API_KEY"
            "BLOCKETHER_OPENAI_API_KEY" "OPENAI_API_KEY")))
 
+(defn- integration-endpoint
+  "Credentials, base URL, and the model that endpoint ACTUALLY serves.
+
+   The two accepted keys point at different endpoints. The Blockether One vars
+   route to an OpenAI-compatible proxy whose catalog is the GLM family: asked
+   for `gpt-4o` it answers with reasoning and no structured content, every
+   provider attempt fails, and the router surfaces `Provider unavailable`. That
+   is a fixture/endpoint mismatch, not a svar defect, so the model follows the
+   endpoint instead of being hardcoded. A plain OpenAI key keeps `gpt-4o`."
+  []
+  (if-let [k (ts/first-env "BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY")]
+    {:api-key  k
+     :base-url (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL" "BLOCKETHER_OPENAI_BASE_URL")
+                 "https://llm.blockether.com/v1")
+     :model    "glm-5.1"}
+    {:api-key  (ts/env "OPENAI_API_KEY")
+     :base-url (or (ts/env "OPENAI_BASE_URL") "https://api.openai.com/v1")
+     :model    "gpt-4o"}))
+
+(defn- integration-model
+  "The model name `make-integration-router` was built around."
+  []
+  (:model (integration-endpoint)))
+
 (defn- make-integration-router
   "Creates a router for real LLM calls from env vars.
    Asserts if no API key — integration tests must have credentials."
   []
-  (let [api-key (ts/first-env "BLOCKETHER_LLM_API_KEY"
-                  "BLOCKETHER_OPENAI_API_KEY" "OPENAI_API_KEY")
-        _ (assert api-key "Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY to run integration tests")
-        base-url (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL"
-                       "BLOCKETHER_OPENAI_BASE_URL" "OPENAI_BASE_URL")
-                   "https://api.openai.com/v1")]
+  (let [{:keys [api-key base-url model]} (integration-endpoint)
+        _ (assert api-key "Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY to run integration tests")]
     (svar/make-router [{:id :integration
                         :api-key api-key
                         :base-url base-url
-                        :models [{:name "gpt-4o"}]}])))
+                        :models [{:name model}]}])))
 
 (defn- blockether-one-enabled?
   "Returns true if Blockether One LLM endpoint is configured."
@@ -146,7 +166,7 @@
                        {:spec streaming-spec
                         :messages [(svar/system "Extract the requested information.")
                                    (svar/user "In 1928, Alexander Fleming discovered penicillin when mold contaminated his petri dish and killed bacteria. This revolutionized medicine with antibiotics, saving millions. It impacted microbiology, pharmacology, infectious disease medicine, and public health.")]
-                        :model "gpt-4o"
+                        :model (integration-model)
                         :on-chunk (fn [chunk]
                                     (swap! chunks conj chunk)
                                     (println "CHUNK" (count @chunks) "=>" (:result chunk)))})]
@@ -171,7 +191,7 @@
                        {:spec event-spec
                         :messages [(svar/system "Extract detailed structured information about the historical event.")
                                    (svar/user "The French Revolution began in 1789 at Versailles. Fiscal crisis, crop failures, and Enlightenment ideals fueled anger against the monarchy. Key figures: Louis XVI, Marie Antoinette, Robespierre, Danton, Lafayette. The Bastille fell July 14 1789. Results: abolition of feudalism, Declaration of Rights of Man, execution of Louis XVI in 1793, Reign of Terror (~17,000 executions), Napoleon's rise. Total death toll ~40,000. It transformed French society, inspired democracy worldwide, created the metric system and modern citizenship.")]
-                        :model "gpt-4o"
+                        :model (integration-model)
                         :on-chunk (fn [chunk]
                                     (swap! chunks conj chunk)
                                     (let [r (:result chunk)

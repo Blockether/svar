@@ -609,7 +609,7 @@
   [^Throwable e url]
   (let [reason (connection-error-reason e)
         host   (try (.getHost (java.net.URI. (str url)))
-                 (catch Exception _ nil))]
+                    (catch Exception _ nil))]
     (ex-info (str "Could not connect to the model provider"
                (when-not (str/blank? host) (str " at " host))
                ": " reason
@@ -659,7 +659,7 @@
   [url]
   (when url
     (try (not-empty (.getHost (java.net.URI. (str url))))
-      (catch Exception _ nil))))
+         (catch Exception _ nil))))
 
 (def CONNECT_HEALTH_WINDOW_MS
   "How long ONE successful connection keeps a host classified as 'healthy'.
@@ -890,11 +890,22 @@
          third-party? (and (not started?) (anthropic-third-party-400? e))
          ;; Low-level retry may retry response failures and genuine transport
          ;; drops, but never after visible output, router-owned watchdogs, or a
-         ;; router-owned 429.
+         ;; router-owned 429. `:connect-timeout` and `:transport-drop` join that
+         ;; set ONLY when the failure carries an HTTP status: the shared LiteLLM
+         ;; gateway maps `litellm.Timeout` onto 408 and answers a pre-response
+         ;; socket drop with 502 while the real cause sits in the body, so the
+         ;; exception is never connect-phase typed and `transport-retryable?`
+         ;; cannot see it — yet the status proves a server answered, and both
+         ;; categories are `:reached-model? false`, so replaying is
+         ;; side-effect-safe. Status-LESS connect failures stay with
+         ;; `transport-retryable?` and its host-health gate, which alone can tell
+         ;; a transient blip from a host that was never reachable.
          response-retry? (and (not started?)
                            retryable?
-                           (contains? #{:rate-limited :upstream-timeout
-                                        :gateway-unavailable} category)
+                           (or (contains? #{:rate-limited :upstream-timeout
+                                            :gateway-unavailable} category)
+                             (and (some? status)
+                               (contains? #{:connect-timeout :transport-drop} category)))
                            (not (and router-handles-rate-limit?
                                   (= :rate-limited category))))
          retry? (boolean (or transport? third-party? response-retry?))]

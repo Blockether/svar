@@ -276,6 +276,64 @@
         (expect (true? (:connection-error? (ex-data e))))
         (expect (some? (ex-cause e)))))))
 
+(defdescribe unanswered-request-retry-test
+  (describe "a request the model never saw is replayed, with or without a status"
+    ;; The shared LiteLLM gateway answers WITH an HTTP status and puts the real
+    ;; cause in the body, so the exception is never connect-phase typed and
+    ;; `transport-retryable?` cannot see it. `:connect-timeout` and
+    ;; `:transport-drop` are `:reached-model? false`, so replaying them is
+    ;; side-effect-free — these were the two shapes that used to burn the whole
+    ;; turn on the first blip.
+
+    (it "retries LiteLLM's 408 connect timeout carried in the body"
+      (let [e (err "HTTP 408"
+                {:type   :svar.core/http-error
+                 :status 408
+                 :body   (str "litellm.Timeout: BedrockException: Timeout Error - litellm.Timeout: "
+                           "Connection timed out. Timeout passed=Timeout(connect=5.0, read=600.0)")})
+            {:keys [retry? reason classification]} (sut/low-level-retry-decision e)]
+        (expect (= :connect-timeout (:category classification)))
+        (expect (false? (:reached-model? classification)))
+        (expect (false? (sut/transport-retryable? e)))
+        (expect retry?)
+        (expect (= :http-status reason))))
+
+    (it "retries a pre-response socket drop that arrives as a 502"
+      (let [e (err "HTTP 502"
+                {:type   :svar.core/http-error
+                 :status 502
+                 :body   "litellm.APIConnectionError: HTTP/1.1 header parser received no bytes"})
+            {:keys [retry? classification]} (sut/low-level-retry-decision e)]
+        (expect (= :transport-drop (:category classification)))
+        (expect (false? (:reached-model? classification)))
+        (expect (false? (sut/transport-retryable? e)))
+        (expect retry?)))
+
+    (it "leaves a status-less drop to transport-retryable? and its host-health gate"
+      ;; No status means no server answered, so only the connect-health history
+      ;; can tell a transient blip from a host that was never reachable. That
+      ;; call stays exactly where it was.
+      (let [e (err "gateway error"
+                {:type :svar.core/http-error
+                 :body "litellm.APIConnectionError: HTTP/1.1 header parser received no bytes"})]
+        (expect (= :transport-drop (:category (sut/classify e))))
+        (expect (false? (sut/transport-retryable? e)))
+        (expect (false? (:retry? (sut/low-level-retry-decision e))))))
+
+    (it "still refuses to replay once visible output was streamed"
+      (let [e (err "HTTP 502"
+                {:type            :svar.core/http-error
+                 :status          502
+                 :body            "HTTP/1.1 header parser received no bytes"
+                 :content-acc-len 120})]
+        (expect (false? (:retry? (sut/low-level-retry-decision e))))))
+
+    (it "still refuses to replay a definitive client error"
+      (let [e (err "HTTP 400" {:type :svar.core/http-error :status 400
+                               :body "Invalid request: messages must not be empty"})]
+        (expect (= :invalid-request (:category (sut/classify e))))
+        (expect (false? (:retry? (sut/low-level-retry-decision e))))))))
+
 (defdescribe router-transient-error-test
   (describe "the router's broader soft/hard verdict"
     (it "re-routes a configured transient status"

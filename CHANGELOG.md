@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- fix(failure): retry a request the model never saw, even when it arrives wearing an HTTP status. The shared LiteLLM gateway maps `litellm.Timeout` onto 408 and answers a pre-response socket drop with 502 while the real cause sits in the body, so the exception is never connect-phase typed and `transport-retryable?` cannot see it — one blip ended the turn. `low-level-retry-decision` now also retries a status-bearing `:connect-timeout` or `:transport-drop`; both are `:reached-model? false`, so the replay is side-effect-free. Status-LESS connect failures are unchanged and still go through `transport-retryable?` and its host-health gate. Fixes blockether/vis#68 and #69.
+- test(core): point the streaming integration fixture at the model its endpoint actually serves. `make-integration-router` hardcoded `gpt-4o` while the Blockether-One env vars route to a GLM-catalog proxy, which answers that name with reasoning and no structured content — both streaming integration tests failed `./verify.sh` with `Provider unavailable`, a fixture mismatch that masked real regressions. The endpoint now picks its own model (`glm-5.1` for the proxy keys, `gpt-4o` for a plain OpenAI key).
+
 ## [v0.7.95] - 2026-08-01
 
 ### Changed
