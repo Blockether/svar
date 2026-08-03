@@ -178,9 +178,9 @@
   ;; fc_ id breaks reasoning-model replay. svar carries the composite
   ;; `call_id|item_id` and splits it back on the wire. (pi parity.)
   (it "extracts the composite call_id|item_id"
-    (expect (= "call_abc|fc_xyz" (responses-id {:call_id "call_abc" :id "fc_xyz" :name "cat"})))
-    (expect (= "call_only" (responses-id {:call_id "call_only"})))
-    (expect (= "fc_only" (responses-id {:id "fc_only"}))))
+    (expect (= "call_abc|fc_xyz" (responses-id {"call_id" "call_abc" "id" "fc_xyz" "name" "cat"})))
+    (expect (= "call_only" (responses-id {"call_id" "call_only"})))
+    (expect (= "fc_only" (responses-id {"id" "fc_only"}))))
   (it "normalize preserves the composite for OpenAI, collapses for others"
     (expect (= "call_abc|fc_xyz" (normalize-id3 "call_abc|fc_xyz" true)))
     (expect (= "call_abc_fc_xyz" (normalize-id3 "call_abc|fc_xyz" false))))

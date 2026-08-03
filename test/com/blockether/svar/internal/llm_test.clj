@@ -130,12 +130,12 @@
       ;; that stubs `http-get!` must start from an empty cache.
       (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
-                                         {:data [{:id "gpt-4o"}
-                                                 {:id "gpt-5"}
-                                                 {:id "gpt-5.1-codex"}
-                                                 {:id "gpt-5.3-codex"}
-                                                 {:id "gpt-5.4"}
-                                                 {:id "gpt-5.5"}]})}
+                                         {"data" [{"id" "gpt-4o"}
+                                                  {"id" "gpt-5"}
+                                                  {"id" "gpt-5.1-codex"}
+                                                  {"id" "gpt-5.3-codex"}
+                                                  {"id" "gpt-5.4"}
+                                                  {"id" "gpt-5.5"}]})}
         (fn []
           (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
                     (mapv :id (svar/models! router))))))))
@@ -146,13 +146,13 @@
                                      :models [{:name "gpt-5.4"}]}])]
       (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
-                                         {:data [{:id "claude-sonnet-4.6"}
-                                                 {:id "gpt-4o"}
-                                                 {:id "gpt-5.1-codex"}
-                                                 {:id "gpt-5.3-codex"}
-                                                 {:id "gpt-5.4"}
-                                                 {:id "gpt-5.5"}
-                                                 {:id "gemini-3-pro-preview"}]})}
+                                         {"data" [{"id" "claude-sonnet-4.6"}
+                                                  {"id" "gpt-4o"}
+                                                  {"id" "gpt-5.1-codex"}
+                                                  {"id" "gpt-5.3-codex"}
+                                                  {"id" "gpt-5.4"}
+                                                  {"id" "gpt-5.5"}
+                                                  {"id" "gemini-3-pro-preview"}]})}
         (fn []
           (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gpt-5.5" "gemini-3-pro-preview"]
                     (mapv :id (svar/models! router))))))))
@@ -163,9 +163,9 @@
                                      :models [{:name "glm-4.7"}]}])]
       (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
-                                         {:data [{:id "glm-4.7"}
-                                                 {:id "glm-5-turbo"}
-                                                 {:id "glm-5v-turbo"}]})}
+                                         {"data" [{"id" "glm-4.7"}
+                                                  {"id" "glm-5-turbo"}
+                                                  {"id" "glm-5v-turbo"}]})}
         (fn []
           (expect (= ["glm-4.7" "glm-5-turbo" "glm-5v-turbo"]
                     (mapv :id (svar/models! router))))))))
@@ -179,7 +179,7 @@
       (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [url _api-key & [opts]]
                                          (reset! captured (assoc opts :url url))
-                                         {:models [{:slug "gpt-5.5" :id "gpt-5.5"}]})}
+                                         {"models" [{"slug" "gpt-5.5" "id" "gpt-5.5"}]})}
         (fn []
           (svar/models! router)
           (let [c @captured]
@@ -199,12 +199,38 @@
                                      :models [{:name "gpt-5.5"}]}])]
       (sut/clear-models-cache!)
       (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
-                                         {:models [{:slug "gpt-5.5" :display_name "GPT-5.5"}
-                                                   {:slug "gpt-5.4"}
-                                                   {:slug "gpt-5.3-codex"}]})}
+                                         {"models" [{"slug" "gpt-5.5" "display_name" "GPT-5.5"}
+                                                    {"slug" "gpt-5.4"}
+                                                    {"slug" "gpt-5.3-codex"}]})}
         (fn []
           (expect (= ["gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
-                    (sort (mapv :id (svar/models! router))))))))))
+                    (sort (mapv :id (svar/models! router)))))))))
+
+  ;; A `/models` body is provider DATA. svar parses it with `:key-fn identity`
+  ;; so a gateway can never grow this process's keyword table, and only svar's
+  ;; OWN model contract (`:id`, `:name`, `:context`, capability flags) is
+  ;; keyword-keyed on the way out.
+  (it "never interns a /models body: wire keys stay strings, svar keys are lifted"
+    (let [router (svar/make-router [{:id :openai-codex
+                                     :api-key "sk-test"
+                                     :models [{:name "gpt-5.5"}]}])]
+      (sut/clear-models-cache!)
+      (with-redefs-fn {#'sut/http-get! (fn [_url _api-key & _opts]
+                                         {"data" [{"id"           "gpt-5.5"
+                                                   "display_name" "GPT-5.5"
+                                                   "model_info"   {"max_input_tokens"          400000
+                                                                   "supports_function_calling" true}
+                                                   "a weird gateway key" 1}]})}
+        (fn []
+          (let [m (first (svar/models! router))]
+            (expect (= "gpt-5.5" (:id m)))
+            (expect (= "GPT-5.5" (:name m)))
+            (expect (= 400000 (:context m)))
+            (expect (true? (:tool-call? m)))
+            (expect (= 1 (get m "a weird gateway key")))
+            (expect (every? string? (keys (get m "model_info"))))
+            (expect (nil? (:display_name m)))
+            (expect (nil? (:model_info m)))))))))
 
 (defdescribe transparent-openai-responses-routing-test
   (describe "ask! transparency"
@@ -433,14 +459,14 @@
   (describe "non-stream response fallback"
     (it "responses transport extracts content + reasoning from terminal :output payload"
       (with-redefs-fn {#'sut/http-post! (fn [_url _body _headers _timeout-ms]
-                                          {:parsed {:output [{:type "reasoning"
-                                                              :summary [{:text "plan first"}]}
-                                                             {:type "message"
-                                                              :content [{:type "output_text"
-                                                                         :text "{\"answer\":\"ok\"}"}]}]
-                                                    :usage {:prompt_tokens 11
-                                                            :completion_tokens 7
-                                                            :total_tokens 18}}
+                                          {:parsed {"output" [{"type" "reasoning"
+                                                               "summary" [{"text" "plan first"}]}
+                                                              {"type" "message"
+                                                               "content" [{"type" "output_text"
+                                                                           "text" "{\"answer\":\"ok\"}"}]}]
+                                                    "usage" {"prompt_tokens" 11
+                                                             "completion_tokens" 7
+                                                             "total_tokens" 18}}
                                            :raw-body "{}"
                                            :url "https://example.invalid/v1/responses"
                                            :status 200})}
@@ -571,12 +597,12 @@
             (expect (= "plan first" (:reasoning (second @events))))))))
 
     (it "responses transport preserves Pi-style raw reasoning item signature for replay"
-      (let [raw-item {:type "reasoning"
-                      :id "rs_123"
-                      :status "completed"
-                      :summary [{:type "summary_text" :text "plan first"}]
-                      :encrypted_content "ciphertext"
-                      :phase "commentary"}
+      (let [raw-item {"type" "reasoning"
+                      "id" "rs_123"
+                      "status" "completed"
+                      "summary" [{"type" "summary_text" "text" "plan first"}]
+                      "encrypted_content" "ciphertext"
+                      "phase" "commentary"}
             stream (str
                      "data: " (json/write-json-str {:type "response.output_item.done"
                                                     :item raw-item}) "\n\n"
@@ -614,8 +640,8 @@
             (expect (= "plan first" (:reasoning result)))
             (expect (= "plan first"
                       (get-in result [:provider-state :reasoning-items 0 :summary-text])))
-            (expect (= [{:type "summary_text" :text "plan first"}]
-                      (get-in result [:provider-state :reasoning-items 0 :raw-item :summary])))))))
+            (expect (= [{"type" "summary_text" "text" "plan first"}]
+                      (get-in result [:provider-state :reasoning-items 0 :raw-item "summary"])))))))
 
     (it "responses transport separates multiple streamed reasoning summary parts"
       (let [events (atom [])
@@ -748,27 +774,27 @@
   (describe "enrich-lmstudio-model"
     (it "prefers loaded_context_length over max_context_length"
       (let [m ((var-get #'sut/enrich-lmstudio-model)
-               {:id "m" :max_context_length 262144 :loaded_context_length 16384 :state "loaded"})]
+               {"id" "m" "max_context_length" 262144 "loaded_context_length" 16384 "state" "loaded"})]
         (expect (= 16384 (:context m)))
         (expect (true? (:loaded? m)))))
     (it "falls back to max_context_length when not loaded"
       (let [m ((var-get #'sut/enrich-lmstudio-model)
-               {:id "m" :max_context_length 131072 :state "not-loaded"})]
+               {"id" "m" "max_context_length" 131072 "state" "not-loaded"})]
         (expect (= 131072 (:context m)))
         (expect (false? (:loaded? m)))))
     (it "surfaces tool_use capability"
       (expect (true? (:tool-call? ((var-get #'sut/enrich-lmstudio-model)
-                                   {:id "m" :capabilities ["tool_use"]})))))
+                                   {"id" "m" "capabilities" ["tool_use"]})))))
     (it "leaves models without context fields untouched"
-      (let [m ((var-get #'sut/enrich-lmstudio-model) {:id "m"})]
+      (let [m ((var-get #'sut/enrich-lmstudio-model) {"id" "m"})]
         (expect (nil? (:context m)))
         (expect (nil? (:tool-call? m))))))
   (describe "shape-models"
     (it "applies :lmstudio shaping"
-      (expect (= 8192 (-> ((var-get #'sut/shape-models) :lmstudio [{:id "m" :max_context_length 8192}])
+      (expect (= 8192 (-> ((var-get #'sut/shape-models) :lmstudio [{"id" "m" "max_context_length" 8192}])
                         first :context))))
     (it "passes through unknown shapes unchanged"
-      (let [models [{:id "m" :max_context_length 8192}]]
+      (let [models [{"id" "m" "max_context_length" 8192}]]
         (expect (= models ((var-get #'sut/shape-models) nil models)))))))
 
 (defdescribe routed-context-limit-flow-test
@@ -874,13 +900,13 @@
    max_tokens truncation looked identical to a clean end_turn."
   (let [finish (var-get #'sut/stream-finish-reason)]
     (it "reads stop_reason from an Anthropic message_delta"
-      (expect (= "end_turn" (finish {:type "message_delta"
-                                     :delta {:stop_reason "end_turn" :stop_sequence nil}
-                                     :usage {:output_tokens 42}})))
-      (expect (= "max_tokens" (finish {:type "message_delta"
-                                       :delta {:stop_reason "max_tokens"}}))))
+      (expect (= "end_turn" (finish {"type" "message_delta"
+                                     "delta" {"stop_reason" "end_turn" "stop_sequence" nil}
+                                     "usage" {"output_tokens" 42}})))
+      (expect (= "max_tokens" (finish {"type" "message_delta"
+                                       "delta" {"stop_reason" "max_tokens"}}))))
     (it "OpenAI chat shape still wins its own field"
-      (expect (= "stop" (finish {:choices [{:finish_reason "stop"}]}))))))
+      (expect (= "stop" (finish {"choices" [{"finish_reason" "stop"}]}))))))
 
 (defdescribe stream-semantic-event-test
   "Status-only Responses events prove transport liveness, not model progress.
@@ -899,13 +925,13 @@
             "response.queued" false
             "provider.status" false}
           (into {}
-            (map (fn [event] [(:type event) (classify event)]))
-            [{:type "ping"}
-             {:type "heartbeat"}
-             {:type "response.created" :response {:status "in_progress"}}
-             {:type "response.in_progress" :response {:status "in_progress"}}
-             {:type "response.queued" :response {:status "queued"}}
-             {:type "provider.status" :status "running"}]))))
+            (map (fn [event] [(get event "type") (classify event)]))
+            [{"type" "ping"}
+             {"type" "heartbeat"}
+             {"type" "response.created" "response" {"status" "in_progress"}}
+             {"type" "response.in_progress" "response" {"status" "in_progress"}}
+             {"type" "response.queued" "response" {"status" "queued"}}
+             {"type" "provider.status" "status" "running"}]))))
     (it "still recognizes model output and terminal progress"
       (expect
         (= {"response.output_text.delta" true
@@ -914,12 +940,12 @@
             "response.completed" true
             "message_start" true}
           (into {}
-            (map (fn [event] [(:type event) (classify event)]))
-            [{:type "response.output_text.delta" :delta "x"}
-             {:type "response.reasoning_summary_text.delta" :delta "plan"}
-             {:type "response.output_item.added" :item {:type "reasoning" :summary []}}
-             {:type "response.completed" :response {:status "completed"}}
-             {:type "message_start"}]))))))
+            (map (fn [event] [(get event "type") (classify event)]))
+            [{"type" "response.output_text.delta" "delta" "x"}
+             {"type" "response.reasoning_summary_text.delta" "delta" "plan"}
+             {"type" "response.output_item.added" "item" {"type" "reasoning" "summary" []}}
+             {"type" "response.completed" "response" {"status" "completed"}}
+             {"type" "message_start"}]))))))
 
 (defdescribe empty-reply-anomaly-type-test
   "A blank reply (no tool call, no text) is only an ERROR when the finish reason

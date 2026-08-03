@@ -105,7 +105,7 @@
                      {#'llm/http-post!
                       (fn [url body headers _timeout-ms]
                         (reset! captured {:url url :body body :headers headers})
-                        {:parsed {:input_tokens 4242} :status 200})}
+                        {:parsed {"input_tokens" 4242} :status 200})}
                      (fn []
                        (anthropic-count-tokens msgs "claude-opus-4-8"
                          {:api-key "sk-ant-fake"
@@ -127,7 +127,7 @@
         (with-redefs-fn
           {#'llm/http-post!
            (fn [url _body _headers _t] (reset! captured url)
-             {:parsed {:input_tokens 1} :status 200})}
+             {:parsed {"input_tokens" 1} :status 200})}
           (fn []
             (anthropic-count-tokens msgs "claude-opus-4-8"
               {:api-key "k" :base-url "https://api.anthropic.com/v1/"})))
@@ -164,7 +164,7 @@
                  :base-url "https://api.anthropic.com/v1"})]
         (expect (fn? f))
         (expect (= 7 (with-redefs-fn
-                       {#'llm/http-post! (fn [_ _ _ _] {:parsed {:input_tokens 7} :status 200})}
+                       {#'llm/http-post! (fn [_ _ _ _] {:parsed {"input_tokens" 7} :status 200})}
                        (fn [] (f)))))))
 
     (it ":openai-compatible-chat → nil (proxied Claude has no count_tokens)"

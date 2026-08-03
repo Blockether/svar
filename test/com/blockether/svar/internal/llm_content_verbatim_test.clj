@@ -37,38 +37,38 @@
   (describe "sequential parts"
     (it "concatenates nested parts with no separator, preserving whitespace"
       (expect (= "def f():\n    return 1"
-                (content-part-text [{:type "text" :text "def f():"}
-                                    {:type "text" :text "\n    "}
-                                    {:type "text" :text "return 1"}]))))))
+                (content-part-text [{"type" "text" "text" "def f():"}
+                                    {"type" "text" "text" "\n    "}
+                                    {"type" "text" "text" "return 1"}]))))))
 
 (defdescribe content-blocks-text-test
   (it "concatenates message body parts verbatim (no injected newlines)"
     (expect (= "header_src = cat(\"x\")"
-              (content-blocks-text [{:type "text" :text "header_src = "}
-                                    {:type "text" :text "cat(\"x\")"}]))))
+              (content-blocks-text [{"type" "text" "text" "header_src = "}
+                                    {"type" "text" "text" "cat(\"x\")"}]))))
 
   (it "preserves whitespace-only parts between tokens"
     (expect (= "a = 1\n\nb = 2"
-              (content-blocks-text [{:type "text" :text "a = 1"}
-                                    {:type "text" :text "\n\n"}
-                                    {:type "text" :text "b = 2"}]))))
+              (content-blocks-text [{"type" "text" "text" "a = 1"}
+                                    {"type" "text" "text" "\n\n"}
+                                    {"type" "text" "text" "b = 2"}]))))
 
   (it "returns nil for an all-blank body"
-    (expect (nil? (content-blocks-text [{:type "text" :text "   "}
-                                        {:type "text" :text ""}])))))
+    (expect (nil? (content-blocks-text [{"type" "text" "text" "   "}
+                                        {"type" "text" "text" ""}])))))
 
 (defdescribe response-output-text-test
   (it "reassembles a message whose body is split across parts (response.completed path)"
     (expect (= "x = 1"
               (response-output-text
-                {:output [{:type "message"
-                           :content [{:type "output_text" :text "x = "}
-                                     {:type "output_text" :text "1"}]}]})))))
+                {"output" [{"type" "message"
+                            "content" [{"type" "output_text" "text" "x = "}
+                                       {"type" "output_text" "text" "1"}]}]})))))
 
 (defdescribe stream-delta-array-content-test
   (it "concatenates array-shaped chat delta content verbatim"
     (expect (= "foo = bar(baz)"
               (:content-delta
                (extract-stream-delta
-                 {:choices [{:delta {:content [{:type "text" :text "foo = "}
-                                               {:type "text" :text "bar(baz)"}]}}]}))))))
+                 {"choices" [{"delta" {"content" [{"type" "text" "text" "foo = "}
+                                                  {"type" "text" "text" "bar(baz)"}]}}]}))))))

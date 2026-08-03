@@ -121,9 +121,9 @@
    Returns nil for nil input."
   [usage]
   (when usage
-    (let [input-uncached (long-or-0 (:input_tokens usage))
-          cache-read     (long-or-0 (:cache_read_input_tokens usage))
-          cache-write    (long-or-0 (:cache_creation_input_tokens usage))]
+    (let [input-uncached (long-or-0 (get usage "input_tokens"))
+          cache-read     (long-or-0 (get usage "cache_read_input_tokens"))
+          cache-write    (long-or-0 (get usage "cache_creation_input_tokens"))]
       (build-canonical
         {:input-tokens  (long (+ (long input-uncached)
                                 (long cache-write)
@@ -131,7 +131,7 @@
          :regular       input-uncached
          :cache-write   cache-write
          :cache-read    cache-read
-         :output-tokens (:output_tokens usage)
+         :output-tokens (get usage "output_tokens")
          :raw           usage}))))
 
 (defn gemini-canonical
@@ -146,10 +146,10 @@
    Returns nil for nil input."
   [usage]
   (when usage
-    (let [prompt   (long-or-0 (:promptTokenCount usage))
-          cand     (long-or-0 (:candidatesTokenCount usage))
-          thoughts (long-or-0 (:thoughtsTokenCount usage))
-          cached   (long-or-0 (:cachedContentTokenCount usage))]
+    (let [prompt   (long-or-0 (get usage "promptTokenCount"))
+          cand     (long-or-0 (get usage "candidatesTokenCount"))
+          thoughts (long-or-0 (get usage "thoughtsTokenCount"))
+          cached   (long-or-0 (get usage "cachedContentTokenCount"))]
       (build-canonical
         {:input-tokens  prompt
          :cache-read    cached
@@ -173,23 +173,23 @@
    Returns nil for nil input."
   [usage]
   (when usage
-    (let [in-tot         (long-or-0 (or (:prompt_tokens usage)
-                                      (:input_tokens usage)))
-          out-tot        (long-or-0 (or (:completion_tokens usage)
-                                      (:output_tokens usage)))
-          details        (or (:prompt_tokens_details usage)
-                           (:input_tokens_details usage))
-          cache-read     (long-or-0 (:cached_tokens details))
+    (let [in-tot         (long-or-0 (or (get usage "prompt_tokens")
+                                      (get usage "input_tokens")))
+          out-tot        (long-or-0 (or (get usage "completion_tokens")
+                                      (get usage "output_tokens")))
+          details        (or (get usage "prompt_tokens_details")
+                           (get usage "input_tokens_details"))
+          cache-read     (long-or-0 (get details "cached_tokens"))
           ;; OpenRouter → Anthropic surfaces cache_creation_input_tokens
           ;; as a pydantic-extra. Standard OpenAI Chat / Responses does
           ;; not have a cache-write field (server-managed). 0 default
           ;; covers both.
-          cache-write    (long-or-0 (or (:cache_creation_tokens details)
-                                      (:cache_creation_input_tokens usage)
-                                      (:cache_write_tokens details)))
-          out-details    (or (:completion_tokens_details usage)
-                           (:output_tokens_details usage))
-          reasoning      (long-or-0 (:reasoning_tokens out-details))]
+          cache-write    (long-or-0 (or (get details "cache_creation_tokens")
+                                      (get usage "cache_creation_input_tokens")
+                                      (get details "cache_write_tokens")))
+          out-details    (or (get usage "completion_tokens_details")
+                           (get usage "output_tokens_details"))
+          reasoning      (long-or-0 (get out-details "reasoning_tokens"))]
       (build-canonical
         {:input-tokens  in-tot
          :cache-write   cache-write

@@ -194,48 +194,19 @@
       (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
     true))
 
-(def ^:private RAW_TOOL_ARG_KEYS
-  "Provider-response keys whose VALUE is MODEL-AUTHORED tool-call arguments:
-   anthropic `tool_use.input`, gemini `functionCall.args`, OpenAI
-   `function.arguments` / `function_call.arguments`.
-
-   Everything else in a provider body is svar's OWN schema — a fixed, small,
-   documented key set — so it is interned for ergonomic access. Tool arguments
-   are the opposite: an OPEN key space owned by the CALLER's tool, where
-   `\"from_anchor\"`, `\"a/b\"` and `\"1:aa\"` are data, not identifiers. Interning
-   them would hand the caller a second shape to check on every read, corrupt
-   anything that renders them back out (JSON, a Python literal, a dict lookup)
-   as `:kw`, and leak every model-invented key into the JVM's global keyword
-   table for the life of the process."
-  #{"input" "args" "arguments"})
-
-(defn- keywordize-response
-  "Interns the keys of a parsed provider response body — svar's own schema —
-   EXCEPT the tool-argument subtrees named by `RAW_TOOL_ARG_KEYS`, which are
-   passed on exactly as JSON delivered them: strings-only, at every depth.
-
-   This is why response bodies are read with `:key-fn identity` and interned
-   here instead: a tool argument is then never a keyword at ANY point, not even
-   for one intermediate step a later pass would have to undo — so `\"a/b\"`,
-   `\"1:aa\"` and `\"has space\"` reach the caller verbatim."
-  [x]
-  (cond
-    (map? x)    (persistent!
-                  (reduce (fn [acc [k v]]
-                            (assoc! acc (cond-> k (string? k) keyword)
-                              (if (contains? RAW_TOOL_ARG_KEYS k)
-                                v
-                                (keywordize-response v))))
-                    (transient {}) x))
-    (vector? x) (mapv keywordize-response x)
-    (seq? x)    (mapv keywordize-response x)
-    :else       x))
-
 (defn- http-post!
   "Makes an HTTP POST request with JSON body. Reuses the shared HttpClient.
 
    Returns an ENVELOPE map:
      {:parsed   <parsed JSON body or nil if parse failed>
+                A provider response is MODEL-AUTHORED JSON, so its keys stay
+                exactly the strings the wire delivered - svar interns nothing.
+                A key like a/b, 1 :aa or one with a space is DATA, not an
+                identifier: interning it would corrupt every render back out (JSON, a
+                Python literal, a dict lookup), hand callers a second shape to
+                check, and leak every model-invented key into the JVM keyword
+                table for the life of the process. Requests are the mirror
+                image: svar authors those, so they stay keyword maps.
       :raw-body <original response body string>
       :url      <request URL that was hit>
       :status   <HTTP status code, e.g. 200>}
@@ -260,7 +231,7 @@
                        (throw e))))
         _        (mark-connection-healthy! url)
         raw-body (:body response)
-        parsed   (try (keywordize-response (json/read-json raw-body :key-fn identity))
+        parsed   (try (json/read-json raw-body :key-fn identity)
                       (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
@@ -283,7 +254,10 @@
    are merged on top.
 
    Throws an `ex-info` with `:type :svar/http-error` on non-2xx so
-   callers can decide whether to fall back to a catalog default."
+   callers can decide whether to fall back to a catalog default.
+
+   The body is parsed with `:key-fn identity`: a response is DATA, and svar
+   never interns provider-chosen key names. Callers read it with `get`."
   ([url api-key]
    (http-get! url api-key {}))
   ([url api-key {:keys [api-style provider-id llm-headers query-params]
@@ -306,7 +280,7 @@
                  :url         url
                  :provider-id provider-id
                  :api-style   api-style})))
-     (json/read-json raw-body :key-fn keyword))))
+     (json/read-json raw-body :key-fn identity))))
 
 ;; =============================================================================
 ;; API-style dispatch (OpenAI vs Anthropic)
@@ -1225,15 +1199,15 @@
 
 (defn- decode-tool-arguments
   "Tool-call arguments reach svar either already parsed (anthropic
-   `tool_use.input`, gemini `functionCall.args` — carried through the envelope
-   parse UNINTERNED by `keywordize-response`) or as a JSON string (OpenAI chat
-   `function.arguments`, responses `function_call.arguments`). Both end up as
-   the SAME string-keyed map, at every depth, so `:input` is uniform across
+   `tool_use.input`, gemini `functionCall.args` — a response body is read with
+   `:key-fn identity`, so they arrive uninterned) or as a JSON string (OpenAI
+   chat `function.arguments`, responses `function_call.arguments`). Both end up
+   as the SAME string-keyed map, at every depth, so `:input` is uniform across
    every wire.
 
    There is no keyword→string repair pass here, deliberately: svar never
-   interns tool arguments in the first place (see `RAW_TOOL_ARG_KEYS`), so a
-   caller reads plain strings and nothing has to be un-done."
+   interns a provider response at all, so a caller reads plain strings and
+   nothing has to be un-done."
   [args]
   (cond
     (map? args)                           args
@@ -1525,7 +1499,7 @@
           url     (str (str/replace base-url #"/+$" "") "/messages/count_tokens")
           {:keys [parsed status]} (http-post! url body headers ANTHROPIC_COUNT_TOKENS_TIMEOUT_MS)]
       (when (= 200 (long (or status 0)))
-        (some-> (:input_tokens parsed) long)))
+        (some-> (get parsed "input_tokens") long)))
     (catch Exception e
       (trove/log! {:level :debug :id ::anthropic-count-tokens-failed
                    :data {:model model :error (ex-message e)}
@@ -1554,20 +1528,20 @@
    through unchanged so future Anthropic block types (tool_use,
    server_tool_use, ...) survive a round-trip."
   [block]
-  (case (:type block)
+  (case (get block "type")
     "text"
-    {:type "text" :text (or (:text block) "")}
+    {:type "text" :text (or (get block "text") "")}
 
     "thinking"
     {:type "thinking"
-     :thinking (or (:thinking block) "")
-     :thinking-signature (or (:signature block) "")
+     :thinking (or (get block "thinking") "")
+     :thinking-signature (or (get block "signature") "")
      :redacted? false}
 
     "redacted_thinking"
     {:type "thinking"
      :thinking ""
-     :thinking-signature (or (:data block) "")
+     :thinking-signature (or (get block "data") "")
      :redacted? true}
 
     ;; Streaming accumulates a tool_use block's args under :partial_json (the
@@ -1575,11 +1549,11 @@
     ;; Normalize both to a canonical `{:type tool_use :id :name :input}`.
     "tool_use"
     {:type "tool_use"
-     :id (:id block)
-     :name (:name block)
-     :input (let [pj (:partial_json block)]
+     :id (get block "id")
+     :name (get block "name")
+     :input (let [pj (get block "partial_json")]
               (decode-tool-arguments
-                (if (and (string? pj) (not (str/blank? pj))) pj (:input block))))}
+                (if (and (string? pj) (not (str/blank? pj))) pj (get block "input"))))}
 
     block))
 
@@ -1610,23 +1584,23 @@
    session active."
   [envelope]
   (let [response       (:parsed envelope)
-        content-blocks (:content response)
+        content-blocks (get response "content")
         text-parts     (->> content-blocks
-                         (filter #(= "text" (:type %)))
-                         (map :text))
+                         (filter #(= "text" (get % "type")))
+                         (map #(get % "text")))
         thinking-parts (->> content-blocks
-                         (filter #(= "thinking" (:type %)))
-                         (map :thinking))
-        usage          (:usage response)
+                         (filter #(= "thinking" (get % "type")))
+                         (map #(get % "thinking")))
+        usage          (get response "usage")
         visible        (when (seq text-parts) (str/join "\n" text-parts))
         ;; Native tool calls: `tool_use` blocks become canonical
         ;; `{:id :name :input}` — the anthropic wire delivers input as a parsed
-        ;; map, but the envelope parse keywordized its keys, so it still goes
-        ;; through `decode-tool-arguments` to come back strings-only.
+         ;; map whose keys are left exactly as the wire sent them, so it still
+         ;; goes through `decode-tool-arguments` for the JSON-string wires.
         tool-calls     (->> content-blocks
-                         (filter #(= "tool_use" (:type %)))
-                         (mapv (fn [b] {:id (:id b) :name (:name b)
-                                        :input (decode-tool-arguments (:input b))})))
+                         (filter #(= "tool_use" (get % "type")))
+                         (mapv (fn [b] {:id (get b "id") :name (get b "name")
+                                        :input (decode-tool-arguments (get b "input"))})))
         canonical-msg  (anthropic-canonical-assistant-message content-blocks)]
     (cond-> {:content       visible
              :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
@@ -1658,29 +1632,29 @@
   []
   (let [pending (atom {})] ;; index -> partial wire block map
     (fn [chunk]
-      (case (:type chunk)
+      (case (get chunk "type")
         "content_block_start"
-        (let [idx (:index chunk)
-              block (:content_block chunk)]
+        (let [idx   (get chunk "index")
+              block (get chunk "content_block")]
           (swap! pending assoc idx (or block {}))
           (cond-> {:content-delta nil :reasoning-delta nil :api-usage nil}
-            (= "tool_use" (:type block))
-            (assoc :tool-call-preview (select-keys block [:id :name]))))
+            (= "tool_use" (get block "type"))
+            (assoc :tool-call-preview {:id (get block "id") :name (get block "name")})))
 
         "content_block_delta"
-        (let [idx   (:index chunk)
-              delta (:delta chunk)]
-          (case (:type delta)
+        (let [idx   (get chunk "index")
+              delta (get chunk "delta")]
+          (case (get delta "type")
             "text_delta"
-            (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+            (do (swap! pending update-in [idx "text"] (fnil str "") (get delta "text"))
+                {:content-delta (get delta "text") :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
-            (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+            (do (swap! pending update-in [idx "thinking"] (fnil str "") (get delta "thinking"))
+                {:content-delta nil :reasoning-delta (get delta "thinking") :api-usage nil})
 
             "signature_delta"
-            (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
+            (do (swap! pending update-in [idx "signature"] (fnil str "") (get delta "signature"))
                 {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic emits input_json_delta for tool_use blocks (the
@@ -1691,14 +1665,14 @@
             ;; tool call's arguments being written live (the model's actual
             ;; work, not just its reasoning).
             "input_json_delta"
-            (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
+            (do (swap! pending update-in [idx "partial_json"] (fnil str "") (get delta "partial_json"))
                 {:content-delta nil :reasoning-delta nil :api-usage nil
-                 :tool-args-delta (:partial_json delta)})
+                 :tool-args-delta (get delta "partial_json")})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
         "content_block_stop"
-        (let [idx (:index chunk)
+        (let [idx        (get chunk "index")
               wire-block (get @pending idx)]
           (swap! pending dissoc idx)
           (if (seq wire-block)
@@ -1713,10 +1687,10 @@
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
         "message_delta"
-        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (:usage chunk))}
+        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (get chunk "usage"))}
 
         "message_start"
-        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (get-in chunk [:message :usage]))}
+        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (get-in chunk ["message" "usage"]))}
 
         "message_stop"
         {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
@@ -1801,16 +1775,16 @@
     part
 
     (map? part)
-    (let [type (:type part)]
+    (let [type (get part "type")]
       (cond
         (content-block-types type)
-        (some-> (or (:text part) (:delta part)) content-part-text)
+        (some-> (or (get part "text") (get part "delta")) content-part-text)
 
         (= "message" type)
-        (some-> (:content part) content-part-text)
+        (some-> (get part "content") content-part-text)
 
         (nil? type)
-        (some-> (:text part) content-part-text)
+        (some-> (get part "text") content-part-text)
 
         :else nil))
 
@@ -1826,21 +1800,21 @@
     (when-not (str/blank? part) part)
 
     (map? part)
-    (let [type (:type part)]
+    (let [type (get part "type")]
       (cond
         (reasoning-block-types type)
-        (or (some-> (:thinking part) reasoning-part-text)
-          (some-> (:summary part) reasoning-part-text)
-          (some-> (:content part) reasoning-part-text)
-          (some-> (or (:text part) (:delta part)) reasoning-part-text))
+        (or (some-> (get part "thinking") reasoning-part-text)
+          (some-> (get part "summary") reasoning-part-text)
+          (some-> (get part "content") reasoning-part-text)
+          (some-> (or (get part "text") (get part "delta")) reasoning-part-text))
 
         (= "message" type)
-        (some-> (:content part) reasoning-part-text)
+        (some-> (get part "content") reasoning-part-text)
 
         (nil? type)
-        (or (some-> (:thinking part) reasoning-part-text)
-          (some-> (:summary part) reasoning-part-text)
-          (some-> (or (:text part) (:delta part)) reasoning-part-text))
+        (or (some-> (get part "thinking") reasoning-part-text)
+          (some-> (get part "summary") reasoning-part-text)
+          (some-> (or (get part "text") (get part "delta")) reasoning-part-text))
 
         :else nil))
 
@@ -1876,52 +1850,52 @@
 
 (defn- reasoning-blocks-text [blocks]
   (let [s (->> blocks
-            (filter #(reasoning-block-types (:type %)))
+            (filter #(reasoning-block-types (get % "type")))
             (keep reasoning-part-text)
             (str/join "\n"))]
     (when-not (str/blank? s) (str/trimr s))))
 
 (defn- response-output-text [response]
-  (->> (:output response)
+  (->> (get response "output")
     (keep (fn [item]
-            (case (:type item)
-              "message"     (content-blocks-text (:content item))
+            (case (get item "type")
+              "message"     (content-blocks-text (get item "content"))
               "output_text" (content-part-text item)
               nil)))
     (remove str/blank?)
     (str/join "\n")))
 
 (defn- response-output-reasoning [response]
-  (->> (:output response)
+  (->> (get response "output")
     (keep (fn [item]
-            (case (:type item)
-              "reasoning" (or (some-> (:content item) reasoning-part-text)
-                            (some-> (:summary item) reasoning-part-text)
+            (case (get item "type")
+              "reasoning" (or (some-> (get item "content") reasoning-part-text)
+                            (some-> (get item "summary") reasoning-part-text)
                             (reasoning-part-text item))
-              "message"   (reasoning-blocks-text (:content item))
+              "message"   (reasoning-blocks-text (get item "content"))
               nil)))
     (remove str/blank?)
     (str/join "\n\n")))
 
 (defn- reasoning-item-state [item]
-  (when (= "reasoning" (:type item))
+  (when (= "reasoning" (get item "type"))
     (cond-> {:type "reasoning"
              :raw-item item}
-      (:id item) (assoc :id (:id item))
-      (:status item) (assoc :status (:status item))
-      (seq (:summary item)) (assoc :summary (:summary item))
-      (not (str/blank? (or (reasoning-part-text (:summary item)) "")))
-      (assoc :summary-text (reasoning-part-text (:summary item)))
-      (:content item) (assoc :content (:content item))
-      (not (str/blank? (or (reasoning-part-text (:content item)) "")))
-      (assoc :content-text (reasoning-part-text (:content item)))
-      (:encrypted_content item) (assoc :encrypted-content (:encrypted_content item)))))
+      (get item "id") (assoc :id (get item "id"))
+      (get item "status") (assoc :status (get item "status"))
+      (seq (get item "summary")) (assoc :summary (get item "summary"))
+      (not (str/blank? (or (reasoning-part-text (get item "summary")) "")))
+      (assoc :summary-text (reasoning-part-text (get item "summary")))
+      (get item "content") (assoc :content (get item "content"))
+      (not (str/blank? (or (reasoning-part-text (get item "content")) "")))
+      (assoc :content-text (reasoning-part-text (get item "content")))
+      (get item "encrypted_content") (assoc :encrypted-content (get item "encrypted_content")))))
 
 (defn- reasoning-item-state-key [item]
   (or (:id item)
     (:encrypted-content item)
-    (get-in item [:raw-item :id])
-    (get-in item [:raw-item :encrypted_content])
+    (get-in item [:raw-item "id"])
+    (get-in item [:raw-item "encrypted_content"])
     (:summary-text item)
     (:content-text item)
     (pr-str item)))
@@ -2010,7 +1984,7 @@
    event delivers the full output array with complete arguments."
   [response]
   (let [items (dedupe-reasoning-items
-                (keep reasoning-item-state (:output response)))
+                (keep reasoning-item-state (get response "output")))
         tool-calls (response-output-tool-calls response)]
     (when (or (seq items) (seq tool-calls))
       (cond-> {:provider :openai-responses}
@@ -2077,7 +2051,12 @@
    rejects longer or non-`rs_` reasoning ids with HTTP 400 even though it
    sometimes mints them. Invalid explicit ids make the item non-replayable.
    Tool-call ids are already clamped in `normalize-tool-ids`; this covers
-   the only other id-bearing input item, the reasoning item."
+   the only other id-bearing input item, the reasoning item.
+
+   This is the REQUEST side, not a response parse: the signature is a string
+   svar itself wrote, and the decoded item joins the keyword-keyed `:input`
+   vector that `json/write-json-str` re-encodes. Hence `:key-fn keyword` here
+   - a provider RESPONSE is never interned (see `http-post!`/`http-get!`)."
   [{:keys [thinking thinking-signature]}]
   (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
                    (try (json/read-json thinking-signature :key-fn keyword)
@@ -2134,11 +2113,11 @@
 (defn- openai-chat-tool-calls
   "Canonical tool calls from an OpenAI chat-completions `message.tool_calls`."
   [message]
-  (->> (:tool_calls message)
+  (->> (get message "tool_calls")
     (keep (fn [tc]
-            (let [f (:function tc)]
-              (when (:name f)
-                {:id (:id tc) :name (:name f) :input (decode-tool-arguments (:arguments f))}))))
+            (let [f (get tc "function")]
+              (when (get f "name")
+                {:id (get tc "id") :name (get f "name") :input (decode-tool-arguments (get f "arguments"))}))))
     vec))
 
 (defn- responses-tool-call-id
@@ -2149,28 +2128,28 @@
    re-emit `responses-message-input-entries` splits this back into the two wire
    fields. Mirrors pi-ai (`${item.call_id}|${item.id}`)."
   [item]
-  (let [c (:call_id item) i (:id item)]
+  (let [c (get item "call_id") i (get item "id")]
     (if (and c i) (str c "|" i) (or c i))))
 
 (defn- response-output-tool-calls
   "Canonical tool calls from an OpenAI Responses `:output` `function_call` items."
   [response]
-  (->> (:output response)
+  (->> (get response "output")
     (keep (fn [item]
-            (when (= "function_call" (:type item))
+            (when (= "function_call" (get item "type"))
               {:id (responses-tool-call-id item)
-               :name (:name item)
-               :input (decode-tool-arguments (:arguments item))})))
+               :name (get item "name")
+               :input (decode-tool-arguments (get item "arguments"))})))
     vec))
 
 (defn- function-call-item->tool-call
   "Canonical tool call from one OpenAI Responses `function_call` output item
    (as delivered complete on `response.output_item.done`)."
   [item]
-  (when (= "function_call" (:type item))
+  (when (= "function_call" (get item "type"))
     {:id (responses-tool-call-id item)
-     :name (:name item)
-     :input (decode-tool-arguments (:arguments item))}))
+     :name (get item "name")
+     :input (decode-tool-arguments (get item "arguments"))}))
 
 (defn- dedupe-tool-calls
   "Dedupe canonical tool calls by `:id`, preserving first-seen order. Guards
@@ -2189,12 +2168,14 @@
    first fragment, `:arguments` as a string concatenated across fragments."
   [fragments]
   (->> fragments
-    (reduce (fn [acc {:keys [index id] f :function}]
-              (let [idx (or index 0)]
+    (reduce (fn [acc fragment]
+              (let [id  (get fragment "id")
+                    f   (get fragment "function")
+                    idx (or (get fragment "index") 0)]
                 (cond-> acc
-                  id            (assoc-in [idx :id] id)
-                  (:name f)     (assoc-in [idx :name] (:name f))
-                  true          (update-in [idx :arguments] (fnil str "") (or (:arguments f) "")))))
+                  id             (assoc-in [idx :id] id)
+                  (get f "name") (assoc-in [idx :name] (get f "name"))
+                  true           (update-in [idx :arguments] (fnil str "") (or (get f "arguments") "")))))
       (sorted-map))
     (mapv (fn [[_ {:keys [id name arguments]}]]
             {:id id :name name :input (decode-tool-arguments arguments)}))))
@@ -2233,16 +2214,16 @@
    active."
   [envelope]
   (let [response           (:parsed envelope)
-        message            (get-in response [:choices 0 :message])
-        raw-content        (:content message)
-        message-reasoning-content (:reasoning_content message)
+        message            (get-in response ["choices" 0 "message"])
+        raw-content        (get message "content")
+        message-reasoning-content (get message "reasoning_content")
         raw-reasoning      (or message-reasoning-content
-                             (:reasoning message)
-                             (:reasoning_text message)
-                             (:reasoning_summary message)
-                             (:reasoning response)
-                             (:reasoning_text response)
-                             (:reasoning_summary response))
+                             (get message "reasoning")
+                             (get message "reasoning_text")
+                             (get message "reasoning_summary")
+                             (get response "reasoning")
+                             (get response "reasoning_text")
+                             (get response "reasoning_summary"))
         block-content      (when (sequential? raw-content)
                              (content-blocks-text raw-content))
         block-reasoning    (when (sequential? raw-content)
@@ -2284,7 +2265,7 @@
     (cond-> {:content        content
              :reasoning      reasoning
              :provider-state provider-state
-             :api-usage      (normalize-openai-usage (get-in response [:usage]))
+             :api-usage      (normalize-openai-usage (get response "usage"))
              :http-response  envelope}
       (seq tool-calls) (assoc :tool-calls tool-calls)
       canonical-msg (assoc :assistant-message canonical-msg))))
@@ -2522,10 +2503,20 @@
        (= :none tool-choice)     {:mode "NONE"}
        :else                     {:mode "AUTO"})}))
 
-(defn- gemini-part-text [part]
+(defn- gemini-part-text
+  "Text of one CANONICAL (request-side) part: svar-authored, keyword-keyed."
+  [part]
   (cond (string? part)          part
         (string? (:text part))  (:text part)
         :else                   nil))
+
+(defn- gemini-wire-part-text
+  "Text of one Gemini RESPONSE part. A response is model-authored JSON, so its
+   keys stay the strings the wire delivered - svar never interns them."
+  [part]
+  (cond (string? part)                  part
+        (string? (get part "text"))     (get part "text")
+        :else                           nil))
 
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
@@ -2590,7 +2581,7 @@
       (seq base-extra)     (merge base-extra))))
 
 (defn- gemini-candidate-parts [response]
-  (get-in response [:candidates 0 :content :parts]))
+  (get-in response ["candidates" 0 "content" "parts"]))
 
 (defn- gemini-tool-calls
   "Canonical tool calls from Gemini `functionCall` parts. Gemini emits no
@@ -2599,14 +2590,14 @@
   [parts]
   (->> parts
     (keep-indexed (fn [idx p]
-                    (when-let [fc (:functionCall p)]
-                      {:id (str "gemini-" (:name fc) "-" idx)
-                       :name (:name fc)
-                       :input (decode-tool-arguments (:args fc))})))
+                    (when-let [fc (get p "functionCall")]
+                      {:id (str "gemini-" (get fc "name") "-" idx)
+                       :name (get fc "name")
+                       :input (decode-tool-arguments (get fc "args"))})))
     vec))
 
 (defn- gemini-visible-text [parts]
-  (->> parts (remove :functionCall) (remove :thought) (keep gemini-part-text)
+  (->> parts (remove #(get % "functionCall")) (remove #(get % "thought")) (keep gemini-wire-part-text)
     (remove str/blank?) (str/join "")))
 
 (defn- gemini-canonical-assistant-message [parts tool-calls]
@@ -2618,12 +2609,12 @@
   (let [response   (:parsed envelope)
         parts      (gemini-candidate-parts response)
         text       (gemini-visible-text parts)
-        thoughts   (->> parts (filter :thought) (keep gemini-part-text) (remove str/blank?) (str/join "\n"))
+        thoughts   (->> parts (filter #(get % "thought")) (keep gemini-wire-part-text) (remove str/blank?) (str/join "\n"))
         tool-calls (gemini-tool-calls parts)
         canonical-msg (gemini-canonical-assistant-message parts tool-calls)]
     (cond-> {:content       (when-not (str/blank? text) text)
              :reasoning     (when-not (str/blank? thoughts) thoughts)
-             :api-usage     (usage/gemini-canonical (:usageMetadata response))
+             :api-usage     (usage/gemini-canonical (get response "usageMetadata"))
              :http-response envelope}
       (seq tool-calls) (assoc :tool-calls tool-calls)
       canonical-msg    (assoc :assistant-message canonical-msg))))
@@ -3086,7 +3077,9 @@
 (def ^:private sse-done ::sse-done)
 
 (defn- parse-sse-data
-  "Parses an SSE data payload. Returns parsed JSON map, `sse-done`, or nil."
+  "Parses an SSE data payload. Returns parsed JSON map, `sse-done`, or nil.
+   Keys stay the wire's strings - see `http-post!` for why svar never interns
+   a provider response."
   [^String data-str]
   (let [trimmed (str/trim data-str)]
     (cond
@@ -3094,7 +3087,7 @@
       (str/blank? trimmed) nil
       :else
       (try
-        (keywordize-response (json/read-json trimmed :key-fn identity))
+        (json/read-json trimmed :key-fn identity)
         (catch Exception _ nil)))))
 
 (defn- sse-field-line
@@ -3120,27 +3113,27 @@
         (= sse-done parsed) sse-done
         (and (map? parsed) (seq event-type))
         (cond-> (assoc parsed :sse-event-type event-type)
-          (nil? (:type parsed)) (assoc :type event-type))
+          (nil? (get parsed "type")) (assoc "type" event-type))
         :else parsed))))
 
 (defn- stream-event-type
   [chunk]
-  (or (:type chunk)
-    (:object chunk)))
+  (or (get chunk "type")
+    (get chunk "object")))
 
 (defn- stream-finish-reason
   [chunk]
-  (or (:finish_reason chunk)
-    (:finish-reason chunk)
-    (get-in chunk [:choices 0 :finish_reason])
-    (get-in chunk [:choices 0 :finish-reason])
+  (or (get chunk "finish_reason")
+    (get chunk "finish-reason")
+    (get-in chunk ["choices" 0 "finish_reason"])
+    (get-in chunk ["choices" 0 "finish-reason"])
     ;; Anthropic message_delta: {:delta {:stop_reason "end_turn"|"max_tokens"|…}}.
     ;; Without it every Anthropic stream finalized with finish-reason nil —
     ;; a max_tokens truncation was indistinguishable from a clean end_turn
     ;; when diagnosing empty-content responses (vis session 372994ce).
-    (get-in chunk [:delta :stop_reason])
-    (get-in chunk [:response :status])
-    (:status chunk)))
+    (get-in chunk ["delta" "stop_reason"])
+    (get-in chunk ["response" "status"])
+    (get chunk "status")))
 
 (def ^:private nonterminal-stream-statuses
   #{"in_progress" "queued" "running"})
@@ -3183,13 +3176,13 @@
   (let [event-type (stream-event-type parsed)
         failed?    (or (= "response.failed" event-type)
                      (= "error" event-type)
-                     (= "failed" (get-in parsed [:response :status])))]
+                     (= "failed" (get-in parsed ["response" "status"])))]
     (when failed?
-      (let [err (or (get-in parsed [:response :error])
-                  (:error parsed)
+      (let [err (or (get-in parsed ["response" "error"])
+                  (get parsed "error")
                   (when (= "error" event-type) parsed))]
-        {:code (some-> (or (:code err) (:type err)) str)
-         :message (or (:message err) "provider reported stream failure")
+        {:code (some-> (or (get err "code") (get err "type")) str)
+         :message (or (get err "message") "provider reported stream failure")
          :event-type event-type}))))
 
 (def ^:private stream-failed-code->status
@@ -3237,24 +3230,24 @@
 (defn- extract-stream-delta
   "Extracts content and reasoning deltas from a streaming SSE chunk."
   [chunk]
-  (if-let [event-type (:type chunk)]
+  (if-let [event-type (get chunk "type")]
     (cond
       (= "response.output_text.delta" event-type)
       ;; Preserve exact stream deltas. A whitespace-only delta can be
       ;; semantically required source, e.g. `:max-lines` + ` ` + `260`.
       ;; Generic text extractors drop blank strings; streaming must not.
-      {:content-delta (:delta chunk)
+      {:content-delta (get chunk "delta")
        :reasoning-delta nil
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (:usage chunk))}
+       :api-usage (normalize-openai-usage (get chunk "usage"))}
 
       (= "response.output_text.done" event-type)
       {:content-delta nil
        :reasoning-delta nil
-       :content-fallback (some-> (:text chunk) content-part-text)
+       :content-fallback (some-> (get chunk "text") content-part-text)
        :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (:usage chunk))}
+       :api-usage (normalize-openai-usage (get chunk "usage"))}
 
       ;; Tool-call arguments stream as their own delta event (the function
       ;; arguments, e.g. run_python's `{"code": …}`, arrive piecewise). Surface
@@ -3266,15 +3259,15 @@
        :reasoning-delta nil
        :content-fallback nil
        :reasoning-fallback nil
-       :tool-args-delta (:delta chunk)
-       :api-usage (normalize-openai-usage (:usage chunk))}
+       :tool-args-delta (get chunk "delta")
+       :api-usage (normalize-openai-usage (get chunk "usage"))}
 
       (= "response.reasoning_summary_part.added" event-type)
       {:content-delta nil
        :reasoning-delta (when (:svar/reasoning-summary-part-boundary? chunk) "\n\n")
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (:usage chunk))}
+       :api-usage (normalize-openai-usage (get chunk "usage"))}
 
       (contains? #{"response.reasoning.delta"
                    "response.reasoning.done"
@@ -3287,20 +3280,20 @@
         event-type)
       {:content-delta nil
        :reasoning-delta (when (str/includes? event-type ".delta")
-                          (some-> (:delta chunk) streaming-reasoning-delta-text))
+                          (some-> (get chunk "delta") streaming-reasoning-delta-text))
        :content-fallback nil
        :reasoning-fallback (when (str/includes? event-type ".done")
-                             (some-> (:text chunk) reasoning-part-text))
-       :api-usage (normalize-openai-usage (:usage chunk))}
+                             (some-> (get chunk "text") reasoning-part-text))
+       :api-usage (normalize-openai-usage (get chunk "usage"))}
 
       (contains? #{"response.output_item.added" "response.output_item.done"}
         event-type)
-      (let [item (:item chunk)
+      (let [item (get chunk "item")
             done? (= "response.output_item.done" event-type)
-            function-call? (= "function_call" (:type item))
+            function-call? (= "function_call" (get item "type"))
             tool-call-preview (when function-call?
-                                {:id (or (:call_id item) (:id item))
-                                 :name (:name item)})
+                                {:id (or (get item "call_id") (get item "id"))
+                                 :name (get item "name")})
             ;; A completed `function_call` item carries its full arguments
             ;; here — codex with `store:false` does NOT echo it on
             ;; `response.completed`, so this is the only place to catch it.
@@ -3308,7 +3301,7 @@
         {:content-delta nil
          :reasoning-delta nil
          :content-fallback nil
-         :reasoning-fallback (when (and (= "reasoning" (:type item)) done?)
+         :reasoning-fallback (when (and (= "reasoning" (get item "type")) done?)
                                (reasoning-part-text item))
          ;; `output_item.added` identifies the native call before argument
          ;; deltas arrive. Preserve that identity separately from reasoning/text.
@@ -3316,40 +3309,40 @@
          :provider-state (cond
                            tool-call {:provider :openai-responses :tool-calls [tool-call]}
                            done?     (reasoning-item-provider-state item))
-         :api-usage (normalize-openai-usage (:usage chunk))})
+         :api-usage (normalize-openai-usage (get chunk "usage"))})
 
       (contains? #{"response.completed" "response.done" "response.incomplete"}
         event-type)
-      (let [response (:response chunk)]
+      (let [response (get chunk "response")]
         {:content-delta nil
          :reasoning-delta nil
          :content-fallback (response-output-text response)
          :reasoning-fallback (response-output-reasoning response)
          :provider-state (openai-responses-state response)
-         :api-usage (normalize-openai-usage (or (:usage response) (:usage chunk)))
+         :api-usage (normalize-openai-usage (or (get response "usage") (get chunk "usage")))
          :terminal? true
          :incomplete? (= "response.incomplete" event-type)
-         :incomplete-reason (or (get-in response [:incomplete_details :reason])
-                              (get-in response [:incomplete-details :reason]))})
+         :incomplete-reason (or (get-in response ["incomplete_details" "reason"])
+                              (get-in response ["incomplete-details" "reason"]))})
 
       :else
       {:content-delta nil
        :reasoning-delta nil
        :content-fallback nil
        :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (:usage chunk))})
-    (let [delta       (get-in chunk [:choices 0 :delta])
-          raw-content (:content delta)
-          reasoning   (or (:reasoning_content delta)
-                        (:reasoning delta)
-                        (:reasoning_text delta)
-                        (:reasoning_summary delta))
-          tool-frags  (:tool_calls delta)
+       :api-usage (normalize-openai-usage (get chunk "usage"))})
+    (let [delta       (get-in chunk ["choices" 0 "delta"])
+          raw-content (get delta "content")
+          reasoning   (or (get delta "reasoning_content")
+                        (get delta "reasoning")
+                        (get delta "reasoning_text")
+                        (get delta "reasoning_summary"))
+          tool-frags  (get delta "tool_calls")
           first-tool-frag (first tool-frags)
-          tool-name (get-in first-tool-frag [:function :name])
+          tool-name (get-in first-tool-frag ["function" "name"])
           tool-call-preview (not-empty
                               (cond-> {}
-                                (:id first-tool-frag) (assoc :id (:id first-tool-frag))
+                                (get first-tool-frag "id") (assoc :id (get first-tool-frag "id"))
                                 tool-name (assoc :name tool-name)))]
       {:content-delta (cond
                         ;; Preserve exact string deltas, including a
@@ -3372,30 +3365,30 @@
        ;; live-code affordance the anthropic input_json_delta path gives).
        :tool-args-delta (when (seq tool-frags)
                           (not-empty
-                            (str/join (keep #(get-in % [:function :arguments]) tool-frags))))
-       :api-usage (normalize-openai-usage (:usage chunk))})))
+                            (str/join (keep #(get-in % ["function" "arguments"]) tool-frags))))
+       :api-usage (normalize-openai-usage (get chunk "usage"))})))
 
 (defn- append-summary-text-to-last-part [item delta]
-  (let [summary (vec (or (:summary item) []))
+  (let [summary (vec (or (get item "summary") []))
         idx (dec (count summary))]
     (if (neg? idx)
-      (assoc item :summary [{:type "summary_text" :text (or delta "")}])
-      (assoc item :summary
-        (update summary idx update :text str (or delta ""))))))
+      (assoc item "summary" [{"type" "summary_text" "text" (or delta "")}])
+      (assoc item "summary"
+        (update summary idx update "text" str (or delta ""))))))
 
 (defn- apply-reasoning-summary-part-done [item part]
   (if part
-    (let [summary (vec (or (:summary item) []))]
+    (let [summary (vec (or (get item "summary") []))]
       (if (seq summary)
-        (assoc item :summary (assoc summary (dec (count summary)) part))
-        (assoc item :summary [part])))
+        (assoc item "summary" (assoc summary (dec (count summary)) part))
+        (assoc item "summary" [part])))
     (append-summary-text-to-last-part item "\n\n")))
 
 (defn- enrich-responses-reasoning-event [current-reasoning-item event]
-  (case (:type event)
+  (case (get event "type")
     "response.output_item.added"
-    (let [item (:item event)]
-      (when (= "reasoning" (:type item))
+    (let [item (get event "item")]
+      (when (= "reasoning" (get item "type"))
         ;; Carry the cross-ITEM summary boundary: when a PRIOR reasoning item
         ;; already produced summary text, the FIRST summary part of this new
         ;; item still needs its "\n\n" separator - without it two items' bold
@@ -3403,36 +3396,36 @@
         (reset! current-reasoning-item
           (cond-> item
             (or (:svar/prior-summary? @current-reasoning-item)
-              (seq (:summary @current-reasoning-item)))
+              (seq (get @current-reasoning-item "summary")))
             (assoc :svar/prior-summary? true))))
       event)
 
     "response.reasoning_summary_part.added"
-    (let [boundary? (or (seq (:summary @current-reasoning-item))
+    (let [boundary? (or (seq (get @current-reasoning-item "summary"))
                       (:svar/prior-summary? @current-reasoning-item))]
-      (swap! current-reasoning-item update :summary (fnil conj []) (:part event))
+      (swap! current-reasoning-item update "summary" (fnil conj []) (get event "part"))
       (cond-> event
         boundary? (assoc :svar/reasoning-summary-part-boundary? true)))
 
     "response.reasoning_summary_text.delta"
     (do
-      (swap! current-reasoning-item append-summary-text-to-last-part (:delta event))
+      (swap! current-reasoning-item append-summary-text-to-last-part (get event "delta"))
       event)
 
     "response.reasoning_summary_part.done"
     (do
-      (swap! current-reasoning-item apply-reasoning-summary-part-done (:part event))
+      (swap! current-reasoning-item apply-reasoning-summary-part-done (get event "part"))
       event)
 
     "response.output_item.done"
-    (let [item (:item event)]
-      (if (= "reasoning" (:type item))
+    (let [item (get event "item")]
+      (if (= "reasoning" (get item "type"))
         (let [merged (merge (dissoc @current-reasoning-item :svar/prior-summary?) item)]
           ;; Keep ONLY the boundary flag alive across the item gap so the next
           ;; reasoning item's first summary part still gets its separator.
           (reset! current-reasoning-item
-            (when (seq (:summary merged)) {:svar/prior-summary? true}))
-          (assoc event :item merged))
+            (when (seq (get merged "summary")) {:svar/prior-summary? true}))
+          (assoc event "item" merged))
         event))
 
     event))
@@ -6013,16 +6006,19 @@
 
 (defn- enrich-lmstudio-model
   "Map LM Studio native `/api/v0/models` fields onto svar model keys.
-   Prefers `loaded_context_length` (the window the runtime ACTUALLY loaded —
+   Prefers `loaded_context_length` (the window the runtime ACTUALLY loaded -
    LM Studio can load a 262k model at 16k to fit RAM, and advertising the max
    would make the server truncate) over `max_context_length`. Surfaces
-   `tool_use` capability and load state. Non-native shapes pass through."
+   `tool_use` capability and load state. Non-native shapes pass through.
+
+   `m` is a RAW wire entry: provider-chosen keys stay strings and are read
+   with `get`. Only svar's own model keys are keywords."
   [m]
-  (let [ctx (or (:loaded_context_length m) (:max_context_length m))]
+  (let [ctx (or (get m "loaded_context_length") (get m "max_context_length"))]
     (cond-> m
-      ctx                              (assoc :context (long ctx))
-      (some #{"tool_use"} (:capabilities m)) (assoc :tool-call? true)
-      (some? (:state m))               (assoc :loaded? (= "loaded" (:state m))))))
+      ctx (assoc :context (long ctx))
+      (some #{"tool_use"} (get m "capabilities")) (assoc :tool-call? true)
+      (some? (get m "state")) (assoc :loaded? (= "loaded" (get m "state"))))))
 
 (def ^:private GATEWAY_CAPABILITY_KEYS
   "LiteLLM `model_info` capability flags -> svar model keys.
@@ -6030,14 +6026,15 @@
    An OpenAI-compatible gateway (LiteLLM in particular) already publishes
    everything svar needs to drive a model it has never seen: context window,
    output cap, tool support, vision, reasoning. Reading it means a user config
-   needs nothing but base-url + api-key + model name."
-  {:supports_function_calling          :tool-call?
-   :supports_tool_choice               :tool-choice?
-   :supports_parallel_function_calling :parallel-tool-calls?
-   :supports_vision                    :vision?
-   :supports_reasoning                 :reasoning?
-   :supports_response_schema           :structured-output?
-   :supports_prompt_caching            :prompt-caching?})
+   needs nothing but base-url + api-key + model name. The wire flags are
+   strings because a `/models` body is never interned."
+  {"supports_function_calling"          :tool-call?
+   "supports_tool_choice"               :tool-choice?
+   "supports_parallel_function_calling" :parallel-tool-calls?
+   "supports_vision"                    :vision?
+   "supports_reasoning"                 :reasoning?
+   "supports_response_schema"           :structured-output?
+   "supports_prompt_caching"            :prompt-caching?})
 
 (defn- enrich-gateway-model
   "Map an OpenAI-compatible gateway's model entry onto svar model keys.
@@ -6045,13 +6042,14 @@
    Reads LiteLLM's `model_info` block (or the same keys inline) for the window,
    the output cap and the capability flags. Absent fields stay ABSENT: svar
    never invents a capability, and an explicit key already on the model (e.g.
-   set by `enrich-lmstudio-model`) always wins."
+   set by `enrich-lmstudio-model`) always wins. Wire fields are read as
+   strings; svar's derived keys are the only keywords."
   [m]
   (if-not (map? m)
     m
-    (let [info (merge m (when (map? (:model_info m)) (:model_info m)))
-          ctx  (or (:max_input_tokens info) (:context_window info))
-          out  (or (:max_output_tokens info) (:max_tokens info))
+    (let [info (merge m (when (map? (get m "model_info")) (get m "model_info")))
+          ctx  (or (get info "max_input_tokens") (get info "context_window"))
+          out  (or (get info "max_output_tokens") (get info "max_tokens"))
           caps (reduce-kv (fn [acc wire-k svar-k]
                             (if (contains? info wire-k)
                               (assoc acc svar-k (boolean (get info wire-k)))
@@ -6065,8 +6063,8 @@
           (and (not (:max-output-tokens m)) (number? out))
           (assoc :max-output-tokens (long out))
 
-          (string? (:litellm_provider info))
-          (assoc :upstream-provider (:litellm_provider info)))))))
+          (string? (get info "litellm_provider"))
+          (assoc :upstream-provider (get info "litellm_provider")))))))
 
 (defn- shape-models
   "Apply provider-specific model normalization keyed by `:models-shape`, then the
@@ -6077,31 +6075,46 @@
       :lmstudio (mapv enrich-lmstudio-model models)
       models)))
 
+(defn- wire-model->svar
+  "Lifts a raw `/models` entry's identity fields onto svar's model keys.
+
+   The body is provider JSON, so its keys stay verbatim strings - a chatty or
+   hostile gateway can never grow this process's keyword table. `:id` and
+   `:name` ARE svar's public model-map contract, so they are assoc'd from
+   whichever wire field carries them (`id` or Codex's `slug`; `name` or
+   `display_name`), leaving the original entry intact underneath."
+  [m]
+  (if-not (map? m)
+    m
+    (let [id    (or (get m "id") (get m "slug"))
+          title (or (get m "name") (get m "display_name"))]
+      (cond-> m
+        (string? id)    (assoc :id id)
+        (string? title) (assoc :name title)))))
+
 (defn- normalize-models-response
   "Normalize a `/models` response body to a vector of model maps with
    at least `{:id ...}`.
 
    Recognized shapes:
-     - OpenAI/Anthropic standard:  `{:data [{:id ... :name ...} ...]}`
-     - ChatGPT backend (Codex):    `{:models [{:slug ... :display_name ...} ...]}`
-     - Plain vector:               `[{:id ...} ...]`
+     - OpenAI/Anthropic standard:  `{\"data\" [{\"id\" ... \"name\" ...} ...]}`
+     - ChatGPT backend (Codex):    `{\"models\" [{\"slug\" ... \"display_name\" ...} ...]}`
+     - Plain vector:               `[{\"id\" ...} ...]`
 
    Codex `slug` maps to `:id` so downstream `provider-model-id` works
-   without special-casing. The original keys are preserved."
+   without special-casing. The original wire keys are preserved as strings."
   [body]
-  (cond
-    (sequential? body) (vec body)
+  (mapv wire-model->svar
+    (cond
+      (sequential? body) (vec body)
 
-    (and (map? body) (sequential? (:data body)))
-    (vec (:data body))
+      (and (map? body) (sequential? (get body "data")))
+      (vec (get body "data"))
 
-    (and (map? body) (sequential? (:models body)))
-    (->> (:models body)
-      (mapv (fn [m]
-              (cond-> m
-                (and (not (:id m)) (:slug m)) (assoc :id (:slug m))))))
+      (and (map? body) (sequential? (get body "models")))
+      (vec (get body "models"))
 
-    :else []))
+      :else [])))
 
 (def ^:private MODELS_CACHE_TTL_MS
   "How long a successful `/models` catalog is reused before re-fetching. The

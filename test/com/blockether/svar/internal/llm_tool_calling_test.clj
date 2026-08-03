@@ -26,14 +26,14 @@
 (def ^:private extract-gemini    @#'sut/extract-gemini-response-data)
 (def ^:private gemini-tool-config @#'sut/gemini-tool-config)
 
-(def ^:private keywordize-response @#'sut/keywordize-response)
 (def ^:private parse-sse-data      @#'sut/parse-sse-data)
 
 (defn- parse-body
   "One RAW provider body through svar's real response parse — the only honest
-   way to assert what a caller actually receives."
+   way to assert what a caller actually receives. svar never interns provider
+   keys, so this is exactly what `http-post!` hands back."
   [s]
-  (keywordize-response (json/read-json s :key-fn identity)))
+  (json/read-json s :key-fn identity))
 
 (def ^:private run-python
   {:name "run_python"
@@ -220,13 +220,13 @@
 
 (defdescribe anthropic-tool-call-extraction-test
   (it "extracts tool_use blocks as canonical :tool-calls and keeps them on assistant-message"
-    (let [envelope {:parsed {:content [{:type "text" :text "let me run that"}
-                                       {:type "tool_use" :id "toolu_1"
-                                        :name "run_python"
+    (let [envelope {:parsed {"content" [{"type" "text" "text" "let me run that"}
+                                        {"type" "tool_use" "id" "toolu_1"
+                                         "name" "run_python"
                                         ;; the envelope parse interns svar's OWN
                                         ;; schema and NEVER tool arguments
-                                        :input {"code" "rg(\"x\")"}}]
-                             :usage {:input_tokens 10 :output_tokens 5}}}
+                                         "input" {"code" "rg(\"x\")"}}]
+                             "usage" {"input_tokens" 10 "output_tokens" 5}}}
           out (extract-anthropic envelope)]
       (expect (= "let me run that" (:content out)))
       (expect (= [{:id "toolu_1" :name "run_python" :input {"code" "rg(\"x\")"}}]
@@ -236,34 +236,34 @@
         (expect (some #(= "tool_use" (:type %)) blocks)))))
 
   (it "no tool_use => no :tool-calls key (plain answer)"
-    (let [out (extract-anthropic {:parsed {:content [{:type "text" :text "the answer"}]
-                                           :usage {:input_tokens 3 :output_tokens 2}}})]
+    (let [out (extract-anthropic {:parsed {"content" [{"type" "text" "text" "the answer"}]
+                                           "usage" {"input_tokens" 3 "output_tokens" 2}}})]
       (expect (not (contains? out :tool-calls)))
       (expect (= "the answer" (:content out))))))
 
 (defdescribe chat-tool-call-extraction-test
   (it "extracts message.tool_calls (JSON-string args decoded) + carries tool_use on assistant-message"
-    (let [envelope {:parsed {:choices [{:message {:content nil
-                                                  :tool_calls [{:id "call_1" :type "function"
-                                                                :function {:name "run_python"
-                                                                           :arguments "{\"code\":\"print(1)\"}"}}]}}]
-                             :usage {:prompt_tokens 9 :completion_tokens 4}}}
+    (let [envelope {:parsed {"choices" [{"message" {"content" nil
+                                                    "tool_calls" [{"id" "call_1" "type" "function"
+                                                                   "function" {"name" "run_python"
+                                                                               "arguments" "{\"code\":\"print(1)\"}"}}]}}]
+                             "usage" {"prompt_tokens" 9 "completion_tokens" 4}}}
           out (extract-openai envelope)]
       (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(1)"}}]
                 (:tool-calls out)))
       (expect (some #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))))
 
   (it "plain chat answer => no :tool-calls"
-    (let [out (extract-openai {:parsed {:choices [{:message {:content "hello"}}]
-                                        :usage {:prompt_tokens 1 :completion_tokens 1}}})]
+    (let [out (extract-openai {:parsed {"choices" [{"message" {"content" "hello"}}]
+                                        "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
       (expect (not (contains? out :tool-calls)))
       (expect (= "hello" (:content out))))))
 
 (defdescribe responses-tool-call-extraction-test
   (it "extracts function_call items from :output and decodes arguments"
-    (let [envelope {:parsed {:output [{:type "function_call" :call_id "fc_1"
-                                       :name "run_python" :arguments "{\"code\":\"print(2)\"}"}]
-                             :usage {:input_tokens 7 :output_tokens 3}}}
+    (let [envelope {:parsed {"output" [{"type" "function_call" "call_id" "fc_1"
+                                        "name" "run_python" "arguments" "{\"code\":\"print(2)\"}"}]
+                             "usage" {"input_tokens" 7 "output_tokens" 3}}}
           out (extract-openai envelope)]
       (expect (= [{:id "fc_1" :name "run_python" :input {"code" "print(2)"}}]
                 (:tool-calls out))))))
@@ -328,22 +328,22 @@
 
 (defdescribe chat-streaming-fragment-assembly-test
   (it "reassembles delta.tool_calls fragments (id/name first, args concatenated) by index"
-    (let [frags [{:index 0 :id "call_1" :type "function" :function {:name "run_python" :arguments "{\"co"}}
-                 {:index 0 :function {:arguments "de\":\"print(1)\"}"}}]
+    (let [frags [{"index" 0 "id" "call_1" "type" "function" "function" {"name" "run_python" "arguments" "{\"co"}}
+                 {"index" 0 "function" {"arguments" "de\":\"print(1)\"}"}}]
           out (assemble-chat-frags frags)]
       (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(1)"}}] out))))
 
   (it "handles two parallel tool calls keyed by distinct :index"
-    (let [frags [{:index 0 :id "a" :function {:name "f" :arguments "{}"}}
-                 {:index 1 :id "b" :function {:name "g" :arguments "{\"x\":1}"}}]
+    (let [frags [{"index" 0 "id" "a" "function" {"name" "f" "arguments" "{}"}}
+                 {"index" 1 "id" "b" "function" {"name" "g" "arguments" "{\"x\":1}"}}]
           out (assemble-chat-frags frags)]
       (expect (= 2 (count out)))
       (expect (= "a" (:id (first out))))
       (expect (= {"x" 1} (:input (second out))))))
 
   (it "merge-provider-state accumulates openai-chat fragments across chunks"
-    (let [a {:provider :openai-chat :tool-call-fragments [{:index 0 :id "c" :function {:name "f" :arguments "{\"a"}}]}
-          b {:provider :openai-chat :tool-call-fragments [{:index 0 :function {:arguments "\":2}"}}]}
+    (let [a {:provider :openai-chat :tool-call-fragments [{"index" 0 "id" "c" "function" {"name" "f" "arguments" "{\"a"}}]}
+          b {:provider :openai-chat :tool-call-fragments [{"index" 0 "function" {"arguments" "\":2}"}}]}
           merged (merge-provider-state a b)
           calls (assemble-chat-frags (:tool-call-fragments merged))]
       (expect (= [{:id "c" :name "f" :input {"a" 2}}] calls)))))
@@ -351,18 +351,18 @@
 (defdescribe responses-streaming-function-call-test
   (it "extract-stream-delta surfaces a completed function_call as provider-state :tool-calls"
     (let [out (extract-stream-delta
-                {:type "response.output_item.done"
-                 :item {:type "function_call" :call_id "call_1" :name "run_python"
-                        :arguments "{\"code\":\"print(6*7)\"}"}})]
+                {"type" "response.output_item.done"
+                 "item" {"type" "function_call" "call_id" "call_1" "name" "run_python"
+                         "arguments" "{\"code\":\"print(6*7)\"}"}})]
       (expect (= :openai-responses (get-in out [:provider-state :provider])))
       (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(6*7)"}}]
                 (get-in out [:provider-state :tool-calls])))))
 
   (it "identifies a Responses function call before its arguments stream"
     (let [out (extract-stream-delta
-                {:type "response.output_item.added"
-                 :item {:type "function_call" :call_id "call_early" :name "run_python"
-                        :arguments ""}})]
+                {"type" "response.output_item.added"
+                 "item" {"type" "function_call" "call_id" "call_early" "name" "run_python"
+                         "arguments" ""}})]
       (expect (= {:id "call_early" :name "run_python"}
                 (:tool-call-preview out)))
       (expect (nil? (:content-delta out)))
@@ -372,14 +372,14 @@
     ;; The finalized call still assembles at output_item.done; mid-stream the
     ;; raw argument fragment rides :tool-args-delta so the live bubble can paint
     ;; the Python (the tool args) being written.
-    (let [out (extract-stream-delta {:type "response.function_call_arguments.delta" :delta "{\"code\":\"pri" :output_index 0})]
+    (let [out (extract-stream-delta {"type" "response.function_call_arguments.delta" "delta" "{\"code\":\"pri" "output_index" 0})]
       (expect (= "{\"code\":\"pri" (:tool-args-delta out)))
       (expect (nil? (:provider-state out)))))
 
   (it "function-call-item->tool-call decodes a complete item; nil for non-function items"
     (expect (= {:id "c" :name "f" :input {"x" 1}}
-              (fn-item->tool-call {:type "function_call" :call_id "c" :name "f" :arguments "{\"x\":1}"})))
-    (expect (nil? (fn-item->tool-call {:type "reasoning"}))))
+              (fn-item->tool-call {"type" "function_call" "call_id" "c" "name" "f" "arguments" "{\"x\":1}"})))
+    (expect (nil? (fn-item->tool-call {"type" "reasoning"}))))
 
   (it "merge-provider-state concats + dedupes responses tool calls across output_item.done events"
     (let [a {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
@@ -416,40 +416,40 @@
   ;; argument fragments as :tool-args-delta on each stream tick.
   (it "anthropic identifies the tool before input_json_delta and still accumulates the block"
     (let [f (make-anthropic-stream-delta-fn)
-          start (f {:type "content_block_start" :index 0
-                    :content_block {:type "tool_use" :id "t1" :name "run_python"}})
-          d1 (f {:type "content_block_delta" :index 0
-                 :delta {:type "input_json_delta" :partial_json "{\"code\":\""}})
-          d2 (f {:type "content_block_delta" :index 0
-                 :delta {:type "input_json_delta" :partial_json "print(1)\"}"}})]
+          start (f {"type" "content_block_start" "index" 0
+                    "content_block" {"type" "tool_use" "id" "t1" "name" "run_python"}})
+          d1 (f {"type" "content_block_delta" "index" 0
+                 "delta" {"type" "input_json_delta" "partial_json" "{\"code\":\""}})
+          d2 (f {"type" "content_block_delta" "index" 0
+                 "delta" {"type" "input_json_delta" "partial_json" "print(1)\"}"}})]
       (expect (= {:id "t1" :name "run_python"} (:tool-call-preview start)))
       (expect (= "{\"code\":\"" (:tool-args-delta d1)))
       (expect (= "print(1)\"}" (:tool-args-delta d2)))
       (expect (nil? (:content-delta d1)))
       ;; The closed block still flushes the canonical tool_use via provider-state.
-      (let [stop (f {:type "content_block_stop" :index 0})]
+      (let [stop (f {"type" "content_block_stop" "index" 0})]
         (expect (= :anthropic (get-in stop [:provider-state :provider]))))))
 
   (it "chat-completions identifies the tool and surfaces concatenated argument deltas"
     (let [out (extract-stream-delta
-                {:choices [{:delta {:tool_calls [{:index 0 :id "c1"
-                                                  :function {:name "run_python" :arguments "{\"code\":\""}}]}}]})]
+                {"choices" [{"delta" {"tool_calls" [{"index" 0 "id" "c1"
+                                                     "function" {"name" "run_python" "arguments" "{\"code\":\""}}]}}]})]
       (expect (= "{\"code\":\"" (:tool-args-delta out)))
       (expect (= {:id "c1" :name "run_python"} (:tool-call-preview out)))
       (expect (= :openai-chat (get-in out [:provider-state :provider]))))
     ;; A plain text delta carries no tool args or native-call identity.
-    (let [out (extract-stream-delta {:choices [{:delta {:content "hello"}}]})]
+    (let [out (extract-stream-delta {"choices" [{"delta" {"content" "hello"}}]})]
       (expect (nil? (:tool-args-delta out)))
       (expect (nil? (:tool-call-preview out)))
       (expect (= "hello" (:content-delta out))))))
 
 (defdescribe responses-state-tool-calls-test
   (it "openai-responses-state carries function_call items as :tool-calls"
-    (let [ps (openai-responses-state {:output [{:type "function_call" :call_id "fc" :name "run_python"
-                                                :arguments "{\"code\":\"x\"}"}]})]
+    (let [ps (openai-responses-state {"output" [{"type" "function_call" "call_id" "fc" "name" "run_python"
+                                                 "arguments" "{\"code\":\"x\"}"}]})]
       (expect (= [{:id "fc" :name "run_python" :input {"code" "x"}}] (:tool-calls ps)))))
   (it "returns nil when neither reasoning items nor tool calls present"
-    (expect (nil? (openai-responses-state {:output [{:type "message"}]})))))
+    (expect (nil? (openai-responses-state {"output" [{"type" "message"}]})))))
 
 (defdescribe gemini-wire-test
   (describe "build-gemini-request-body"
@@ -482,11 +482,11 @@
 
   (describe "extract-gemini-response-data"
     (it "pulls text + functionCall (args already a map) into :tool-calls + assistant tool_use"
-      (let [out (extract-gemini {:parsed {:candidates [{:content {:role "model"
-                                                                  :parts [{:text "let me run it"}
-                                                                          {:functionCall {:name "run_python"
-                                                                                          :args {"code" "print(1)"}}}]}}]
-                                          :usageMetadata {:promptTokenCount 10 :candidatesTokenCount 4}}})]
+      (let [out (extract-gemini {:parsed {"candidates" [{"content" {"role" "model"
+                                                                    "parts" [{"text" "let me run it"}
+                                                                             {"functionCall" {"name" "run_python"
+                                                                                              "args" {"code" "print(1)"}}}]}}]
+                                          "usageMetadata" {"promptTokenCount" 10 "candidatesTokenCount" 4}}})]
         (expect (= "let me run it" (:content out)))
         (expect (= "run_python" (:name (first (:tool-calls out)))))
         (expect (= {"code" "print(1)"} (:input (first (:tool-calls out)))))
@@ -494,8 +494,8 @@
         (expect (= 10 (get-in out [:api-usage :input-tokens])))))
 
     (it "plain text answer => no :tool-calls"
-      (let [out (extract-gemini {:parsed {:candidates [{:content {:parts [{:text "42"}]}}]
-                                          :usageMetadata {:promptTokenCount 1 :candidatesTokenCount 1}}})]
+      (let [out (extract-gemini {:parsed {"candidates" [{"content" {"parts" [{"text" "42"}]}}]
+                                          "usageMetadata" {"promptTokenCount" 1 "candidatesTokenCount" 1}}})]
         (expect (not (contains? out :tool-calls)))
         (expect (= "42" (:content out))))))
 
@@ -561,10 +561,10 @@
                                  "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))
             args   {"edits" [{"path" "a.clj" "from_anchor" "1:aa"}] "op" "delete"}]
         ;; the ENVELOPE is svar's own schema, so it is interned as before
-        (expect (= "tool_use" (:type (first (:content parsed)))))
-        (expect (= 1 (get-in parsed [:usage :input_tokens])))
+        (expect (= "tool_use" (get (first (get parsed "content")) "type")))
+        (expect (= 1 (get-in parsed ["usage" "input_tokens"])))
         ;; the ARGUMENTS never were a keyword at any point
-        (expect (= args (:input (first (:content parsed)))))
+        (expect (= args (get (first (get parsed "content")) "input")))
         (expect (= [args] (mapv :input (:tool-calls (extract-anthropic {:parsed parsed})))))))
 
     (it "keys with no faithful keyword form survive verbatim"
@@ -581,28 +581,28 @@
                      (str "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":"
                        "[{\"functionCall\":{\"name\":\"fs\",\"args\":{\"op\":\"delete\","
                        "\"paths\":[\"x\"]}}}]}}]}"))]
-        (expect (= "model" (get-in parsed [:candidates 0 :content :role])))
+        (expect (= "model" (get-in parsed ["candidates" 0 "content" "role"])))
         (expect (= [{"op" "delete" "paths" ["x"]}]
                   (mapv :input (:tool-calls (extract-gemini {:parsed parsed})))))))
 
     (it "openai chat: JSON arguments decode without interning"
       (let [out (extract-openai
-                  {:parsed {:choices [{:message {:tool_calls
-                                                 [{:id "call_1" :type "function"
-                                                   :function {:name "patch"
-                                                              :arguments "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}}]}}]
-                            :usage {:prompt_tokens 1 :completion_tokens 1}}})]
+                  {:parsed {"choices" [{"message" {"tool_calls"
+                                                   [{"id" "call_1" "type" "function"
+                                                     "function" {"name" "patch"
+                                                                 "arguments" "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}}]}}]
+                            "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
         (expect (= [{"edits" [{"from_anchor" "1:aa"}]}] (mapv :input (:tool-calls out))))))
 
     (it "openai responses: streamed and completed items agree"
       (expect (= {"edits" [{"from_anchor" "1:aa"}]}
                 (:input (fn-item->tool-call
-                          {:type "function_call" :call_id "c" :name "patch"
-                           :arguments "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}))))
+                          {"type" "function_call" "call_id" "c" "name" "patch"
+                           "arguments" "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}))))
       (expect (= {"code" "print(1)"}
                 (:input (first (assemble-chat-frags
-                                 [{:index 0 :id "c" :function {:name "run_python"
-                                                               :arguments "{\"code\":\"print(1)\"}"}}]))))))
+                                 [{"index" 0 "id" "c" "function" {"name" "run_python"
+                                                                  "arguments" "{\"code\":\"print(1)\"}"}}]))))))
 
     (it "the canonical assistant message carries the strings-only input onward"
       (let [parsed (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"fs\","

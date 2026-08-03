@@ -36,9 +36,9 @@
       (expect
         (try (#'sut/build-anthropic-request-body
               [bad-msg] "claude-haiku-4-5" nil)
-          false
-          (catch clojure.lang.ExceptionInfo e
-            (= :svar.core/invalid-cache-ttl (:type (ex-data e)))))))))
+             false
+             (catch clojure.lang.ExceptionInfo e
+               (= :svar.core/invalid-cache-ttl (:type (ex-data e)))))))))
 
 ;;; ── Anthropic body shape ──────────────────────────────────────────────
 
@@ -137,10 +137,10 @@
 
   (it "Chat Completions: surfaces total + cache-read split"
     (let [usage (#'sut/normalize-openai-usage
-                 {:prompt_tokens 100
-                  :completion_tokens 10
-                  :total_tokens 110
-                  :prompt_tokens_details {:cached_tokens 80}})]
+                 {"prompt_tokens" 100
+                  "completion_tokens" 10
+                  "total_tokens" 110
+                  "prompt_tokens_details" {"cached_tokens" 80}})]
       (expect (= 100 (:input-tokens usage)))
       (expect (= 10  (:output-tokens usage)))
       (expect (= 110 (:total-tokens usage)))
@@ -151,10 +151,10 @@
 
   (it "Responses API: same canonical shape from input_tokens_details"
     (let [usage (#'sut/normalize-openai-usage
-                 {:input_tokens 100
-                  :output_tokens 10
-                  :total_tokens 110
-                  :input_tokens_details {:cached_tokens 80}})]
+                 {"input_tokens" 100
+                  "output_tokens" 10
+                  "total_tokens" 110
+                  "input_tokens_details" {"cached_tokens" 80}})]
       (expect (= 100 (:input-tokens usage)))
       (expect (= 80  (get-in usage [:input-tokens-details :cache-read]))))))
 
@@ -163,10 +163,10 @@
   ;; canonical sums all three to TOTAL, splits onto :input-tokens-details.
 
   (it "sums uncached + cache-read into TOTAL"
-    (let [envelope {:parsed {:content [{:type "text" :text "hi"}]
-                             :usage   {:input_tokens             100
-                                       :output_tokens            10
-                                       :cache_read_input_tokens  80}}}
+    (let [envelope {:parsed {"content" [{"type" "text" "text" "hi"}]
+                             "usage"   {"input_tokens"             100
+                                        "output_tokens"            10
+                                        "cache_read_input_tokens"  80}}}
           {:keys [api-usage]} (#'sut/extract-anthropic-response-data envelope)]
       (expect (= 180 (:input-tokens api-usage)))
       (expect (= 10  (:output-tokens api-usage)))
@@ -176,17 +176,17 @@
         (expect (= 0   (:cache-write d))))))
 
   (it "surfaces cache_creation_input_tokens as :cache-write"
-    (let [envelope {:parsed {:content [{:type "text" :text "hi"}]
-                             :usage   {:input_tokens                100
-                                       :output_tokens               10
-                                       :cache_creation_input_tokens 90}}}
+    (let [envelope {:parsed {"content" [{"type" "text" "text" "hi"}]
+                             "usage"   {"input_tokens"                100
+                                        "output_tokens"               10
+                                        "cache_creation_input_tokens" 90}}}
           {:keys [api-usage]} (#'sut/extract-anthropic-response-data envelope)]
       (expect (= 190 (:input-tokens api-usage)))
       (expect (= 90 (get-in api-usage [:input-tokens-details :cache-write])))))
 
   (it "still produces canonical shape when neither cache field is present"
-    (let [envelope {:parsed {:content [{:type "text" :text "hi"}]
-                             :usage   {:input_tokens 100 :output_tokens 10}}}
+    (let [envelope {:parsed {"content" [{"type" "text" "text" "hi"}]
+                             "usage"   {"input_tokens" 100 "output_tokens" 10}}}
           {:keys [api-usage]} (#'sut/extract-anthropic-response-data envelope)]
       (expect (= 100 (:input-tokens api-usage)))
       (let [d (:input-tokens-details api-usage)]
