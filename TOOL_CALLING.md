@@ -35,6 +35,7 @@ canonical block types that hoist the same way.
 ```clojure
 {:name "run_python"
  :description "Execute Python in the sandbox; tools are functions."
+ :strict true                    ;; optional — constrain sampling to :schema
  :schema {:type "object"
           :properties {"code" {:type "string"}}
           :required ["code"]}}
@@ -66,6 +67,11 @@ canonical block types that hoist the same way.
 - anthropic: `{:name :description :input_schema schema}` → body `:tools`
 - chat: `{:type "function" :function {:name :description :parameters schema}}` → body `:tools`
 - responses: `{:type "function" :name :description :parameters schema}` → body `:tools`
+- `:strict true` on a tool def rides along as `strict` — anthropic top-level,
+  responses top-level, chat under `:function`. Anthropic allows optional
+  properties; the OpenAI subset needs every property in `required` plus
+  `additionalProperties: false` everywhere. A rejection is healed by re-sending
+  with the field stripped (`gateway-injected-tool-fields`).
 - `:tool-choice` → anthropic `{:type "auto"|"any"|"tool" :name}`,
   chat `"auto"|"required"|{:type "function" :function{:name}}`,
   responses `"auto"|"required"|{:type "function" :name}`.

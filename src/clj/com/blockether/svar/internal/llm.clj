@@ -232,7 +232,7 @@
         _        (mark-connection-healthy! url)
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn identity)
-                      (catch Exception _ nil))]
+                   (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -477,7 +477,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-          (assoc body :max_tokens required-min))
+        (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -1070,6 +1070,7 @@
 ;; ---------------------------------------------------------------------------
 ;;
 ;; Caller passes canonical tool defs `{:name :description :schema <json-schema>}`
+;; — plus an optional `:strict` per tool (grammar-constrained tool inputs) —
 ;; plus a canonical tool-choice. They ride in `extra-body` under `:svar/tools` /
 ;; `:svar/tool-choice` (the universal passthrough that already reaches every
 ;; request-body builder), mirroring the `:svar/cache` marker convention. Each
@@ -1079,58 +1080,106 @@
 (def ^:private EMPTY_TOOL_SCHEMA {:type "object" :properties {}})
 
 (defn- tool-def->wire
-  "Shape one canonical tool def `{:name :description :schema}` for `api-style`."
-  [api-style {:keys [name description schema]}]
-  (let [schema (or schema EMPTY_TOOL_SCHEMA)]
+  "Shape one canonical tool def `{:name :description :schema :strict}` for `api-style`.
+
+   `:strict true` opts THAT tool into the provider's grammar-constrained
+   sampling, so its `input` cannot come back malformed (the classic failure is
+   an array argument arriving as JSON TEXT). It is per-tool because each wire
+   enforces a different JSON-Schema subset:
+
+   - anthropic — `strict` sits next to `input_schema`. Generally available, no
+     beta header; optional properties may stay out of `required`.
+   - openai responses / chat — `strict` on the function tool (flat, resp. under
+     `:function`). The subset is harsher: EVERY property must be listed in
+     `required` (make optional ones nullable) and every object must carry
+     `additionalProperties false`, or the request is rejected. The ChatGPT
+     Codex backend accepts the field — Codex's own tools serialize
+     `strict: false`.
+   - gemini has no per-tool equivalent; the flag is ignored there.
+
+   A provider that rejects the field heals itself instead of failing the turn:
+   see `gateway-injected-tool-fields`."
+  [api-style {:keys [name description schema strict]}]
+  (let [schema  (or schema EMPTY_TOOL_SCHEMA)
+        strict? (boolean strict)]
     (case api-style
       :anthropic
       (cond-> {:name name :input_schema schema}
-        description (assoc :description description))
+        description (assoc :description description)
+        strict?     (assoc :strict true))
 
       :openai-compatible-responses
       (cond-> {:type "function" :name name :parameters schema}
-        description (assoc :description description))
+        description (assoc :description description)
+        strict?     (assoc :strict true))
 
       ;; default = :openai-compatible-chat
       {:type "function"
        :function (cond-> {:name name :parameters schema}
-                   description (assoc :description description))})))
+                   description (assoc :description description)
+                   strict?     (assoc :strict true))})))
 
 (defn- tools->wire [api-style tools]
   (mapv #(tool-def->wire api-style %) tools))
 
 (def ^:private tool-schema-path-pattern
-  #"(?i)(tools\.(\d+)(?:\.(?:custom|function))?\.(input_schema|parameters|strict|additionalProperties))")
+  "Provider path to the offending tool field, in either wire spelling: dotted
+   (`tools.11.custom.input_schema` — LiteLLM/Bedrock) or bracketed
+   (`tools[0].parameters` — the OpenAI/Codex `param` on a rejected schema)."
+  #"(?i)tools(?:\.(\d+)|\[(\d+)\])(?:\.(?:custom|function))?\.(input_schema|parameters|strict|additionalProperties)")
+
+(def ^:private strict-schema-rejection-pattern
+  #"(?i)invalid_function_parameters|Invalid schema for function")
+
+(defn- droppable-tool-field
+  "The tool field that can actually be DROPPED to make the call work.
+
+   OpenAI — and the ChatGPT Codex backend, verified live — blame
+   `tools[0].parameters` with `Invalid schema for function 'x': In context=(),
+   'additionalProperties' is required to be supplied and to be false` when a
+   tool asked for `:strict true` with a schema outside the strict subset. The
+   schema is perfectly legal WITHOUT strict, so the removable field is `strict`,
+   not the parameters the provider names."
+  [field text tool]
+  (if (and (= "parameters" field)
+        (:strict tool)
+        (re-find strict-schema-rejection-pattern text))
+    "strict"
+    field))
 
 (defn- enrich-tool-schema-rejection
   "Attach the canonical tool name to a provider schema error that only names
    the request-array index, e.g. `tools.11.custom.input_schema`."
   [^Exception e tools]
   (let [text (str (or (:body (ex-data e)) "") "\n" (or (ex-message e) ""))]
-    (if-let [[_ path index-str field] (re-find tool-schema-path-pattern text)]
-      (let [index (parse-long index-str)
-            tool (when index (nth (vec tools) index nil))]
+    (if-let [[path dotted bracketed field] (re-find tool-schema-path-pattern text)]
+      (let [index (parse-long (or dotted bracketed))
+            tool  (when index (nth (vec tools) index nil))]
         (if tool
           (ex-info (ex-message e)
             (assoc (ex-data e)
               :tool-index index
               :tool-name (str (:name tool))
-              :tool-schema-field (str/lower-case field)
+              :tool-schema-field (droppable-tool-field (str/lower-case field) text tool)
               :tool-schema-path path)
             e)
           e))
       e)))
 
 (def ^:private gateway-injected-tool-fields
-  "Tool fields a GATEWAY can graft onto the wire tool and the upstream model
-   then rejects (`tools.0.custom.strict: Extra inputs are not permitted`).
+  "Tool fields the UPSTREAM model can reject on a wire tool
+   (`tools.0.custom.strict: Extra inputs are not permitted`).
 
-   LiteLLM's Bedrock Converse path builds `toolSpec` from the request tool:
-   it copies `function.strict` and hoists the schema ROOT `additionalProperties`
-   into `inputSchema.json`, then Bedrock validates that toolSpec against the
-   native Anthropic tool shape, which has neither key. Both are advisory-only
-   for tool calling, so dropping them is always safe and lets svar heal itself
-   instead of failing the turn. Lower-cased to match `:tool-schema-field`."
+   They arrive two ways. A GATEWAY grafts them on: LiteLLM's Bedrock Converse
+   path builds `toolSpec` from the request tool, copying `function.strict` and
+   hoisting the schema ROOT `additionalProperties` into `inputSchema.json`,
+   then Bedrock validates that toolSpec against the native Anthropic tool
+   shape, which has neither key. Or WE sent them — a tool def carrying
+   `:strict true` (see `tool-def->wire`) routed to a model that cannot do
+   grammar-constrained sampling. Either way both fields are advisory for tool
+   calling: dropping them costs the sampling guarantee, never the call, so svar
+   re-sends without them instead of failing the turn. Lower-cased to match
+   `:tool-schema-field`."
   #{"strict" "additionalproperties"})
 
 (defn- strip-schema-fields
@@ -1213,7 +1262,7 @@
     (map? args)                           args
     (and (string? args) (not (str/blank? args)))
     (try (json/read-json args :key-fn identity)
-         (catch Exception _ {}))
+      (catch Exception _ {}))
     :else                                 {}))
 
 ;; ── Replay hygiene (mirrors pi-ai transform-messages guards) ────────────────
@@ -1647,15 +1696,15 @@
           (case (get delta "type")
             "text_delta"
             (do (swap! pending update-in [idx "text"] (fnil str "") (get delta "text"))
-                {:content-delta (get delta "text") :reasoning-delta nil :api-usage nil})
+              {:content-delta (get delta "text") :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx "thinking"] (fnil str "") (get delta "thinking"))
-                {:content-delta nil :reasoning-delta (get delta "thinking") :api-usage nil})
+              {:content-delta nil :reasoning-delta (get delta "thinking") :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx "signature"] (fnil str "") (get delta "signature"))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic emits input_json_delta for tool_use blocks (the
             ;; tool arguments, e.g. run_python's `{"code": …}`, arrive as a
@@ -1666,8 +1715,8 @@
             ;; work, not just its reasoning).
             "input_json_delta"
             (do (swap! pending update-in [idx "partial_json"] (fnil str "") (get delta "partial_json"))
-                {:content-delta nil :reasoning-delta nil :api-usage nil
-                 :tool-args-delta (get delta "partial_json")})
+              {:content-delta nil :reasoning-delta nil :api-usage nil
+               :tool-args-delta (get delta "partial_json")})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -2060,7 +2109,7 @@
   [{:keys [thinking thinking-signature]}]
   (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
                    (try (json/read-json thinking-signature :key-fn keyword)
-                        (catch Exception _ nil)))
+                     (catch Exception _ nil)))
                (when (and (string? thinking) (not (str/blank? thinking)))
                  {:type "reasoning"
                   :summary [{:type "summary_text" :text thinking}]}))]
@@ -2507,16 +2556,16 @@
   "Text of one CANONICAL (request-side) part: svar-authored, keyword-keyed."
   [part]
   (cond (string? part)          part
-        (string? (:text part))  (:text part)
-        :else                   nil))
+    (string? (:text part))  (:text part)
+    :else                   nil))
 
 (defn- gemini-wire-part-text
   "Text of one Gemini RESPONSE part. A response is model-authored JSON, so its
    keys stay the strings the wire delivered - svar never interns them."
   [part]
   (cond (string? part)                  part
-        (string? (get part "text"))     (get part "text")
-        :else                           nil))
+    (string? (get part "text"))     (get part "text")
+    :else                           nil))
 
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
@@ -3517,7 +3566,7 @@
           (do (when-not @headers-received?-atom
                 (reset! ttft-fired?-atom true)
                 (.interrupt caller))
-              false)
+            false)
           :else true)))))
 
 (defn- start-idle-stream-watchdog!
@@ -3544,8 +3593,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long idle-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                (try (.close stream) (catch Throwable _ nil))
-                false)
+              (try (.close stream) (catch Throwable _ nil))
+              false)
             true))
         false))))
 
@@ -3560,8 +3609,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long semantic-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                (try (.close stream) (catch Throwable _ nil))
-                false)
+              (try (.close stream) (catch Throwable _ nil))
+              false)
             true))
         false))))
 
@@ -3583,18 +3632,18 @@
       (if @alive?-atom
         (if (cancel-requested?)
           (do (reset! cancel-fired? true)
-              (if-let [s @stream-ref]
+            (if-let [s @stream-ref]
                 ;; Post-headers: closing the body unblocks the parked
                 ;; `.readLine`. Do NOT interrupt — the caller is in OUR read
                 ;; loop, and interrupting the shared JDK client's send
                 ;; machinery can wedge its SelectorManager, surfacing as
                 ;; "selector manager closed" on every LATER send.
-                (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
+              (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
                 ;; Pre-headers: no body yet; the caller is parked in
                 ;; HttpClient.send -> CompletableFuture.get. Interrupt to
                 ;; unpark it (the TTFT lever) — unavoidable here, but rare.
-                (try (.interrupt caller) (catch Throwable _ nil)))
-              false)
+              (try (.interrupt caller) (catch Throwable _ nil)))
+            false)
           true)
         false))))
 
@@ -3613,28 +3662,28 @@
   (cond
     @cancel-fired?
     (do (Thread/interrupted)
-        (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                 {:type :svar.core/stream-cancelled :stream? true :url url} e)))
+      (throw (ex-info "Stream cancelled by caller (pre-headers)."
+               {:type :svar.core/stream-cancelled :stream? true :url url} e)))
 
     @ttft-fired?
     (do (Thread/interrupted)
-        (trove/log! {:level :warn :id ::stream-ttft-timeout
-                     :data (log-data {:url url
-                                      :ttft-timeout-ms ttft-timeout-ms})
-                     :msg "TTFT timeout, no headers received"})
-        (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                          "ms with no response headers): " (ex-message e))
-                 {:type :svar.core/stream-ttft-timeout
-                  :stream? true :url url
-                  :ttft-timeout-ms ttft-timeout-ms
-                  :cause-class (.getName (class e))}
-                 e)))
+      (trove/log! {:level :warn :id ::stream-ttft-timeout
+                   :data (log-data {:url url
+                                    :ttft-timeout-ms ttft-timeout-ms})
+                   :msg "TTFT timeout, no headers received"})
+      (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                        "ms with no response headers): " (ex-message e))
+               {:type :svar.core/stream-ttft-timeout
+                :stream? true :url url
+                :ttft-timeout-ms ttft-timeout-ms
+                :cause-class (.getName (class e))}
+               e)))
 
     :else
     ;; Not our watchdog — a real external interrupt. Restore the flag and
     ;; propagate as-is (clean cancellation).
     (do (.interrupt (Thread/currentThread))
-        (throw e))))
+      (throw e))))
 
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
@@ -3945,9 +3994,9 @@
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
                       "event" (do (vreset! saw-sse? true)
-                                  (recur value data-lines (unchecked-inc line-count) now-ns))
+                                (recur value data-lines (unchecked-inc line-count) now-ns))
                       "data"  (do (vreset! saw-sse? true)
-                                  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
+                                (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
                       (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
@@ -4188,8 +4237,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                  idle?     :svar.core/stream-idle-timeout
-                                  :else     :svar.core/http-error)
+                              idle?     :svar.core/stream-idle-timeout
+                              :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4223,8 +4272,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                idle?     :svar.core/stream-idle-timeout
-                                :else     :svar.core/http-error)
+                            idle?     :svar.core/stream-idle-timeout
+                            :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4408,7 +4457,7 @@
                (catch Exception e
                  (if (failure/retry-without-server-item-ids? e)
                    (do (failure/mark-stateless-items! base-url)
-                       (responses-call true))
+                     (responses-call true))
                    (throw e))))))
 
          :else
@@ -5226,7 +5275,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
+                                                 (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -5694,8 +5743,9 @@
    opts:
      :messages    - REQUIRED. Canonical messages; may carry prior `tool_use`
                     (assistant) + `tool_result` (user) content blocks.
-     :tools       - Canonical defs `[{:name :description :schema}]`
-                    (`:schema` is a JSON-Schema map for the tool input).
+     :tools       - Canonical defs `[{:name :description :schema :strict}]`
+                    (`:schema` is a JSON-Schema map for the tool input;
+                    `:strict true` constrains sampling to that schema).
      :tool-choice - Optional. :auto (default) | :required | :none | {:name \"x\"}
                     | \"x\" (force a specific tool).
      plus the usual :model/:timeout-ms/:extra-body/:on-chunk keys resolved
@@ -5883,7 +5933,10 @@
      :tools       - Canonical tool defs `[{:name :description :schema}]`, where
                     `:schema` is a JSON-Schema map for the tool input. Shaped
                     per wire (anthropic `tools`/`input_schema`; OpenAI chat
-                    `function`/`parameters`; responses flat `function`).
+                    `function`/`parameters`; responses flat `function`). Add
+                    `:strict true` to a tool to make the provider sample its
+                    `input` under the schema as a grammar — the wire subsets
+                    differ, see `tool-def->wire`.
      :tool-choice - :auto (default) | :required | :none | {:name \"x\"} |
                     \"x\" (force a specific tool).
 
@@ -5919,14 +5972,19 @@
    `:on-empty-reply-resend` (fn of 1 arg) to observe each re-send live:
    {:model :provider-id :attempt :max-resends :delay-ms :error}.
 
-   SELF-HEALING TOOL SCHEMAS: when the provider rejects a tool field a GATEWAY
-   grafted onto the request from our tools (`tools.0.custom.strict: Extra inputs
-   are not permitted` — LiteLLM's Bedrock Converse `toolSpec` forwards
-   `strict` and hoists a schema-root `additionalProperties`), the call is
-   re-sent ONCE with those fields stripped from every tool, and the model is
-   remembered so later calls send the sanitized shape first. When our tools
-   never carried the field, the gateway invented it: the error propagates with
-   `:tool-schema-field-source :gateway` next to `:tool-name`/`:tool-schema-field`."
+   SELF-HEALING TOOL SCHEMAS: when the provider rejects a tool field that can be
+   dropped, the call is re-sent ONCE without it and the model is remembered so
+   later calls send the sanitized shape first. Two sources. A GATEWAY grafted it
+   on (`tools.0.custom.strict: Extra inputs are not permitted` — LiteLLM's
+   Bedrock Converse `toolSpec` forwards `strict` and hoists a schema-root
+   `additionalProperties`); when our tools never carried the field, only a
+   gateway/model change can fix it and the error propagates with
+   `:tool-schema-field-source :gateway` next to
+   `:tool-name`/`:tool-schema-field`. Or WE asked for `:strict true` on a tool
+   whose schema is outside the provider's strict subset (OpenAI/Codex:
+   `tools[0].parameters` — `Invalid schema for function ...`); the schema is
+   valid without strict, so the turn degrades to unconstrained sampling instead
+   of failing."
   [router opts]
   ;; Bind the caller's cancellation hook for the whole routed call so every
   ;; provider-fallback attempt (and its backoff sleeps) honours it. See
@@ -5960,8 +6018,8 @@
                                                :tool-name (:tool-name (ex-data enriched))
                                                :tool-schema-field field}
                                         :msg "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
-                           (swap! gateway-tool-field-quirks conj quirk)
-                           (run (assoc opts :tools tools)))
+                         (swap! gateway-tool-field-quirks conj quirk)
+                         (run (assoc opts :tools tools)))
               ;; Same field, but our tools never carried it: the gateway invented
               ;; it, so only a gateway/model change can fix this. Say so.
               healable (throw (ex-info (ex-message enriched)
@@ -6222,7 +6280,7 @@
                                    (if (seq fetched)
                                      (do (swap! models-cache assoc cache-key
                                            {:at (System/currentTimeMillis) :models fetched})
-                                         fetched)
+                                       fetched)
                                      ;; Empty = the fetch failed or the gateway hiccuped.
                                      (or (:models cached) fetched))))]
      (filter-provider-models provider-id models))))

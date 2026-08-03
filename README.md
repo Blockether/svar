@@ -288,6 +288,8 @@ Returns `{:stop-reason :tool-calls|:end :tool-calls [{:id <str> :name <str> :inp
 
 `ask-code!` accepts the same routing, reasoning, verbosity, network, and streaming controls as `ask!`, minus the structured-output-only knobs (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`). See [TOOL_CALLING.md](TOOL_CALLING.md) for the full wire-level design.
 
+Add `:strict true` to a tool definition to have the provider sample that tool's `input` under `:schema` as a grammar, so an argument can never come back malformed (an array arriving as JSON text, a missing required key). Anthropic takes it as-is and still allows optional properties. The OpenAI wires (chat, responses, and the ChatGPT Codex backend) enforce a harsher subset: every property must be listed in `required` — mark optional ones nullable — and every object must set `additionalProperties: false`. Gemini has no per-tool equivalent and ignores the flag. When a route rejects the field, svar re-sends once with it stripped rather than failing the turn.
+
 ### Reasoning depth and output verbosity
 
 Two knobs, different jobs:

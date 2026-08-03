@@ -68,6 +68,43 @@
       (expect (= {:type "object" :properties {}}
                 (:input_schema (tool-def->wire :anthropic {:name "x"})))))))
 
+(defdescribe strict-tool-shaping-test
+  (describe "`:strict true` rides to every wire's own slot"
+    (let [strict-tool (assoc run-python :strict true)
+          strict-of   {:anthropic                   #(:strict %)
+                       :openai-compatible-responses #(:strict %)
+                       :openai-compatible-chat      #(get-in % [:function :strict])}]
+      (it "anthropic puts it next to :input_schema"
+        (let [w (tool-def->wire :anthropic strict-tool)]
+          (expect (true? (:strict w)))
+          (expect (= (:schema run-python) (:input_schema w)))))
+
+      (it "responses puts it flat, chat under :function"
+        (expect (true? (:strict (tool-def->wire :openai-compatible-responses strict-tool))))
+        (let [w (tool-def->wire :openai-compatible-chat strict-tool)]
+          (expect (true? (get-in w [:function :strict])))
+          (expect (nil? (:strict w)))))
+
+      (it "omits the field entirely when unset or false"
+        (doseq [[api-style read-strict] strict-of
+                tool                    [run-python (assoc run-python :strict false)]]
+          (expect (nil? (read-strict (tool-def->wire api-style tool))))))
+
+      (it "reaches the request body and survives JSON encoding"
+        (let [body (build-anthropic [{:role "user" :content "hi"}] "claude"
+                     {:svar/tools [strict-tool]})]
+          (expect (true? (get-in body [:tools 0 :strict])))
+          (expect (true? (get (first (get (parse-body (json/write-json-str body)) "tools"))
+                           "strict")))))
+
+      (it "a provider that rejects `strict` heals by dropping OUR flag, not the tool"
+        (let [sanitized (sanitize-tools-for-gateway [strict-tool])]
+          (expect (= [(dissoc strict-tool :strict)] sanitized))
+          (expect (nil? (:strict (tool-def->wire :anthropic (first sanitized)))))))
+
+      (it "nothing to strip when no tool asked for strict"
+        (expect (nil? (sanitize-tools-for-gateway [run-python])))))))
+
 (defdescribe tool-choice-shaping-test
   (describe "tool-choice->wire"
     (it "anthropic: auto/any/tool"
@@ -183,6 +220,27 @@
           enriched (enrich-tool-schema-rejection cause [{:name "grep"} {:name "patch"}])]
       (expect (= "grep" (:tool-name (ex-data enriched))))
       (expect (= "strict" (:tool-schema-field (ex-data enriched))))))
+  ;; The live OpenAI/Codex 400 for a strict schema outside the strict subset.
+  ;; It blames `parameters` in the BRACKETED spelling, but the schema is legal
+  ;; without strict — so `strict` is what svar must drop to heal.
+  (let [openai-strict-400
+        (fn [] (ex-info "Provider unavailable"
+                 {:status 400
+                  :body (str "{\"error\":{\"message\":\"Invalid schema for function 'patch': "
+                          "In context=(), 'additionalProperties' is required to be supplied and "
+                          "to be false.\",\"type\":\"invalid_request_error\","
+                          "\"param\":\"tools[1].parameters\",\"code\":\"invalid_function_parameters\"}}")}))]
+    (it "reads the bracketed path and blames OUR `strict`, not the parameters"
+      (let [enriched (enrich-tool-schema-rejection (openai-strict-400)
+                       [{:name "grep"} {:name "patch" :strict true}])]
+        (expect (= 1 (:tool-index (ex-data enriched))))
+        (expect (= "patch" (:tool-name (ex-data enriched))))
+        (expect (= "strict" (:tool-schema-field (ex-data enriched))))
+        (expect (= "tools[1].parameters" (:tool-schema-path (ex-data enriched))))))
+    (it "keeps blaming the parameters when the tool never asked for strict"
+      (let [enriched (enrich-tool-schema-rejection (openai-strict-400)
+                       [{:name "grep"} {:name "patch"}])]
+        (expect (= "parameters" (:tool-schema-field (ex-data enriched)))))))
   (it "leaves an out-of-range provider index untouched"
     (let [cause (ex-info "bad tools.9.function.parameters" {:status 400})]
       (expect (identical? cause (enrich-tool-schema-rejection cause [{:name "patch"}]))))))
