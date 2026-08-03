@@ -224,7 +224,7 @@
         _        (mark-connection-healthy! url)
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn keyword)
-                   (catch Exception _ nil))]
+                      (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -466,7 +466,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-        (assoc body :max_tokens required-min))
+          (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -1186,16 +1186,51 @@
    (:svar/tool-choice extra-body)
    (dissoc extra-body :svar/tools :svar/tool-choice)])
 
+(defn- tool-arg-key
+  "One MODEL-AUTHORED argument key as the STRING it was on the wire. `name`
+   would drop the namespace of a key like `\"a/b\"` and `str` would keep the
+   interning colon, so a keyword is unwrapped with `subs` instead."
+  [k]
+  (cond (keyword? k) (subs (str k) 1)
+        (string? k)  k
+        :else        (str k)))
+
+(defn- stringify-tool-args
+  "Restore STRING keys on decoded tool arguments, at EVERY depth (nested dicts
+   inside vectors included). Interned VALUES are unwrapped the same way: JSON
+   cannot produce one, so a keyword/symbol value only ever arrives from a
+   provider adapter that coerced an enum, and the caller wants the wire string."
+  [x]
+  (cond
+    (map? x)    (into {} (map (fn [[k v]] [(tool-arg-key k) (stringify-tool-args v)])) x)
+    (vector? x) (mapv stringify-tool-args x)
+    (set? x)    (into #{} (map stringify-tool-args) x)
+    (seq? x)    (mapv stringify-tool-args x)
+    (keyword? x) (tool-arg-key x)
+    (symbol? x) (str x)
+    :else       x))
+
 (defn- decode-tool-arguments
-  "Tool-call arguments reach svar as either an already-parsed map (anthropic
-   `tool_use.input`) or a JSON string (OpenAI chat `function.arguments`,
-   responses `function_call.arguments`). Normalize to a keyword-keyed map so
-   `:input` is uniform across all wires."
+  "Tool-call arguments reach svar either already parsed (anthropic
+   `tool_use.input`, gemini `functionCall.args` — parsed with the rest of the
+   envelope) or as a JSON string (OpenAI chat `function.arguments`, responses
+   `function_call.arguments`). Normalize to a STRING-keyed map, at every depth,
+   so `:input` is uniform across all wires.
+
+   STRINGS-ONLY, DELIBERATELY: svar keywordizes a provider ENVELOPE because its
+   keys are a fixed, svar-owned schema. Tool arguments are not — they are
+   MODEL-AUTHORED data in the tool's own open key space, where `\"from_anchor\"`,
+   `\"a/b\"` and `\"1:aa\"` are values, not identifiers. Interning them costs the
+   caller a second shape to check on every read and corrupts anything that
+   renders them back out (JSON, a Python literal, a dict lookup) as `:kw`. So
+   the conversion happens ONCE, here, at the wire edge, and callers downstream
+   read plain strings."
   [args]
   (cond
-    (map? args)                           args
+    (map? args)                           (stringify-tool-args args)
     (and (string? args) (not (str/blank? args)))
-    (try (json/read-json args :key-fn keyword) (catch Exception _ {}))
+    (try (stringify-tool-args (json/read-json args :key-fn identity))
+         (catch Exception _ {}))
     :else                                 {}))
 
 ;; ── Replay hygiene (mirrors pi-ai transform-messages guards) ────────────────
@@ -1534,9 +1569,8 @@
      :id (:id block)
      :name (:name block)
      :input (let [pj (:partial_json block)]
-              (if (and (string? pj) (not (str/blank? pj)))
-                (decode-tool-arguments pj)
-                (or (:input block) {})))}
+              (decode-tool-arguments
+                (if (and (string? pj) (not (str/blank? pj))) pj (:input block))))}
 
     block))
 
@@ -1577,11 +1611,13 @@
         usage          (:usage response)
         visible        (when (seq text-parts) (str/join "\n" text-parts))
         ;; Native tool calls: `tool_use` blocks become canonical
-        ;; `{:id :name :input}` — input is already a parsed map on the
-        ;; anthropic wire (no JSON-string decode needed).
+        ;; `{:id :name :input}` — the anthropic wire delivers input as a parsed
+        ;; map, but the envelope parse keywordized its keys, so it still goes
+        ;; through `decode-tool-arguments` to come back strings-only.
         tool-calls     (->> content-blocks
                          (filter #(= "tool_use" (:type %)))
-                         (mapv (fn [b] {:id (:id b) :name (:name b) :input (or (:input b) {})})))
+                         (mapv (fn [b] {:id (:id b) :name (:name b)
+                                        :input (decode-tool-arguments (:input b))})))
         canonical-msg  (anthropic-canonical-assistant-message content-blocks)]
     (cond-> {:content       visible
              :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
@@ -1628,15 +1664,15 @@
           (case (:type delta)
             "text_delta"
             (do (swap! pending update-in [idx :text] (fnil str "") (:text delta))
-              {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
+                {:content-delta (:text delta) :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx :thinking] (fnil str "") (:thinking delta))
-              {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
+                {:content-delta nil :reasoning-delta (:thinking delta) :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx :signature] (fnil str "") (:signature delta))
-              {:content-delta nil :reasoning-delta nil :api-usage nil})
+                {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic emits input_json_delta for tool_use blocks (the
             ;; tool arguments, e.g. run_python's `{"code": …}`, arrive as a
@@ -1647,8 +1683,8 @@
             ;; work, not just its reasoning).
             "input_json_delta"
             (do (swap! pending update-in [idx :partial_json] (fnil str "") (:partial_json delta))
-              {:content-delta nil :reasoning-delta nil :api-usage nil
-               :tool-args-delta (:partial_json delta)})
+                {:content-delta nil :reasoning-delta nil :api-usage nil
+                 :tool-args-delta (:partial_json delta)})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -2036,7 +2072,7 @@
   [{:keys [thinking thinking-signature]}]
   (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
                    (try (json/read-json thinking-signature :key-fn keyword)
-                     (catch Exception _ nil)))
+                        (catch Exception _ nil)))
                (when (and (string? thinking) (not (str/blank? thinking)))
                  {:type "reasoning"
                   :summary [{:type "summary_text" :text thinking}]}))]
@@ -2479,8 +2515,8 @@
 
 (defn- gemini-part-text [part]
   (cond (string? part)          part
-    (string? (:text part))  (:text part)
-    :else                   nil))
+        (string? (:text part))  (:text part)
+        :else                   nil))
 
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
@@ -2557,7 +2593,7 @@
                     (when-let [fc (:functionCall p)]
                       {:id (str "gemini-" (:name fc) "-" idx)
                        :name (:name fc)
-                       :input (or (:args fc) {})})))
+                       :input (decode-tool-arguments (:args fc))})))
     vec))
 
 (defn- gemini-visible-text [parts]
@@ -3479,7 +3515,7 @@
           (do (when-not @headers-received?-atom
                 (reset! ttft-fired?-atom true)
                 (.interrupt caller))
-            false)
+              false)
           :else true)))))
 
 (defn- start-idle-stream-watchdog!
@@ -3506,8 +3542,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long idle-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-              (try (.close stream) (catch Throwable _ nil))
-              false)
+                (try (.close stream) (catch Throwable _ nil))
+                false)
             true))
         false))))
 
@@ -3522,8 +3558,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long semantic-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-              (try (.close stream) (catch Throwable _ nil))
-              false)
+                (try (.close stream) (catch Throwable _ nil))
+                false)
             true))
         false))))
 
@@ -3545,18 +3581,18 @@
       (if @alive?-atom
         (if (cancel-requested?)
           (do (reset! cancel-fired? true)
-            (if-let [s @stream-ref]
+              (if-let [s @stream-ref]
                 ;; Post-headers: closing the body unblocks the parked
                 ;; `.readLine`. Do NOT interrupt — the caller is in OUR read
                 ;; loop, and interrupting the shared JDK client's send
                 ;; machinery can wedge its SelectorManager, surfacing as
                 ;; "selector manager closed" on every LATER send.
-              (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
+                (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
                 ;; Pre-headers: no body yet; the caller is parked in
                 ;; HttpClient.send -> CompletableFuture.get. Interrupt to
                 ;; unpark it (the TTFT lever) — unavoidable here, but rare.
-              (try (.interrupt caller) (catch Throwable _ nil)))
-            false)
+                (try (.interrupt caller) (catch Throwable _ nil)))
+              false)
           true)
         false))))
 
@@ -3575,28 +3611,28 @@
   (cond
     @cancel-fired?
     (do (Thread/interrupted)
-      (throw (ex-info "Stream cancelled by caller (pre-headers)."
-               {:type :svar.core/stream-cancelled :stream? true :url url} e)))
+        (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                 {:type :svar.core/stream-cancelled :stream? true :url url} e)))
 
     @ttft-fired?
     (do (Thread/interrupted)
-      (trove/log! {:level :warn :id ::stream-ttft-timeout
-                   :data (log-data {:url url
-                                    :ttft-timeout-ms ttft-timeout-ms})
-                   :msg "TTFT timeout, no headers received"})
-      (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                        "ms with no response headers): " (ex-message e))
-               {:type :svar.core/stream-ttft-timeout
-                :stream? true :url url
-                :ttft-timeout-ms ttft-timeout-ms
-                :cause-class (.getName (class e))}
-               e)))
+        (trove/log! {:level :warn :id ::stream-ttft-timeout
+                     :data (log-data {:url url
+                                      :ttft-timeout-ms ttft-timeout-ms})
+                     :msg "TTFT timeout, no headers received"})
+        (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                          "ms with no response headers): " (ex-message e))
+                 {:type :svar.core/stream-ttft-timeout
+                  :stream? true :url url
+                  :ttft-timeout-ms ttft-timeout-ms
+                  :cause-class (.getName (class e))}
+                 e)))
 
     :else
     ;; Not our watchdog — a real external interrupt. Restore the flag and
     ;; propagate as-is (clean cancellation).
     (do (.interrupt (Thread/currentThread))
-      (throw e))))
+        (throw e))))
 
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
@@ -3907,9 +3943,9 @@
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
                       "event" (do (vreset! saw-sse? true)
-                                (recur value data-lines (unchecked-inc line-count) now-ns))
+                                  (recur value data-lines (unchecked-inc line-count) now-ns))
                       "data"  (do (vreset! saw-sse? true)
-                                (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
+                                  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
                       (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
@@ -4091,7 +4127,8 @@
             ;;               provider-state :tool-call-fragments; assemble now.
             msg-tool-calls  (->> (:content assistant-msg)
                               (filter #(= "tool_use" (:type %)))
-                              (mapv (fn [b] {:id (:id b) :name (:name b) :input (or (:input b) {})})))
+                              (mapv (fn [b] {:id (:id b) :name (:name b)
+                                             :input (decode-tool-arguments (:input b))})))
             ps-tool-calls   (or (not-empty (:tool-calls ps))
                               (when (seq (:tool-call-fragments ps))
                                 (assemble-chat-tool-call-fragments (:tool-call-fragments ps))))
@@ -4149,8 +4186,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                              idle?     :svar.core/stream-idle-timeout
-                              :else     :svar.core/http-error)
+                                  idle?     :svar.core/stream-idle-timeout
+                                  :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4184,8 +4221,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                            idle?     :svar.core/stream-idle-timeout
-                            :else     :svar.core/http-error)
+                                idle?     :svar.core/stream-idle-timeout
+                                :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4369,7 +4406,7 @@
                (catch Exception e
                  (if (failure/retry-without-server-item-ids? e)
                    (do (failure/mark-stateless-items! base-url)
-                     (responses-call true))
+                       (responses-call true))
                    (throw e))))))
 
          :else
@@ -5187,7 +5224,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                 (catch Exception _ partial-map)))]
+                                                    (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -5921,8 +5958,8 @@
                                                :tool-name (:tool-name (ex-data enriched))
                                                :tool-schema-field field}
                                         :msg "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
-                         (swap! gateway-tool-field-quirks conj quirk)
-                         (run (assoc opts :tools tools)))
+                           (swap! gateway-tool-field-quirks conj quirk)
+                           (run (assoc opts :tools tools)))
               ;; Same field, but our tools never carried it: the gateway invented
               ;; it, so only a gateway/model change can fix this. Say so.
               healable (throw (ex-info (ex-message enriched)
@@ -6163,7 +6200,7 @@
                                    (if (seq fetched)
                                      (do (swap! models-cache assoc cache-key
                                            {:at (System/currentTimeMillis) :models fetched})
-                                       fetched)
+                                         fetched)
                                      ;; Empty = the fetch failed or the gateway hiccuped.
                                      (or (:models cached) fetched))))]
      (filter-provider-models provider-id models))))
