@@ -26,6 +26,15 @@
 (def ^:private extract-gemini    @#'sut/extract-gemini-response-data)
 (def ^:private gemini-tool-config @#'sut/gemini-tool-config)
 
+(def ^:private keywordize-response @#'sut/keywordize-response)
+(def ^:private parse-sse-data      @#'sut/parse-sse-data)
+
+(defn- parse-body
+  "One RAW provider body through svar's real response parse — the only honest
+   way to assert what a caller actually receives."
+  [s]
+  (keywordize-response (json/read-json s :key-fn identity)))
+
 (def ^:private run-python
   {:name "run_python"
    :description "Execute Python in the sandbox."
@@ -214,9 +223,9 @@
     (let [envelope {:parsed {:content [{:type "text" :text "let me run that"}
                                        {:type "tool_use" :id "toolu_1"
                                         :name "run_python"
-                                        ;; the envelope parse keywordizes EVERY
-                                        ;; key, tool arguments included
-                                        :input {:code "rg(\"x\")"}}]
+                                        ;; the envelope parse interns svar's OWN
+                                        ;; schema and NEVER tool arguments
+                                        :input {"code" "rg(\"x\")"}}]
                              :usage {:input_tokens 10 :output_tokens 5}}}
           out (extract-anthropic envelope)]
       (expect (= "let me run that" (:content out)))
@@ -476,7 +485,7 @@
       (let [out (extract-gemini {:parsed {:candidates [{:content {:role "model"
                                                                   :parts [{:text "let me run it"}
                                                                           {:functionCall {:name "run_python"
-                                                                                          :args {:code "print(1)"}}}]}}]
+                                                                                          :args {"code" "print(1)"}}}]}}]
                                           :usageMetadata {:promptTokenCount 10 :candidatesTokenCount 4}}})]
         (expect (= "let me run it" (:content out)))
         (expect (= "run_python" (:name (first (:tool-calls out)))))
@@ -540,18 +549,41 @@
 
 (defdescribe tool-arguments-are-strings-only-test
   ;; Tool arguments are MODEL-AUTHORED data in the tool's own key space, not
-  ;; svar's schema. Every wire must hand the caller the SAME strings-only map,
-  ;; at every depth — a caller that renders them (JSON, a Python literal, a dict
-  ;; lookup) must never meet an interned `:kw`.
-  (describe "every wire decodes tool arguments to string keys at every depth"
-    (it "anthropic: the keywordized envelope comes back strings-only"
-      (let [out (extract-anthropic
-                  {:parsed {:content [{:type "tool_use" :id "toolu_1" :name "patch"
-                                       :input {:edits [{:path "a.clj" :from_anchor "1:aa"}]
-                                               :op :delete}}]
-                            :usage {:input_tokens 1 :output_tokens 1}}})]
-        (expect (= [{"edits" [{"path" "a.clj" "from_anchor" "1:aa"}] "op" "delete"}]
-                  (mapv :input (:tool-calls out))))))
+  ;; svar's schema. svar NEVER interns them — not even for one intermediate step
+  ;; a later pass would undo — so every wire hands the caller the SAME
+  ;; strings-only map, at every depth, and a caller that renders them (JSON, a
+  ;; Python literal, a dict lookup) can never meet an interned `:kw`.
+  (describe "the response parse interns svar's envelope but not tool arguments"
+    (it "anthropic: `tool_use.input` comes off the wire strings-only"
+      (let [parsed (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\","
+                                 "\"name\":\"patch\",\"input\":{\"edits\":[{\"path\":\"a.clj\","
+                                 "\"from_anchor\":\"1:aa\"}],\"op\":\"delete\"}}],"
+                                 "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))
+            args   {"edits" [{"path" "a.clj" "from_anchor" "1:aa"}] "op" "delete"}]
+        ;; the ENVELOPE is svar's own schema, so it is interned as before
+        (expect (= "tool_use" (:type (first (:content parsed)))))
+        (expect (= 1 (get-in parsed [:usage :input_tokens])))
+        ;; the ARGUMENTS never were a keyword at any point
+        (expect (= args (:input (first (:content parsed)))))
+        (expect (= [args] (mapv :input (:tool-calls (extract-anthropic {:parsed parsed})))))))
+
+    (it "keys with no faithful keyword form survive verbatim"
+      ;; `name` would drop the `a` of `a/b`, `str` would keep the interning
+      ;; colon, and a space or a leading colon has no round-trip at all.
+      (let [parsed (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"cat\","
+                                 "\"input\":{\"a/b\":1,\"1:aa\":2,\"has space\":3,\":path\":4}}],"
+                                 "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))]
+        (expect (= [{"a/b" 1 "1:aa" 2 "has space" 3 ":path" 4}]
+                  (mapv :input (:tool-calls (extract-anthropic {:parsed parsed})))))))
+
+    (it "gemini: `functionCall.args` is uninterned on the streaming wire too"
+      (let [parsed (parse-sse-data
+                     (str "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":"
+                       "[{\"functionCall\":{\"name\":\"fs\",\"args\":{\"op\":\"delete\","
+                       "\"paths\":[\"x\"]}}}]}}]}"))]
+        (expect (= "model" (get-in parsed [:candidates 0 :content :role])))
+        (expect (= [{"op" "delete" "paths" ["x"]}]
+                  (mapv :input (:tool-calls (extract-gemini {:parsed parsed})))))))
 
     (it "openai chat: JSON arguments decode without interning"
       (let [out (extract-openai
@@ -572,26 +604,12 @@
                                  [{:index 0 :id "c" :function {:name "run_python"
                                                                :arguments "{\"code\":\"print(1)\"}"}}]))))))
 
-    (it "gemini: `functionCall.args` is decoded like every other wire"
-      (let [out (extract-gemini
-                  {:parsed {:candidates [{:content {:parts [{:functionCall {:name "fs"
-                                                                            :args {:op :delete
-                                                                                   :paths ["x"]}}}]}}]}})]
-        (expect (= [{"op" "delete" "paths" ["x"]}] (mapv :input (:tool-calls out))))))
-
-    (it "a namespaced or colon-bearing key survives the round trip verbatim"
-      ;; `name` would drop the `a` of `a/b`; `str` would keep the colon.
-      (let [out (extract-anthropic
-                  {:parsed {:content [{:type "tool_use" :id "t" :name "cat"
-                                       :input {(keyword "a/b") 1 (keyword "1:aa") 2}}]
-                            :usage {:input_tokens 1 :output_tokens 1}}})]
-        (expect (= [{"a/b" 1 "1:aa" 2}] (mapv :input (:tool-calls out))))))
-
     (it "the canonical assistant message carries the strings-only input onward"
-      (let [out (extract-anthropic
-                  {:parsed {:content [{:type "tool_use" :id "t" :name "fs" :input {:op :delete}}]
-                            :usage {:input_tokens 1 :output_tokens 1}}})
-            block (first (filter #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))]
+      (let [parsed (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"fs\","
+                                 "\"input\":{\"op\":\"delete\"}}],"
+                                 "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))
+            out    (extract-anthropic {:parsed parsed})
+            block  (first (filter #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))]
         (expect (= {"op" "delete"} (:input block)))
         ;; and it re-encodes to the wire unchanged
         (expect (= "{\"op\":\"delete\"}" (json/write-json-str (:input block))))))))

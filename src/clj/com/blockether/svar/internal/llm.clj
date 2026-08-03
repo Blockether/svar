@@ -194,6 +194,43 @@
       (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
     true))
 
+(def ^:private RAW_TOOL_ARG_KEYS
+  "Provider-response keys whose VALUE is MODEL-AUTHORED tool-call arguments:
+   anthropic `tool_use.input`, gemini `functionCall.args`, OpenAI
+   `function.arguments` / `function_call.arguments`.
+
+   Everything else in a provider body is svar's OWN schema — a fixed, small,
+   documented key set — so it is interned for ergonomic access. Tool arguments
+   are the opposite: an OPEN key space owned by the CALLER's tool, where
+   `\"from_anchor\"`, `\"a/b\"` and `\"1:aa\"` are data, not identifiers. Interning
+   them would hand the caller a second shape to check on every read, corrupt
+   anything that renders them back out (JSON, a Python literal, a dict lookup)
+   as `:kw`, and leak every model-invented key into the JVM's global keyword
+   table for the life of the process."
+  #{"input" "args" "arguments"})
+
+(defn- keywordize-response
+  "Interns the keys of a parsed provider response body — svar's own schema —
+   EXCEPT the tool-argument subtrees named by `RAW_TOOL_ARG_KEYS`, which are
+   passed on exactly as JSON delivered them: strings-only, at every depth.
+
+   This is why response bodies are read with `:key-fn identity` and interned
+   here instead: a tool argument is then never a keyword at ANY point, not even
+   for one intermediate step a later pass would have to undo — so `\"a/b\"`,
+   `\"1:aa\"` and `\"has space\"` reach the caller verbatim."
+  [x]
+  (cond
+    (map? x)    (persistent!
+                  (reduce (fn [acc [k v]]
+                            (assoc! acc (cond-> k (string? k) keyword)
+                              (if (contains? RAW_TOOL_ARG_KEYS k)
+                                v
+                                (keywordize-response v))))
+                    (transient {}) x))
+    (vector? x) (mapv keywordize-response x)
+    (seq? x)    (mapv keywordize-response x)
+    :else       x))
+
 (defn- http-post!
   "Makes an HTTP POST request with JSON body. Reuses the shared HttpClient.
 
@@ -223,7 +260,7 @@
                        (throw e))))
         _        (mark-connection-healthy! url)
         raw-body (:body response)
-        parsed   (try (json/read-json raw-body :key-fn keyword)
+        parsed   (try (keywordize-response (json/read-json raw-body :key-fn identity))
                       (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
@@ -1186,50 +1223,22 @@
    (:svar/tool-choice extra-body)
    (dissoc extra-body :svar/tools :svar/tool-choice)])
 
-(defn- tool-arg-key
-  "One MODEL-AUTHORED argument key as the STRING it was on the wire. `name`
-   would drop the namespace of a key like `\"a/b\"` and `str` would keep the
-   interning colon, so a keyword is unwrapped with `subs` instead."
-  [k]
-  (cond (keyword? k) (subs (str k) 1)
-        (string? k)  k
-        :else        (str k)))
-
-(defn- stringify-tool-args
-  "Restore STRING keys on decoded tool arguments, at EVERY depth (nested dicts
-   inside vectors included). Interned VALUES are unwrapped the same way: JSON
-   cannot produce one, so a keyword/symbol value only ever arrives from a
-   provider adapter that coerced an enum, and the caller wants the wire string."
-  [x]
-  (cond
-    (map? x)    (into {} (map (fn [[k v]] [(tool-arg-key k) (stringify-tool-args v)])) x)
-    (vector? x) (mapv stringify-tool-args x)
-    (set? x)    (into #{} (map stringify-tool-args) x)
-    (seq? x)    (mapv stringify-tool-args x)
-    (keyword? x) (tool-arg-key x)
-    (symbol? x) (str x)
-    :else       x))
-
 (defn- decode-tool-arguments
   "Tool-call arguments reach svar either already parsed (anthropic
-   `tool_use.input`, gemini `functionCall.args` — parsed with the rest of the
-   envelope) or as a JSON string (OpenAI chat `function.arguments`, responses
-   `function_call.arguments`). Normalize to a STRING-keyed map, at every depth,
-   so `:input` is uniform across all wires.
+   `tool_use.input`, gemini `functionCall.args` — carried through the envelope
+   parse UNINTERNED by `keywordize-response`) or as a JSON string (OpenAI chat
+   `function.arguments`, responses `function_call.arguments`). Both end up as
+   the SAME string-keyed map, at every depth, so `:input` is uniform across
+   every wire.
 
-   STRINGS-ONLY, DELIBERATELY: svar keywordizes a provider ENVELOPE because its
-   keys are a fixed, svar-owned schema. Tool arguments are not — they are
-   MODEL-AUTHORED data in the tool's own open key space, where `\"from_anchor\"`,
-   `\"a/b\"` and `\"1:aa\"` are values, not identifiers. Interning them costs the
-   caller a second shape to check on every read and corrupts anything that
-   renders them back out (JSON, a Python literal, a dict lookup) as `:kw`. So
-   the conversion happens ONCE, here, at the wire edge, and callers downstream
-   read plain strings."
+   There is no keyword→string repair pass here, deliberately: svar never
+   interns tool arguments in the first place (see `RAW_TOOL_ARG_KEYS`), so a
+   caller reads plain strings and nothing has to be un-done."
   [args]
   (cond
-    (map? args)                           (stringify-tool-args args)
+    (map? args)                           args
     (and (string? args) (not (str/blank? args)))
-    (try (stringify-tool-args (json/read-json args :key-fn identity))
+    (try (json/read-json args :key-fn identity)
          (catch Exception _ {}))
     :else                                 {}))
 
@@ -3085,7 +3094,7 @@
       (str/blank? trimmed) nil
       :else
       (try
-        (json/read-json trimmed :key-fn keyword)
+        (keywordize-response (json/read-json trimmed :key-fn identity))
         (catch Exception _ nil)))))
 
 (defn- sse-field-line
