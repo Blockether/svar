@@ -395,6 +395,43 @@
     :svar.core/stream-truncated
     :svar.core/stream-incomplete})
 
+(declare classify)
+
+(defn- attempt-error-message
+  "Human text retained on one router `:attempts` row."
+  [error]
+  (cond
+    (nil? error) nil
+    (string? error) error
+    (instance? Throwable error) (ex-message error)
+    (map? error) (or (:message error) (get error "message"))
+    :else (str error)))
+
+(defn- attempt->throwable
+  "Rebuild one router attempt as classification evidence, stripping nested
+   attempts so recursive classification is finite."
+  ^Throwable [{:keys [status reason error]}]
+  (let [nested-data (cond
+                      (instance? Throwable error) (ex-data error)
+                      (map? error) (or (:data error) error)
+                      :else nil)
+        data (cond-> (dissoc (or nested-data {}) :attempts)
+               status (assoc :status status))
+        message (or (not-empty (attempt-error-message error))
+                  (case reason
+                    (:auth :authentication) "authentication failed"
+                    :model-unsupported "model not supported"
+                    :rate-limit "rate limit"
+                    :stream-timeout "upstream timeout"
+                    nil)
+                  "Provider attempt failed")]
+    (ex-info message data (when (instance? Throwable error) error))))
+
+(defn- attempt-classifications
+  [data]
+  (mapv (comp classify attempt->throwable)
+    (filter map? (:attempts data))))
+
 (defn classify
   "Classifies a provider/gateway failure into a stable, actionable shape.
 
@@ -404,6 +441,8 @@
       :reached-model?  true / false / nil (unknown)
       :status          upstream HTTP status, when any
       :request-id      correlation id, when the gateway printed one
+      :attempt-categories categories of retained router attempts, when any
+      :all-attempts-category? whether every retained attempt has this category
       :summary         one-line human explanation
       :next-step       one-line human guidance}
 
@@ -416,17 +455,35 @@
         hay (haystack e)
         etype (:type data)
         started? (stream-output-started? e)
+        attempt-results (attempt-classifications data)
+        attempt-categories (mapv :category attempt-results)
+        unanimous-attempt-category (when (and (seq attempt-categories)
+                                           (apply = attempt-categories)
+                                           (not= :unknown (first attempt-categories)))
+                                     (first attempt-categories))
         base {:status status
               :request-id (request-id e)
               :error-type etype}
         limit? (provider-limit-failure? status hay)
         answer (fn [category retryable? reached? summary next-step]
-                 (assoc base
-                   :category category
-                   :retryable? (boolean (and retryable? (not started?)))
-                   :reached-model? reached?
-                   :summary summary
-                   :next-step next-step))]
+                 (cond-> (assoc base
+                           :category category
+                           :retryable? (boolean (and retryable? (not started?)))
+                           :reached-model? reached?
+                           :summary summary
+                           :next-step next-step)
+                   (seq attempt-categories)
+                   (assoc :attempt-categories attempt-categories
+                     :all-attempts-category?
+                     (= category unanimous-attempt-category))))
+        attempt-answer (when unanimous-attempt-category
+                         (-> (peek attempt-results)
+                           (assoc :status (or status (:status (peek attempt-results)))
+                             :request-id (request-id e)
+                             :error-type etype
+                             :attempt-categories attempt-categories
+                             :all-attempts-category? true)
+                           (update :retryable? #(boolean (and % (not started?))))))]
     (cond
       limit?
       (answer :quota-exhausted false true
@@ -507,9 +564,10 @@
         "fix the request; retrying it unchanged will fail the same way")
 
       :else
-      (answer :unknown false nil
-        "the provider call failed"
-        "retry; if it persists, switch provider/model"))))
+      (or attempt-answer
+        (answer :unknown false nil
+          "the provider call failed"
+          "retry; if it persists, switch provider/model")))))
 
 (defn retryable?
   "Convenience: svar's retry verdict for one exception."

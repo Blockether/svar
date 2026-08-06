@@ -429,3 +429,38 @@
       (let [e (ex-info "Overloaded" {:type :svar.core/http-error :status 529})]
         (expect (true? (:retryable? (sut/classify e))))
         (expect (true? (sut/transient-error? e)))))))
+
+;; Regression, issue #105: provider routing wrappers hid the final failures in
+;; `:attempts`, so consumers could not use Svar as the sole classifier.
+(defdescribe routed-attempt-classification-test
+  (it "classifies a timeout retained only on one routing attempt"
+    (let [e (ex-info "Provider unavailable"
+              {:type :svar.llm/provider-unavailable
+               :attempts [{:provider :bedrock
+                           :model "claude-opus-4-8"
+                           :reason :transient-error
+                           :error (str "litellm.Timeout: BedrockException: Timeout Error - "
+                                    "litellm.Timeout: Connection timed out. Timeout "
+                                    "passed=Timeout(connect=5.0, read=600.0)")}]})
+          c (sut/classify e)]
+      (expect (= :connect-timeout (:category c)))
+      (expect (true? (:retryable? c)))
+      (expect (= [:connect-timeout] (:attempt-categories c)))
+      (expect (true? (:all-attempts-category? c)))))
+
+  (it "classifies an all-auth fleet from routing attempts alone"
+    (let [e (ex-info "All providers exhausted"
+              {:type :svar.llm/all-providers-exhausted
+               :attempts [{:provider :a
+                           :status 401
+                           :reason :authentication
+                           :error "API authentication failed"}
+                          {:provider :b
+                           :status 401
+                           :reason :authentication
+                           :error "Invalid API key"}]})
+          c (sut/classify e)]
+      (expect (= :auth (:category c)))
+      (expect (false? (:retryable? c)))
+      (expect (= [:auth :auth] (:attempt-categories c)))
+      (expect (true? (:all-attempts-category? c))))))
