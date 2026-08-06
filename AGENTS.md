@@ -1,14 +1,13 @@
 # Svar repository guidance
 
-Svar owns structured LLM output and routing, not databases, agents, ingestion, benchmarks, guards, or removed CoD/CoVe APIs.
+Svar owns structured LLM output and routing. Keep changes inside that boundary: do not reintroduce databases, agents, ingestion, benchmarks, guards, or the removed CoD/CoVe APIs.
 
-## Contracts
+## Non-negotiable contracts
 
 - Blockether One is live and expected to be available.
-- Never add `lazytest/skip=true`.
-- Use Lazytest, not `clojure.test`.
-- Final verification is `./verify.sh`.
+- Use Lazytest, never `clojure.test`; never add `lazytest/skip=true`.
+- Use `taoensso.trove` v1.1.0, not Telemere.
 
-## Logging
+## Verification
 
-Use `taoensso.trove` v1.1.0, not Telemere.
+Run focused checks while iterating, then run `./verify.sh` as the final check.
