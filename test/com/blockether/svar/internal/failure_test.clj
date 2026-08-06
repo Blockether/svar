@@ -402,6 +402,20 @@
           (expect (false? (sut/transient-error? e)) msg)
           (expect (false? (sut/transport-retryable? e)) msg))))
 
+    ;; Regression: Claude's exhausted extra-usage gate was treated as an
+    ;; intermittent routing blip, so one rejected turn slept through nested
+    ;; low-level and router backoff instead of surfacing the account limit.
+    (it "surfaces Anthropic extra-usage exhaustion without one retry"
+      (let [body "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Third-party apps now draw from your extra usage.\"}}"
+            e (ex-info "Exceptional status code: 400"
+                {:type :svar.core/http-error :status 400 :body body})
+            c (sut/classify e)
+            decision (sut/low-level-retry-decision e)]
+        (expect (= :quota-exhausted (:category c)))
+        (expect (false? (:retryable? c)))
+        (expect (false? (:retry? decision)))
+        (expect (nil? (:reason decision)))))
+
     (it "treats a bare HTTP 402 as the same account wall"
       (let [e (ex-info "Exceptional status code: 402"
                 {:type :svar.core/http-error :status 402})

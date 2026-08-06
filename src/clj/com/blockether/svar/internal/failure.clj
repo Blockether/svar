@@ -83,6 +83,10 @@
    "exceeded your budget" "budget limit" "exceededbudget" "crossed spend"
    "spend limit" "spending limit" "max budget"
    "plan limit reached" "subscription expired" "account_deactivated"
+   ;; Anthropic's Claude subscription OAuth gate. This wording means the plan
+   ;; will not fund a third-party request; repeating the same request cannot
+   ;; change the account state.
+   "third-party apps now draw" "draw from your extra usage" "draw from extra usage"
    "payment required" "payment_required"])
 
 (defn provider-limit-error?
@@ -852,21 +856,6 @@
              ((fn [c] (or (instance? java.net.ConnectException c)
                         (instance? java.net.SocketTimeoutException c)))))))))))
 
-(defn- anthropic-third-party-400?
-  "The one known server-side 400 that is safe to retry. Anthropic intermittently
-   gates otherwise-valid Claude subscription OAuth calls with this message; the
-   identical request succeeds seconds later. Keep this exception here—not in
-   `llm`—so all retry policy has one owner."
-  [^Throwable e]
-  (let [{:keys [status body]} (ex-data e)
-        body (some-> body str str/lower-case)]
-    (and (= 400 status)
-      body
-      (some #(str/includes? body %)
-        ["third-party apps now draw from your extra usage"
-         "draw from your extra usage"
-         "draw from extra usage"]))))
-
 (defn low-level-retry-decision
   "Canonical same-provider HTTP retry policy for `llm/with-retry`.
 
@@ -880,14 +869,12 @@
    (let [classification (classify e)
          {:keys [category status retryable?]} classification
          started? (stream-output-started? e)
-         ;; A known hard canonical category vetoes every generic retry path. The
-         ;; Anthropic exception below is deliberate and narrowly identified.
+         ;; A known hard canonical category vetoes every generic retry path.
          hard-category? (contains? #{:auth :quota-exhausted :resource-mismatch
                                      :tool-schema-unsupported :context-length-exceeded
                                      :model-unavailable :invalid-request}
                           category)
          transport? (and (not hard-category?) (not started?) (transport-retryable? e))
-         third-party? (and (not started?) (anthropic-third-party-400? e))
          ;; Low-level retry may retry response failures and genuine transport
          ;; drops, but never after visible output, router-owned watchdogs, or a
          ;; router-owned 429. `:connect-timeout` and `:transport-drop` join that
@@ -908,12 +895,11 @@
                                (contains? #{:connect-timeout :transport-drop} category)))
                            (not (and router-handles-rate-limit?
                                   (= :rate-limited category))))
-         retry? (boolean (or transport? third-party? response-retry?))]
+         retry? (boolean (or transport? response-retry?))]
      {:retry? retry?
       :reason (when retry?
                 (cond
                   transport? :connection-error
-                  third-party? :anthropic-third-party-400
                   (and (= :gateway-unavailable category) (nil? status)) :transient-message
                   :else :http-status))
       :classification classification})))
