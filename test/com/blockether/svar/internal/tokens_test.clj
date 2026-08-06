@@ -54,6 +54,7 @@
       (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.3-codex")))
       (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4")))
       (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4-mini")))
+      (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-luna")))
       (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-sol")))
       (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-terra"))))
 

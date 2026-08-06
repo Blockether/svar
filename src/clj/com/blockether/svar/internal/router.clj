@@ -134,7 +134,7 @@
     :provider-model-source :github-copilot}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys [] :api-style :openai-compatible-responses
-                  :default-models [{:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
+                  :default-models [{:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1"
@@ -223,6 +223,7 @@
    "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.4-mini"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
+   "gpt-5.6-luna"              {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
    "gpt-5.6-sol"               {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
 
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
@@ -534,6 +535,7 @@
     "gpt-5.5"                   {:context 272000
                                  :pricing {:input-over-272k 10.00 :cached-input-over-272k 1.00
                                            :output-over-272k 45.00}}
+    "gpt-5.6-luna"              {:context 272000}
     "gpt-5.6-sol"               {:context 272000
                                  :pricing {:input 5.00  :cached-input 0.50  :output 30.00
                                            :input-over-272k 10.00 :cached-input-over-272k 1.00

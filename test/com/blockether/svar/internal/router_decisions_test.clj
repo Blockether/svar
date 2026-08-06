@@ -1798,6 +1798,15 @@
     (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
 
 (defdescribe known-provider-default-models-test
+  (it "uses curated OpenAI Codex defaults when caller omits :models"
+    (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
+      (expect (= ["gpt-5.6-luna"
+                  "gpt-5.6-sol"
+                  "gpt-5.5"
+                  "gpt-5.4"
+                  "gpt-5.3-codex"]
+                (mapv :name (:models p))))))
+
   (it "uses curated Mistral defaults when caller omits :models"
     (let [p (router/normalize-provider 0 {:id :mistral :api-key "x"})
           models (mapv :name (:models p))
