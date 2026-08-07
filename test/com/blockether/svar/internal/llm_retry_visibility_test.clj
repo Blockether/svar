@@ -108,3 +108,56 @@
                  :provider-error-code "server_is_overloaded"})]
         (expect (= :gateway-unavailable (:category (failure/classify e))))
         (expect (failure/transient-error? e))))))
+
+(defn- rate-limited!
+  "The 429 a subscription/quota window answers with, carrying the server's own
+   `Retry-After` (delta-seconds, the only form providers actually send)."
+  [retry-after-secs]
+  (ex-info "HTTP 429: rate_limit_error"
+    {:type :svar.core/http-error
+     :status 429
+     :headers {"retry-after" (str retry-after-secs)}}))
+
+;; Regression, vis session 07d38cba (2026-08-07): an `anthropic-coding-plan` 429
+;; answered `Retry-After: 60`, twice, then 42 — and the ladder slept its OWN
+;; ceiling instead. Every retry then landed inside the window the provider had
+;; just declared closed, so the attempts were spent on guaranteed refusals and
+;; the turn failed having never waited the minute it was asked for. The request
+;; a human re-sent ~163 s after the first refusal succeeded on its first try.
+(defdescribe declared-cooldown-test
+  (describe "a server-declared Retry-After is an instruction, not a hint"
+    (it "waits what the provider asked, not the jitter ceiling"
+      (let [seen     (atom [])
+            attempts (atom 0)]
+        (try
+          (#'llm/with-retry
+           (fn [] (swap! attempts inc) (throw (rate-limited! 1)))
+           (assoc fast :max-retries 2 :on-retry #(swap! seen conj %)))
+          (catch clojure.lang.ExceptionInfo _ nil))
+        (expect (= 2 @attempts))
+        ;; `fast` caps its own backoff at 1 ms; the header outranks it.
+        (expect (= [1000] (mapv :delay-ms @seen)))
+        ;; and the wait says WHOSE it is, so a surface can name the cooldown.
+        (expect (= [1000] (mapv :retry-after-ms @seen)))))
+
+    (it "refuses to retry into a window the phase budget cannot outlast"
+      (let [seen     (atom [])
+            attempts (atom 0)]
+        (try
+          (#'llm/with-retry
+           (fn [] (swap! attempts inc) (throw (rate-limited! 60)))
+           (assoc fast :budget-ms 30000 :on-retry #(swap! seen conj %)))
+          (catch clojure.lang.ExceptionInfo _ nil))
+        ;; 60 s > the 30 s this phase may spend, and sleeping less than the
+        ;; provider asked only buys another refusal — hand the request on.
+        (expect (= 1 @attempts))
+        (expect (empty? @seen)))))
+
+  (describe "phase budget"
+    (it "outlasts the cooldown ladder that actually healed the incident"
+      ;; 60 s + 60 s + 42 s of declared waiting, then a successful request.
+      (expect (<= 162000 (long failure/RETRY_PHASE_BUDGET_MS))))
+
+    (it "is the same budget the router's same-provider phase spends"
+      (expect (= (long failure/RETRY_PHASE_BUDGET_MS)
+                (long (:fallback-after-ms router/DEFAULT_RATE_LIMIT_ROUTING)))))))

@@ -930,12 +930,14 @@
                                 surface the rate-limit error to the
                                 caller instead.
 
-   The 60 000 ms (60 s) default tolerates Anthropic / OpenAI / z.ai
-   Retry-After values that can land between 30-60 s under quota
-   pressure on reasoning-heavy workloads, while still bounding the
-   wait so a single user request cannot hang for minutes."
+   The budget is `failure/RETRY_PHASE_BUDGET_MS`: the low-level HTTP ladder
+   and this loop are the same same-provider phase seen at two layers, and it
+   has to outlast the `Retry-After` values Anthropic / OpenAI / z.ai answer
+   with under quota pressure — one refused minute, then another, is normal, and
+   a cap below them turns a throttle the provider itself scheduled into a hard
+   failure."
   {:same-provider-delays-ms failure/RETRY_DELAY_LADDER_MS
-   :fallback-after-ms 60000
+   :fallback-after-ms failure/RETRY_PHASE_BUDGET_MS
    :respect-retry-after? true
    :fallback-provider? true})
 
@@ -1308,10 +1310,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-                (assoc ps
-                  :cb-state :open
-                  :cb-failures new-failures
-                  :cb-open-until (+ now recovery-ms)))
+              (assoc ps
+                :cb-state :open
+                :cb-failures new-failures
+                :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1323,7 +1325,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1533,8 +1535,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
+                    (keyword? prefer) [prefer]
+                    :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)
@@ -1673,27 +1675,15 @@
       (some? (:partial-content data))
       (some? (:reasoning data)))))
 
-(def ^:private retry-after-header-ms
-  "See `failure/retry-after-ms`."
-  failure/retry-after-ms)
-
 (defn- rate-limit-delay-ms
-  "Raw delay candidate for the next same-provider retry, in ms.
+  "Configured delay for the next same-provider retry, in ms, or nil once the
+   `:same-provider-delays-ms` schedule is exhausted.
 
-   Combines (in order of precedence):
-     - `Retry-After` HTTP header (when `:respect-retry-after?` is true);
-     - `:same-provider-delays-ms[attempt-index]` from policy.
-
-   Returns nil once the configured delay schedule is exhausted (caller
-   then consults `:fallback-after-ms` for budget padding before falling
-   back to the next provider)."
-  [router e attempt-index]
-  (let [policy (:rate-limit router)
-        configured (nth (vec (:same-provider-delays-ms policy)) attempt-index nil)
-        retry-after (when (:respect-retry-after? policy)
-                      (retry-after-header-ms e))]
-    (when (some? configured)
-      (long (or retry-after configured)))))
+   This is only the wait to use when the SERVER declared none;
+   `failure/retry-sleep-plan` owns the `Retry-After` header, the budget clamp
+   and the decision to stop."
+  [router attempt-index]
+  (nth (vec (:same-provider-delays-ms (:rate-limit router))) attempt-index nil))
 
 (defn- provider-label
   [provider]
@@ -1750,7 +1740,6 @@
         budget   (some-> (:fallback-after-ms policy) long)
         budget?  (some? budget)
         elapsed* #(- (long (router-now-ms router)) (long start-ms))
-        remain*  #(if budget? (max 0 (- (long budget) (long (elapsed*)))) Long/MAX_VALUE)
         budget-exhausted-result
         (fn [last-error]
           {:error last-error
@@ -1759,26 +1748,38 @@
            :elapsed-ms (long (elapsed*))})]
     (loop [retry-index 0
            last-error e]
-      (let [raw      (rate-limit-delay-ms router last-error retry-index)
-            remain   (long (remain*))
-            ;; Clamp configured delay to remaining budget so the same-provider
-            ;; phase never overshoots `:fallback-after-ms`.
-            delay-ms (when (and (some? raw) (or (not budget?) (pos? remain)))
-                       (long (if budget? (min (long raw) remain) (long raw))))]
+      (let [configured (rate-limit-delay-ms router retry-index)
+            ;; `failure/retry-sleep-plan` is the ONE policy both same-provider
+            ;; ladders spend: a server-declared `Retry-After` is honored in
+            ;; full or not at all, and only an undeclared wait clamps to the
+            ;; remaining budget. Sleeping a truncated cooldown just re-enters
+            ;; the window the provider named and is refused again.
+            plan     (when (some? configured)
+                       (failure/retry-sleep-plan last-error
+                         {:fallback-ms configured
+                          :elapsed-ms (elapsed*)
+                          :budget-ms (when budget? budget)
+                          :respect-retry-after? (:respect-retry-after? policy)}))
+            delay-ms (:delay-ms plan)]
         (cond
           ;; A retry is still in budget — sleep, then re-invoke `f`.
-          (some? delay-ms)
+          (some? plan)
           (do
             (append-routing-event! trace prefs
               (routing-event router :llm.routing/provider-retry
-                {:status (:status (ex-data last-error))
-                 :reason :rate-limit
-                 :provider (provider-label provider)
-                 :model (:name model-map)
-                 :attempt (inc retry-index)
-                 :delay-ms delay-ms
-                 :elapsed-ms (long (elapsed*))
-                 :error (ex-message last-error)}))
+                (cond-> {:status (:status (ex-data last-error))
+                         :reason :rate-limit
+                         :provider (provider-label provider)
+                         :model (:name model-map)
+                         :attempt (inc retry-index)
+                         :delay-ms delay-ms
+                         :elapsed-ms (long (elapsed*))
+                         :error (ex-message last-error)}
+                  ;; Name the cooldown as the SERVER's when it is: a minute of
+                  ;; waiting reads as a hang unless the surface can say who
+                  ;; asked for it.
+                  (some? (:retry-after-ms plan))
+                  (assoc :retry-after-ms (long (:retry-after-ms plan))))))
             ;; Plain `Thread/sleep` instead of `(async/<!! (async/timeout
             ;; ...))` so a Vis-side `Esc` (= thread interrupt) wakes the
             ;; loop immediately with an `InterruptedException`. Core.async

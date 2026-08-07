@@ -504,6 +504,36 @@
         ;; Header-driven delay should clamp configured 10000ms to 0ms.
         (expect (every? #(zero? (long (:delay-ms %))) retries)))))
 
+  ;; Regression, vis session 07d38cba (2026-08-07): the same-provider phase
+  ;; clamped the server's own `Retry-After` down to whatever budget was left and
+  ;; slept THAT, so the retry re-entered a window the provider had just declared
+  ;; closed and was refused again. A cooldown the phase cannot outlast is the
+  ;; next provider's problem, not another guaranteed 429.
+  (it "falls back instead of sleeping less than the declared cooldown"
+    (let [[clock _] (mock-clock)
+          r (llm/make-router
+              [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+               {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+              {:clock clock
+               :failure-threshold 1
+               :rate-limit {:same-provider-delays-ms [10 10]
+                            :fallback-after-ms 1000
+                            :respect-retry-after? true
+                            :fallback-provider? true}})
+          calls (atom [])
+          result (router/with-provider-fallback r {}
+                   (fn [provider _model]
+                     (swap! calls conj (:id provider))
+                     (case (:id provider)
+                       :p1 (throw (ex-info "HTTP 429"
+                                    {:type :svar.core/http-error
+                                     :status 429
+                                     :headers {"retry-after" "9999"}}))
+                       :p2 (success-result 100))))]
+      (expect (= [:p1 :p2] @calls))
+      (expect (empty? (filter #(= :llm.routing/provider-retry (:event/type %))
+                        (:routed/trace result))))))
+
   (it "`:respect-retry-after? false` ignores `Retry-After` header"
     (let [[clock _] (mock-clock)
           r (llm/make-router
@@ -918,7 +948,7 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; CB should be open — verify P1 is skipped.
       (let [skipped (router/with-provider-fallback r {:strategy :root}
                       (fn [_ _] (success-result 10)))]
@@ -943,13 +973,13 @@
       (dotimes [_ 2]
         (router/with-provider-fallback r {:strategy :root}
           (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                                 :p2 (success-result 10)))))
+                             :p2 (success-result 10)))))
       ;; Advance to half-open
       (advance! clock-atom 11000)
       ;; Probe P1 → fails again; CB should immediately re-open for another recovery-ms
       (router/with-provider-fallback r {:strategy :root}
         (fn [provider _] (case (:id provider) :p1 (transient-error 503)
-                               :p2 (success-result 10))))
+                           :p2 (success-result 10))))
       ;; P1 should still be skipped — just advancing 1 second is not enough,
       ;; CB is open again for recovery-ms.
       (advance! clock-atom 1000)

@@ -348,9 +348,10 @@
   1000)
 
 (def RETRY_MAX_DELAY_MS
-  "Ceiling for one same-provider sleep. Bounds the tail of the ladder so a
-   single user request cannot sit behind minute-long waits; a server-declared
-   `Retry-After` is clamped to it too (`next-delay-ms`)."
+  "Ceiling for one of OUR OWN sleeps — the jittered exponential this namespace
+   invents when the server declared nothing. A `Retry-After` the provider sent
+   is never clamped to it: waking before the window it named just earns another
+   refusal, so `retry-sleep-plan` honors a declared cooldown in full or stops."
   15000)
 
 (def RETRY_MULTIPLIER
@@ -374,6 +375,18 @@
    is; `llm-retry-visibility-test` pins it against the four constants above."
   [1000 2000 4000 8000 15000 15000])
 
+(def RETRY_PHASE_BUDGET_MS
+  "Wall-clock cap for ONE same-provider retry phase. The low-level HTTP ladder
+   (`llm/with-retry`) and the router's `:fallback-after-ms` are the SAME phase
+   seen at two layers, so they spend one budget rather than two.
+
+   Measured (vis session 07d38cba, 2026-08-07): an `anthropic-coding-plan` 429
+   answered `Retry-After: 60`, again `60`, then `42`. The request that finally
+   succeeded landed ~163 s after the first refusal — so a budget shorter than
+   that turns a throttle the provider itself scheduled into a hard failure,
+   which is exactly what a 60 s cap does to a one-minute cooldown."
+  180000)
+
 (defn backoff-ms
   "Exponential backoff with FULL JITTER, the AWS-recommended shape.
 
@@ -388,14 +401,38 @@
          half (/ capped 2.0)]
      (long (+ half (* half (double (rand-fn))))))))
 
-(defn next-delay-ms
-  "Sleep before the next attempt: a server-declared `Retry-After` wins (clamped
-   to `max-ms`), otherwise jittered exponential backoff."
-  ([e base max-ms] (next-delay-ms e base max-ms rand))
-  ([e base max-ms rand-fn]
-   (if-let [ra (retry-after-ms e)]
-     (long (min (long ra) (long max-ms)))
-     (backoff-ms base max-ms rand-fn))))
+(defn retry-sleep-plan
+  "How long to wait before the next same-provider attempt, or nil to stop.
+
+   A server-declared `Retry-After` is an INSTRUCTION: waking before the window
+   the provider named is a guaranteed repeat refusal that spends an attempt for
+   nothing (vis session 07d38cba: every retry slept the ladder's own ceiling and
+   re-entered a 60 s cooldown). So a declared cooldown is honored IN FULL or not
+   at all — when it does not fit the phase's remaining budget the plan is nil and
+   the caller hands the request to the next provider instead of retrying into a
+   closed window.
+
+   `:fallback-ms` is the caller's own wait when the server declared none — the
+   jittered exponential of `llm/with-retry`, the configured ladder entry in the
+   router — and IS clamped to the remaining budget. `:elapsed-ms` is what the
+   phase has already spent and `:budget-ms` its cap (nil means
+   `RETRY_PHASE_BUDGET_MS`, never 'unbounded'). `:respect-retry-after?` is the
+   router's own policy switch and defaults to true."
+  [^Throwable e {:keys [fallback-ms elapsed-ms budget-ms respect-retry-after?]
+                 :or {respect-retry-after? true}}]
+  (let [budget   (long (or budget-ms RETRY_PHASE_BUDGET_MS))
+        remain   (- budget (long (or elapsed-ms 0)))
+        declared (when respect-retry-after? (retry-after-ms e))]
+    (cond
+      (not (pos? remain))
+      nil
+
+      (some? declared)
+      (when (<= (long declared) remain)
+        {:delay-ms (long declared) :retry-after-ms (long declared)})
+
+      (some? fallback-ms)
+      {:delay-ms (min (long fallback-ms) remain)})))
 
 ;; =============================================================================
 ;; Classification

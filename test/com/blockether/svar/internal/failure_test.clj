@@ -183,22 +183,43 @@
     (it "actually varies, so a fleet of agents does not retry in lockstep"
       (expect (< 1 (count (set (repeatedly 50 #(sut/backoff-ms 1000 60000))))))))
 
-  (describe "next-delay-ms"
-    (it "honors a server-declared Retry-After over its own backoff"
-      (expect (= 3000 (sut/next-delay-ms (err "slow down" {:headers {"retry-after" "3"}})
-                        1000 60000 (constantly 1.0)))))
+  (describe "retry-sleep-plan"
+    (it "honors a server-declared Retry-After in full, over its own backoff"
+      (expect (= {:delay-ms 3000 :retry-after-ms 3000}
+                (sut/retry-sleep-plan (err "slow down" {:headers {"retry-after" "3"}})
+                  {:fallback-ms 1000}))))
 
-    (it "clamps Retry-After to the max delay"
-      (expect (= 5000 (sut/next-delay-ms (err "slow down" {:headers {"retry-after" "600"}})
-                        1000 5000 (constantly 1.0)))))
+    ;; Regression, vis session 07d38cba (2026-08-07): a `Retry-After: 60` was
+    ;; clamped to the ladder's own 15 s ceiling, so every retry woke inside the
+    ;; window the provider had declared closed and was refused again.
+    (it "never shortens a declared cooldown to its own ceiling"
+      (expect (= {:delay-ms 600000 :retry-after-ms 600000}
+                (sut/retry-sleep-plan (err "slow down" {:headers {"retry-after" "600"}})
+                  {:fallback-ms 1000 :budget-ms 900000}))))
+
+    (it "stops instead, when the declared cooldown outlasts the phase budget"
+      (expect (nil? (sut/retry-sleep-plan (err "slow down" {:headers {"retry-after" "600"}})
+                      {:fallback-ms 1000 :budget-ms 30000}))))
 
     (it "ignores an unparsable HTTP-date Retry-After rather than sleeping nonsense"
-      (expect (= 1000 (sut/next-delay-ms (err "slow down"
-                                           {:headers {"retry-after" "Wed, 21 Oct 2015 07:28:00 GMT"}})
-                        1000 60000 (constantly 1.0)))))
+      (expect (= {:delay-ms 1000}
+                (sut/retry-sleep-plan (err "slow down"
+                                        {:headers {"retry-after" "Wed, 21 Oct 2015 07:28:00 GMT"}})
+                  {:fallback-ms 1000}))))
 
-    (it "falls back to jittered backoff with no header"
-      (expect (= 1000 (sut/next-delay-ms (err "boom" {:status 503}) 1000 60000 (constantly 1.0)))))))
+    (it "ignores the header entirely when the caller's policy says so"
+      (expect (= {:delay-ms 1000}
+                (sut/retry-sleep-plan (err "slow down" {:headers {"retry-after" "600"}})
+                  {:fallback-ms 1000 :respect-retry-after? false}))))
+
+    (it "clamps its OWN backoff to what is left of the budget"
+      (expect (= {:delay-ms 2000}
+                (sut/retry-sleep-plan (err "boom" {:status 503})
+                  {:fallback-ms 8000 :elapsed-ms 28000 :budget-ms 30000}))))
+
+    (it "is spent once the budget is gone"
+      (expect (nil? (sut/retry-sleep-plan (err "boom" {:status 503})
+                      {:fallback-ms 1000 :elapsed-ms 30000 :budget-ms 30000}))))))
 
 ;;; ── transport-level consolidation ──────────────────────────────────────────
 ;;

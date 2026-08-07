@@ -232,7 +232,7 @@
         _        (mark-connection-healthy! url)
         raw-body (:body response)
         parsed   (try (json/read-json raw-body :key-fn identity)
-                      (catch Exception _ nil))]
+                   (catch Exception _ nil))]
     {:parsed   parsed
      :raw-body raw-body
      :url      url
@@ -476,7 +476,7 @@
                        :msg (str "Clamping :max_tokens to " required-min
                               " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
                               " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
-          (assoc body :max_tokens required-min))
+        (assoc body :max_tokens required-min))
       body)))
 
 ;; =============================================================================
@@ -1261,7 +1261,7 @@
     (map? args)                           args
     (and (string? args) (not (str/blank? args)))
     (try (json/read-json args :key-fn identity)
-         (catch Exception _ {}))
+      (catch Exception _ {}))
     :else                                 {}))
 
 ;; ── Replay hygiene (mirrors pi-ai transform-messages guards) ────────────────
@@ -1695,15 +1695,15 @@
           (case (get delta "type")
             "text_delta"
             (do (swap! pending update-in [idx "text"] (fnil str "") (get delta "text"))
-                {:content-delta (get delta "text") :reasoning-delta nil :api-usage nil})
+              {:content-delta (get delta "text") :reasoning-delta nil :api-usage nil})
 
             "thinking_delta"
             (do (swap! pending update-in [idx "thinking"] (fnil str "") (get delta "thinking"))
-                {:content-delta nil :reasoning-delta (get delta "thinking") :api-usage nil})
+              {:content-delta nil :reasoning-delta (get delta "thinking") :api-usage nil})
 
             "signature_delta"
             (do (swap! pending update-in [idx "signature"] (fnil str "") (get delta "signature"))
-                {:content-delta nil :reasoning-delta nil :api-usage nil})
+              {:content-delta nil :reasoning-delta nil :api-usage nil})
 
             ;; Anthropic emits input_json_delta for tool_use blocks (the
             ;; tool arguments, e.g. run_python's `{"code": …}`, arrive as a
@@ -1714,8 +1714,8 @@
             ;; work, not just its reasoning).
             "input_json_delta"
             (do (swap! pending update-in [idx "partial_json"] (fnil str "") (get delta "partial_json"))
-                {:content-delta nil :reasoning-delta nil :api-usage nil
-                 :tool-args-delta (get delta "partial_json")})
+              {:content-delta nil :reasoning-delta nil :api-usage nil
+               :tool-args-delta (get delta "partial_json")})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
@@ -1753,61 +1753,90 @@
   "Executes a function with exponential backoff retry for canonical transient failures.
 
    Provider/gateway evidence and the retry verdict live in
-   `failure/low-level-retry-decision`; this function only runs the attempt,
-   sleeps, logs, and ANNOUNCES the supplied decision.
+   `failure/low-level-retry-decision`, and the WAIT in
+   `failure/retry-sleep-plan`; this function only runs the attempt, sleeps,
+   logs, and ANNOUNCES the supplied decision.
 
    `:on-retry` makes the wait observable. A provider overload (Anthropic 529 /
    OpenAI `server_is_overloaded`) is healed HERE, inside one `ask!` call, so
    without this callback the caller sees a frozen bubble for the whole ladder
    and the only trace is a `:warn` line in a log file. The emitted map is the
    router's own `:llm.routing/provider-retry` shape, so every surface that
-   already paints a provider retry paints this one too."
+   already paints a provider retry paints this one too.
+
+   `:budget-ms` is the wall clock this ladder may spend (default
+   `failure/RETRY_PHASE_BUDGET_MS`). Attempts alone are not a budget: a 429
+   carrying `Retry-After: 60` costs a minute per attempt, and a cooldown the
+   phase cannot outlast is the router's problem, not another guaranteed 429."
   ([f] (with-retry f {}))
-  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier
+  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier budget-ms
               router-handles-rate-limit? on-retry provider-id model]
        :or {max-retries failure/RETRY_MAX_ATTEMPTS
             initial-delay-ms failure/RETRY_INITIAL_DELAY_MS
             max-delay-ms failure/RETRY_MAX_DELAY_MS
             multiplier failure/RETRY_MULTIPLIER}}]
-   (loop [attempt 1
-          delay-ms initial-delay-ms]
-     (let [result (try
-                    {:success (f)}
-                    (catch Exception e
-                      (let [{:keys [retry? reason classification]}
-                            (retry-decision e {:router-handles-rate-limit? router-handles-rate-limit?})]
-                        (if (and retry? (< attempt (long max-retries)))
-                          {:retry true :error e :reason reason
-                           :status (:status classification)}
-                          {:error e}))))]
-       (cond
-         (:success result) (:success result)
-         (:retry result) (let [err (:error result)
-                               sleep-ms (long (failure/next-delay-ms err delay-ms max-delay-ms))]
-                           (trove/log! {:level :warn :id ::http-retry
-                                        :data (log-data {:attempt attempt
-                                                         :reason (:reason result)
-                                                         :delay-ms sleep-ms
-                                                         :status (:status result)
-                                                         :request-id (failure/request-id err)
-                                                         :error (ex-message err)})
-                                        :msg "retrying transient HTTP failure"})
-                           (when on-retry
-                             (on-retry (cond-> {:event/type :llm.routing/provider-retry
-                                                :reason (or (:reason result) :http-status)
-                                                :attempt attempt
-                                                :max-retries (long max-retries)
-                                                :delay-ms sleep-ms
-                                                :error (ex-message err)}
-                                         (some? (:status result)) (assoc :status (:status result))
-                                         (some? provider-id) (assoc :provider (name provider-id)
-                                                               :from-provider (name provider-id))
-                                         (some? model) (assoc :model (str model)
-                                                         :from-model (str model)))))
-                           (Thread/sleep sleep-ms)
-                           (recur (inc attempt)
-                             (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
-         :else (throw (:error result)))))))
+   (let [started-ms (System/currentTimeMillis)]
+     (loop [attempt 1
+            delay-ms initial-delay-ms]
+       (let [result (try
+                      {:success (f)}
+                      (catch Exception e
+                        (let [{:keys [retry? reason classification]}
+                              (retry-decision e {:router-handles-rate-limit? router-handles-rate-limit?})]
+                          (if (and retry? (< attempt (long max-retries)))
+                            {:retry true :error e :reason reason
+                             :status (:status classification)}
+                            {:error e}))))]
+         (cond
+           (:success result) (:success result)
+           (:retry result)
+           (let [err  (:error result)
+                 plan (failure/retry-sleep-plan
+                        err
+                        {:fallback-ms (failure/backoff-ms delay-ms max-delay-ms)
+                         :elapsed-ms (- (System/currentTimeMillis) started-ms)
+                         :budget-ms budget-ms})]
+             ;; No plan: the phase is spent, or the server declared a cooldown
+             ;; longer than this phase may spend. Waking before the window the
+             ;; provider named only buys another refusal, so hand the request
+             ;; to the router's fallback instead of burning the ladder here.
+             (if (nil? plan)
+               (throw err)
+               (let [sleep-ms       (long (:delay-ms plan))
+                     retry-after-ms (:retry-after-ms plan)]
+                 (trove/log! {:level :warn :id ::http-retry
+                              :data (log-data {:attempt attempt
+                                               :reason (:reason result)
+                                               :delay-ms sleep-ms
+                                               :retry-after-ms retry-after-ms
+                                               :status (:status result)
+                                               :request-id (failure/request-id err)
+                                               :error (ex-message err)})
+                              :msg "retrying transient HTTP failure"})
+                 (when on-retry
+                   (on-retry (cond-> {:event/type :llm.routing/provider-retry
+                                      :reason (or (:reason result) :http-status)
+                                      :attempt attempt
+                                      :max-retries (long max-retries)
+                                      :delay-ms sleep-ms
+                                      :error (ex-message err)}
+                               (some? retry-after-ms)
+                               (assoc :retry-after-ms (long retry-after-ms))
+
+                               (some? (:status result))
+                               (assoc :status (:status result))
+
+                               (some? provider-id)
+                               (assoc :provider (name provider-id)
+                                 :from-provider (name provider-id))
+
+                               (some? model)
+                               (assoc :model (str model)
+                                 :from-model (str model)))))
+                 (Thread/sleep sleep-ms)
+                 (recur (inc attempt)
+                   (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))))
+           :else (throw (:error result))))))))
 
 (def ^:private content-block-types
   #{"text" "output_text"})
@@ -2116,7 +2145,7 @@
   [{:keys [thinking thinking-signature]}]
   (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
                    (try (json/read-json thinking-signature :key-fn keyword)
-                        (catch Exception _ nil)))
+                     (catch Exception _ nil)))
                (when (and (string? thinking) (not (str/blank? thinking)))
                  {:type "reasoning"
                   :summary [{:type "summary_text" :text thinking}]}))]
@@ -2563,16 +2592,16 @@
   "Text of one CANONICAL (request-side) part: svar-authored, keyword-keyed."
   [part]
   (cond (string? part)          part
-        (string? (:text part))  (:text part)
-        :else                   nil))
+    (string? (:text part))  (:text part)
+    :else                   nil))
 
 (defn- gemini-wire-part-text
   "Text of one Gemini RESPONSE part. A response is model-authored JSON, so its
    keys stay the strings the wire delivered - svar never interns them."
   [part]
   (cond (string? part)                  part
-        (string? (get part "text"))     (get part "text")
-        :else                           nil))
+    (string? (get part "text"))     (get part "text")
+    :else                           nil))
 
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
@@ -3573,7 +3602,7 @@
           (do (when-not @headers-received?-atom
                 (reset! ttft-fired?-atom true)
                 (.interrupt caller))
-              false)
+            false)
           :else true)))))
 
 (defn- start-idle-stream-watchdog!
@@ -3600,8 +3629,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long idle-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                (try (.close stream) (catch Throwable _ nil))
-                false)
+              (try (.close stream) (catch Throwable _ nil))
+              false)
             true))
         false))))
 
@@ -3616,8 +3645,8 @@
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
           (if (>= elapsed-ms (long semantic-timeout-ms))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
-                (try (.close stream) (catch Throwable _ nil))
-                false)
+              (try (.close stream) (catch Throwable _ nil))
+              false)
             true))
         false))))
 
@@ -3639,18 +3668,18 @@
       (if @alive?-atom
         (if (cancel-requested?)
           (do (reset! cancel-fired? true)
-              (if-let [s @stream-ref]
+            (if-let [s @stream-ref]
                 ;; Post-headers: closing the body unblocks the parked
                 ;; `.readLine`. Do NOT interrupt — the caller is in OUR read
                 ;; loop, and interrupting the shared JDK client's send
                 ;; machinery can wedge its SelectorManager, surfacing as
                 ;; "selector manager closed" on every LATER send.
-                (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
+              (try (.close ^java.io.InputStream s) (catch Throwable _ nil))
                 ;; Pre-headers: no body yet; the caller is parked in
                 ;; HttpClient.send -> CompletableFuture.get. Interrupt to
                 ;; unpark it (the TTFT lever) — unavoidable here, but rare.
-                (try (.interrupt caller) (catch Throwable _ nil)))
-              false)
+              (try (.interrupt caller) (catch Throwable _ nil)))
+            false)
           true)
         false))))
 
@@ -3669,28 +3698,28 @@
   (cond
     @cancel-fired?
     (do (Thread/interrupted)
-        (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                 {:type :svar.core/stream-cancelled :stream? true :url url} e)))
+      (throw (ex-info "Stream cancelled by caller (pre-headers)."
+               {:type :svar.core/stream-cancelled :stream? true :url url} e)))
 
     @ttft-fired?
     (do (Thread/interrupted)
-        (trove/log! {:level :warn :id ::stream-ttft-timeout
-                     :data (log-data {:url url
-                                      :ttft-timeout-ms ttft-timeout-ms})
-                     :msg "TTFT timeout, no headers received"})
-        (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                          "ms with no response headers): " (ex-message e))
-                 {:type :svar.core/stream-ttft-timeout
-                  :stream? true :url url
-                  :ttft-timeout-ms ttft-timeout-ms
-                  :cause-class (.getName (class e))}
-                 e)))
+      (trove/log! {:level :warn :id ::stream-ttft-timeout
+                   :data (log-data {:url url
+                                    :ttft-timeout-ms ttft-timeout-ms})
+                   :msg "TTFT timeout, no headers received"})
+      (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                        "ms with no response headers): " (ex-message e))
+               {:type :svar.core/stream-ttft-timeout
+                :stream? true :url url
+                :ttft-timeout-ms ttft-timeout-ms
+                :cause-class (.getName (class e))}
+               e)))
 
     :else
     ;; Not our watchdog — a real external interrupt. Restore the flag and
     ;; propagate as-is (clean cancellation).
     (do (.interrupt (Thread/currentThread))
-        (throw e))))
+      (throw e))))
 
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
@@ -4001,9 +4030,9 @@
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
                       "event" (do (vreset! saw-sse? true)
-                                  (recur value data-lines (unchecked-inc line-count) now-ns))
+                                (recur value data-lines (unchecked-inc line-count) now-ns))
                       "data"  (do (vreset! saw-sse? true)
-                                  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
+                                (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
                       (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
         (let [stream-finalization (stream-finalization-summary
@@ -4244,8 +4273,8 @@
                               idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                  idle?     :svar.core/stream-idle-timeout
-                                  :else     :svar.core/http-error)
+                              idle?     :svar.core/stream-idle-timeout
+                              :else     :svar.core/http-error)
                       :stream? true :url url
                       :idle-timeout-ms (when idle? idle-timeout-ms)
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4279,8 +4308,8 @@
                             idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                idle?     :svar.core/stream-idle-timeout
-                                :else     :svar.core/http-error)
+                            idle?     :svar.core/stream-idle-timeout
+                            :else     :svar.core/http-error)
                     :stream? true :url url
                     :idle-timeout-ms (when idle? idle-timeout-ms)
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -4464,7 +4493,7 @@
                (catch Exception e
                  (if (failure/retry-without-server-item-ids? e)
                    (do (failure/mark-stateless-items! base-url)
-                       (responses-call true))
+                     (responses-call true))
                    (throw e))))))
 
          :else
@@ -5282,7 +5311,7 @@
                                      coerced (when partial-map
                                                (try (spec/str->data-with-spec
                                                       (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
+                                                 (catch Exception _ partial-map)))]
                                  ;; Fire callback when reasoning OR content is available.
                                  ;; Reasoning streams before content - don't gate on content.
                                  (when (or coerced (some? reasoning))
@@ -6035,8 +6064,8 @@
                                                :tool-name (:tool-name (ex-data enriched))
                                                :tool-schema-field field}
                                         :msg "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
-                           (swap! gateway-tool-field-quirks conj quirk)
-                           (run (assoc opts :tools tools)))
+                         (swap! gateway-tool-field-quirks conj quirk)
+                         (run (assoc opts :tools tools)))
               ;; Same field, but our tools never carried it: the gateway invented
               ;; it, so only a gateway/model change can fix this. Say so.
               healable (throw (ex-info (ex-message enriched)
@@ -6297,7 +6326,7 @@
                                    (if (seq fetched)
                                      (do (swap! models-cache assoc cache-key
                                            {:at (System/currentTimeMillis) :models fetched})
-                                         fetched)
+                                       fetched)
                                      ;; Empty = the fetch failed or the gateway hiccuped.
                                      (or (:models cached) fetched))))]
      (filter-provider-models provider-id models))))
