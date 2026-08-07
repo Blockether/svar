@@ -10,6 +10,8 @@
         file."
   (:require
    [lazytest.core :refer [defdescribe describe expect it]]
+   [com.blockether.svar.internal.failure :as failure]
+   [com.blockether.svar.internal.router :as router]
    [com.blockether.svar.internal.llm :as llm]))
 
 (defn- overloaded!
@@ -74,3 +76,35 @@
         (expect (= :ok (#'llm/with-retry (constantly :ok)
                                          (assoc fast :on-retry #(swap! seen conj %)))))
         (expect (empty? @seen))))))
+
+;; Regression, vis gateway events 2026-08-07: a real OpenAI/Codex overload never
+;; reaches `llm/with-retry` at all — it arrives MID-STREAM as `Provider stream
+;; failed (server_is_overloaded)` / status 529 and is healed by the ROUTER's
+;; same-provider loop, which owned a private `[2000 3000 6000]` ladder. The
+;; streamed 529 (the common one) therefore got 11 s of healing while the
+;; pre-stream 529 got 45 s.
+(defdescribe streamed-overload-ladder-test
+  (describe "one policy for both ladders"
+    (it "router's same-provider schedule IS the same-provider retry ladder"
+      ;; The literals are the shipped policy: 7 attempts = 6 sleeps, 1 s doubling
+      ;; up to the 15 s ceiling, 45 s of healing (the mid-stream 529 used to get
+      ;; [2000 3000 6000] = 11 s).
+      (expect (= [1000 2000 4000 8000 15000 15000]
+                (:same-provider-delays-ms router/DEFAULT_RATE_LIMIT_ROUTING))))
+
+    (it "outlasts a provider overload window instead of 11 s"
+      (let [ladder (:same-provider-delays-ms router/DEFAULT_RATE_LIMIT_ROUTING)
+            total  (long (reduce + ladder))]
+        (expect (= 6 (count ladder)))
+        (expect (apply <= ladder))
+        (expect (<= 40000 total))
+        ;; and still inside the router's hard wall-clock cap.
+        (expect (<= total (long (:fallback-after-ms router/DEFAULT_RATE_LIMIT_ROUTING))))))
+
+    (it "classifies the streamed OpenAI overload as router-retryable"
+      (let [e (ex-info "Provider stream failed (server_is_overloaded): Our servers are currently overloaded. Please try again later."
+                {:type :svar.core/stream-failed :source :provider :stream? true
+                 :status 529 :output-started? false
+                 :provider-error-code "server_is_overloaded"})]
+        (expect (= :gateway-unavailable (:category (failure/classify e))))
+        (expect (failure/transient-error? e))))))

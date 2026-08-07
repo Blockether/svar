@@ -934,7 +934,7 @@
    Retry-After values that can land between 30-60 s under quota
    pressure on reasoning-heavy workloads, while still bounding the
    wait so a single user request cannot hang for minutes."
-  {:same-provider-delays-ms [2000 3000 6000]
+  {:same-provider-delays-ms failure/RETRY_DELAY_LADDER_MS
    :fallback-after-ms 60000
    :respect-retry-after? true
    :fallback-provider? true})

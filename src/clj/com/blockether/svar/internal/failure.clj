@@ -357,6 +357,23 @@
   "Growth factor between attempts."
   2.0)
 
+(def RETRY_DELAY_LADDER_MS
+  "The same budget as `RETRY_MAX_ATTEMPTS`/`RETRY_INITIAL_DELAY_MS`/
+   `RETRY_MAX_DELAY_MS`/`RETRY_MULTIPLIER`, spelled as the EXPLICIT sleep
+   schedule the router's same-provider loop consumes (`:same-provider-delays-ms`).
+
+   Measured (vis gateway events, 2026-08-07): every real OpenAI/Codex overload
+   arrives MID-STREAM as `Provider stream failed (server_is_overloaded)` with
+   status 529, so it never reaches `llm/with-retry` at all — it is healed by the
+   router loop, which used to own a private `[2000 3000 6000]` ladder worth 11 s.
+   Two ladders for one failure family meant the pre-stream 529 got 45 s of
+   healing and the far more common streamed 529 got eleven seconds. One vector,
+   derived here, ends that.
+
+   The vector is spelled out rather than computed so it reads as the policy it
+   is; `llm-retry-visibility-test` pins it against the four constants above."
+  [1000 2000 4000 8000 15000 15000])
+
 (defn backoff-ms
   "Exponential backoff with FULL JITTER, the AWS-recommended shape.
 
@@ -698,7 +715,7 @@
   [^Throwable e url]
   (let [reason (connection-error-reason e)
         host   (try (.getHost (java.net.URI. (str url)))
-                    (catch Exception _ nil))]
+                 (catch Exception _ nil))]
     (ex-info (str "Could not connect to the model provider"
                (when-not (str/blank? host) (str " at " host))
                ": " reason
@@ -748,7 +765,7 @@
   [url]
   (when url
     (try (not-empty (.getHost (java.net.URI. (str url))))
-         (catch Exception _ nil))))
+      (catch Exception _ nil))))
 
 (def CONNECT_HEALTH_WINDOW_MS
   "How long ONE successful connection keeps a host classified as 'healthy'.
