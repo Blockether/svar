@@ -904,11 +904,12 @@
   nil)
 
 (def DEFAULT_RETRY
-  "Default retry policy for transient HTTP errors."
-  {:max-retries 5
-   :initial-delay-ms 1000
-   :max-delay-ms 60000
-   :multiplier 2.0})
+  "Default retry policy for transient HTTP errors. The numbers live in
+   `failure` beside the classification that decides when they are spent."
+  {:max-retries failure/RETRY_MAX_ATTEMPTS
+   :initial-delay-ms failure/RETRY_INITIAL_DELAY_MS
+   :max-delay-ms failure/RETRY_MAX_DELAY_MS
+   :multiplier failure/RETRY_MULTIPLIER})
 
 (def DEFAULT_RATE_LIMIT_ROUTING
   "Default router-owned transient-retry policy (429/5xx/network).

@@ -1754,13 +1754,21 @@
 
    Provider/gateway evidence and the retry verdict live in
    `failure/low-level-retry-decision`; this function only runs the attempt,
-   sleeps, and logs the supplied decision."
+   sleeps, logs, and ANNOUNCES the supplied decision.
+
+   `:on-retry` makes the wait observable. A provider overload (Anthropic 529 /
+   OpenAI `server_is_overloaded`) is healed HERE, inside one `ask!` call, so
+   without this callback the caller sees a frozen bubble for the whole ladder
+   and the only trace is a `:warn` line in a log file. The emitted map is the
+   router's own `:llm.routing/provider-retry` shape, so every surface that
+   already paints a provider retry paints this one too."
   ([f] (with-retry f {}))
-  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier router-handles-rate-limit?]
-       :or {max-retries 5
-            initial-delay-ms 1000
-            max-delay-ms 60000
-            multiplier 2.0}}]
+  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier
+              router-handles-rate-limit? on-retry provider-id model]
+       :or {max-retries failure/RETRY_MAX_ATTEMPTS
+            initial-delay-ms failure/RETRY_INITIAL_DELAY_MS
+            max-delay-ms failure/RETRY_MAX_DELAY_MS
+            multiplier failure/RETRY_MULTIPLIER}}]
    (loop [attempt 1
           delay-ms initial-delay-ms]
      (let [result (try
@@ -1784,6 +1792,18 @@
                                                          :request-id (failure/request-id err)
                                                          :error (ex-message err)})
                                         :msg "retrying transient HTTP failure"})
+                           (when on-retry
+                             (on-retry (cond-> {:event/type :llm.routing/provider-retry
+                                                :reason (or (:reason result) :http-status)
+                                                :attempt attempt
+                                                :max-retries (long max-retries)
+                                                :delay-ms sleep-ms
+                                                :error (ex-message err)}
+                                         (some? (:status result)) (assoc :status (:status result))
+                                         (some? provider-id) (assoc :provider (name provider-id)
+                                                               :from-provider (name provider-id))
+                                         (some? model) (assoc :model (str model)
+                                                         :from-model (str model)))))
                            (Thread/sleep sleep-ms)
                            (recur (inc attempt)
                              (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))
@@ -5291,6 +5311,11 @@
                                            :idle-timeout-ms idle-timeout-ms
                                            :semantic-timeout-ms semantic-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
+                     ;; The low-level HTTP ladder heals inside ONE call; route its
+                     ;; retries to the caller's RAW `on-chunk` (the same seam the
+                     ;; router emits routing events on) so a provider overload is
+                     ;; visible progress instead of a frozen bubble.
+                     on-chunk (assoc :on-retry on-chunk :model model)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      (seq extra-body) (assoc :extra-body extra-body)
                      responses-path (assoc :responses-path responses-path)
@@ -5814,6 +5839,11 @@
                                            :idle-timeout-ms idle-timeout-ms
                                            :semantic-timeout-ms semantic-timeout-ms})
                      provider-id (assoc :provider-id provider-id)
+                     ;; The low-level HTTP ladder heals inside ONE call; route its
+                     ;; retries to the caller's RAW `on-chunk` (the same seam the
+                     ;; router emits routing events on) so a provider overload is
+                     ;; visible progress instead of a frozen bubble.
+                     on-chunk (assoc :on-retry on-chunk :model model)
                      streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
                      (seq extra-body) (assoc :extra-body extra-body)
                      responses-path (assoc :responses-path responses-path)

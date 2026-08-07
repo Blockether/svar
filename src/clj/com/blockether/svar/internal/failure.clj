@@ -330,6 +330,33 @@
 ;; Backoff
 ;; =============================================================================
 
+(def RETRY_MAX_ATTEMPTS
+  "Attempts for ONE same-provider HTTP call, including the first. Sleeps are
+   therefore `RETRY_MAX_ATTEMPTS - 1`.
+
+   Measured (vis, 2026-08-05): an Anthropic `overloaded_error` (HTTP 529) storm
+   produced attempts 1-4 with 0,5 s → 6 s of jittered sleep, ~7 s of healing in
+   total, and then surfaced as a hard turn failure. A provider overload window
+   is tens of seconds, not seven, so the ladder gave up while the failure was
+   still transient — the classification was never wrong, the BUDGET was. Six
+   sleeps capped at `RETRY_MAX_DELAY_MS` spend at most ~45 s before the router
+   is allowed to move the request to another provider."
+  7)
+
+(def RETRY_INITIAL_DELAY_MS
+  "Un-jittered delay for the first same-provider retry."
+  1000)
+
+(def RETRY_MAX_DELAY_MS
+  "Ceiling for one same-provider sleep. Bounds the tail of the ladder so a
+   single user request cannot sit behind minute-long waits; a server-declared
+   `Retry-After` is clamped to it too (`next-delay-ms`)."
+  15000)
+
+(def RETRY_MULTIPLIER
+  "Growth factor between attempts."
+  2.0)
+
 (defn backoff-ms
   "Exponential backoff with FULL JITTER, the AWS-recommended shape.
 
