@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.107] - 2026-08-07
+
+### Changed
+- Never let the transport compress an SSE stream
+- release: update version files for v0.7.106, bump to next dev version
+
+
 ## [v0.7.106] - 2026-08-07
 
 ### Changed
@@ -2126,7 +2133,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.106...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.107...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2270,3 +2277,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.104]: https://github.com/Blockether/svar/releases/tag/v0.7.104
 [v0.7.105]: https://github.com/Blockether/svar/releases/tag/v0.7.105
 [v0.7.106]: https://github.com/Blockether/svar/releases/tag/v0.7.106
+[v0.7.107]: https://github.com/Blockether/svar/releases/tag/v0.7.107
