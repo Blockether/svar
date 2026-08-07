@@ -3767,7 +3767,14 @@
                      (fn [client]
                        (http/post url
                          {:client client
-                          :headers headers
+                          ;; STREAMING PIN - never let the transport compress an
+                          ;; SSE body. babashka.http-client's defaults advertise
+                          ;; `accept-encoding: gzip, deflate` and wrap the body in
+                          ;; a GZIPInputStream; a gzip stream cannot yield its
+                          ;; first line until a whole deflate block is buffered,
+                          ;; so upstreams that honour it (api.anthropic.com does)
+                          ;; turn a live token stream into one burst at the end.
+                          :headers (assoc headers "accept-encoding" "identity")
                           :body (json/write-json-str body)
                           :timeout timeout-ms
                           :as :stream})))
