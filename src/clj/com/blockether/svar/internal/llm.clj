@@ -2945,8 +2945,14 @@
   nil)
 
 (def ^:private stream-finalization-error-types
+  "Typed stream outcomes that must reach the caller VERBATIM. Re-wrapping one as
+   a generic `:svar.core/http-error` destroys the only evidence the router has:
+   a TTFT abort then looked like an untyped failure whose message says \"timeout\"
+   but not \"timed out\", so `failure/transient-error?` refused fallback and a
+   request that never reached the model became a terminal turn failure."
   #{:svar.core/stream-incomplete
     :svar.core/stream-truncated
+    :svar.core/stream-ttft-timeout
     :svar.core/stream-idle-timeout
     :svar.core/stream-semantic-timeout
     :svar.core/stream-cancelled
