@@ -7,12 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Wait two minutes for the first token and retry the request elsewhere
+
 ## [v0.7.107] - 2026-08-07
 
 ### Changed
 - Never let the transport compress an SSE stream
 - release: update version files for v0.7.106, bump to next dev version
-
 
 ## [v0.7.106] - 2026-08-07
 

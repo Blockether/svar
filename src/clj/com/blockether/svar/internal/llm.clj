@@ -4984,7 +4984,7 @@
                         `HttpClient.send` if no response headers arrive
                         within the window. Surfaces typed ex-info
                         `:type :svar.core/stream-ttft-timeout`. Default
-                        `router/DEFAULT_TTFT_TIMEOUT_MS` (90 s).
+                        `router/DEFAULT_TTFT_TIMEOUT_MS` (2 minutes).
      :idle-timeout-ms - Inter-chunk idle ceiling for streaming responses.
                         Closes the body `InputStream` if no SSE bytes
                         arrive within the window. Surfaces

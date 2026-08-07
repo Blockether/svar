@@ -843,14 +843,17 @@
    headers. On fire, raises `:svar.core/stream-ttft-timeout` and the caller
    thread's interrupt unparks the underlying `CompletableFuture.get`.
 
-   30 s default. Tight enough to surface stuck provider connections
-   inside one iteration (the original 90 s default sometimes wasted a
-   whole autoresearch iter waiting for headers), generous enough for
-   real reasoning cold starts — z.ai glm-5.1 has been observed sending
-   first headers between 8 and 22 s. Disable per-call with
+   120 000 ms (2 minutes) default. Long enough for a queued or cold-starting
+   provider to answer — z.ai glm-5.1 has been observed sending first headers
+   between 8 and 22 s, and a busy subscription endpoint can idle far longer
+   before it commits — short enough that a wedged connection is surfaced
+   inside one iteration instead of burning five minutes on silence. On fire
+   the abort keeps its type (`failure/STREAM_WATCHDOG_ERROR_TYPES`), so with
+   no output started the router treats it as transient and RETRIES on another
+   provider rather than failing the turn. Disable per-call with
    `:ttft-timeout-ms nil`; pass a larger value for slow reasoning
    models with long pre-stream queues."
-  30000)
+  120000)
 
 (def DEFAULT_IDLE_TIMEOUT_MS
   "Default idle-stream timeout (ms) for streaming HTTP responses. If no
