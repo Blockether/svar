@@ -1817,7 +1817,7 @@
                                             :models [{:name model-name}]})
             m (first (:models p))]
         (expect (= :anthropic (:api-style m)))
-        (expect (= :server-managed (:reasoning-style m))))))
+        (expect (= :anthropic-thinking (:reasoning-style m))))))
 
   (it "model-key-variants tries as-is first, then dot↔dash version variants"
     (expect (= ["claude-opus-4-8" "claude-opus-4.8"]

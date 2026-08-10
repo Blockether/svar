@@ -33,15 +33,37 @@
         (expect (= :openai-effort (:reasoning-style m)))
         (expect (true? (:reasoning-effort? m)))))
 
-    (it "refuses effort for the Claude tier, whose depth the proxy manages"
-      ;; Regression: the proxy spiralled agent loops when svar pushed
-      ;; `reasoning_effort` at Copilot Claude, so that row is `:server-managed`
-      ;; and emits nothing tunable. A channel offering the control there offers
-      ;; a control that cannot reach the wire.
+    (it "grants effort to the Claude tier, which rides the native Anthropic wire"
+      ;; Regression, GitHub Copilot Enterprise: claude-opus-5 offered no depth
+      ;; control at all. The row was `:server-managed` — a guard against the
+      ;; spiral that `reasoning_effort` caused on Copilot's OPENAI-compatible
+      ;; chat wire. Claude has been back on `/v1/messages` since; there the
+      ;; native `thinking`/`output_config` fields are readable, so the caller
+      ;; picks the depth and the OpenAI knob is never emitted.
       (let [m (get (copilot "claude-sonnet-4.6") "claude-sonnet-4.6")]
         (expect (true? (:reasoning? m)))
-        (expect (= :server-managed (:reasoning-style m)))
-        (expect (false? (:reasoning-effort? m))))))
+        (expect (= :anthropic (:api-style m)))
+        (expect (= :anthropic-thinking (:reasoning-style m)))
+        (expect (true? (:reasoning-effort? m)))))
+
+    (it "emits Anthropic thinking on that wire, never `reasoning_effort`"
+      (let [opus (get (copilot "claude-opus-5") "claude-opus-5")
+            haiku (get (copilot "claude-haiku-4.5") "claude-haiku-4.5")
+            body (fn [m level] (router/reasoning-extra-body (:api-style m) m level))]
+        ;; Opus 5 is an adaptive-thinking family: depth is `output_config.effort`.
+        (expect (= {:thinking {:type "adaptive" :display "summarized"}
+                    :output_config {:effort "low"}}
+                  (body opus :quick)))
+        (expect (= {:thinking {:type "adaptive" :display "summarized"}
+                    :output_config {:effort "high"}}
+                  (body opus :deep)))
+        ;; Older families still take a manual budget.
+        (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}
+                  (body haiku :balanced)))
+        ;; The lever that spiralled the proxy stays unreachable on this wire.
+        (doseq [level [:quick :balanced :deep]
+                m [opus haiku]]
+          (expect (nil? (:reasoning_effort (body m level))))))))
 
   (describe "styles that carry a caller-chosen depth"
     (it "grants effort on the native Anthropic wire (budget tokens)"
@@ -105,13 +127,26 @@
       (expect (= :openai-text (:verbosity-style info)))
       (expect (= ["low" "medium" "high"] (:verbosity-options info)))))
 
-  (it "surfaces the refusal for the Claude tier of the SAME provider"
+  (it "surfaces depth-but-no-verbosity for the Claude tier of the SAME provider"
     (let [router (router/make-router
                    [{:id :github-copilot
                      :api-key "test-key"
                      :models [{:name "claude-sonnet-4.6"} {:name "gpt-5.5"}]}])
           info (router/resolve-effective-model router)]
       (expect (= "claude-sonnet-4.6" (:name info)))
+      ;; Anthropic wire: the depth knob is native, the OpenAI text knob is not.
+      (expect (true? (:reasoning-effort? info)))
+      (expect (nil? (:verbosity-style info)))))
+
+  (it "surfaces the refusal when the wire really does manage depth itself"
+    (let [router (router/make-router
+                   [{:id :proxy-that-gates
+                     :api-key "test-key"
+                     :base-url "https://example.test/v1"
+                     :models [{:name "gemini-3-pro-preview"
+                               :reasoning? true
+                               :reasoning-style :server-managed}]}])
+          info (router/resolve-effective-model router)]
       (expect (false? (:reasoning-effort? info)))
       (expect (nil? (:verbosity-style info))))))
 
@@ -139,7 +174,7 @@
         (expect (= :openai-effort (:reasoning-style gpt)))
         (expect (= :openai-text (:verbosity-style gpt)))
 
-        ;; Claude rides an Anthropic wire the proxy manages: neither knob.
-        (expect (false? (:reasoning-effort? claude)))
-        (expect (= :server-managed (:reasoning-style claude)))
+        ;; Claude rides the native Anthropic wire: depth yes, verbosity no.
+        (expect (true? (:reasoning-effort? claude)))
+        (expect (= :anthropic-thinking (:reasoning-style claude)))
         (expect (nil? (:verbosity-style claude)))))))

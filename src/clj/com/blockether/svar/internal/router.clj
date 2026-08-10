@@ -299,18 +299,22 @@
                              mis-route) client-supplied `reasoning_effort`
                              / `thinking` fields. Modeled on pi-ai's
                              `compat.supportsReasoningEffort: false` flag
-                             for Copilot Claude / Gemini / Grok: every
-                             entry in `REASONING_LEVELS` resolves to nil,
-                             so `reasoning-extra-body` returns nil and the
+                             for Copilot Gemini / Grok: every entry in
+                             `REASONING_LEVELS` resolves to nil, so
+                             `reasoning-extra-body` returns nil and the
                              wire body carries no reasoning field at all.
-                             Without this style, the May 2026 Copilot Claude
-                             switch from `:api-style :anthropic` (Anthropic
-                             /messages with thinking blocks) to
+                             It is a property of the WIRE, not the vendor:
+                             the May 2026 Copilot Claude switch from
+                             `:api-style :anthropic` (Anthropic /messages
+                             with thinking blocks) to
                              `:openai-compatible-chat` (with `reasoning_effort`)
-                             made Copilot proxy bias Claude into excessive
+                             made the Copilot proxy bias Claude into excessive
                              autonomous reasoning loops — observable on
                              session 52983a42 / 831cedee as 5K-8K output
-                             tokens per iteration burned on hidden thinking."
+                             tokens per iteration burned on hidden thinking.
+                             Copilot Claude is back on `/v1/messages` and
+                             therefore back on `:anthropic-thinking`; the
+                             OpenAI-compatible Copilot rows keep this style."
   {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "off"  :server-managed nil}
    :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
    :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
@@ -368,7 +372,7 @@
   "True when the CALLER may choose this model's thinking depth.
 
    `:reasoning?` only says the model thinks. `:server-managed` (Copilot
-   Claude / Gemini / Grok) and `:zai-thinking` (binary on/off) both refuse a
+   Gemini / Grok) and `:zai-thinking` (binary on/off) both refuse a
    depth — `reasoning-extra-body` emits nothing tunable for them — so a channel
    that shows an effort control for those models shows a control that cannot
    reach the wire."
@@ -651,26 +655,34 @@
    ;; supply a `…/v1` base-url so `{base}/messages` resolves to
    ;; `…/v1/messages` (the vis Copilot provider does this).
    ;;
-   ;; Reasoning stays server-managed: `:reasoning-style :server-managed`
-   ;; resolves to nil in REASONING_LEVELS, so `reasoning-extra-body` emits
-   ;; no `thinking` field at all — Claude thinks on its own (visible in the
-   ;; response) and we don't push the lever that caused the spiral.
-   {"claude-opus-5"             {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+   ;; Depth is the CALLER's: `:reasoning-style :anthropic-thinking`. The
+   ;; spiral came from `reasoning_effort` — an OpenAI chat-completions field —
+   ;; pushed on the OpenAI-compatible wire, where Anthropic's own controls are
+   ;; unreadable and the proxy picked the depth itself. `/v1/messages` reads
+   ;; the NATIVE fields, so `reasoning-extra-body` emits exactly the
+   ;; `{:thinking {:type "adaptive"} :output_config {:effort …}}` this catalog
+   ;; already sends to api.anthropic.com for the same model, and the OpenAI
+   ;; knob is never emitted on an `:api-style :anthropic` wire at all.
+   ;; `:server-managed` hid the control and pinned every Copilot Claude turn to
+   ;; the proxy's own depth with no way to ask for less — Gemini and Grok below
+   ;; keep it because they ride the OpenAI-compatible wire, which is the wire
+   ;; the lever actually misfires on.
+   {"claude-opus-5"             {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
     ;; Several Claude rows once carried Anthropic-native context copied
     ;; verbatim (`:context 1000000`) or stale Copilot caps (`144000`).
     ;; Both distort `auto-params` and pre-flight checks. Let refreshed
     ;; models.dev supply Copilot limits (currently 200K total / 168K
     ;; input for Opus 4.8 / 4.7 / 4.6 / Sonnet 4.6).
-    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-sonnet-5"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-fable-5"            {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
-    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :server-managed}
+    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-sonnet-5"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-fable-5"            {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
 
     "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
                                  :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}

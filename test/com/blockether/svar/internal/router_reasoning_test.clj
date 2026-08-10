@@ -362,7 +362,7 @@
       (expect (= #{"claude-opus-5" "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"}
                 (set (keys by-name))))
       (expect (= :anthropic (:api-style (get by-name "claude-opus-5"))))
-      (expect (= :server-managed (:reasoning-style (get by-name "claude-opus-5"))))
+      (expect (= :anthropic-thinking (:reasoning-style (get by-name "claude-opus-5"))))
       (doseq [model ["gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]]
         (expect (= :openai-compatible-responses (:api-style (get by-name model))))
         (expect (= :openai-effort (:reasoning-style (get by-name model))))
