@@ -345,6 +345,38 @@
   (or (:reasoning-style model-map)
     (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
 
+(def VERBOSITY_LEVELS
+  "Output-length hints accepted by the OpenAI Responses `text.verbosity` field.
+
+   models.dev has NO verbosity concept for any model (the string does not occur
+   in the catalog), so this vocabulary is svar's own and is declared exactly
+   once, here, for every surface that offers the control."
+  ["low" "medium" "high"])
+
+(defn- infer-verbosity-style
+  "Verbosity control this model accepts on its wire, or nil when it accepts none.
+
+   `:openai-text` is the Responses envelope `{:text {:verbosity \"medium\"}}`;
+   `llm/` strips it on every other api-style. It belongs to the WIRE, not to a
+   vendor: OpenAI Codex and GitHub Copilot GPT both ride
+   `:openai-compatible-responses`, so both accept it."
+  [api-style model-map]
+  (or (:verbosity-style model-map)
+    (when (= api-style :openai-compatible-responses) :openai-text)))
+
+(defn- caller-selectable-reasoning-effort?
+  "True when the CALLER may choose this model's thinking depth.
+
+   `:reasoning?` only says the model thinks. `:server-managed` (Copilot
+   Claude / Gemini / Grok) and `:zai-thinking` (binary on/off) both refuse a
+   depth — `reasoning-extra-body` emits nothing tunable for them — so a channel
+   that shows an effort control for those models shows a control that cannot
+   reach the wire."
+  [api-style model-map]
+  (boolean (and (:reasoning? model-map)
+             (contains? #{:openai-effort :anthropic-thinking :zai-effort}
+               (infer-reasoning-style api-style model-map)))))
+
 (def ^:private PROVIDER_NATIVE_REASONING_EFFORTS ["high" "max"])
 
 (defn- normalize-reasoning-effort [effort]
@@ -1158,6 +1190,29 @@
     (contains? (set (get-in model [:modalities :input])) :image)
     (update :capabilities (fnil conj #{:chat}) :vision)))
 
+(defn- add-wire-capabilities
+  "Stamp the CAPABILITY facts every surface needs onto one normalized model:
+   the reasoning style the request path will actually use, whether the caller
+   may pick a depth, and the verbosity control the wire accepts.
+
+   They are decided HERE because they are decided by the WIRE, and only the
+   router knows which wire a model rides: the model's own `:api-style` wins over
+   the provider's (the request path does the same `or`), so Copilot Claude is
+   `:anthropic` while Copilot GPT is `:openai-compatible-responses` under one
+   provider id. A channel that re-derives this from a provider keyword instead
+   ends up asking whether the id is `:openai-codex` — and then Copilot GPT loses
+   a knob its endpoint accepts."
+  [provider-api-style model]
+  (let [api-style (or (:api-style model) provider-api-style)
+        verbosity (infer-verbosity-style api-style model)]
+    (cond-> (assoc model
+              :reasoning-effort? (caller-selectable-reasoning-effort? api-style model))
+      (:reasoning? model)
+      (assoc :reasoning-style (infer-reasoning-style api-style model))
+
+      verbosity
+      (assoc :verbosity-style verbosity :verbosity-options VERBOSITY_LEVELS))))
+
 (defn normalize-provider
   "Normalizes a provider entry:
     - resolves :base-url from KNOWN_PROVIDERS if not provided
@@ -1174,13 +1229,16 @@
         known (known-provider id)
         base-url (or (:base-url provider-map) (:base-url known))
         exclude-models (set (concat (:exclude-models known) (:exclude-models provider-map)))
+        api-style (or (:api-style provider-map) (:api-style known) :openai-compatible-chat)
         models (->> (configured-model-inputs known provider-map)
                  (keep (fn [m]
                          (when-let [normalized (normalize-model m)]
                            (when-not (contains? exclude-models (:name normalized))
-                             (add-catalog-vision
-                               (merge normalized
-                                 (provider-model-entry id (:name normalized))))))))
+                             (add-wire-capabilities
+                               api-style
+                               (add-catalog-vision
+                                 (merge normalized
+                                   (provider-model-entry id (:name normalized)))))))))
                  (reduce conj-model-once []))
         root-name (:name (first models))]
     (when-not id
@@ -1194,7 +1252,7 @@
     (cond-> {:id id
              :api-key (:api-key provider-map)
              :base-url base-url
-             :api-style (or (:api-style provider-map) (:api-style known) :openai-compatible-chat)
+             :api-style api-style
              :priority idx
              :root root-name
              :models models}
@@ -1313,10 +1371,10 @@
                                     :recovery-ms recovery-ms :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
-              (assoc ps
-                :cb-state :open
-                :cb-failures new-failures
-                :cb-open-until (+ now recovery-ms)))
+                (assoc ps
+                  :cb-state :open
+                  :cb-failures new-failures
+                  :cb-open-until (+ now recovery-ms)))
             (assoc ps :cb-failures new-failures)))))))
 
 (defn- cb-record-success!
@@ -1328,7 +1386,7 @@
         (if (= current-state :half-open)
           (do (trove/log! {:level :info :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-            (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1538,8 +1596,8 @@
   [prefs]
   (let [prefer (:prefer prefs)
         prefs-vec (cond (vector? prefer) prefer
-                    (keyword? prefer) [prefer]
-                    :else nil)
+                        (keyword? prefer) [prefer]
+                        :else nil)
         key-fns (keep preference-sort-key prefs-vec)
         model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
         order (:provider-order prefs)
@@ -2871,12 +2929,23 @@
            [provider model-map] (select-provider router prefs)
            reasoning-level (some-> (:reasoning overrides) normalize-reasoning-level)]
        (when model-map
-         (cond-> {:name         (:name model-map)
-                  :reasoning?   (boolean (:reasoning? model-map))
-                  :provider     (:id provider)
-                  :api-style    (:api-style provider)
-                  :pricing      (:pricing model-map)
-                  :context      (:context model-map)
-                  :intelligence (:intelligence model-map)
-                  :speed        (:speed model-map)}
+         (cond-> {:name              (:name model-map)
+                  :reasoning?        (boolean (:reasoning? model-map))
+                  ;; Capability, not vendor: `normalize-provider` stamped these
+                  ;; from the wire the model actually rides, so a channel can
+                  ;; decide whether to OFFER a reasoning-depth or verbosity
+                  ;; control without owning a model table of its own.
+                  :reasoning-style   (:reasoning-style model-map)
+                  :reasoning-effort? (boolean (:reasoning-effort? model-map))
+                  :verbosity-style   (:verbosity-style model-map)
+                  :verbosity-options (:verbosity-options model-map)
+                  :provider          (:id provider)
+                  ;; The model's own api-style wins, exactly as the request path
+                  ;; resolves it — one Copilot provider serves an Anthropic wire
+                  ;; for Claude and a Responses wire for GPT.
+                  :api-style         (or (:api-style model-map) (:api-style provider))
+                  :pricing           (:pricing model-map)
+                  :context           (:context model-map)
+                  :intelligence      (:intelligence model-map)
+                  :speed             (:speed model-map)}
            reasoning-level (assoc :reasoning reasoning-level)))))))
