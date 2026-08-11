@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.112] - 2026-08-11
+
+### Changed
+- Classify Anthropic refusals and auto-switch to a fallback model
+- release: update version files for v0.7.111, bump to next dev version
+
+
 ### Added
 - Classify Anthropic `stop_reason: refusal` as typed `:svar.llm/refusal` (never resend-eligible) carrying `stop_details` category + explanation
 - `ask-code!` `:refusal-fallbacks` — automatically switch a refused request to a caller-named fallback model (Opus 5 → Opus 4.8), with `:on-refusal-fallback` and `:refusal-recovered`
@@ -2162,7 +2169,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.111...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.112...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2310,3 +2317,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.109]: https://github.com/Blockether/svar/releases/tag/v0.7.109
 [v0.7.110]: https://github.com/Blockether/svar/releases/tag/v0.7.110
 [v0.7.111]: https://github.com/Blockether/svar/releases/tag/v0.7.111
+[v0.7.112]: https://github.com/Blockether/svar/releases/tag/v0.7.112
