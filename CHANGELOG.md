@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Classify Anthropic `stop_reason: refusal` as typed `:svar.llm/refusal` (never resend-eligible) carrying `stop_details` category + explanation
+- `ask-code!` `:refusal-fallbacks` — automatically switch a refused request to a caller-named fallback model (Opus 5 → Opus 4.8), with `:on-refusal-fallback` and `:refusal-recovered`
+- Server-side refusal fallback: auto-attach the `server-side-fallback-2026-07-01` beta header when `:extra-body` carries `:fallbacks`
+- Map `model_context_window_exceeded` to the max-tokens family and `pause_turn` to a clean stop, so neither is blind-retried as an empty reply
+
 ## [v0.7.111] - 2026-08-10
 
 ### Changed

@@ -406,13 +406,22 @@
           (str/join "," (conj (vec (sort tokens)) value)))))
     (assoc headers "anthropic-beta" value)))
 
-(defn- request-headers [api-style api-key provider-id messages llm-headers]
+(defn- request-headers [api-style api-key provider-id messages llm-headers extra-body]
   (cond-> (make-llm-headers api-style api-key provider-id)
     (copilot-provider-id? provider-id)
     (merge (copilot-static-headers))
 
     (copilot-provider-id? provider-id)
     (merge (copilot-dynamic-headers messages))
+
+    ;; Server-side refusal fallback (beta): when the caller asks Anthropic to
+    ;; auto-retry a refused Fable 5 / Opus 5 request on a fallback model (by
+    ;; putting `:fallbacks` in `:extra-body`, which rides into the request
+    ;; body), the `server-side-fallback-2026-07-01` beta header MUST accompany
+    ;; it or Anthropic ignores the `fallbacks` field. Anthropic-wire only; the
+    ;; field is unsupported on Bedrock/Vertex/Foundry and the Batches API.
+    (and (= api-style :anthropic) (contains? extra-body :fallbacks))
+    (append-anthropic-beta "server-side-fallback-2026-07-01")
 
     ;; Auto-add the 1h-cache beta header when any block in this
     ;; request opts into the 1-hour cache tier. Without this header
@@ -3107,7 +3116,7 @@
                        (build-request-body messages model extra-body))
         input-tokens (router/count-messages model messages)
         chat-url     (make-chat-url base-url api-style)
-        headers      (request-headers api-style api-key provider-id messages llm-headers)
+        headers      (request-headers api-style api-key provider-id messages llm-headers extra-body)
         extract-fn   (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
         _ (trove/log! {:level :info
                        :data (log-data {:model model
@@ -3226,6 +3235,18 @@
     (get-in chunk ["response" "status"])
     (get chunk "status")))
 
+(defn- stream-stop-details
+  "Anthropic `stop_details` object riding the terminal `message_delta`, else
+   nil. Present ONLY when `stop_reason` is `refusal` (null for every other stop
+   reason), it names the safety category and a human explanation:
+   `{\"type\" \"refusal\" \"category\" \"cyber\" \"explanation\" \"…\"}`. Both
+   `category` and `explanation` may be null even on a refusal (an uncategorised
+   decline). Parsed with `:key-fn identity`, so keys are strings. Non-Anthropic
+   wires never carry it and return nil."
+  [chunk]
+  (or (get-in chunk ["delta" "stop_details"])
+    (get chunk "stop_details")))
+
 (def ^:private nonterminal-stream-statuses
   #{"in_progress" "queued" "running"})
 
@@ -3305,7 +3326,7 @@
            "too many tokens"])))))
 
 (defn- stream-finalization-summary
-  [{:keys [terminal incomplete last-event-type last-finish-reason
+  [{:keys [terminal incomplete last-event-type last-finish-reason stop-details
            content-acc reasoning-acc response]}]
   (cond-> {:terminal? (boolean terminal)
            :terminal-kind (:kind terminal)
@@ -3316,6 +3337,7 @@
            :incomplete-reason (:reason incomplete)
            :content-acc-len (.length ^StringBuilder content-acc)
            :reasoning-acc-len (.length ^StringBuilder reasoning-acc)}
+    stop-details (assoc :stop-details stop-details)
     response (assoc :http-status (:status response))))
 
 (defn- extract-stream-delta
@@ -3893,6 +3915,7 @@
         terminal-event (atom nil)
         last-event-type (atom nil)
         last-finish-reason (atom nil)
+        stop-details (atom nil)
         incomplete-response (atom nil)
         failed-response (atom nil)
         last-byte-ns (atom (System/nanoTime))
@@ -3957,6 +3980,12 @@
                         (reset! last-event-type event-type))
                       (when-let [finish-reason (stream-finish-reason parsed)]
                         (reset! last-finish-reason finish-reason)
+                        ;; Anthropic sends `stop_details` in the SAME terminal
+                        ;; `message_delta` as `stop_reason`; capture it so a
+                        ;; `refusal` carries its category + explanation into the
+                        ;; finalization the blank-reply classifier reads.
+                        (when-let [sd (stream-stop-details parsed)]
+                          (reset! stop-details sd))
                         (when (and (not @terminal-event)
                                 (not (contains? nonterminal-stream-statuses finish-reason)))
                           (reset! terminal-event {:kind :finish-reason
@@ -4243,6 +4272,7 @@
                                    :incomplete nil
                                    :last-event-type @last-event-type
                                    :last-finish-reason @last-finish-reason
+                                   :stop-details @stop-details
                                    :content-acc content-acc
                                    :reasoning-acc reasoning-acc
                                    :response response})]
@@ -4363,7 +4393,7 @@
         request-body (cond-> (assoc base-body :stream true)
                        (not anthropic?) (assoc :stream_options {:include_usage true}))
         chat-url     (make-chat-url base-url api-style)
-        headers      (merge (request-headers api-style api-key provider-id messages llm-headers)
+        headers      (merge (request-headers api-style api-key provider-id messages llm-headers extra-body)
                        {"Accept" "text/event-stream"})
         ;; Anthropic uses a stateful closure so per-block
         ;; signature/text accumulation survives the SSE event boundary.
@@ -5166,7 +5196,7 @@
       (some? cached) (assoc :cached cached)
       (some? cache-created) (assoc :cache-created cache-created))))
 
-(declare empty-reply-anomaly-type call-with-empty-reply-resend sum-api-usage)
+(declare empty-reply-anomaly-type refusal-message call-with-empty-reply-resend sum-api-usage)
 
 (defn ask!*
   "Low-level ask - calls the LLM directly without routing. Use ask! instead.
@@ -5403,10 +5433,15 @@
             (when (str/blank? content)
               (let [anomaly-type (empty-reply-anomaly-type
                                    (some-> stream-finalization :finish-reason str))
-                    throw-type   (or anomaly-type :svar.llm/empty-content)]
+                    throw-type   (or anomaly-type :svar.llm/empty-content)
+                    stop-details (:stop-details stream-finalization)
+                    refusal?     (= :svar.llm/refusal throw-type)]
                 (throw (ex-info
-                         (if (= :svar.llm/max-tokens-exceeded throw-type)
+                         (cond
+                           (= :svar.llm/max-tokens-exceeded throw-type)
                            "Stream truncated at max_tokens before any structured output. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
+                           refusal? (refusal-message stop-details)
+                           :else
                            (str "The model produced reasoning but no structured JSON output. "
                              "This usually means the response budget was consumed by reasoning, "
                              "the spec could not be satisfied for the given input, or the task "
@@ -5423,7 +5458,8 @@
                                            :provider-id provider-id})
                                    :type throw-type
                                    :attempt attempt-n)
-                           (nil? anomaly-type) (assoc :empty-reply-resend-eligible? false))))))
+                           (nil? anomaly-type) (assoc :empty-reply-resend-eligible? false)
+                           stop-details        (assoc :stop-details stop-details))))))
             {:content        content
              :reasoning      reasoning
              :provider-state provider-state
@@ -5655,13 +5691,51 @@
        :empty-content and retried into a bogus \"Provider unavailable\";
        a truncated Responses stream never reaches here, it throws
        :svar.core/stream-incomplete earlier)
+     - `refusal` (Anthropic Fable 5 / Opus 5 safety classifier) -> :refusal.
+       A DOCUMENTED, non-transient outcome (HTTP 200 + `stop_reason: refusal`):
+       replaying the SAME request to the SAME model \"usually earns another
+       refusal\" (Anthropic), so it is deliberately NOT `:empty-content` and so
+       NEVER resend-eligible. The recovery Anthropic recommends is a fallback
+       MODEL — server-side (`fallbacks`/`server-side-fallback` beta) or client-
+       side — not a same-model retry. The typed error carries `stop_details`
+       (category + explanation) for the caller to surface honestly.
+     - `model_context_window_exceeded` (Anthropic) -> :max-tokens-exceeded: the
+       response filled the whole context window before `max_tokens`; same
+       truncation family as a token cap, handled by the same bump path.
+     - `pause_turn` (Anthropic server-tool sampling-loop pause) -> nil: a paused
+       turn normally carries a `server_tool_use` block, so it never reaches this
+       BLANK-reply classifier; a blank pause is treated as a legit stop, never a
+       blind resend.
      - anything else (nil / mid-stream truncation)   -> :empty-content (retry)"
   [finish-reason]
   (let [fr (some-> finish-reason str)]
     (cond
-      (contains? #{"length" "max_tokens"} fr)                         :svar.llm/max-tokens-exceeded
-      (contains? #{"stop" "end_turn" "stop_sequence" "completed"} fr) nil
-      :else                                                           :svar.llm/empty-content)))
+      (contains? #{"length" "max_tokens" "model_context_window_exceeded"} fr) :svar.llm/max-tokens-exceeded
+      (= "refusal" fr)                                                         :svar.llm/refusal
+      (contains? #{"stop" "end_turn" "stop_sequence" "completed" "pause_turn"} fr) nil
+      :else                                                                    :svar.llm/empty-content)))
+
+(defn- refusal-message
+  "Human-facing message for an Anthropic safety refusal. Surfaces the
+   classifier's own `explanation` VERBATIM (Anthropic: the text is not stable —
+   display it, do not parse it) and names the `category`. Both fields may be
+   null on an uncategorised refusal, so each is optional. `stop-details` keys
+   are strings (parsed with `:key-fn identity`)."
+  [stop-details]
+  (let [category    (get stop-details "category")
+        explanation (get stop-details "explanation")]
+    (str "The model declined this request"
+      (when category (str " (category: " category ")"))
+      "."
+      (when explanation (str " " explanation))
+      " Retrying the same request on the same model usually earns the same"
+      " refusal; a different model (server-side or client-side fallback) is the"
+      " documented recovery.")))
+
+(defn- refusal-ex?
+  "True when `e` carries svar's typed `:svar.llm/refusal`."
+  [e]
+  (= :svar.llm/refusal (:type (ex-data e))))
 
 (def ^:private ^:const EMPTY_REPLY_RESEND_LIMIT
   "How many times a call that came back EMPTY (`:svar.llm/empty-content` — an
@@ -5915,7 +5989,9 @@
             (when (and (empty? tool-calls) (str/blank? content))
               (when-let [anomaly-type (empty-reply-anomaly-type
                                         (some-> stream-finalization :finish-reason str))]
-                (let [base-envelope (envelope-data
+                (let [stop-details (:stop-details stream-finalization)
+                      refusal?     (= :svar.llm/refusal anomaly-type)
+                      base-envelope (envelope-data
                                       {:model model :api-style api-style :chat-url chat-url
                                        :duration-ms duration-ms :api-usage api-usage
                                        :reasoning reasoning :content content
@@ -5925,10 +6001,16 @@
                                        :stream-finalization stream-finalization
                                        :provider-id provider-id})]
                   (throw (ex-info
-                           (if (= :svar.llm/max-tokens-exceeded anomaly-type)
+                           (cond
+                             (= :svar.llm/max-tokens-exceeded anomaly-type)
                              "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
-                             "The model produced neither text nor a tool call.")
-                           (assoc base-envelope :type anomaly-type))))))
+                             refusal? (refusal-message stop-details)
+                             :else    "The model produced neither text nor a tool call.")
+                           ;; Hoist stop_details to top-level ex-data so callers
+                           ;; read category/explanation without digging into
+                           ;; `:stream-finalization`.
+                           (cond-> (assoc base-envelope :type anomaly-type)
+                             stop-details (assoc :stop-details stop-details)))))))
             (assoc response
               :duration-ms duration-ms
               :stream-finalization stream-finalization)))
@@ -6055,36 +6137,109 @@
                       router (:prefs resolved)
                       (fn [provider model-map]
                         (ask-code!* router (inject-routed-params opts provider model-map))))))
-          quirk (tool-quirk-key opts)
-          ;; A model already caught rejecting a gateway-grafted tool field gets
-          ;; sanitized tools on the FIRST try, so the round trip is never wasted twice.
-          opts  (if-let [tools (and (contains? @gateway-tool-field-quirks quirk)
-                                 (sanitize-tools-for-gateway (:tools opts)))]
-                  (assoc opts :tools tools)
-                  opts)]
-      (try
-        (run opts)
-        (catch Exception e
-          (let [enriched (enrich-tool-schema-rejection e (:tools opts))
-                field    (:tool-schema-field (ex-data enriched))
-                healable (contains? gateway-injected-tool-fields field)
-                tools    (when healable (sanitize-tools-for-gateway (:tools opts)))]
-            (cond
-              ;; The upstream model rejects a field the gateway forwarded FROM our
-              ;; tools — drop it and re-send once instead of failing the turn.
-              tools    (do (trove/log! {:level :warn :id ::gateway-tool-field-sanitized
-                                        :data {:model (:model opts)
-                                               :tool-name (:tool-name (ex-data enriched))
-                                               :tool-schema-field field}
-                                        :msg "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
-                         (swap! gateway-tool-field-quirks conj quirk)
-                         (run (assoc opts :tools tools)))
-              ;; Same field, but our tools never carried it: the gateway invented
-              ;; it, so only a gateway/model change can fix this. Say so.
-              healable (throw (ex-info (ex-message enriched)
-                                (assoc (ex-data enriched) :tool-schema-field-source :gateway)
-                                enriched))
-              :else    (throw enriched))))))))
+          ;; ONE routed attempt on `opts`, with the gateway-tool-field self-heal
+          ;; (drop a gateway-grafted field and re-send once) folded in. The
+          ;; refusal-fallback loop below drives this per model, so the quirk
+          ;; check runs fresh for whichever model is being tried.
+          run-healed
+          (fn [opts]
+            (let [quirk (tool-quirk-key opts)
+                  opts  (if-let [tools (and (contains? @gateway-tool-field-quirks quirk)
+                                         (sanitize-tools-for-gateway (:tools opts)))]
+                          (assoc opts :tools tools)
+                          opts)]
+              (try
+                (run opts)
+                (catch Exception e
+                  (let [enriched (enrich-tool-schema-rejection e (:tools opts))
+                        field    (:tool-schema-field (ex-data enriched))
+                        healable (contains? gateway-injected-tool-fields field)
+                        tools    (when healable (sanitize-tools-for-gateway (:tools opts)))]
+                    (cond
+                      ;; The upstream model rejects a field the gateway forwarded FROM our
+                      ;; tools — drop it and re-send once instead of failing the turn.
+                      tools    (do (trove/log! {:level :warn :id ::gateway-tool-field-sanitized
+                                                :data {:model (:model opts)
+                                                       :tool-name (:tool-name (ex-data enriched))
+                                                       :tool-schema-field field}
+                                                :msg "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
+                                 (swap! gateway-tool-field-quirks conj quirk)
+                                 (run (assoc opts :tools tools)))
+                      ;; Same field, but our tools never carried it: the gateway invented
+                      ;; it, so only a gateway/model change can fix this. Say so.
+                      healable (throw (ex-info (ex-message enriched)
+                                        (assoc (ex-data enriched) :tool-schema-field-source :gateway)
+                                        enriched))
+                      :else    (throw enriched)))))))]
+      ;; AUTOMATIC REFUSAL FALLBACK (client-side). Anthropic's Fable 5 / Opus 5
+      ;; safety classifier can DECLINE a request (`stop_reason: refusal`, typed
+      ;; `:svar.llm/refusal`). A same-model retry earns the same refusal, so the
+      ;; documented recovery is a DIFFERENT model. `:refusal-fallbacks` is an
+      ;; ordered list of model names to try in turn; the FIRST that answers wins
+      ;; and its result is annotated `:refusal-recovered {:from :to :category
+      ;; :explanation}` so the caller can say which model actually answered.
+      ;; Exhausting the list re-throws the LAST refusal, enriched with
+      ;; `:refusal-fallbacks-tried`. Absent/empty list = today's behaviour: the
+      ;; refusal propagates immediately. This is the CLIENT-side sibling of
+      ;; Anthropic's server-side fallback (the `fallbacks` body field +
+      ;; `server-side-fallback` beta header, wired in `request-headers`); use
+      ;; whichever the provider path supports.
+      (let [on-fallback   (:on-refusal-fallback opts)
+            fallbacks     (vec (:refusal-fallbacks opts))
+            base-opts     (dissoc opts :refusal-fallbacks :on-refusal-fallback)]
+        (loop [opts      base-opts
+               remaining fallbacks
+               tried     []]
+          (let [outcome (try
+                          {:ok (run-healed opts)}
+                          (catch clojure.lang.ExceptionInfo e
+                            (if (and (refusal-ex? e) (seq remaining))
+                              {:refusal e}
+                              (throw (cond-> e
+                                       (and (refusal-ex? e) (seq tried))
+                                       (as-> e (ex-info (ex-message e)
+                                                 (assoc (ex-data e) :refusal-fallbacks-tried tried)
+                                                 e)))))))]
+            (if-let [result (:ok outcome)]
+              (cond-> result
+                (seq tried)
+                (assoc :refusal-recovered {:from (:model (first tried))
+                                           :to (get-in opts [:routing :model])
+                                           :fallbacks-tried tried}))
+              (let [e            (:refusal outcome)
+                    details      (:stop-details (ex-data e))
+                    ;; the model that actually refused, straight from the typed
+                    ;; error's envelope — not opts, which only carries a routing
+                    ;; PREFERENCE the router may resolve differently.
+                    from-model   (:model (ex-data e))
+                    next-model   (first remaining)]
+                (trove/log! {:level :warn :id ::refusal-fallback
+                             :data (log-data {:from-model from-model
+                                              :to-model next-model
+                                              :category (get details "category")})
+                             :msg "model refused — switching to fallback model"})
+                (when on-fallback
+                  (try
+                    (on-fallback {:from-model from-model
+                                  :to-model next-model
+                                  :category (get details "category")
+                                  :explanation (get details "explanation")
+                                  :attempt (inc (count tried))})
+                    (catch Throwable t
+                      (trove/log! {:level :debug :id ::refusal-fallback-hook-failed
+                                   :data (log-data {:error (ex-message t)})
+                                   :msg ":on-refusal-fallback hook threw; ignored"}))))
+                ;; Switch the ROUTED model via `:routing {:model …}` (the pref
+                ;; `resolve-routing` reads and turns into `:force-model`), NOT
+                ;; top-level `:model` (which routing ignores). Also drop any
+                ;; server-side `:fallbacks` so the two fallback mechanisms never
+                ;; stack on the retry.
+                (recur (-> opts
+                         (assoc :routing (assoc (or (:routing opts) {}) :model next-model))
+                         (update :extra-body dissoc :fallbacks))
+                       (vec (rest remaining))
+                       (conj tried {:model from-model
+                                    :category (get details "category")}))))))))))
 
 ;; =============================================================================
 ;; models! - Fetch available models

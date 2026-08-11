@@ -380,3 +380,152 @@
             (expect (not (contains? result :empty-reply-resend-usage)))
             ;; (100k in * $10/M) + (1k out * $20/M) = 1.02
             (expect (approx= 1.02 (get-in result [:cost :total-cost])))))))))
+
+;; =============================================================================
+;; Anthropic refusal (stop_reason "refusal") — classify, DON'T resend, surface
+;; stop_details. A refused Fable/Opus 5 request is a documented, non-transient
+;; outcome: replaying it to the SAME model earns the same refusal, so it must
+;; NOT enter the empty-reply resend ladder. See vis session
+;; 1d39a651-2e61-41bb-ac46-9194761022f0 (a bare refusal misread as an empty
+;; stall + blind-retried 3x).
+;; =============================================================================
+
+(def ^:private anomaly-type @#'sut/empty-reply-anomaly-type)
+
+(defdescribe refusal-classification-test
+  (describe "empty-reply-anomaly-type finish-reason mapping"
+    (it "maps refusal -> :svar.llm/refusal"
+      (expect (= :svar.llm/refusal (anomaly-type "refusal"))))
+    (it "maps model_context_window_exceeded -> :svar.llm/max-tokens-exceeded"
+      (expect (= :svar.llm/max-tokens-exceeded (anomaly-type "model_context_window_exceeded"))))
+    (it "maps pause_turn -> nil (legit stop, never a blind resend)"
+      (expect (nil? (anomaly-type "pause_turn"))))
+    (it "still maps an unknown/nil finish reason -> :svar.llm/empty-content"
+      (expect (= :svar.llm/empty-content (anomaly-type nil)))
+      (expect (= :svar.llm/empty-content (anomaly-type "weird_new_reason")))))
+
+  (describe "ask-code! blank reply with stop_reason refusal"
+    (it "throws :svar.llm/refusal, carries stop_details, and is NOT re-sent"
+      (with-redefs [sut/EMPTY_REPLY_RESEND_BASE_DELAY_MS 0]
+        (let [calls (atom [])]
+          (with-redefs [sut/chat-completion
+                        (mock-chat [{:content "" :tool-calls []
+                                     :api-usage usage-100k-in
+                                     :http-response {:status 200}
+                                     :stream-finalization
+                                     {:finish-reason "refusal"
+                                      :stop-details {"type" "refusal"
+                                                     "category" "cyber"
+                                                     "explanation" "Declined: could enable cyber harm."}}}]
+                          calls)]
+            (let [thrown (try (svar/ask-code! (test-router)
+                                {:messages [(svar/user "Do the cyber thing.")]})
+                            ::no-throw
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (expect (not= ::no-throw thrown))
+              (expect (= :svar.llm/refusal (:type (ex-data thrown))))
+              ;; the classifier's category + explanation rode into ex-data
+              (expect (= "cyber" (get (:stop-details (ex-data thrown)) "category")))
+              ;; the human message displays the decline, not "stall/retry"
+              (expect (re-find #"(?i)declined" (ex-message thrown)))
+              ;; a refusal is deterministic — exactly ONE call, no resend ladder
+              (expect (= 1 (count @calls))))))))))
+
+;; =============================================================================
+;; Automatic refusal fallback — a refused primary model client-side-switches to
+;; the caller's `:refusal-fallbacks` model. Most of the mechanism lives in svar;
+;; the caller (Vis) only names the fallback (e.g. claude-opus-4-8).
+;; =============================================================================
+
+(defn- two-model-router []
+  (svar/make-router
+    [{:id :test
+      :api-key "sk-test"
+      :base-url "https://example.invalid/v1"
+      :api-style :openai-compatible-chat
+      :models [{:name "primary-model"} {:name "fallback-model"}]}]))
+
+(defn- model-aware-chat
+  "chat-completion stub that answers by MODEL: `refuse-model` returns a
+   stop_reason refusal, everything else returns `answer`. Records model order."
+  [refuse-model answer calls-atom]
+  (fn [_messages model _api-key _url _retry-opts]
+    (swap! calls-atom conj model)
+    (if (= model refuse-model)
+      {:content "" :tool-calls []
+       :api-usage usage-100k-in
+       :http-response {:status 200}
+       :stream-finalization {:finish-reason "refusal"
+                             :stop-details {"type" "refusal"
+                                            "category" "cyber"
+                                            "explanation" "Declined: could enable cyber harm."}}}
+      answer)))
+
+(defdescribe refusal-fallback-test
+  (describe "ask-code! with :refusal-fallbacks"
+    (it "switches to the fallback model on refusal and annotates :refusal-recovered"
+      (with-redefs [router/provider-model-pricing fixed-pricing]
+        (let [calls (atom [])
+              events (atom [])]
+          (with-redefs [sut/chat-completion
+                        (model-aware-chat "primary-model"
+                          {:content "done" :tool-calls []
+                           :api-usage usage-good
+                           :http-response {:status 200}
+                           :stream-finalization {:finish-reason "stop"}}
+                          calls)]
+            (let [result (svar/ask-code! (two-model-router)
+                           {:model "primary-model"
+                            :refusal-fallbacks ["fallback-model"]
+                            :on-refusal-fallback (fn [ev] (swap! events conj ev))
+                            :messages [(svar/user "Do the thing.")]})]
+              (expect (= "done" (:content result)))
+              (expect (= :end (:stop-reason result)))
+              ;; primary refused, fallback answered — exactly that order
+              (expect (= ["primary-model" "fallback-model"] @calls))
+              ;; the result names who actually answered
+              (expect (= "primary-model" (get-in result [:refusal-recovered :from])))
+              (expect (= "fallback-model" (get-in result [:refusal-recovered :to])))
+              ;; the observability hook fired once with the switch detail
+              (expect (= 1 (count @events)))
+              (expect (= "primary-model" (:from-model (first @events))))
+              (expect (= "fallback-model" (:to-model (first @events))))
+              (expect (= "cyber" (:category (first @events)))))))))
+
+    (it "with NO fallback list, a refusal propagates untouched (one call)"
+      (with-redefs [router/provider-model-pricing fixed-pricing]
+        (let [calls (atom [])]
+          (with-redefs [sut/chat-completion
+                        (model-aware-chat "primary-model" nil calls)]
+            (let [thrown (try (svar/ask-code! (two-model-router)
+                                {:model "primary-model"
+                                 :messages [(svar/user "Do the thing.")]})
+                            ::no-throw
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (expect (not= ::no-throw thrown))
+              (expect (= :svar.llm/refusal (:type (ex-data thrown))))
+              (expect (= ["primary-model"] @calls)))))))
+
+    (it "when EVERY fallback also refuses, the last refusal propagates enriched"
+      (with-redefs [router/provider-model-pricing fixed-pricing]
+        (let [calls (atom [])]
+          ;; both models refuse: stub refuses regardless of model name
+          (with-redefs [sut/chat-completion
+                        (fn [_m model _k _u _r]
+                          (swap! calls conj model)
+                          {:content "" :tool-calls []
+                           :api-usage usage-100k-in
+                           :http-response {:status 200}
+                           :stream-finalization {:finish-reason "refusal"
+                                                 :stop-details {"category" "cyber"}}})]
+            (let [thrown (try (svar/ask-code! (two-model-router)
+                                {:model "primary-model"
+                                 :refusal-fallbacks ["fallback-model"]
+                                 :messages [(svar/user "Do the thing.")]})
+                            ::no-throw
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (expect (not= ::no-throw thrown))
+              (expect (= :svar.llm/refusal (:type (ex-data thrown))))
+              ;; tried primary then the one fallback, then gave up
+              (expect (= ["primary-model" "fallback-model"] @calls))
+              (expect (seq (:refusal-fallbacks-tried (ex-data thrown)))))))))))
