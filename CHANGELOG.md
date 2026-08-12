@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.114] - 2026-08-12
+
+### Changed
+- Send only the effort models.dev says the model sells
+- release: update version files for v0.7.113, bump to next dev version
+
+
 ### Changed
 - Every reasoning effort svar sends is now a value models.dev advertises for that exact model: `:deep` names the CEILING and is clamped to the strongest advertised rung (`max` on GPT-5.6 and Claude Opus 5, `high` on the o-series / GPT-5.1 / rows that stop there), `:quick` and `:balanced` are clamped the same way, and a model the catalog knows nothing about still gets the evidence-free `high` ceiling
 - Adaptive vs manual Claude thinking is read from the catalog instead of guessed from the model NAME: an `effort`-only row is adaptive, a `budget_tokens`-only row is manual, and only a row advertising both (Opus 4.5 / 4.6 / Sonnet 4.6, where `effort` predates adaptive thinking) falls back to the name pattern
@@ -2180,7 +2187,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.113...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.114...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2330,3 +2337,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.111]: https://github.com/Blockether/svar/releases/tag/v0.7.111
 [v0.7.112]: https://github.com/Blockether/svar/releases/tag/v0.7.112
 [v0.7.113]: https://github.com/Blockether/svar/releases/tag/v0.7.113
+[v0.7.114]: https://github.com/Blockether/svar/releases/tag/v0.7.114
