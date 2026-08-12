@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Claude adaptive thinking climbs Anthropic's own effort ladder (`:quick` low, `:balanced` high — the API default —, `:deep` max) instead of borrowing the OpenAI `reasoning_effort` column, which pinned `:balanced` one rung BELOW the default and `:deep` merely AT it
+- A level-less Claude adaptive request still sends `thinking: {type "adaptive", display "summarized"}`, so Opus 5 / Sonnet 5 / Fable 5 stop falling back to their own `display: "omitted"` default (thinking blocks with an empty `thinking` field and no `thinking_delta` events)
+
 ## [v0.7.112] - 2026-08-11
 
 ### Changed

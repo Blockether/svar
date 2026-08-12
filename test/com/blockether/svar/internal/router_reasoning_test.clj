@@ -79,10 +79,14 @@
                   (router/reasoning-extra-body :anthropic claude :deep)))))
 
     (it "uses adaptive thinking for Claude Opus 5 / Opus 4.8–4.6 / Sonnet 4.6"
-      (doseq [[model level effort] [["claude-opus-5" :balanced "medium"]
-                                    ["claude-opus-4-8" :balanced "medium"]
-                                    ["claude-opus-4-7" :balanced "medium"]
-                                    ["claude-opus-4-6" :deep "high"]
+      ;; Regression: these efforts came from the OpenAI column, so `:balanced`
+      ;; asked for "medium" — one rung BELOW Anthropic's default — and `:deep`
+      ;; asked for "high", which IS the default. Turns that requested deep
+      ;; thinking came back with two-word summaries.
+      (doseq [[model level effort] [["claude-opus-5" :balanced "high"]
+                                    ["claude-opus-4-8" :balanced "high"]
+                                    ["claude-opus-4-7" :balanced "high"]
+                                    ["claude-opus-4-6" :deep "max"]
                                     ["claude-sonnet-4-6" :quick "low"]]]
         (let [out (router/reasoning-extra-body :anthropic
                     {:name model :reasoning? true :reasoning-style :anthropic-thinking}
@@ -90,6 +94,44 @@
           (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
           (expect (= {:effort effort} (:output_config out)))
           (expect (nil? (get-in out [:thinking :budget_tokens]))))))
+
+    (it "climbs Anthropic's own effort ladder, not OpenAI's"
+      ;; docs.claude.com /en/docs/build-with-claude/adaptive-thinking:
+      ;; max > xhigh > high (default) > medium > low.
+      (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}
+            effort (fn [level] (get-in (router/reasoning-extra-body :anthropic opus level)
+                                 [:output_config :effort]))]
+        (expect (= "low" (effort :quick)))
+        (expect (= "high" (effort :balanced)))
+        (expect (= "max" (effort :deep)))
+        ;; The two columns are deliberately different data.
+        (expect (not= (get-in router/REASONING_LEVELS [:deep :openai-effort])
+                  (get-in router/REASONING_LEVELS [:deep :anthropic-effort])))))
+
+    (it "opts into summarized display even when the caller names no level"
+      ;; Regression: a level-less call emitted no `thinking` field at all, so
+      ;; Opus 5 / Sonnet 5 / Fable 5 used their own `display: "omitted"`
+      ;; default — thinking blocks with an EMPTY thinking field and no
+      ;; `thinking_delta` events, i.e. a reasoning surface showing nothing.
+      (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}]
+        (expect (= {:thinking {:type "adaptive" :display "summarized"}}
+                  (router/reasoning-extra-body :anthropic opus nil)))
+        ;; No level means no DEPTH opinion: Anthropic's default effort stands.
+        (expect (nil? (:output_config (router/reasoning-extra-body :anthropic opus nil))))
+        (expect (= (router/reasoning-extra-body :anthropic opus nil)
+                  (router/reasoning-extra-body :anthropic opus :turbo)))))
+
+    (it "keeps the silent nil for every other level-less model"
+      (let [manual {:name "claude-sonnet-4-5" :reasoning? true :reasoning-style :anthropic-thinking}
+            opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}
+            gpt {:name "gpt-5" :reasoning? true}]
+        ;; Manual budget_tokens families have no adaptive display to opt into.
+        (expect (nil? (router/reasoning-extra-body :anthropic manual nil)))
+        ;; `thinking` is meaningless on an OpenAI-compatible wire.
+        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat opus nil)))
+        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat gpt nil)))
+        ;; A model that does not think stays untouched.
+        (expect (nil? (router/reasoning-extra-body :anthropic {:name "claude-opus-5"} nil)))))
 
     (it "infers :anthropic-thinking from :api-style :anthropic when style is unset"
       (let [claude {:name "unknown-claude" :reasoning? true}]

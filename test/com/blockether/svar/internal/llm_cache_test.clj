@@ -422,7 +422,7 @@
                             :svar/cache true :svar/cache-ttl :1h}]}
                 {:role "user" :content "hi"}]
           headers (#'sut/request-headers :anthropic "sk-x" :anthropic-coding-plan
-                                         msgs nil)]
+                                         msgs nil nil)]
       (expect (= "extended-cache-ttl-2025-04-11"
                 (get headers "anthropic-beta")))))
 
@@ -431,7 +431,7 @@
                  :content [{:type "text" :text "x" :svar/cache true}]}
                 {:role "user" :content "hi"}]
           headers (#'sut/request-headers :anthropic "sk-x" :anthropic-coding-plan
-                                         msgs nil)]
+                                         msgs nil nil)]
       (expect (not= "extended-cache-ttl-2025-04-11"
                 (get headers "anthropic-beta")))))
 
@@ -442,7 +442,7 @@
           ;; OAuth-style anthropic key prefix triggers the static beta
           ;; header in `make-llm-headers`.
           headers (#'sut/request-headers :anthropic "sk-ant-oat01-xxxx"
-                                         :anthropic-coding-plan msgs nil)
+                                         :anthropic-coding-plan msgs nil nil)
           beta    (get headers "anthropic-beta")]
       (expect (re-find #"extended-cache-ttl-2025-04-11" beta))
       (expect (re-find #"claude-code-20250219" beta)))))

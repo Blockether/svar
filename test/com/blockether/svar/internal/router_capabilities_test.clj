@@ -54,8 +54,11 @@
         (expect (= {:thinking {:type "adaptive" :display "summarized"}
                     :output_config {:effort "low"}}
                   (body opus :quick)))
+        ;; Regression: `:deep` used to resolve through the OPENAI effort column
+        ;; and land on "high" — Anthropic's DEFAULT — so asking for deep
+        ;; thinking bought nothing above the default posture.
         (expect (= {:thinking {:type "adaptive" :display "summarized"}
-                    :output_config {:effort "high"}}
+                    :output_config {:effort "max"}}
                   (body opus :deep)))
         ;; Older families still take a manual budget.
         (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}

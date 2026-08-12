@@ -284,6 +284,18 @@
                              Used by GPT-5.x, o-series, Gemini 2.5 via OpenAI gateway,
                              DeepSeek Reasoner, Copilot GPT-5+, and most
                              OpenAI-compatible reasoners.
+     `:anthropic-effort`   → `output_config.effort` for Claude ADAPTIVE thinking.
+                             Anthropic's ladder is its own and deliberately not
+                             OpenAI's: max > xhigh > high (the API DEFAULT) >
+                             medium (\"may skip thinking for simple queries\") >
+                             low (\"minimizes thinking\") — docs.claude.com
+                             /en/docs/build-with-claude/adaptive-thinking,
+                             \"Effort levels\". Reusing `:openai-effort` here (as
+                             this table did until 2026-08) sent `:balanced` one
+                             rung BELOW Anthropic's default and `:deep` merely
+                             AT it, so a caller asking for deep thinking got
+                             two-word summaries. `:balanced` is now exactly the
+                             documented default and `:deep` the ceiling.
      `:anthropic-thinking` → Claude thinking controls.
                              Claude Opus 5 / Opus 4.8 / Opus 4.7 / Opus 4.6 /
                              Sonnet 4.6 use adaptive thinking + output_config.effort.
@@ -315,9 +327,9 @@
                              Copilot Claude is back on `/v1/messages` and
                              therefore back on `:anthropic-thinking`; the
                              OpenAI-compatible Copilot rows keep this style."
-  {:quick    {:openai-effort "low"    :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "off"  :server-managed nil}
-   :balanced {:openai-effort "medium" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
-   :deep     {:openai-effort "high"   :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
+  {:quick    {:openai-effort "low"    :anthropic-effort "low"  :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "off"  :server-managed nil}
+   :balanced {:openai-effort "medium" :anthropic-effort "high" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
+   :deep     {:openai-effort "high"   :anthropic-effort "max"  :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
 
 (defn normalize-reasoning-level
   "Coerce any accepted spelling to a canonical :quick|:balanced|:deep keyword.
@@ -397,6 +409,17 @@
     distinct
     vec))
 
+(def ^:private ANTHROPIC_ADAPTIVE_THINKING
+  "The thinking config every Claude adaptive-thinking request carries.
+
+   `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5 /
+   Mythos 5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, and an omitted block
+   arrives with an EMPTY `thinking` field and no `thinking_delta` events at all
+   (docs.claude.com /en/docs/build-with-claude/thinking, \"Controlling thinking
+   display\"). Callers that render reasoning would show a silent, empty block
+   for every such turn, so svar always opts into the summary."
+  {:type "adaptive" :display "summarized"})
+
 (defn resolve-reasoning-effort
   "Resolve an exact provider-native reasoning effort for one model.
 
@@ -424,8 +447,7 @@
          extra-body (when effective
                       (case wire-style
                         :openai-effort {:reasoning_effort effective}
-                        :anthropic-thinking {:thinking {:type "adaptive"
-                                                        :display "summarized"}
+                        :anthropic-thinking {:thinking ANTHROPIC_ADAPTIVE_THINKING
                                              :output_config {:effort effective}}
                         :zai-effort {:thinking {:type "enabled"}
                                      :reasoning_effort effective}
@@ -449,17 +471,35 @@
 (defn- anthropic-thinking-extra-body
   [model-map norm budget]
   (if (anthropic-adaptive-thinking-model? (:name model-map))
-    {:thinking {:type "adaptive"
-                :display "summarized"}
-     :output_config {:effort (get-in REASONING_LEVELS [norm :openai-effort])}}
+    {:thinking ANTHROPIC_ADAPTIVE_THINKING
+     :output_config {:effort (get-in REASONING_LEVELS [norm :anthropic-effort])}}
     {:thinking {:type "enabled" :budget_tokens budget}}))
+
+(defn- anthropic-adaptive-display-body
+  "Thinking config for an adaptive Claude model when the caller named NO level.
+
+   Without this, `reasoning-extra-body` returned nil for a level-less call, the
+   body carried no `thinking` field, and the newest Claude models ran with their
+   own default `display: \"omitted\"` — thinking blocks with an empty `thinking`
+   field, no `thinking_delta` events, and a reasoning surface that shows nothing.
+   Emitting the display opt-in alone (no `output_config`) leaves DEPTH entirely
+   to Anthropic's default effort, which is what \"no level\" means."
+  [api-style model-map]
+  (when (and (= api-style :anthropic)
+          (:reasoning? model-map)
+          (= :anthropic-thinking (infer-reasoning-style api-style model-map))
+          (anthropic-adaptive-thinking-model? (:name model-map)))
+    {:thinking ANTHROPIC_ADAPTIVE_THINKING}))
 
 (defn reasoning-extra-body
   "Translates an abstract reasoning level into provider-specific extra-body.
    Returns nil when:
-     - `level` is nil / unknown
      - the selected model is not flagged `:reasoning?`
-     - the reasoning-style has no mapping in REASONING_LEVELS.
+     - the reasoning-style has no mapping in REASONING_LEVELS
+     - `level` is nil / unknown AND the model is not a Claude adaptive-thinking
+       model on the Anthropic wire. Those DO get a body without a level: the
+       display opt-in alone (see `anthropic-adaptive-display-body`), because
+       their own default is `display: \"omitted\"` — empty thinking blocks.
 
    Dispatches on the model's `:reasoning-style` first (explicit pin), falling
    back to inference from `api-style` when the model doesn't declare one.
@@ -479,7 +519,7 @@
   ([api-style model-map level]
    (reasoning-extra-body api-style model-map level nil))
   ([api-style model-map level {:keys [preserved-thinking?]}]
-   (when-let [norm (normalize-reasoning-level level)]
+   (if-let [norm (normalize-reasoning-level level)]
      (when (:reasoning? model-map)
        (let [raw-style (infer-reasoning-style api-style model-map)
              ;; The emitted reasoning BODY must be valid for the WIRE, not just
@@ -523,7 +563,10 @@
                                    {:reasoning_effort mapped
                                     :thinking (cond-> {:type "enabled"}
                                                 preserved-thinking? (assoc :clear_thinking false))})
-             nil)))))))
+             nil))))
+     ;; No level named: Claude adaptive models still need the display opt-in,
+     ;; everything else keeps the historical silent nil.
+     (anthropic-adaptive-display-body api-style model-map))))
 
 ;; =============================================================================
 ;; Provider-scoped model availability, pricing, and context limits
