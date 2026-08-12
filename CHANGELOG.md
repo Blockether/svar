@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.113] - 2026-08-12
+
+### Changed
+- Ask Claude for the depth Anthropic actually sells
+- release: update version files for v0.7.112, bump to next dev version
+
+
 ### Changed
 - Claude adaptive thinking climbs Anthropic's own effort ladder (`:quick` low, `:balanced` high — the API default —, `:deep` max) instead of borrowing the OpenAI `reasoning_effort` column, which pinned `:balanced` one rung BELOW the default and `:deep` merely AT it
 - A level-less Claude adaptive request still sends `thinking: {type "adaptive", display "summarized"}`, so Opus 5 / Sonnet 5 / Fable 5 stop falling back to their own `display: "omitted"` default (thinking blocks with an empty `thinking` field and no `thinking_delta` events)
@@ -2173,7 +2180,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.112...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.113...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2322,3 +2329,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.110]: https://github.com/Blockether/svar/releases/tag/v0.7.110
 [v0.7.111]: https://github.com/Blockether/svar/releases/tag/v0.7.111
 [v0.7.112]: https://github.com/Blockether/svar/releases/tag/v0.7.112
+[v0.7.113]: https://github.com/Blockether/svar/releases/tag/v0.7.113
