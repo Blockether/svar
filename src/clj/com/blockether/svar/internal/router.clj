@@ -460,22 +460,42 @@
     (when-let [ceiling (get UNCATALOGUED_EFFORT_CEILING style)]
       (filterv #(<= (long (EFFORT_RANK %)) (long (EFFORT_RANK ceiling))) EFFORT_LADDER))))
 
+(def ^:private WEAKEST_THINKING_EFFORT
+  "The weakest rung of `EFFORT_LADDER` that still asks the model to THINK.
+
+   Everything below it (`none`, `minimal`) turns reasoning OFF. An abstract
+   level always means \"think this much\", never \"do not think\", so clamping
+   may not cross this floor — see `clamp-effort`."
+  "low")
+
 (defn- clamp-effort
   "The rung to actually send: `wanted` when the model accepts it, otherwise the
    strongest accepted rung BELOW it — an abstract level asks for AT MOST that
    much thinking — or the weakest accepted rung when every option sits above it.
+   `nil` when the model advertises no thinking rung at all, so the caller omits
+   the field and leaves depth to the provider's own default.
 
-   Without this the abstract-level path sent the level table's rung blind while
-   only `resolve-reasoning-effort` consulted the catalog: `:deep` → \"max\" is a
-   400 on a row that stops at \"high\" (o-series, GPT-5.1, Opus 4.5), and a row
-   that grows a rung above ours would never be reached."
+   Clamping DOWN stops at `WEAKEST_THINKING_EFFORT`: a row that sells only
+   `[\"none\" \"high\"]` (Mistral Medium, GLM-5.2 on several gateways, the Gemini
+   image rows) must answer `:quick` with \"high\", never \"none\" — silently
+   disabling reasoning for a caller who asked for the shallow END of it is the
+   one clamp direction that changes what the request MEANS.
+
+   Without any clamp the abstract-level path sent the level table's rung blind
+   while only `resolve-reasoning-effort` consulted the catalog: `:deep` → \"max\"
+   is a 400 on a row that stops at \"high\" (o-series, GPT-5.1, Opus 4.5), and a
+   row that grows a rung above ours would never be reached."
   [wanted supported]
-  (let [want (EFFORT_RANK wanted)]
+  (let [want (EFFORT_RANK wanted)
+        floor (long (EFFORT_RANK WEAKEST_THINKING_EFFORT))
+        thinking? #(<= floor (long (EFFORT_RANK %)))]
     (cond
       (or (nil? want) (empty? supported)) wanted
       (some #{wanted} supported) wanted
-      :else (or (last (filter #(<= (long (EFFORT_RANK %)) (long want)) supported))
-              (first supported)))))
+      :else (let [candidates (if (<= floor (long want)) (filterv thinking? supported) supported)]
+              (when (seq candidates)
+                (or (last (filter #(<= (long (EFFORT_RANK %)) (long want)) candidates))
+                  (first candidates)))))))
 
 (defn- effort-option-values [model-map]
   (filterv (set PROVIDER_NATIVE_REASONING_EFFORTS) (catalog-effort-values model-map)))
@@ -565,9 +585,13 @@
 (defn- anthropic-thinking-extra-body
   [model-map norm budget]
   (if (anthropic-adaptive-thinking-model? model-map)
-    {:thinking ANTHROPIC_ADAPTIVE_THINKING
-     :output_config {:effort (clamp-effort (get-in REASONING_LEVELS [norm :anthropic-effort])
-                               (supported-efforts model-map :anthropic-thinking))}}
+    ;; No advertised thinking rung (`clamp-effort` → nil) still keeps the display
+    ;; opt-in: Anthropic's own default effort is a depth, `display: "omitted"` is
+    ;; an empty reasoning surface.
+    (let [effort (clamp-effort (get-in REASONING_LEVELS [norm :anthropic-effort])
+                   (supported-efforts model-map :anthropic-thinking))]
+      (cond-> {:thinking ANTHROPIC_ADAPTIVE_THINKING}
+        effort (assoc :output_config {:effort effort})))
     {:thinking {:type "enabled" :budget_tokens budget}}))
 
 (defn- anthropic-adaptive-display-body
@@ -635,7 +659,8 @@
              mapped (get-in REASONING_LEVELS [norm style])]
          (when mapped
            (case style
-             :openai-effort      {:reasoning_effort (clamp-effort mapped (supported-efforts model-map :openai-effort))}
+             :openai-effort      (when-let [effort (clamp-effort mapped (supported-efforts model-map :openai-effort))]
+                                   {:reasoning_effort effort})
              :anthropic-thinking (anthropic-thinking-extra-body model-map norm mapped)
              :zai-thinking       {:thinking (cond-> {:type mapped}
                                               ;; `clear_thinking: false` = keep reasoning_content

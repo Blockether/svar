@@ -336,6 +336,26 @@
         (expect (= {:reasoning_effort "high"}
                   (router/reasoning-extra-body :openai-compatible-chat pro :quick)))))
 
+    (it "never clamps a level down into \"none\" / \"minimal\""
+      ;; Regression: clamping only looked DOWNWARD, so the 40 catalog rows that
+      ;; sell reasoning as on/off (`["none" "high"]` — Mistral Medium, GLM-5.2 on
+      ;; several gateways, `["minimal" "high"]` on the Gemini image rows) answered
+      ;; `:quick` and `:balanced` with "none": a caller asking for the shallow end
+      ;; of thinking silently got NO thinking.
+      (let [on-off {:name "mistral-medium-3.5" :reasoning? true
+                    :reasoning-options [{:type "effort" :values ["none" "high"]}]}]
+        (expect (= {:reasoning_effort "high"}
+                  (router/reasoning-extra-body :openai-compatible-chat on-off :quick)))
+        (expect (= {:reasoning_effort "high"}
+                  (router/reasoning-extra-body :openai-compatible-chat on-off :balanced)))))
+
+    (it "omits the field when the row sells no thinking rung at all"
+      ;; Sending "none" would disable reasoning, "low" would 400: say nothing and
+      ;; let the provider's own default decide.
+      (let [off-only {:name "zai-glm-4.7" :reasoning? true
+                      :reasoning-options [{:type "effort" :values ["none"]}]}]
+        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat off-only :deep)))))
+
     (it "stays at \"high\" when the catalog advertises nothing"
       ;; No evidence, no claim: `xhigh`/`max` 400 on every older reasoner.
       (let [unknown {:name "some-new-reasoner" :reasoning? true}]
@@ -348,6 +368,12 @@
                     :reasoning-options [{:type "effort" :values ["low" "high" "xhigh"]}]}]
         (expect (= {:effort "xhigh"}
                   (:output_config (router/reasoning-extra-body :anthropic custom :deep))))))
+
+    (it "keeps the display opt-in when the row sells no thinking rung"
+      (let [off-only {:name "vendor-claude-off" :reasoning? true :reasoning-style :anthropic-thinking
+                      :reasoning-options [{:type "effort" :values ["none"]}]}]
+        (expect (= {:thinking {:type "adaptive" :display "summarized"}}
+                  (router/reasoning-extra-body :anthropic off-only :deep)))))
 
     (it "keeps \"max\" for a Claude row the catalog does not carry"
       (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}]
@@ -371,10 +397,28 @@
                 :when sent]
           (swap! checked inc)
           (expect (contains? advertised sent)
-            (str provider "/" (:name model) " " level " → " sent)))
+            (str provider "/" (:name model) " " level " → " sent))
+          (expect (not (contains? #{"none" "minimal"} sent))
+            (str provider "/" (:name model) " " level " → " sent " disables thinking")))
         ;; The walk is worthless if it silently stops finding models — e.g. a
         ;; provider id that no longer resolves in the bundled catalog.
-        (expect (< 100 @checked))))))
+        (expect (< 100 @checked))))
+
+    (it "never turns thinking off, in any provider of the catalog"
+      (let [checked (atom 0)]
+        (doseq [[provider entry] @modelsdev/catalog
+                [_ raw] (:models entry)
+                :let [model (modelsdev/normalize-model raw)]
+                :when (seq (:reasoning-options model))
+                api-style [:openai-compatible-chat :anthropic]
+                level [:quick :balanced :deep]
+                :let [body (router/reasoning-extra-body api-style model level)
+                      sent (or (:reasoning_effort body) (get-in body [:output_config :effort]))]
+                :when sent]
+          (swap! checked inc)
+          (expect (not (contains? #{"none" "minimal"} sent))
+            (str provider "/" (:name model) " " level " → " sent)))
+        (expect (< 1000 @checked))))))
 
 (defdescribe catalog-decides-thinking-style-test
   "models.dev, not the model NAME, decides adaptive vs manual Claude thinking."

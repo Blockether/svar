@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- An abstract reasoning level never turns thinking OFF: clamping down now stops at the weakest rung that still thinks, so the rows selling reasoning as on/off (`["none" "high"]` — Mistral Medium, GLM-5.2 on several gateways — and `["minimal" "high"]` on the Gemini image rows) answer `:quick` / `:balanced` with `high` instead of `none`. A row advertising no thinking rung at all now omits the field entirely rather than disabling reasoning, and a Claude row in that shape keeps the `display: "summarized"` opt-in
+
 ## [v0.7.114] - 2026-08-12
 
 ### Changed
