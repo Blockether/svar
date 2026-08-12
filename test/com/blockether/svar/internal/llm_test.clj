@@ -331,7 +331,11 @@
               (expect (= "conversation-edits" (get headers "Openai-Intent")))
               (expect (= "text/event-stream" (get headers "Accept")))
               (expect (= true (:stream body)))
-              (expect (= {:effort "high" :summary "detailed"} (:reasoning body)))
+              ;; `:deep` is the CEILING models.dev advertises for the model, not a
+              ;; fixed rung: Copilot's gpt-5.5 row sells none/low/medium/high/xhigh,
+              ;; so deep thinking asks for "xhigh". Pinning "high" here meant the
+              ;; strongest level anyone could request was two rungs short.
+              (expect (= {:effort "xhigh" :summary "detailed"} (:reasoning body)))
               (expect (= ["reasoning.encrypted_content"] (:include body))))))))
 
     (it "chat-completion sends Anthropic OAuth tokens with Claude Code headers and system identity"

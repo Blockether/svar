@@ -420,8 +420,8 @@
                           calls)]
             (let [thrown (try (svar/ask-code! (test-router)
                                 {:messages [(svar/user "Do the cyber thing.")]})
-                            ::no-throw
-                            (catch clojure.lang.ExceptionInfo e e))]
+                              ::no-throw
+                              (catch clojure.lang.ExceptionInfo e e))]
               (expect (not= ::no-throw thrown))
               (expect (= :svar.llm/refusal (:type (ex-data thrown))))
               ;; the classifier's category + explanation rode into ex-data
@@ -500,8 +500,8 @@
             (let [thrown (try (svar/ask-code! (two-model-router)
                                 {:model "primary-model"
                                  :messages [(svar/user "Do the thing.")]})
-                            ::no-throw
-                            (catch clojure.lang.ExceptionInfo e e))]
+                              ::no-throw
+                              (catch clojure.lang.ExceptionInfo e e))]
               (expect (not= ::no-throw thrown))
               (expect (= :svar.llm/refusal (:type (ex-data thrown))))
               (expect (= ["primary-model"] @calls)))))))
@@ -522,8 +522,8 @@
                                 {:model "primary-model"
                                  :refusal-fallbacks ["fallback-model"]
                                  :messages [(svar/user "Do the thing.")]})
-                            ::no-throw
-                            (catch clojure.lang.ExceptionInfo e e))]
+                              ::no-throw
+                              (catch clojure.lang.ExceptionInfo e e))]
               (expect (not= ::no-throw thrown))
               (expect (= :svar.llm/refusal (:type (ex-data thrown))))
               ;; tried primary then the one fallback, then gave up

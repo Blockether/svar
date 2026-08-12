@@ -7,12 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.7.113] - 2026-08-12
-
 ### Changed
-- Ask Claude for the depth Anthropic actually sells
-- release: update version files for v0.7.112, bump to next dev version
+- Every reasoning effort svar sends is now a value models.dev advertises for that exact model: `:deep` names the CEILING and is clamped to the strongest advertised rung (`max` on GPT-5.6 and Claude Opus 5, `high` on the o-series / GPT-5.1 / rows that stop there), `:quick` and `:balanced` are clamped the same way, and a model the catalog knows nothing about still gets the evidence-free `high` ceiling
+- Adaptive vs manual Claude thinking is read from the catalog instead of guessed from the model NAME: an `effort`-only row is adaptive, a `budget_tokens`-only row is manual, and only a row advertising both (Opus 4.5 / 4.6 / Sonnet 4.6, where `effort` predates adaptive thinking) falls back to the name pattern
+- `resolve-reasoning-effort` sends the adaptive `thinking` block only to families that take it; a model with `output_config.effort` but no adaptive thinking (Opus 4.5) now gets the effort alone
 
+## [v0.7.113] - 2026-08-12
 
 ### Changed
 - Claude adaptive thinking climbs Anthropic's own effort ladder (`:quick` low, `:balanced` high — the API default —, `:deep` max) instead of borrowing the OpenAI `reasoning_effort` column, which pinned `:balanced` one rung BELOW the default and `:deep` merely AT it

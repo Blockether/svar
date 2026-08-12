@@ -752,7 +752,7 @@
   [^Throwable e url]
   (let [reason (connection-error-reason e)
         host   (try (.getHost (java.net.URI. (str url)))
-                 (catch Exception _ nil))]
+                    (catch Exception _ nil))]
     (ex-info (str "Could not connect to the model provider"
                (when-not (str/blank? host) (str " at " host))
                ": " reason
@@ -802,7 +802,7 @@
   [url]
   (when url
     (try (not-empty (.getHost (java.net.URI. (str url))))
-      (catch Exception _ nil))))
+         (catch Exception _ nil))))
 
 (def CONNECT_HEALTH_WINDOW_MS
   "How long ONE successful connection keeps a host classified as 'healthy'.

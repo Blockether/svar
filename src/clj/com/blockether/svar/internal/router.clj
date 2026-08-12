@@ -284,6 +284,12 @@
                              Used by GPT-5.x, o-series, Gemini 2.5 via OpenAI gateway,
                              DeepSeek Reasoner, Copilot GPT-5+, and most
                              OpenAI-compatible reasoners.
+                             `:deep` names the CEILING (\"max\"), not a fixed rung:
+                             `clamp-effort` lowers it to the strongest value the
+                             model's models.dev row advertises, and to \"high\"
+                             (`UNCATALOGUED_EFFORT_CEILING`) when the catalog knows
+                             no options. Pinning \"high\" in this table instead left
+                             `:deep` two rungs below what GPT-5.6 sells.
      `:anthropic-effort`   → `output_config.effort` for Claude ADAPTIVE thinking.
                              Anthropic's ladder is its own and deliberately not
                              OpenAI's: max > xhigh > high (the API DEFAULT) >
@@ -295,7 +301,9 @@
                              rung BELOW Anthropic's default and `:deep` merely
                              AT it, so a caller asking for deep thinking got
                              two-word summaries. `:balanced` is now exactly the
-                             documented default and `:deep` the ceiling.
+                             documented default and `:deep` the ceiling — clamped,
+                             like every effort here, to the values models.dev
+                             advertises for the exact model (`clamp-effort`).
      `:anthropic-thinking` → Claude thinking controls.
                              Claude Opus 5 / Opus 4.8 / Opus 4.7 / Opus 4.6 /
                              Sonnet 4.6 use adaptive thinking + output_config.effort.
@@ -329,7 +337,7 @@
                              OpenAI-compatible Copilot rows keep this style."
   {:quick    {:openai-effort "low"    :anthropic-effort "low"  :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "off"  :server-managed nil}
    :balanced {:openai-effort "medium" :anthropic-effort "high" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
-   :deep     {:openai-effort "high"   :anthropic-effort "max"  :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
+   :deep     {:openai-effort "max"    :anthropic-effort "max"  :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
 
 (defn normalize-reasoning-level
   "Coerce any accepted spelling to a canonical :quick|:balanced|:deep keyword.
@@ -401,13 +409,76 @@
       (when (contains? (set PROVIDER_NATIVE_REASONING_EFFORTS) normalized)
         normalized))))
 
+(def ^:private EFFORT_LADDER
+  "Every reasoning-effort rung models.dev advertises, weakest → strongest.
+
+   The vocabulary is the catalog's own (`reasoning_options[].values`) and is
+   declared exactly once, here, so ordering and clamping cannot drift apart.
+   `none` / `minimal` mean *do not think*; svar's abstract levels never aim
+   there — `:quick` is the weakest rung that still thinks."
+  ["none" "minimal" "low" "medium" "high" "xhigh" "max"])
+
+(def ^:private EFFORT_RANK
+  "Rung → position in `EFFORT_LADDER`. A map, so comparing two rungs never
+   reflects into `java.util.List/indexOf`."
+  (into {} (map-indexed (fn [i v] [v i])) EFFORT_LADDER))
+
+(def ^:private UNCATALOGUED_EFFORT_CEILING
+  "Strongest rung svar will send when models.dev advertises NO effort options
+   for the model — the depth we may claim without evidence.
+
+   `high` is the universal OpenAI-compatible ceiling: it is the top of every
+   o-series / GPT-5 / GPT-5.1 row, and `xhigh` / `max` are recent additions that
+   400 on older reasoners. Every Claude family that takes adaptive thinking
+   advertises `max`, so a Claude row without options is a catalog gap rather
+   than a weaker model."
+  {:openai-effort "high" :anthropic-thinking "max"})
+
+(defn- catalog-effort-values
+  "Effort rungs models.dev advertises for this model, lowercased and
+   ladder-ordered. Empty when the row carries no `effort` reasoning-option —
+   either the model takes `budget_tokens`, or the catalog does not know it."
+  [model-map]
+  (let [advertised (->> (:reasoning-options model-map)
+                     (filter #(= "effort" (:type %)))
+                     (mapcat :values)
+                     (keep #(when (string? %) (str/lower-case (str/trim %))))
+                     set)]
+    (filterv advertised EFFORT_LADDER)))
+
+(defn- catalog-budget-tokens-option?
+  "True when models.dev says this model takes manual `thinking.budget_tokens`."
+  [model-map]
+  (boolean (some #(= "budget_tokens" (:type %)) (:reasoning-options model-map))))
+
+(defn- supported-efforts
+  "Effort rungs svar may send for this model on `style`: models.dev's
+   advertisement when the catalog carries one, else `EFFORT_LADDER` truncated at
+   the style's evidence-free ceiling."
+  [model-map style]
+  (or (seq (catalog-effort-values model-map))
+    (when-let [ceiling (get UNCATALOGUED_EFFORT_CEILING style)]
+      (filterv #(<= (long (EFFORT_RANK %)) (long (EFFORT_RANK ceiling))) EFFORT_LADDER))))
+
+(defn- clamp-effort
+  "The rung to actually send: `wanted` when the model accepts it, otherwise the
+   strongest accepted rung BELOW it — an abstract level asks for AT MOST that
+   much thinking — or the weakest accepted rung when every option sits above it.
+
+   Without this the abstract-level path sent the level table's rung blind while
+   only `resolve-reasoning-effort` consulted the catalog: `:deep` → \"max\" is a
+   400 on a row that stops at \"high\" (o-series, GPT-5.1, Opus 4.5), and a row
+   that grows a rung above ours would never be reached."
+  [wanted supported]
+  (let [want (EFFORT_RANK wanted)]
+    (cond
+      (or (nil? want) (empty? supported)) wanted
+      (some #{wanted} supported) wanted
+      :else (or (last (filter #(<= (long (EFFORT_RANK %)) (long want)) supported))
+              (first supported)))))
+
 (defn- effort-option-values [model-map]
-  (->> (:reasoning-options model-map)
-    (filter #(= "effort" (:type %)))
-    (mapcat :values)
-    (filter (set PROVIDER_NATIVE_REASONING_EFFORTS))
-    distinct
-    vec))
+  (filterv (set PROVIDER_NATIVE_REASONING_EFFORTS) (catalog-effort-values model-map)))
 
 (def ^:private ANTHROPIC_ADAPTIVE_THINKING
   "The thinking config every Claude adaptive-thinking request carries.
@@ -419,6 +490,35 @@
    display\"). Callers that render reasoning would show a silent, empty block
    for every such turn, so svar always opts into the summary."
   {:type "adaptive" :display "summarized"})
+
+(def ^:private ANTHROPIC_ADAPTIVE_NAME_PATTERN
+  "Claude families that take ADAPTIVE thinking, by name.
+
+   Fable 5 / Mythos 5 / Sonnet 5 / Opus 5 / Opus 4.8–4.7 reject manual
+   budget_tokens; Opus 4.6 and Sonnet 4.6 still accept it but Anthropic marks it
+   deprecated. Dot and dash aliases both match so Copilot-style ids
+   (`claude-opus-4.8`) do not regress. This is the FALLBACK — `models.dev`
+   decides first, see `anthropic-adaptive-thinking-model?`."
+  #"(?i)^claude-(?:fable-5|mythos-5|sonnet-5|opus-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
+
+(defn- anthropic-adaptive-thinking-model?
+  "Does this Claude model take ADAPTIVE thinking (`output_config.effort`) rather
+   than manual `thinking.budget_tokens`?
+
+   models.dev states the fact svar used to guess from the model NAME, so the
+   catalog decides whenever it is unambiguous: a row advertising only `effort`
+   options is adaptive, a row advertising only `budget_tokens` is manual. Rows
+   that advertise BOTH (Opus 4.5, Opus 4.6, Sonnet 4.6) are genuinely ambiguous
+   — `effort` there predates adaptive thinking — so the name pattern breaks the
+   tie, as it does for rows the catalog does not carry at all (custom
+   deployments, brand-new ids, hand-built model maps)."
+  [model-map]
+  (let [efforts? (seq (catalog-effort-values model-map))
+        budget? (catalog-budget-tokens-option? model-map)]
+    (cond
+      (and efforts? (not budget?)) true
+      (and budget? (not efforts?)) false
+      :else (boolean (re-find ANTHROPIC_ADAPTIVE_NAME_PATTERN (str (:name model-map)))))))
 
 (defn resolve-reasoning-effort
   "Resolve an exact provider-native reasoning effort for one model.
@@ -447,8 +547,12 @@
          extra-body (when effective
                       (case wire-style
                         :openai-effort {:reasoning_effort effective}
-                        :anthropic-thinking {:thinking ANTHROPIC_ADAPTIVE_THINKING
-                                             :output_config {:effort effective}}
+                        ;; `output_config.effort` is the Opus 4.5+ control; the
+                        ;; adaptive `thinking` block only belongs to families
+                        ;; that actually take it (Opus 4.6+ / Sonnet 5 / Fable 5).
+                        :anthropic-thinking (cond-> {:output_config {:effort effective}}
+                                              (anthropic-adaptive-thinking-model? model-map)
+                                              (assoc :thinking ANTHROPIC_ADAPTIVE_THINKING))
                         :zai-effort {:thinking {:type "enabled"}
                                      :reasoning_effort effective}
                         nil))]
@@ -458,21 +562,12 @@
       :wire-style wire-style
       :extra-body extra-body})))
 
-(defn- anthropic-adaptive-thinking-model?
-  "Fable 5 / Mythos 5 / Opus 5 / Opus 4.8–4.7 reject manual budget_tokens.
-   Opus 4.6 and Sonnet 4.6 still accept manual thinking today, but Anthropic
-   marks it deprecated. Use adaptive thinking for all families listed here.
-   Accept dot/dash aliases so Copilot-style names do not regress."
-  [model-name]
-  (boolean
-    (re-find #"(?i)^claude-(?:fable-5|mythos-5|sonnet-5|opus-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)"
-      (str model-name))))
-
 (defn- anthropic-thinking-extra-body
   [model-map norm budget]
-  (if (anthropic-adaptive-thinking-model? (:name model-map))
+  (if (anthropic-adaptive-thinking-model? model-map)
     {:thinking ANTHROPIC_ADAPTIVE_THINKING
-     :output_config {:effort (get-in REASONING_LEVELS [norm :anthropic-effort])}}
+     :output_config {:effort (clamp-effort (get-in REASONING_LEVELS [norm :anthropic-effort])
+                               (supported-efforts model-map :anthropic-thinking))}}
     {:thinking {:type "enabled" :budget_tokens budget}}))
 
 (defn- anthropic-adaptive-display-body
@@ -488,7 +583,7 @@
   (when (and (= api-style :anthropic)
           (:reasoning? model-map)
           (= :anthropic-thinking (infer-reasoning-style api-style model-map))
-          (anthropic-adaptive-thinking-model? (:name model-map)))
+          (anthropic-adaptive-thinking-model? model-map))
     {:thinking ANTHROPIC_ADAPTIVE_THINKING}))
 
 (defn reasoning-extra-body
@@ -540,7 +635,7 @@
              mapped (get-in REASONING_LEVELS [norm style])]
          (when mapped
            (case style
-             :openai-effort      {:reasoning_effort mapped}
+             :openai-effort      {:reasoning_effort (clamp-effort mapped (supported-efforts model-map :openai-effort))}
              :anthropic-thinking (anthropic-thinking-extra-body model-map norm mapped)
              :zai-thinking       {:thinking (cond-> {:type mapped}
                                               ;; `clear_thinking: false` = keep reasoning_content

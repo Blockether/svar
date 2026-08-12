@@ -45,7 +45,7 @@
       (let [attempts (atom 0)]
         (expect (re-find #"Overloaded"
                   (try (#'llm/with-retry (fn [] (swap! attempts inc) (throw (overloaded!))) fast)
-                    (catch clojure.lang.ExceptionInfo e (ex-message e)))))
+                       (catch clojure.lang.ExceptionInfo e (ex-message e)))))
         ;; The shipped ladder is 7 attempts = 6 sleeps. It used to be 5 = 4
         ;; sleeps, ~7 s, shorter than an Anthropic/OpenAI overload window.
         (expect (= 7 @attempts)))))

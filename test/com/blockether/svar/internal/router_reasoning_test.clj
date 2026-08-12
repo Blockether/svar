@@ -104,9 +104,12 @@
         (expect (= "low" (effort :quick)))
         (expect (= "high" (effort :balanced)))
         (expect (= "max" (effort :deep)))
-        ;; The two columns are deliberately different data.
-        (expect (not= (get-in router/REASONING_LEVELS [:deep :openai-effort])
-                  (get-in router/REASONING_LEVELS [:deep :anthropic-effort])))))
+        ;; The two columns are deliberately different data: `:balanced` is each
+        ;; vendor's own DEFAULT rung — "medium" on OpenAI, "high" on Anthropic —
+        ;; and reusing OpenAI's here is what asked Claude to think one rung
+        ;; below default. (`:deep` names the ceiling on both, then clamps.)
+        (expect (not= (get-in router/REASONING_LEVELS [:balanced :openai-effort])
+                  (get-in router/REASONING_LEVELS [:balanced :anthropic-effort])))))
 
     (it "opts into summarized display even when the caller names no level"
       ;; Regression: a level-less call emitted no `thinking` field at all, so
@@ -302,6 +305,118 @@
                        :anthropic (dissoc glm :reasoning-options) "high")]
         (expect (nil? (:effective resolved)))
         (expect (= [] (:supported resolved)))))))
+
+(defdescribe catalog-clamped-effort-test
+  "Every effort svar sends is a value models.dev advertises for that model."
+  ;; Regression: the abstract-level path read `REASONING_LEVELS` blind — only
+  ;; `resolve-reasoning-effort` consulted the catalog. `:deep` therefore sent one
+  ;; fixed rung for every model: too LOW for GPT-5.6 (which sells `xhigh`/`max`)
+  ;; and, once Anthropic's column asked for "max", a 400 waiting for any row that
+  ;; stops at "high".
+
+  (describe "OpenAI-compatible effort"
+    (it "reaches the ceiling the catalog advertises"
+      (let [luna {:name "gpt-5.6-luna" :reasoning? true
+                  :reasoning-options [{:type "effort"
+                                       :values ["none" "low" "medium" "high" "xhigh" "max"]}]}]
+        (expect (= {:reasoning_effort "max"}
+                  (router/reasoning-extra-body :openai-compatible-chat luna :deep)))
+        (expect (= {:reasoning_effort "medium"}
+                  (router/reasoning-extra-body :openai-compatible-chat luna :balanced)))))
+
+    (it "clamps down to the strongest advertised rung"
+      (let [o3 {:name "o3" :reasoning? true
+                :reasoning-options [{:type "effort" :values ["low" "medium" "high"]}]}]
+        (expect (= {:reasoning_effort "high"}
+                  (router/reasoning-extra-body :openai-compatible-chat o3 :deep)))))
+
+    (it "clamps up when every advertised rung sits above the level"
+      (let [pro {:name "gpt-5-pro" :reasoning? true
+                 :reasoning-options [{:type "effort" :values ["high"]}]}]
+        (expect (= {:reasoning_effort "high"}
+                  (router/reasoning-extra-body :openai-compatible-chat pro :quick)))))
+
+    (it "stays at \"high\" when the catalog advertises nothing"
+      ;; No evidence, no claim: `xhigh`/`max` 400 on every older reasoner.
+      (let [unknown {:name "some-new-reasoner" :reasoning? true}]
+        (expect (= {:reasoning_effort "high"}
+                  (router/reasoning-extra-body :openai-compatible-chat unknown :deep))))))
+
+  (describe "Anthropic effort"
+    (it "clamps :deep to the ladder the model's row stops at"
+      (let [custom {:name "vendor-claude-x" :reasoning? true :reasoning-style :anthropic-thinking
+                    :reasoning-options [{:type "effort" :values ["low" "high" "xhigh"]}]}]
+        (expect (= {:effort "xhigh"}
+                  (:output_config (router/reasoning-extra-body :anthropic custom :deep))))))
+
+    (it "keeps \"max\" for a Claude row the catalog does not carry"
+      (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}]
+        (expect (= {:effort "max"}
+                  (:output_config (router/reasoning-extra-body :anthropic opus :deep)))))))
+
+  (describe "the whole bundled catalog"
+    (it "never emits an effort the model does not advertise"
+      (let [checked (atom 0)]
+        (doseq [[provider api-style] [[:anthropic :anthropic]
+                                      [:openai :openai-compatible-chat]
+                                      [:github-copilot :openai-compatible-chat]]
+                [_ model] (modelsdev/provider-models provider)
+                :when (:reasoning? model)
+                :let [advertised (into #{} (mapcat :values)
+                                   (filter #(= "effort" (:type %)) (:reasoning-options model)))]
+                :when (seq advertised)
+                level [:quick :balanced :deep]
+                :let [body (router/reasoning-extra-body api-style model level)
+                      sent (or (:reasoning_effort body) (get-in body [:output_config :effort]))]
+                :when sent]
+          (swap! checked inc)
+          (expect (contains? advertised sent)
+            (str provider "/" (:name model) " " level " → " sent)))
+        ;; The walk is worthless if it silently stops finding models — e.g. a
+        ;; provider id that no longer resolves in the bundled catalog.
+        (expect (< 100 @checked))))))
+
+(defdescribe catalog-decides-thinking-style-test
+  "models.dev, not the model NAME, decides adaptive vs manual Claude thinking."
+  ;; Regression: the choice was a hardcoded name regex over a fact the catalog
+  ;; already states, so a renamed or brand-new adaptive id silently fell back to
+  ;; manual `budget_tokens` (and vice versa).
+
+  (it "an effort-only row is adaptive, whatever the name says"
+    (let [custom {:name "vendor-claude-x" :reasoning? true :reasoning-style :anthropic-thinking
+                  :reasoning-options [{:type "effort" :values ["low" "medium" "high" "max"]}]}
+          out (router/reasoning-extra-body :anthropic custom :balanced)]
+      (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
+      (expect (= {:effort "high"} (:output_config out)))))
+
+  (it "a budget_tokens-only row is manual, whatever the name says"
+    (let [named-adaptive {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking
+                          :reasoning-options [{:type "budget_tokens" :min 1024}]}]
+      (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}
+                (router/reasoning-extra-body :anthropic named-adaptive :balanced)))))
+
+  (it "a row advertising BOTH is ambiguous, so the name pattern breaks the tie"
+    ;; `effort` predates adaptive thinking: Opus 4.5 takes `output_config.effort`
+    ;; but NOT `thinking: {type: "adaptive"}`, while Opus 4.6 takes both.
+    (let [both (fn [name*] {:name name* :reasoning? true :reasoning-style :anthropic-thinking
+                            :reasoning-options [{:type "effort" :values ["low" "medium" "high" "max"]}
+                                                {:type "budget_tokens" :min 1024}]})]
+      (expect (= {:thinking {:type "enabled" :budget_tokens 24000}}
+                (router/reasoning-extra-body :anthropic (both "claude-opus-4-5") :deep)))
+      (expect (= {:type "adaptive" :display "summarized"}
+                (:thinking (router/reasoning-extra-body :anthropic (both "claude-opus-4-6") :deep))))))
+
+  (it "the exact-effort API sends the adaptive block only to adaptive families"
+    (let [opus45 {:name "claude-opus-4-5" :reasoning? true :reasoning-style :anthropic-thinking
+                  :reasoning-options [{:type "effort" :values ["low" "medium" "high"]}
+                                      {:type "budget_tokens" :min 1024}]}
+          opus5 {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking
+                 :reasoning-options [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]}]
+      (expect (= {:output_config {:effort "high"}}
+                (:extra-body (router/resolve-reasoning-effort :anthropic opus45 "high"))))
+      (expect (= {:output_config {:effort "max"}
+                  :thinking {:type "adaptive" :display "summarized"}}
+                (:extra-body (router/resolve-reasoning-effort :anthropic opus5 "max")))))))
 
 (defdescribe modelsdev-reasoning-options-test
   (it "normalizes reasoning options while preserving the catalog contract"
