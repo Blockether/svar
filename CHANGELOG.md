@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.115] - 2026-08-12
+
+### Changed
+- Never let a reasoning level mean "do not think"
+- release: update version files for v0.7.114, bump to next dev version
+
+
 ### Fixed
 - An abstract reasoning level never turns thinking OFF: clamping down now stops at the weakest rung that still thinks, so the rows selling reasoning as on/off (`["none" "high"]` — Mistral Medium, GLM-5.2 on several gateways — and `["minimal" "high"]` on the Gemini image rows) answer `:quick` / `:balanced` with `high` instead of `none`. A row advertising no thinking rung at all now omits the field entirely rather than disabling reasoning, and a Claude row in that shape keeps the `display: "summarized"` opt-in
 
@@ -2190,7 +2197,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.114...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.115...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2341,3 +2348,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.112]: https://github.com/Blockether/svar/releases/tag/v0.7.112
 [v0.7.113]: https://github.com/Blockether/svar/releases/tag/v0.7.113
 [v0.7.114]: https://github.com/Blockether/svar/releases/tag/v0.7.114
+[v0.7.115]: https://github.com/Blockether/svar/releases/tag/v0.7.115
