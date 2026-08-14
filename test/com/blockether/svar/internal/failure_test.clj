@@ -355,6 +355,45 @@
         (expect (= :invalid-request (:category (sut/classify e))))
         (expect (false? (:retry? (sut/low-level-retry-decision e))))))))
 
+;; Regression: the refusal itself was invisible. `with-retry` rethrew in silence,
+;; so the one fact that explained a dead turn — output had already streamed, so
+;; svar can never resend — was computed here and then dropped on the floor.
+(defdescribe no-retry-reason-test
+  (describe "a refusal carries the reason it refused"
+    (it "names the streamed output that makes a truncated stream terminal"
+      (let [e (err "Stream ended before terminal marker."
+                {:type              :svar.core/stream-truncated
+                 :stream?           true
+                 :reasoning-acc-len 4200})
+            {:keys [retry? no-retry-reason classification]} (sut/low-level-retry-decision e)]
+        (expect (false? retry?))
+        (expect (= :stream-interrupted (:category classification)))
+        (expect (= :output-already-streamed no-retry-reason))))
+
+    (it "names the hard category behind an auth refusal"
+      (let [{:keys [retry? no-retry-reason]}
+            (sut/low-level-retry-decision (err "HTTP 401" {:type :svar.core/http-error :status 401}))]
+        (expect (false? retry?))
+        (expect (= :hard-category no-retry-reason))))
+
+    (it "names the router as the owner of the 429 cooldown it declined"
+      (let [{:keys [retry? no-retry-reason]}
+            (sut/low-level-retry-decision (err "HTTP 429" {:type :svar.core/http-error :status 429})
+              {:router-handles-rate-limit? true})]
+        (expect (false? retry?))
+        (expect (= :router-owned-rate-limit no-retry-reason))))
+
+    (it "leaves no refusal reason on a decision that DOES retry"
+      (let [{:keys [retry? reason no-retry-reason]}
+            (sut/low-level-retry-decision
+              (err "HTTP 502"
+                {:type   :svar.core/http-error
+                 :status 502
+                 :body   "litellm.APIConnectionError: HTTP/1.1 header parser received no bytes"}))]
+        (expect retry?)
+        (expect (some? reason))
+        (expect (nil? no-retry-reason))))))
+
 (defdescribe router-transient-error-test
   (describe "the router's broader soft/hard verdict"
     (it "re-routes a configured transient status"

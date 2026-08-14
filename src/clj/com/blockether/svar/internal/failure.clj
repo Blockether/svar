@@ -998,8 +998,10 @@
 (defn low-level-retry-decision
   "Canonical same-provider HTTP retry policy for `llm/with-retry`.
 
-   The returned map contains `:retry?`, a stable `:reason`, and the canonical
-   `:classification`. Router policy (provider selection and whether it owns a
+   The returned map carries `:retry?`, the canonical `:classification`, a stable
+   `:reason` when it retries and a `:no-retry-reason` when it does NOT — that
+   refusal used to be computed and dropped, so nothing downstream could say WHY a
+   failure was never resent. Router policy (provider selection and whether it owns a
    429 cooldown) is supplied as options; it never changes failure evidence.
    Deliberate stream watchdog aborts remain router-owned and are not retried
    here, even before output."
@@ -1041,4 +1043,12 @@
                   transport? :connection-error
                   (and (= :gateway-unavailable category) (nil? status)) :transient-message
                   :else :http-status))
-      :classification classification})))
+      :classification classification
+      :no-retry-reason (when-not retry?
+                         (cond
+                           hard-category? :hard-category
+                           (and router-handles-rate-limit? (= :rate-limited category))
+                           :router-owned-rate-limit
+                           started? :output-already-streamed
+                           (not retryable?) :not-retryable
+                           :else :no-retry-path))})))

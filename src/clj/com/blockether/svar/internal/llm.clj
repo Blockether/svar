@@ -1758,6 +1758,26 @@
   "See `failure/low-level-retry-decision`: the canonical low-level HTTP retry policy."
   failure/low-level-retry-decision)
 
+(defn- log-retry-declined!
+  "Records WHY a provider failure was NOT retried.
+
+   `failure/low-level-retry-decision` computes that verdict and `with-retry` used
+   to drop it: the retry branch logged `::http-retry` while both refusal branches
+   rethrew in silence, so the logs showed every retry and never a refusal. The
+   decisive case is `:output-already-streamed` — svar cannot rewind bytes the
+   caller has already rendered, so a stream that dies mid-answer is terminal by
+   policy, not by transport."
+  [{:keys [attempt declined classification error]}]
+  (trove/log! {:level :warn :id ::retry-declined
+               :data  (log-data {:attempt attempt
+                                 :declined declined
+                                 :category (:category classification)
+                                 :status (:status classification)
+                                 :reached-model? (:reached-model? classification)
+                                 :request-id (failure/request-id error)
+                                 :error (ex-message error)})
+               :msg   "not retrying provider failure"}))
+
 (defn- with-retry
   "Executes a function with exponential backoff retry for canonical transient failures.
 
@@ -1790,12 +1810,15 @@
        (let [result (try
                       {:success (f)}
                       (catch Exception e
-                        (let [{:keys [retry? reason classification]}
+                        (let [{:keys [retry? reason classification no-retry-reason]}
                               (retry-decision e {:router-handles-rate-limit? router-handles-rate-limit?})]
                           (if (and retry? (< attempt (long max-retries)))
                             {:retry true :error e :reason reason
+                             :classification classification
                              :status (:status classification)}
-                            {:error e}))))]
+                            {:error e
+                             :classification classification
+                             :declined (if retry? :max-retries-exhausted no-retry-reason)}))))]
          (cond
            (:success result) (:success result)
            (:retry result)
@@ -1810,7 +1833,11 @@
              ;; provider named only buys another refusal, so hand the request
              ;; to the router's fallback instead of burning the ladder here.
              (if (nil? plan)
-               (throw err)
+               (do (log-retry-declined! {:attempt attempt
+                                         :declined :retry-budget-exhausted
+                                         :classification (:classification result)
+                                         :error err})
+                   (throw err))
                (let [sleep-ms       (long (:delay-ms plan))
                      retry-after-ms (:retry-after-ms plan)]
                  (trove/log! {:level :warn :id ::http-retry
@@ -1845,7 +1872,12 @@
                  (Thread/sleep sleep-ms)
                  (recur (inc attempt)
                    (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))))
-           :else (throw (:error result))))))))
+           :else (let [err (:error result)]
+                   (log-retry-declined! {:attempt attempt
+                                         :declined (:declined result)
+                                         :classification (:classification result)
+                                         :error err})
+                   (throw err))))))))
 
 (def ^:private content-block-types
   #{"text" "output_text"})
@@ -4210,15 +4242,24 @@
                         :url url
                         :response-body body
                         :stream-finalization stream-finalization})))
-            (throw (ex-info "Stream ended before terminal marker."
-                     {:type :svar.core/stream-truncated
-                      :stream? true
-                      :url url
-                      :stream-finalization stream-finalization
-                      :content-acc-len (.length content-acc)
-                      :reasoning-acc-len (.length reasoning-acc)
-                      :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                      :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))})))))
+            ;; The throw used to be SILENT while its success twin logs
+            ;; `::stream-finalized` with the same summary, so a truncated stream
+            ;; left nothing behind: which SSE event arrived last, whether a
+            ;; finish reason was seen and how much had already accumulated all
+            ;; died with the exception unless a caller printed its ex-data.
+            (do
+              (trove/log! {:level :warn :id ::stream-truncated
+                           :data  (log-data (assoc stream-finalization :url url))
+                           :msg   "stream ended before terminal marker"})
+              (throw (ex-info "Stream ended before terminal marker."
+                       {:type :svar.core/stream-truncated
+                        :stream? true
+                        :url url
+                        :stream-finalization stream-finalization
+                        :content-acc-len (.length content-acc)
+                        :reasoning-acc-len (.length reasoning-acc)
+                        :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                        :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))))
       (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
             final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
             ps              @provider-state-atom
