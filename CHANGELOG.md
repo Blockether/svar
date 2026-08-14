@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.117] - 2026-08-14
+
+### Changed
+- feat(router): map :reasoning 1:1 onto GLM's low/high/max rungs
+- feat(router): add z.ai GLM-5.3 across every z.ai surface
+- release: update version files for v0.7.116, bump to next dev version
+
+
 ### Added
 - z.ai **GLM-5.3** on every z.ai surface (`:zai`, `:zai-coding`, `:zai-coding-plan`): curated as the first default model, 1M context, the deliberate 32768 agentic output cap, GLM's `:json-object-mode?` prose-leak guard, and retail GLM-5.2 rates. models.dev lists GLM-5.3 under the coding-plan providers only — not yet under retail `zai` — so svar's overlay is the sole source of its pricing, context and effort rungs.
 - `:reasoning` now maps 1:1 onto GLM's own effort rungs on every `:zai-effort` row: `:quick` → `low`, `:balanced` → `high`, `:deep` → `max`. `low` is sent only when models.dev advertises it for the exact model — GLM-5.3 does, GLM-5.2 does not — because z.ai answers an effort a model does not know with its heavy `max` default, so a row selling nothing below `high` still answers `:quick` by disabling thinking.
@@ -2209,7 +2217,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.116...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.117...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2362,3 +2370,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.114]: https://github.com/Blockether/svar/releases/tag/v0.7.114
 [v0.7.115]: https://github.com/Blockether/svar/releases/tag/v0.7.115
 [v0.7.116]: https://github.com/Blockether/svar/releases/tag/v0.7.116
+[v0.7.117]: https://github.com/Blockether/svar/releases/tag/v0.7.117
