@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- z.ai **GLM-5.3** on every z.ai surface (`:zai`, `:zai-coding`, `:zai-coding-plan`): curated as the first default model, 1M context, the deliberate 32768 agentic output cap, GLM's `:json-object-mode?` prose-leak guard, and retail GLM-5.2 rates. models.dev lists GLM-5.3 under the coding-plan providers only — not yet under retail `zai` — so svar's overlay is the sole source of its pricing, context and effort rungs.
+- `:quick` spends GLM-5.3's advertised `low` effort rung (`reasoning_effort "low"` with thinking ENABLED) instead of turning thinking off. Disabling thinking stays the answer for GLM-5.2 and any other `:zai-effort` row that advertises no rung below `high` — an abstract level never means "do not think" when the catalog offers a light rung.
+
 ## [v0.7.116] - 2026-08-14
 
 ### Changed

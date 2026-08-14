@@ -323,7 +323,7 @@ For provider-controlled evaluations, `:reasoning-effort` is a separate exact
 control. It accepts only the provider-native strings `"high"` and `"max"`,
 requires the selected model to advertise that value in its models.dev
 `:reasoning-options`, and bypasses abstract reasoning aliases, caps, and
-translations. GLM-5.2 sends `{:thinking {:type "enabled"}
+translations. GLM-5.2 and GLM-5.3 send `{:thinking {:type "enabled"}
 :reasoning_effort "<high|max>"}`. Routed results retain the actual resolution
 under `:routed/reasoning-effort`; callers can preflight with
 `resolve-reasoning-effort`, which returns `:requested`, `:effective`,

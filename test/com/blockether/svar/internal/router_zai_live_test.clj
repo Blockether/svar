@@ -261,4 +261,27 @@
         (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
           (let [zai (select-keys (:pricing (router/provider-model-entry :zai name)) keys-of-interest)
                 cod (select-keys (:pricing (router/provider-model-entry :zai-coding name)) keys-of-interest)]
-            (expect (= zai cod))))))))
+            (expect (= zai cod)))))))
+
+  ;; GLM-5.3 landed on the Coding Plan first: models.dev carries it under
+  ;; `zai-coding-plan` / `zhipuai-coding-plan`, NOT yet under retail `zai`,
+  ;; so svar's own overlay is the only source of its pricing, context, output
+  ;; cap and effort rungs on every z.ai surface.
+  (describe "GLM-5.3"
+    (it "is curated as the default model on every z.ai surface"
+      (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+        (expect (= "glm-5.3" (first (router/provider-default-models pid))))))
+
+    (it "carries retail pricing, 1M context and the agentic output cap"
+      (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+        (let [m (router/provider-model-entry pid "glm-5.3")]
+          (expect (= 1.40 (:input (:pricing m))))
+          (expect (= 0.26 (:cached-input (:pricing m))))
+          (expect (= 4.40 (:output (:pricing m))))
+          (expect (= 1000000 (:context m)))
+          (expect (= 32768 (:output-limit m)))
+          (expect (true? (:json-object-mode? m))))))
+
+    (it "advertises the light effort rung GLM-5.2 lacks"
+      (expect (= [{:type "effort" :values ["low" "high" "max"]}]
+                (:reasoning-options (router/provider-model-entry :zai "glm-5.3")))))))

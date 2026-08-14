@@ -44,7 +44,7 @@
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
                  :env-keys ["ZAI_API_KEY"]
-                 :default-models [{:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
+                 :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
    :zai-coding  {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic
                  ;; Coding Plan endpoint, but for budget accounting we use
                  ;; retail :zai per-token rates (the plan meters overage at
@@ -63,7 +63,7 @@
     :pricing-source :zai
     :provider-model-source :zai
     :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
-    :default-models [{:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"}]}
+    :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
@@ -261,6 +261,7 @@
    "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
    "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
    "glm-5.2"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-effort}
+   "glm-5.3"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-effort}
    "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
    "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
 
@@ -610,6 +611,24 @@
           (anthropic-adaptive-thinking-model? model-map))
     {:thinking ANTHROPIC_ADAPTIVE_THINKING}))
 
+(defn- zai-light-effort
+  "The rung a `:zai-effort` model can think LIGHTLY at, or nil when it sells none.
+
+   `:quick` asks GLM to barely think. GLM-5.2 advertises only [\"high\" \"max\"],
+   so the only way to keep a short turn short there is to stop thinking
+   altogether; GLM-5.3 advertises \"low\" — a real light rung — and an abstract
+   level must prefer thinking a little to not thinking at all (`clamp-effort`,
+   `WEAKEST_THINKING_EFFORT`). The catalog decides, never the model name: a rung
+   counts as light when it still thinks and sits BELOW the `:balanced` rung."
+  [model-map]
+  (let [floor   (long (EFFORT_RANK WEAKEST_THINKING_EFFORT))
+        ceiling (long (EFFORT_RANK (get-in REASONING_LEVELS [:balanced :zai-effort])))]
+    (first
+      (filter (fn [rung]
+                (let [rank (long (EFFORT_RANK rung))]
+                  (and (<= floor rank) (< rank ceiling))))
+        (catalog-effort-values model-map)))))
+
 (defn reasoning-extra-body
   "Translates an abstract reasoning level into provider-specific extra-body.
    Returns nil when:
@@ -676,13 +695,17 @@
              ;; (clean `text` answer, `stop_reason "end_turn"`, zero reasoning
              ;; burn), whereas a small `max_tokens` cap just truncates mid-think
              ;; and starves the answer (600-token cap → all thinking, no reply).
-             ;; `:quick` → "off" disables thinking; `:balanced`/`:deep` keep it
-             ;; on at high/max effort.
-             :zai-effort         (if (= mapped "off")
-                                   {:thinking {:type "disabled"}}
-                                   {:reasoning_effort mapped
+             ;; `:quick` → "off" therefore disables thinking on a row with no
+             ;; light rung; GLM-5.3 sells "low", so `zai-light-effort` spends
+             ;; the quick turn there instead of not thinking at all.
+             ;; `:balanced`/`:deep` keep thinking on at high/max effort.
+             :zai-effort         (if-let [effort (if (= mapped "off")
+                                                   (zai-light-effort model-map)
+                                                   mapped)]
+                                   {:reasoning_effort effort
                                     :thinking (cond-> {:type "enabled"}
-                                                preserved-thinking? (assoc :clear_thinking false))})
+                                                preserved-thinking? (assoc :clear_thinking false))}
+                                   {:thinking {:type "disabled"}})
              nil))))
      ;; No level named: Claude adaptive models still need the display opt-in,
      ;; everything else keeps the historical silent nil.
@@ -790,6 +813,16 @@
     ;; genuinely needs a longer output.
     "glm-5.1"                   {:context 200000  :output-limit 32768 :json-object-mode? true}
     "glm-5.2"                   {:context 1000000 :output-limit 32768 :json-object-mode? true}
+    ;; GLM-5.3 shipped on the Coding Plan first: models.dev carries it under
+    ;; `zai-coding-plan` / `zhipuai-coding-plan` but NOT yet under retail `zai`,
+    ;; so this overlay is the only source of its metadata on every z.ai surface
+    ;; (all three share `:pricing-source :zai`). Rates mirror glm-5.2 retail —
+    ;; what the plan meters overage at, and what the catalog quotes for glm-5.3
+    ;; on the gateways that already list it. The effort rungs are the catalog's
+    ;; own: unlike glm-5.2, GLM-5.3 sells a "low".
+    "glm-5.3"                   {:pricing {:input 1.40 :cached-input 0.26 :output 4.40}
+                                 :context 1000000 :output-limit 32768 :json-object-mode? true
+                                 :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
     "glm-5-turbo"               {:context 200000  :output-limit 32768 :json-object-mode? true}
     "glm-5v-turbo"              {:context 200000  :output-limit 32768 :json-object-mode? true}
     "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}

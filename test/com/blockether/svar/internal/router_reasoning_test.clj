@@ -219,7 +219,7 @@
         (expect (nil? (router/reasoning-extra-body :openai-compatible-chat glm nil
                         {:preserved-thinking? true}))))))
 
-  (describe "Z.ai / GLM-5.2 effort thinking (:zai-effort)"
+  (describe "Z.ai / GLM effort thinking (:zai-effort)"
     ;; GLM-5.2 chooses thinking DEPTH via reasoning_effort, but only accepts
     ;; "high"/"max" — no light rung. `:quick` therefore disables thinking
     ;; outright (verified live: glm-5.2 honors thinking:{type "disabled"}),
@@ -240,7 +240,28 @@
       (it "`:quick` ignores `:preserved-thinking?` (no thinking → nothing to preserve)"
         (expect (= {:thinking {:type "disabled"}}
                   (router/reasoning-extra-body :anthropic glm :quick
-                    {:preserved-thinking? true}))))))
+                    {:preserved-thinking? true})))))
+
+    ;; GLM-5.3 (2026-08-14) advertises ["low" "high" "max"] — a genuine light
+    ;; rung GLM-5.2 never had. `:quick` must think a LITTLE rather than not at
+    ;; all whenever the catalog offers the rung (see `clamp-effort`).
+    (let [glm53 {:name "glm-5.3" :reasoning? true :reasoning-style :zai-effort
+                 :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}]
+      (it "`:quick` thinks at the advertised low rung instead of disabling thinking"
+        (expect (= {:reasoning_effort "low" :thinking {:type "enabled"}}
+                  (router/reasoning-extra-body :anthropic glm53 :quick))))
+
+      (it "`:quick` + preserved keeps reasoning across turns"
+        (expect (= {:reasoning_effort "low"
+                    :thinking {:type "enabled" :clear_thinking false}}
+                  (router/reasoning-extra-body :anthropic glm53 :quick
+                    {:preserved-thinking? true}))))
+
+      (it "`:balanced` and `:deep` still ride high / max"
+        (expect (= {:reasoning_effort "high" :thinking {:type "enabled"}}
+                  (router/reasoning-extra-body :anthropic glm53 :balanced)))
+        (expect (= {:reasoning_effort "max" :thinking {:type "enabled"}}
+                  (router/reasoning-extra-body :anthropic glm53 :deep))))))
 
   (describe "non-reasoning models (silent no-op)"
     (it "returns nil when model lacks :reasoning? flag"
@@ -516,7 +537,10 @@
         (expect (true? (:reasoning? m)))
         (expect (= :zai-thinking (:reasoning-style m)))))
     (expect (= :zai-effort
-              (:reasoning-style (get router/KNOWN_MODEL_METADATA "glm-5.2")))))
+              (:reasoning-style (get router/KNOWN_MODEL_METADATA "glm-5.2"))))
+    ;; GLM-5.3 rides the same effort mechanism; only its rungs are wider.
+    (expect (= :zai-effort
+              (:reasoning-style (get router/KNOWN_MODEL_METADATA "glm-5.3")))))
 
   (it ":zai provider has per-token pricing for every reasoning-capable GLM"
     (doseq [name ["glm-4.6" "glm-4.6v" "glm-4.7" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"]]
