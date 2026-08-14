@@ -4815,7 +4815,7 @@
   "Merges svar-level opts that influence routing/fallback into the `:routing`
    map so `resolve-routing` can build a complete prefs map:
      - `:reasoning`         → implies `:require-reasoning? true`
-     - `:reasoning-effort`  → exact provider-native `high|max`
+     - `:reasoning-effort`  → exact provider-native `low|high|max`
      - `:on-format-error`   → enables format-error provider fallback
      - `:format-retry-on`   → customises the format-error type set
      - `:on-chunk`          → surfaced to the router so routing events

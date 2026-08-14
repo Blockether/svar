@@ -336,7 +336,7 @@
                              Copilot Claude is back on `/v1/messages` and
                              therefore back on `:anthropic-thinking`; the
                              OpenAI-compatible Copilot rows keep this style."
-  {:quick    {:openai-effort "low"    :anthropic-effort "low"  :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "off"  :server-managed nil}
+  {:quick    {:openai-effort "low"    :anthropic-effort "low"  :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "low"  :server-managed nil}
    :balanced {:openai-effort "medium" :anthropic-effort "high" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
    :deep     {:openai-effort "max"    :anthropic-effort "max"  :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
 
@@ -402,7 +402,15 @@
              (contains? #{:openai-effort :anthropic-thinking :zai-effort}
                (infer-reasoning-style api-style model-map)))))
 
-(def ^:private PROVIDER_NATIVE_REASONING_EFFORTS ["high" "max"])
+(def ^:private PROVIDER_NATIVE_REASONING_EFFORTS
+  "Exact rungs a caller may pin through `:reasoning-effort`, weakest → strongest.
+
+   The exact API exists for provider-controlled evaluations, so the vocabulary
+   is deliberately narrow: the rungs z.ai's GLM rows sell. `low` joined it with
+   GLM-5.3, which advertises the light rung GLM-5.2 never had. Every value stays
+   catalog-gated per model (`effort-option-values`), so a row that does not
+   advertise a rung can never be pinned to it."
+  ["low" "high" "max"])
 
 (defn- normalize-reasoning-effort [effort]
   (when (string? effort)
@@ -545,7 +553,7 @@
   "Resolve an exact provider-native reasoning effort for one model.
 
    Unlike `reasoning-extra-body`, this API does no abstract-level aliasing or
-   translation: only the literal strings \"high\" and \"max\" are accepted,
+   translation: only the literal strings \"low\", \"high\" and \"max\" are accepted,
    and the requested value must appear in the model catalog's effort options.
    The returned map is stable evidence callers can retain with a routed result."
   ([model-map effort]
@@ -611,23 +619,22 @@
           (anthropic-adaptive-thinking-model? model-map))
     {:thinking ANTHROPIC_ADAPTIVE_THINKING}))
 
-(defn- zai-light-effort
-  "The rung a `:zai-effort` model can think LIGHTLY at, or nil when it sells none.
+(defn- zai-effort-rung
+  "The `reasoning_effort` GLM will honor for `wanted`, or nil when it honors
+   none — which means the turn must stop thinking rather than think heavily.
 
-   `:quick` asks GLM to barely think. GLM-5.2 advertises only [\"high\" \"max\"],
-   so the only way to keep a short turn short there is to stop thinking
-   altogether; GLM-5.3 advertises \"low\" — a real light rung — and an abstract
-   level must prefer thinking a little to not thinking at all (`clamp-effort`,
-   `WEAKEST_THINKING_EFFORT`). The catalog decides, never the model name: a rung
-   counts as light when it still thinks and sits BELOW the `:balanced` rung."
-  [model-map]
-  (let [floor   (long (EFFORT_RANK WEAKEST_THINKING_EFFORT))
-        ceiling (long (EFFORT_RANK (get-in REASONING_LEVELS [:balanced :zai-effort])))]
-    (first
-      (filter (fn [rung]
-                (let [rank (long (EFFORT_RANK rung))]
-                  (and (<= floor rank) (< rank ceiling))))
-        (catalog-effort-values model-map)))))
+   `high` and `max` are GLM's baseline vocabulary: every `:zai-effort` row takes
+   them. A LIGHTER rung is real only when models.dev advertises it for the exact
+   model — GLM-5.3 sells \"low\", GLM-5.2 sells nothing below \"high\" — because
+   z.ai answers an effort a model does not know with its heavy `max` default,
+   the opposite of the short turn `:quick` asked for. The catalog decides, never
+   the model name."
+  [wanted model-map]
+  (when wanted
+    (if (<= (long (EFFORT_RANK (get-in REASONING_LEVELS [:balanced :zai-effort])))
+          (long (EFFORT_RANK wanted)))
+      wanted
+      (some #{wanted} (catalog-effort-values model-map)))))
 
 (defn reasoning-extra-body
   "Translates an abstract reasoning level into provider-specific extra-body.
@@ -686,22 +693,21 @@
                                               ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
                                               preserved-thinking? (assoc :clear_thinking false))}
              ;; GLM-5.2+ (DeepSeek-V4 mechanism): thinking is ON and the DEPTH
-             ;; is chosen by `reasoning_effort` — but GLM only accepts "high"/
-             ;; "max" (NOT OpenAI's low/medium/high; anything else falls back to
-             ;; the heavy "max" default), so there is NO genuinely-light effort
-             ;; rung. The only way to stop GLM-5.2 over-reasoning on a `:quick`
-             ;; turn is to turn thinking OFF — verified live against z.ai's
-             ;; Anthropic endpoint: glm-5.2 honors `thinking:{type "disabled"}`
-             ;; (clean `text` answer, `stop_reason "end_turn"`, zero reasoning
-             ;; burn), whereas a small `max_tokens` cap just truncates mid-think
-             ;; and starves the answer (600-token cap → all thinking, no reply).
-             ;; `:quick` → "off" therefore disables thinking on a row with no
-             ;; light rung; GLM-5.3 sells "low", so `zai-light-effort` spends
-             ;; the quick turn there instead of not thinking at all.
-             ;; `:balanced`/`:deep` keep thinking on at high/max effort.
-             :zai-effort         (if-let [effort (if (= mapped "off")
-                                                   (zai-light-effort model-map)
-                                                   mapped)]
+             ;; is chosen by `reasoning_effort`. GLM's rungs are "low"/"high"/
+             ;; "max" — NOT OpenAI's low/medium/high — and they line up 1:1 with
+             ;; the abstract levels (`REASONING_LEVELS`): `:quick` → "low",
+             ;; `:balanced` → "high", `:deep` → "max".
+             ;;
+             ;; "low" is the rung a row may not sell: GLM-5.2 stops at "high", and
+             ;; z.ai answers an effort a model does not know with its heavy "max"
+             ;; default rather than an error — the opposite of a quick turn. Not
+             ;; thinking is the only short turn left there, and it is verified live
+             ;; against z.ai's Anthropic endpoint: glm-5.2 honors `thinking:{type
+             ;; "disabled"}` (clean `text` answer, `stop_reason "end_turn"`, zero
+             ;; reasoning burn), whereas a small `max_tokens` cap just truncates
+             ;; mid-think and starves the answer (600-token cap → all thinking, no
+             ;; reply).
+             :zai-effort         (if-let [effort (zai-effort-rung mapped model-map)]
                                    {:reasoning_effort effort
                                     :thinking (cond-> {:type "enabled"}
                                                 preserved-thinking? (assoc :clear_thinking false))}

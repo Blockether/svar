@@ -220,14 +220,21 @@
                         {:preserved-thinking? true}))))))
 
   (describe "Z.ai / GLM effort thinking (:zai-effort)"
-    ;; GLM-5.2 chooses thinking DEPTH via reasoning_effort, but only accepts
-    ;; "high"/"max" — no light rung. `:quick` therefore disables thinking
-    ;; outright (verified live: glm-5.2 honors thinking:{type "disabled"}),
-    ;; which is the only way to stop it over-reasoning short turns.
+    ;; GLM chooses thinking DEPTH via reasoning_effort and its rungs are
+    ;; low/high/max, which the abstract levels ride 1:1. GLM-5.2 sells nothing
+    ;; below "high" — z.ai answers a rung a model does not know with its heavy
+    ;; "max" default — so `:quick` stops thinking there instead (verified live:
+    ;; glm-5.2 honors thinking:{type "disabled"}).
     (let [glm {:name "glm-5.2" :reasoning? true :reasoning-style :zai-effort}]
       (it "`:quick` disables thinking (no light effort rung exists)"
         (expect (= {:thinking {:type "disabled"}}
                   (router/reasoning-extra-body :anthropic glm :quick))))
+
+      (it "`:quick` still disables thinking when the catalog stops at high"
+        (expect (= {:thinking {:type "disabled"}}
+                  (router/reasoning-extra-body :anthropic
+                    (assoc glm :reasoning-options [{:type "effort" :values ["high" "max"]}])
+                    :quick))))
 
       (it "`:balanced` keeps thinking on at high effort"
         (expect (= {:reasoning_effort "high" :thinking {:type "enabled"}}
@@ -242,9 +249,9 @@
                   (router/reasoning-extra-body :anthropic glm :quick
                     {:preserved-thinking? true})))))
 
-    ;; GLM-5.3 (2026-08-14) advertises ["low" "high" "max"] — a genuine light
-    ;; rung GLM-5.2 never had. `:quick` must think a LITTLE rather than not at
-    ;; all whenever the catalog offers the rung (see `clamp-effort`).
+    ;; GLM-5.3 (2026-08-14) advertises ["low" "high" "max"] — the light rung
+    ;; GLM-5.2 never had — so the whole ladder is reachable and `:quick` spends
+    ;; it instead of turning thinking off (see `zai-effort-rung`).
     (let [glm53 {:name "glm-5.3" :reasoning? true :reasoning-style :zai-effort
                  :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}]
       (it "`:quick` thinks at the advertised low rung instead of disabling thinking"
@@ -325,7 +332,32 @@
       (let [resolved (router/resolve-reasoning-effort
                        :anthropic (dissoc glm :reasoning-options) "high")]
         (expect (nil? (:effective resolved)))
-        (expect (= [] (:supported resolved)))))))
+        (expect (= [] (:supported resolved))))))
+
+  ;; GLM-5.3 sells the light rung GLM-5.2 never had, so the EXACT API reaches
+  ;; "low" too — on the models.dev rows that advertise it, and nowhere else.
+  (let [glm53 {:name "glm-5.3"
+               :reasoning? true
+               :reasoning-style :zai-effort
+               :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}]
+    (it "emits the exact GLM-5.3 low body"
+      (expect (= {:requested "low"
+                  :effective "low"
+                  :supported ["low" "high" "max"]
+                  :wire-style :zai-effort
+                  :extra-body {:thinking {:type "enabled"}
+                               :reasoning_effort "low"}}
+                (router/resolve-reasoning-effort :anthropic glm53 "low"))))
+
+    (it "refuses an exact `low` on a row whose catalog stops at high"
+      (let [glm52 {:name "glm-5.2"
+                   :reasoning? true
+                   :reasoning-style :zai-effort
+                   :reasoning-options [{:type "effort" :values ["high" "max"]}]}
+            resolved (router/resolve-reasoning-effort :anthropic glm52 "low")]
+        (expect (= "low" (:requested resolved)))
+        (expect (nil? (:effective resolved)))
+        (expect (= ["high" "max"] (:supported resolved)))))))
 
 (defdescribe catalog-clamped-effort-test
   "Every effort svar sends is a value models.dev advertises for that model."
