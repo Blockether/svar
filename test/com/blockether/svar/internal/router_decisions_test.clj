@@ -1849,4 +1849,19 @@
                   "codestral-latest"]
                 models))
       (expect (= 262144 (:context large)))
-      (expect (= 262144 (:output-limit large))))))
+      (expect (= 262144 (:output-limit large)))))
+
+  ;; The Z.ai Coding Plan bundles exactly one vision surface (`glm-5v-turbo`);
+  ;; leaving it out of the curated defaults left a coding-plan user with no
+  ;; vision-capable model to switch to at all.
+  (it "curates the z.ai coding-plan vision model, last so cheap picks stay textual"
+    (let [coding (router/provider-default-models :zai-coding-plan)
+          p (router/normalize-provider 0 {:id :zai-coding-plan :api-key "x"})
+          by-name (into {} (map (juxt :name identity)) (:models p))]
+      (expect (= "glm-5.3" (first coding)))
+      (expect (= "glm-5v-turbo" (last coding)))
+      ;; Retail `:zai` offers it too, and `:zai-coding` inherits that curated set.
+      (expect (contains? (set (router/provider-default-models :zai)) "glm-5v-turbo"))
+      (expect (contains? (set (router/provider-default-models :zai-coding)) "glm-5v-turbo"))
+      (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
+      (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))

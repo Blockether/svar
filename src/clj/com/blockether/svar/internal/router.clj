@@ -44,7 +44,7 @@
     :prepend-default-models? true}
    :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
                  :env-keys ["ZAI_API_KEY"]
-                 :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
+                 :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-5v-turbo"} {:name "glm-4.6v"}]}
    :zai-coding  {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic
                  ;; Coding Plan endpoint, but for budget accounting we use
                  ;; retail :zai per-token rates (the plan meters overage at
@@ -63,7 +63,11 @@
     :pricing-source :zai
     :provider-model-source :zai
     :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
-    :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"}]}
+     ;; `glm-5v-turbo` is the plan's only vision surface (`glm-4.6v` is metered
+     ;; separately and does not ride the plan), and it sits LAST so a
+     ;; `:cost`/`:speed` side-channel keeps picking a text model on the
+     ;; all-zero coding-plan price table.
+    :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"} {:name "glm-5v-turbo"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
