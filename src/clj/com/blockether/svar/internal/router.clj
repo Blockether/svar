@@ -3252,6 +3252,9 @@
                       that already learned a provider's wire refuses its payload asks
                      what it would use INSTEAD
      :exclude-models — set of model NAMES this call must NOT land on
+     :prefer-providers — ordered provider ids tried first; the ranking key the ask
+                      path builds from the same key, so a caller that asks what it
+                      WOULD use sees the provider it is about to prefer
 
    (resolve-effective-model router)                                         ;; root model
    (resolve-effective-model router {:optimize :cost})                       ;; cheapest
@@ -3262,7 +3265,8 @@
   ([router overrides]
    (when router
      (let [routing-opts (select-keys overrides
-                          [:optimize :provider :model :reasoning :capabilities :exclude-providers :exclude-models])
+                          [:optimize :provider :model :reasoning :capabilities :exclude-providers
+                           :exclude-models :prefer-providers])
            {:keys [prefs]} (resolve-routing router routing-opts)
            [provider model-map] (select-provider router prefs)
            reasoning-level (some-> (:reasoning overrides) normalize-reasoning-level)]

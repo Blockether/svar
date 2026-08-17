@@ -1963,6 +1963,31 @@
                            :optimize :cost
                            :exclude-providers #{:seeing}})))))
 
+    ;; The vision side-channel remembers WHICH provider actually answered and asks the probe
+    ;; what it would use with that preference. `resolve-routing` has always honored
+    ;; `:prefer-providers`, but the descriptor dropped the key, so the probe answered about a
+    ;; different provider than the ask it was standing in for.
+    (it "answers about the provider the caller PREFERS, not the cheapest one"
+      (let [r (llm/make-router
+                [{:id :cheap :api-key "k" :base-url "http://a"
+                  :models [{:name "cheap-seer" :pricing {:input 0.10 :output 0.20}
+                            :intelligence :low :speed :fast :capabilities #{:chat :vision}}]}
+                 {:id :proven :api-key "k" :base-url "http://b"
+                  :models [{:name "proven-seer" :pricing {:input 2.00 :output 5.00}
+                            :intelligence :high :speed :medium :capabilities #{:chat :vision}}]}])]
+        (expect (= "cheap-seer"
+                  (:name (router/resolve-effective-model
+                           r {:capabilities #{:vision} :optimize :cost}))))
+        (expect (= "proven-seer"
+                  (:name (router/resolve-effective-model
+                           r {:capabilities #{:vision} :optimize :cost
+                              :prefer-providers [:proven]}))))
+        ;; A preference is not a pin: the provider that broke is still excluded.
+        (expect (= "cheap-seer"
+                  (:name (router/resolve-effective-model
+                           r {:capabilities #{:vision} :optimize :cost
+                              :prefer-providers [:proven]
+                              :exclude-providers #{:proven}}))))))
     ;; A refusal that names the MODEL ("this model does not support image input") is a
     ;; fact about the MODEL, wherever it is served from — not about the endpoint, which
     ;; keeps serving the provider's other eyes. Excluding the provider for it would take
