@@ -1961,7 +1961,33 @@
         (expect (nil? (router/resolve-effective-model
                         r {:capabilities #{:vision}
                            :optimize :cost
-                           :exclude-providers #{:seeing}})))))))
+                           :exclude-providers #{:seeing}})))))
+
+    ;; A refusal that names the MODEL ("this model does not support image input") is a
+    ;; fact about the MODEL, wherever it is served from — not about the endpoint, which
+    ;; keeps serving the provider's other eyes. Excluding the provider for it would take
+    ;; a whole fleet's sight down over one small model.
+    (it "routes past ONE excluded model name without losing its provider"
+      (let [r (llm/make-router
+                [{:id :seeing :api-key "k" :base-url "http://y"
+                  :models [{:name "seer-mini" :pricing {:input 0.10 :output 0.20}
+                            :intelligence :low :speed :fast :capabilities #{:chat :vision}}
+                           {:name "seer-max" :pricing {:input 2.00 :output 5.00}
+                            :intelligence :high :speed :medium :capabilities #{:chat :vision}}]}])
+            {:keys [prefs]} (router/resolve-routing r {:capabilities #{:vision}
+                                                       :optimize :cost
+                                                       :exclude-models #{"seer-mini"}})]
+        (expect (= #{"seer-mini"} (:exclude-models prefs)))
+        (expect (= "seer-mini" (routed-name r {:prefer :cost :capabilities #{:vision}})))
+        (expect (= "seer-max" (routed-name r prefs)))
+        (expect (= "seer-max"
+                  (:name (router/resolve-effective-model
+                           r {:capabilities #{:vision} :optimize :cost
+                              :exclude-models #{"seer-mini"}}))))
+        ;; Every name out — nil, never a blind substitute.
+        (expect (nil? (router/resolve-effective-model
+                        r {:capabilities #{:vision} :optimize :cost
+                           :exclude-models #{"seer-mini" "seer-max"}})))))))
 ;; =============================================================================
 ;; Provider-scoped capabilities
 ;; =============================================================================

@@ -2608,7 +2608,9 @@
 
    `:on-auth-error :fallback-provider` opts into provider-scoped credential
    failover. `:exclude-providers` seeds providers already known unusable for this
-   call. Auth fallback may release a provider/model pin only after that provider
+   call, `:exclude-models` model NAMES it must not land on — a refusal that names the
+   MODEL is a fact about the model, wherever it is served from.
+   Auth fallback may release a provider/model pin only after that provider
    rejects auth, and never after visible streamed output.
 
    `:reasoning` implies `:require-reasoning? true`, filtering selection to
@@ -2621,7 +2623,7 @@
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning reasoning-effort
                 prefer-providers on-format-error format-retry-on on-auth-error
-                exclude-providers on-chunk capabilities]} routing-opts
+                exclude-providers exclude-models on-chunk capabilities]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
         base-prefs (cond
@@ -2676,6 +2678,7 @@
                 format-retry-on      (assoc :format-retry-on format-retry-on)
                 on-auth-error        (assoc :on-auth-error on-auth-error)
                 (seq exclude-providers) (assoc :exclude-providers (set exclude-providers))
+                (seq exclude-models) (assoc :exclude-models (set exclude-models))
                 ;; Routing events fire live and remain in final `:routed/trace`.
                 on-chunk             (assoc :on-chunk on-chunk))]
     {:prefs prefs
@@ -3247,7 +3250,8 @@
                       nil when no routable model carries every one of them
      :exclude-providers — set of provider ids this call must NOT land on; a caller
                       that already learned a provider's wire refuses its payload asks
-                      what it would use INSTEAD
+                     what it would use INSTEAD
+     :exclude-models — set of model NAMES this call must NOT land on
 
    (resolve-effective-model router)                                         ;; root model
    (resolve-effective-model router {:optimize :cost})                       ;; cheapest
@@ -3258,7 +3262,7 @@
   ([router overrides]
    (when router
      (let [routing-opts (select-keys overrides
-                          [:optimize :provider :model :reasoning :capabilities :exclude-providers])
+                          [:optimize :provider :model :reasoning :capabilities :exclude-providers :exclude-models])
            {:keys [prefs]} (resolve-routing router routing-opts)
            [provider model-map] (select-provider router prefs)
            reasoning-level (some-> (:reasoning overrides) normalize-reasoning-level)]
