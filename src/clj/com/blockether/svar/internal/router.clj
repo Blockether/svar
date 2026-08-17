@@ -1747,7 +1747,13 @@
 
    Filters applied (in order):
      - `:capabilities` — model's `:capabilities` set must be a superset.
-     - `:require-reasoning?` — only `:reasoning? true` models survive. Set
+     - `:capabilities` — model's `:capabilities` set must be a superset. A
+        HARD filter, unlike `:require-reasoning?`: it decides whether the
+        request can be served AT ALL (an image sent to a text-only model is
+        not a weaker answer, it is a wrong one), so it also applies to
+        `:strategy :root` — a provider whose models all lack the capability
+        resolves to nil and is skipped. Only `:force-model` overrides it:
+        there the caller named the model.
         automatically by `resolve-routing` when caller supplies a `:reasoning`
         level. Ensures `{:routing {:optimize :cost} :reasoning :deep}` picks
         the cheapest *reasoning-capable* model, not silently drops the depth.
@@ -1760,6 +1766,8 @@
   [provider prefs]
   (let [require-reasoning? (:require-reasoning? prefs)
         reasoning-effort (:reasoning-effort prefs)
+        required-caps (or (:capabilities prefs) #{})
+        caps-ok? (fn [m] (every? (:capabilities m) required-caps))
         reasoning-ok? (fn [m] (if require-reasoning? (:reasoning? m) true))
         effort-ok? (fn [m]
                      (if reasoning-effort
@@ -1787,17 +1795,16 @@
       ;; serve `:reasoning`-flagged turns instead of "all providers exhausted".
       (= (:strategy prefs) :root)
       (let [root-name (:root provider)
-            models (if reasoning-effort
+            models (if (or reasoning-effort (seq required-caps))
                      (:models provider)
                      (filter #(= (:name %) root-name) (:models provider)))
-            m (first (filter #(and (not-excluded? %) (effort-ok? %)) models))]
+            m (first (filter #(and (not-excluded? %) (effort-ok? %) (caps-ok? %)) models))]
         (when (not-excluded? m) m))
 
       :else
-      (let [required-caps (or (:capabilities prefs) #{})
-            exclude (:exclude-model prefs)
+      (let [exclude (:exclude-model prefs)
             candidates (->> (:models provider)
-                         (filter #(every? (:capabilities %) required-caps))
+                         (filter caps-ok?)
                          (filter reasoning-ok?)
                          (filter effort-ok?)
                          (filter #(if exclude (not= (:name %) exclude) true))
@@ -2527,11 +2534,16 @@
    rejects auth, and never after visible streamed output.
 
    `:reasoning` implies `:require-reasoning? true`, filtering selection to
-   reasoning-capable models."
+   reasoning-capable models.
+
+   `:capabilities` is a set of model capabilities the call REQUIRES (today
+   `#{:vision}`). It is a hard filter: providers with no model carrying every
+   capability are skipped and routing fails rather than sending input the model
+   cannot read. An explicit `:model`/`:provider`+`:model` pin still wins."
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning reasoning-effort
                 prefer-providers on-format-error format-retry-on on-auth-error
-                exclude-providers on-chunk]} routing-opts
+                exclude-providers on-chunk capabilities]} routing-opts
         error-strategy (or on-transient-error :hybrid)
         ;; Build prefs map for with-provider-fallback
         base-prefs (cond
@@ -2580,6 +2592,7 @@
                      {:strategy :root})
         prefs (cond-> base-prefs
                 reasoning            (assoc :require-reasoning? true)
+                (seq capabilities)   (assoc :capabilities (set capabilities))
                 reasoning-effort     (assoc :reasoning-effort reasoning-effort)
                 on-format-error      (assoc :on-format-error on-format-error)
                 format-retry-on      (assoc :format-retry-on format-retry-on)
@@ -3145,13 +3158,15 @@
    routing overrides.
 
    Returns a model descriptor map (or nil when no provider is available):
-   {:name :reasoning? :provider :api-style :pricing :context :intelligence :speed ...}
+   {:name :reasoning? :capabilities :provider :api-style :pricing :context ...}
 
    `overrides` (optional map):
      :optimize  — :cost | :speed | :intelligence (translated to :prefer)
      :provider  — explicit provider id keyword
      :model     — explicit model name string
      :reasoning — reasoning level keyword (implies reasoning-capable model)
+     :capabilities — set of capabilities the call REQUIRES, e.g. `#{:vision}`;
+                     nil when no routable model carries every one of them
 
    (resolve-effective-model router)                                         ;; root model
    (resolve-effective-model router {:optimize :cost})                       ;; cheapest
@@ -3161,13 +3176,17 @@
    (resolve-effective-model router nil))
   ([router overrides]
    (when router
-     (let [routing-opts (select-keys overrides [:optimize :provider :model :reasoning])
+     (let [routing-opts (select-keys overrides [:optimize :provider :model :reasoning :capabilities])
            {:keys [prefs]} (resolve-routing router routing-opts)
            [provider model-map] (select-provider router prefs)
            reasoning-level (some-> (:reasoning overrides) normalize-reasoning-level)]
        (when model-map
          (cond-> {:name              (:name model-map)
                   :reasoning?        (boolean (:reasoning? model-map))
+                   ;; What the model can READ, not just how it thinks: a channel
+                   ;; holding an image asks this before deciding whether to send
+                   ;; the pixels or route the description elsewhere.
+                  :capabilities      (or (:capabilities model-map) #{})
                   ;; Capability, not vendor: `normalize-provider` stamped these
                   ;; from the wire the model actually rides, so a channel can
                   ;; decide whether to OFFER a reasoning-depth or verbosity

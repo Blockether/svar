@@ -1865,3 +1865,87 @@
       (expect (contains? (set (router/provider-default-models :zai-coding)) "glm-5v-turbo"))
       (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
       (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))
+
+;; =============================================================================
+;; Capability routing (`:capabilities` — the HARD filter)
+;; =============================================================================
+
+(defdescribe capability-routing-test
+  "`:capabilities` decides whether a request can be served AT ALL: an image
+   handed to a text-only model is not a weaker answer, it is a wrong one. So
+   unlike `:reasoning` the flag survives `resolve-routing` into prefs and skips
+   providers whose models cannot read the input — including their root model."
+
+  (let [routed-name (fn [r prefs] (some-> (router/select-provider r prefs) second :name))
+        mixed-fleet (fn []
+                      (llm/make-router
+                        [{:id :blind :api-key "k" :base-url "http://x"
+                          :models [{:name "cheap-blind" :pricing {:input 0.10 :output 0.20}
+                                    :intelligence :low :speed :fast :capabilities #{:chat}}]}
+                         {:id :seeing :api-key "k" :base-url "http://y"
+                          :models [{:name "pricey-seer" :pricing {:input 2.00 :output 5.00}
+                                    :intelligence :high :speed :medium :capabilities #{:chat :vision}}]}]))]
+
+    (it "carries :capabilities from routing opts into prefs"
+      (let [r (mixed-fleet)
+            {:keys [prefs]} (router/resolve-routing r {:capabilities #{:vision} :optimize :cost})]
+        (expect (= #{:vision} (:capabilities prefs)))
+        (expect (= :cost (:prefer prefs))))
+      ;; Absent from the call, absent from prefs — no default capability floor.
+      (let [r (mixed-fleet)
+            {:keys [prefs]} (router/resolve-routing r {:optimize :cost})]
+        (expect (nil? (:capabilities prefs)))))
+
+    (it "crosses providers to reach a seeing model instead of the cheapest one"
+      (let [r (mixed-fleet)]
+        (expect (= "cheap-blind" (routed-name r {:prefer :cost})))
+        (expect (= "pricey-seer" (routed-name r {:prefer :cost :capabilities #{:vision}})))))
+
+    (it "skips a blind root model rather than answering with it"
+      (let [r (llm/make-router
+                [{:id :synth :api-key "k" :base-url "http://x"
+                  :models [{:name "blind-root" :capabilities #{:chat}}
+                           {:name "seer" :capabilities #{:chat :vision}}]}])]
+        (expect (= "blind-root" (routed-name r {:strategy :root})))
+        (expect (= "seer" (routed-name r {:strategy :root :capabilities #{:vision}})))))
+
+    (it "resolves to nothing when no provider can see"
+      (let [r (llm/make-router
+                [{:id :synth :api-key "k" :base-url "http://x"
+                  :models [{:name "blind-root" :capabilities #{:chat}}]}])]
+        (expect (nil? (router/select-provider r {:strategy :root :capabilities #{:vision}})))
+        (expect (nil? (router/select-provider r {:prefer :cost :capabilities #{:vision}})))
+        (expect (nil? (router/resolve-effective-model r {:capabilities #{:vision}})))))
+
+    (it "honors an explicit model pin over the capability filter"
+      (let [r (mixed-fleet)]
+        (expect (= "cheap-blind" (routed-name r {:force-model "cheap-blind" :capabilities #{:vision}})))))
+
+    (it "surfaces the routed model's capabilities to callers"
+      (let [r (mixed-fleet)
+            m (router/resolve-effective-model r {:capabilities #{:vision} :optimize :cost})]
+        (expect (= "pricey-seer" (:name m)))
+        (expect (contains? (:capabilities m) :vision))
+        (expect (= :seeing (:provider m)))))
+
+    ;; The z.ai coding plan meters every model at zero, so `:cost` alone ties and
+    ;; the ONE seeing model has to be reachable by capability, not by price.
+    (it "finds the coding plan's only seeing model through prefer-providers"
+      (let [r (llm/make-router [{:id :zai-coding-plan :api-key "k"}])
+            {:keys [prefs]} (router/resolve-routing r {:prefer-providers [:zai-coding-plan]
+                                                       :optimize [:cost :speed]
+                                                       :capabilities #{:vision}})]
+        (expect (= "glm-5v-turbo" (routed-name r prefs)))))
+
+    (it "reaches ask!'s provider selection end to end"
+      (let [captured (atom nil)
+            r (mixed-fleet)]
+        (with-redefs [llm/ask!* (fn [_r opts]
+                                  (reset! captured opts)
+                                  {:result {:answer "ok"}
+                                   :api-usage {:input-tokens 1 :output-tokens 1 :total-tokens 2}})]
+          (llm/ask! r {:spec {} :messages [{:role "user" :content "hi"}]
+                       :routing {:optimize :cost :capabilities #{:vision}}}))
+        ;; Pure `:cost` would have picked cheap-blind; the capability filter
+        ;; is what moves the call to the other provider.
+        (expect (= "pricey-seer" (:model @captured)))))))
