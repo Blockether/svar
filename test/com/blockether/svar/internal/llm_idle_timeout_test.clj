@@ -7,8 +7,8 @@
      by interrupting the calling thread inside `HttpClient.send -> CF.get`
      when no response headers arrive within `:ttft-timeout-ms`.
    - Idle watchdog (`start-idle-stream-watchdog!`) bounds the post-headers
-     phase by closing the body `InputStream` when no SSE bytes arrive
-     within `:idle-timeout-ms`.
+     phase by closing the body `InputStream`: `:first-byte-timeout-ms` until
+     one line has been read, `:idle-timeout-ms` for every gap after it.
 
    Pre-fix behavior: `http-post-stream!` relied on
    `HttpRequest.Builder.timeout` to bound the whole call, but on JDK 25 +
@@ -58,11 +58,13 @@
             last-byte-ns  (atom (System/nanoTime))
             alive?        (atom true)
             fired-elapsed (atom nil)
-            on-fire       (fn [elapsed-ms] (reset! fired-elapsed elapsed-ms))
+            on-fire       (fn [elapsed-ms _threshold-ms _first-byte?]
+                            (reset! fired-elapsed elapsed-ms))
             ;; 200ms is plenty: watchdog checks every ~50ms, so it should
             ;; observe the staleness on the second tick (~200-250ms in).
             idle-ms       200
-            t             (start-watchdog stream idle-ms last-byte-ns alive? on-fire)]
+            bytes-seen?   (atom true)
+            t             (start-watchdog stream idle-ms nil last-byte-ns bytes-seen? alive? on-fire)]
         ;; Give the watchdog a hard upper bound to fire. Anything more than
         ;; ~2x idle-ms is a regression. Poll with 25ms granularity.
         (loop [waited 0]
@@ -85,9 +87,10 @@
             last-byte-ns  (atom (System/nanoTime))
             alive?        (atom true)
             fired?        (atom false)
-            on-fire       (fn [_] (reset! fired? true))
+            on-fire       (fn [_ _ _] (reset! fired? true))
             idle-ms       250
-            t             (start-watchdog stream idle-ms last-byte-ns alive? on-fire)]
+            bytes-seen?   (atom true)
+            t             (start-watchdog stream idle-ms nil last-byte-ns bytes-seen? alive? on-fire)]
         ;; Simulate a healthy SSE producer: write a byte every 80ms for
         ;; 600ms total. Each write bumps last-byte-ns, so the watchdog
         ;; never sees a 250ms idle window.
@@ -104,6 +107,90 @@
         (expect (false? (.get closed?)))
         (expect (false? @fired?)))))
 
+  ;; Regression (vis session 26af5650): headers arrived and then not one body
+  ;; byte for the WHOLE inter-chunk budget - 300 047 ms against a zero-length
+  ;; accumulator - so a turn with ten finished iterations behind it died five
+  ;; minutes after the request, on a provider that had produced nothing.
+  (describe "bounds the wait for the FIRST byte with its own window"
+    (it "fires at first-byte-timeout-ms while no line has been read"
+      (let [closed?       (AtomicBoolean. false)
+            stream        (close-tracking-stream
+                            (ByteArrayInputStream. (byte-array 0))
+                            closed?)
+            last-byte-ns  (atom (System/nanoTime))
+            bytes-seen?   (atom false)
+            alive?        (atom true)
+            fired         (atom nil)
+            on-fire       (fn [elapsed-ms threshold-ms first-byte?]
+                            (reset! fired {:elapsed-ms  elapsed-ms
+                                           :threshold   threshold-ms
+                                           :first-byte? first-byte?}))
+            ;; A generous inter-chunk budget the pre-first-byte phase must NOT
+            ;; inherit, and the short window that owns that phase instead.
+            idle-ms       5000
+            first-byte-ms 200
+            t             (start-watchdog stream idle-ms first-byte-ms last-byte-ns
+                            bytes-seen? alive? on-fire)]
+        (loop [waited 0]
+          (cond
+            (.get closed?)   :done
+            (>= waited 1500) :timed-out
+            :else            (do (Thread/sleep 25) (recur (+ waited 25)))))
+        (reset! alive? false)
+        (deregister-watchdog t)
+        (expect (.get closed?))
+        (expect (true? (:first-byte? @fired)))
+        (expect (= first-byte-ms (:threshold @fired)))
+        (expect (>= (long (:elapsed-ms @fired)) first-byte-ms))
+        (expect (< (long (:elapsed-ms @fired)) idle-ms))))
+
+    (it "hands the stream to the inter-chunk budget once the first byte lands"
+      (let [closed?      (AtomicBoolean. false)
+            stream       (close-tracking-stream
+                           (ByteArrayInputStream. (byte-array 0))
+                           closed?)
+            last-byte-ns (atom (System/nanoTime))
+            bytes-seen?  (atom false)
+            alive?       (atom true)
+            fired?       (atom false)
+            on-fire      (fn [_ _ _] (reset! fired? true))
+            t            (start-watchdog stream 5000 200 last-byte-ns
+                           bytes-seen? alive? on-fire)]
+        ;; The first byte arrives inside the short window; from here only the
+        ;; 5s inter-chunk budget can close the stream, and it has not elapsed.
+        (Thread/sleep 100)
+        (reset! bytes-seen? true)
+        (reset! last-byte-ns (System/nanoTime))
+        (Thread/sleep 400)
+        (reset! alive? false)
+        (deregister-watchdog t)
+        (expect (false? (.get closed?)))
+        (expect (false? @fired?))))
+
+    (it "only tightens: a first-byte window wider than idle never widens it"
+      (let [closed?      (AtomicBoolean. false)
+            stream       (close-tracking-stream
+                           (ByteArrayInputStream. (byte-array 0))
+                           closed?)
+            last-byte-ns (atom (System/nanoTime))
+            bytes-seen?  (atom false)
+            alive?       (atom true)
+            fired        (atom nil)
+            on-fire      (fn [_ threshold-ms first-byte?]
+                           (reset! fired {:threshold threshold-ms :first-byte? first-byte?}))
+            t            (start-watchdog stream 200 5000 last-byte-ns
+                           bytes-seen? alive? on-fire)]
+        (loop [waited 0]
+          (cond
+            (.get closed?)   :done
+            (>= waited 1500) :timed-out
+            :else            (do (Thread/sleep 25) (recur (+ waited 25)))))
+        (reset! alive? false)
+        (deregister-watchdog t)
+        (expect (.get closed?))
+        (expect (= 200 (:threshold @fired)))
+        (expect (true? (:first-byte? @fired))))))
+
   (describe "exits cleanly on alive? false"
     (it "does not call close after caller signals shutdown"
       (let [closed?      (AtomicBoolean. false)
@@ -113,8 +200,9 @@
             last-byte-ns (atom (System/nanoTime))
             alive?       (atom true)
             fired?       (atom false)
-            on-fire      (fn [_] (reset! fired? true))
-            t            (start-watchdog stream 5000 last-byte-ns alive? on-fire)]
+            on-fire      (fn [_ _ _] (reset! fired? true))
+            bytes-seen?  (atom true)
+            t            (start-watchdog stream 5000 nil last-byte-ns bytes-seen? alive? on-fire)]
         ;; Caller flips alive? before idle-timeout-ms elapses; watchdog
         ;; should wake from sleep, see alive? false, exit the loop.
         (Thread/sleep 50)

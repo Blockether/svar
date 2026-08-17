@@ -2971,6 +2971,12 @@
 (def ^:dynamic *stream-semantic-timeout-ms*
   router/DEFAULT_SEMANTIC_TIMEOUT_MS)
 
+(def ^:dynamic *stream-first-byte-timeout-ms*
+  "Ceiling (ms) on the wait for the FIRST byte of a streaming response body,
+   enforced by the idle watchdog until one line has been read. Bind it to widen,
+   tighten or disable (nil/0) the pre-first-byte window for one call; the
+   inter-chunk `:idle-timeout-ms` governs every gap after that byte."
+  router/DEFAULT_FIRST_BYTE_TIMEOUT_MS)
 (def ^:dynamic *cancel-fn*
   "Optional no-arg predicate for caller-driven cancellation. When bound to
    a fn that returns truthy, an in-flight streaming call aborts ASAP — a
@@ -3665,14 +3671,35 @@
               false)
           :else true)))))
 
+(defn- idle-timeout-message
+  "The idle watchdog's message, naming the PHASE it fired in: waiting for the
+   FIRST stream byte, or waiting for the next one. `suffix` carries the closed
+   stream's own message when the abort surfaced as an IOException."
+  [fired-ms first-byte? suffix]
+  (str (if first-byte?
+         (str "Stream first-byte timeout (" fired-ms "ms with no stream bytes)")
+         (str "Stream idle timeout (" fired-ms "ms with no bytes)"))
+    suffix))
+
 (defn- start-idle-stream-watchdog!
-  "Arms an idle check on the shared scheduler: closes `stream` if
-   `last-byte-ns-atom` is stale > idle-ms. Reader loop bumps the atom every
-   line; when the wall-clock gap exceeds the threshold the close kicks the
-   parked `.readLine` with an `IOException` and the surrounding catch
-   re-throws as `:svar.core/stream-idle-timeout`. On normal completion the
-   caller flips `alive?-atom` false and the check disarms without touching
-   the stream.
+  "Arms an idle check on the shared scheduler: closes `stream` when
+   `last-byte-ns-atom` is staler than the threshold for the phase the stream is
+   in. Reader loop bumps that atom and flips `bytes-seen?-atom` on every line;
+   when the wall-clock gap exceeds the threshold the close kicks the parked
+   `.readLine` with an `IOException` and the surrounding catch re-throws as
+   `:svar.core/stream-idle-timeout`. On normal completion the caller flips
+   `alive?-atom` false and the check disarms without touching the stream.
+
+   TWO phases, because they are not the same failure. AFTER the first byte a
+   long gap can be legitimate extended thinking, which is why `idle-timeout-ms`
+   is generous. BEFORE it nothing is streaming at all: headers are in, the
+   provider owes its opening event (Anthropic's `message_start`, an SSE comment)
+   within seconds, and silence there is a wedged connection that has produced
+   nothing. Measured: 300 047 ms of it against a zero-length accumulator, five
+   minutes spent on a request that never answered. So while `bytes-seen?-atom`
+   is false the ceiling is `first-byte-timeout-ms`, and it only ever TIGHTENS
+   the wait — the effective threshold is the smaller of the two, and a nil/0
+   first-byte value leaves the idle budget alone.
 
    Why a separate timer, not `HttpRequest.timeout`: the JDK request timeout
    covers headers + total wall-clock, doesn't fire on a mid-stream idle
@@ -3680,15 +3707,23 @@
    known to miss entirely. The idle check is signal-driven: stalls surface
    fast, slow-but-progressing reasoning streams keep flowing.
 
-   `on-fire` called once with elapsed-ms before the close; lets the caller
-   stamp telemetry. Returns a handle token for shutdown."
-  [^java.io.InputStream stream idle-timeout-ms last-byte-ns-atom alive?-atom on-fire]
+   `on-fire` called once before the close with elapsed-ms, the threshold that
+   fired and whether it was the first-byte one; lets the caller stamp telemetry.
+   Returns a handle token for shutdown."
+  [^java.io.InputStream stream idle-timeout-ms first-byte-timeout-ms last-byte-ns-atom
+   bytes-seen?-atom alive?-atom on-fire]
   (register-watchdog!
     (fn []
       (if @alive?-atom
-        (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
-          (if (>= elapsed-ms (long idle-timeout-ms))
-            (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
+        (let [first-byte?  (and (not @bytes-seen?-atom)
+                             (number? first-byte-timeout-ms)
+                             (pos? (long first-byte-timeout-ms)))
+              threshold-ms (if first-byte?
+                             (min (long idle-timeout-ms) (long first-byte-timeout-ms))
+                             (long idle-timeout-ms))
+              elapsed-ms   (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
+          (if (>= elapsed-ms threshold-ms)
+            (do (try (on-fire elapsed-ms threshold-ms first-byte?) (catch Throwable _ nil))
                 (try (.close stream) (catch Throwable _ nil))
                 false)
             true))
@@ -3951,26 +3986,41 @@
         incomplete-response (atom nil)
         failed-response (atom nil)
         last-byte-ns (atom (System/nanoTime))
+        bytes-seen? (atom false)
         last-semantic-ns (atom (System/nanoTime))
         idle-fired? (atom false)
+        idle-fired-ms (atom nil)
+        idle-first-byte? (atom false)
         semantic-fired? (atom false)
         watchdog-alive? (atom true)
         semantic-timeout-ms *stream-semantic-timeout-ms*
+        first-byte-timeout-ms *stream-first-byte-timeout-ms*
         watchdog (when (and (number? idle-timeout-ms) (pos? (long idle-timeout-ms)))
                    (start-idle-stream-watchdog!
                      input-stream
                      idle-timeout-ms
+                     first-byte-timeout-ms
                      last-byte-ns
+                     bytes-seen?
                      watchdog-alive?
-                     (fn [elapsed-ms]
+                     (fn [elapsed-ms threshold-ms first-byte?]
                        (reset! idle-fired? true)
-                       (trove/log! {:level :warn :id ::stream-idle-timeout
+                       (reset! idle-fired-ms threshold-ms)
+                       (reset! idle-first-byte? first-byte?)
+                       (trove/log! {:level :warn
+                                    :id (if first-byte?
+                                          ::stream-first-byte-timeout
+                                          ::stream-idle-timeout)
                                     :data (log-data {:url url
                                                      :idle-timeout-ms idle-timeout-ms
+                                                     :first-byte-timeout-ms first-byte-timeout-ms
+                                                     :fired-timeout-ms threshold-ms
                                                      :elapsed-ms elapsed-ms
                                                      :content-acc-len (.length content-acc)
                                                      :reasoning-acc-len (.length reasoning-acc)})
-                                    :msg "stream idle, closing"}))))
+                                    :msg (if first-byte?
+                                           "no first stream byte, closing"
+                                           "stream idle, closing")}))))
         semantic-watchdog (when (and (number? semantic-timeout-ms) (pos? (long semantic-timeout-ms)))
                             (start-semantic-stream-watchdog!
                               input-stream
@@ -4061,6 +4111,9 @@
               ;; Reset idle on every observed line: comments, blank
               ;; separators, and data all prove transport liveness.
               (reset! last-byte-ns now-ns)
+              ;; First line of the body: the pre-first-byte ceiling stops
+              ;; applying and the inter-chunk idle budget takes over.
+              (when (and line (not @bytes-seen?)) (reset! bytes-seen? true))
               ;; Caller cancelled while deltas are still flowing: break
               ;; between lines (the watchdog's stream-close covers a parked
               ;; read; this covers a fast stream that never parks). Cheap
@@ -4137,11 +4190,14 @@
                                      :content-acc content-acc
                                      :reasoning-acc reasoning-acc
                                      :response response})]
-          (throw (ex-info (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes).")
+          (throw (ex-info (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
+                            @idle-first-byte?
+                            ".")
                    {:type :svar.core/stream-idle-timeout
                     :stream? true
                     :url url
-                    :idle-timeout-ms idle-timeout-ms
+                    :idle-timeout-ms (or @idle-fired-ms idle-timeout-ms)
+                    :first-byte? @idle-first-byte?
                     :stream-finalization stream-finalization
                     :content-acc-len (.length content-acc)
                     :reasoning-acc-len (.length reasoning-acc)
@@ -4354,13 +4410,16 @@
             (throw (ex-info (cond
                               semantic? (str "Stream semantic timeout (" semantic-timeout-ms
                                           "ms without model/progress event): " (ex-message e))
-                              idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
+                              idle?     (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
+                                          @idle-first-byte?
+                                          (str ": " (ex-message e)))
                               :else     (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
                                   idle?     :svar.core/stream-idle-timeout
                                   :else     :svar.core/http-error)
                       :stream? true :url url
-                      :idle-timeout-ms (when idle? idle-timeout-ms)
+                      :idle-timeout-ms (when idle? (or @idle-fired-ms idle-timeout-ms))
+                      :first-byte? (boolean (and idle? @idle-first-byte?))
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
                       :cause-class (.getName (class e))
                       :stream-finalization stream-finalization
@@ -4389,13 +4448,16 @@
           (throw (ex-info (cond
                             semantic? (str "Stream semantic timeout (" semantic-timeout-ms
                                         "ms without model/progress event): " (ex-message e))
-                            idle?     (str "Stream idle timeout (" idle-timeout-ms "ms with no bytes): " (ex-message e))
+                            idle?     (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
+                                        @idle-first-byte?
+                                        (str ": " (ex-message e)))
                             :else     (str "Stream connection error: " (ex-message e)))
                    {:type (cond semantic? :svar.core/stream-semantic-timeout
                                 idle?     :svar.core/stream-idle-timeout
                                 :else     :svar.core/http-error)
                     :stream? true :url url
-                    :idle-timeout-ms (when idle? idle-timeout-ms)
+                    :idle-timeout-ms (when idle? (or @idle-fired-ms idle-timeout-ms))
+                    :first-byte? (boolean (and idle? @idle-first-byte?))
                     :semantic-timeout-ms (when semantic? semantic-timeout-ms)
                     :cause-class (.getName (class e))
                     :stream-finalization stream-finalization

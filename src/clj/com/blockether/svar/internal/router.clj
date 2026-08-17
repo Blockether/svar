@@ -1101,6 +1101,25 @@
    models with long pre-stream queues."
   120000)
 
+(def DEFAULT_FIRST_BYTE_TIMEOUT_MS
+  "Default first-byte timeout (ms) for a streaming response BODY: the ceiling on
+   the gap between the response headers and the first byte of the stream. The
+   idle watchdog enforces it in place of `DEFAULT_IDLE_TIMEOUT_MS` until one line
+   has been read, and only ever tightens that wait (see
+   `llm/*stream-first-byte-timeout-ms*`).
+
+   120 000 ms (2 minutes). The two windows guard different things: AFTER the
+   first byte, silence can be legitimate extended thinking, so callers running
+   those workloads raise `:idle-timeout-ms` to 240-300 s. BEFORE it, the provider
+   has accepted the request and owes its opening event within seconds, so a
+   silence that long is a wedged connection which has produced nothing.
+   Measured: a pinned route sat at zero bytes for a full 300 s idle budget and
+   killed a turn that had ten finished iterations behind it.
+
+   Nothing is streamed, billed or painted inside this window, so its abort is
+   the safest kind to re-issue: it keeps `failure/STREAM_WATCHDOG_ERROR_TYPES`,
+   and a caller that retries pre-output aborts simply asks again."
+  120000)
 (def DEFAULT_IDLE_TIMEOUT_MS
   "Default idle-stream timeout (ms) for streaming HTTP responses. If no
    SSE bytes arrive for this long the underlying `InputStream` is closed
