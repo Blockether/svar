@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.120] - 2026-08-17
+
+### Changed
+- fix(router): decide vision per provider, not per model name
+- release: update version files for v0.7.119, bump to next dev version
+
+
 ## [v0.7.119] - 2026-08-17
 
 ### Changed
@@ -2232,7 +2239,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.119...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.120...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2388,3 +2395,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.117]: https://github.com/Blockether/svar/releases/tag/v0.7.117
 [v0.7.118]: https://github.com/Blockether/svar/releases/tag/v0.7.118
 [v0.7.119]: https://github.com/Blockether/svar/releases/tag/v0.7.119
+[v0.7.120]: https://github.com/Blockether/svar/releases/tag/v0.7.120
