@@ -1949,8 +1949,19 @@
                        :routing {:optimize :cost :capabilities #{:vision}}}))
         ;; Pure `:cost` would have picked cheap-blind; the capability filter
         ;; is what moves the call to the other provider.
-        (expect (= "pricey-seer" (:model @captured)))))))
-
+        (expect (= "pricey-seer" (:model @captured)))))
+    ;; A caller that already LEARNED a provider's wire refuses its payload asks what
+    ;; it would use INSTEAD; without this key the descriptor kept naming the dead
+    ;; provider, so the caller could only guess whether a second pair of eyes existed.
+    (it "answers what it would use INSTEAD when a provider is excluded"
+      (let [r (mixed-fleet)]
+        (expect (= "pricey-seer"
+                  (:name (router/resolve-effective-model
+                           r {:capabilities #{:vision} :optimize :cost}))))
+        (expect (nil? (router/resolve-effective-model
+                        r {:capabilities #{:vision}
+                           :optimize :cost
+                           :exclude-providers #{:seeing}})))))))
 ;; =============================================================================
 ;; Provider-scoped capabilities
 ;; =============================================================================
@@ -2033,6 +2044,41 @@
       (expect (not (contains? (:capabilities (router/provider-model-metadata
                                                :openrouter {:name "google/gemini-2.5-pro" :vision? false}))
                      :vision)))))
+
+  (describe "a provider whose wire cannot carry pixels"
+    ;; Regression: models.dev lists a gateway's proxied models as taking image
+    ;; input, but the gateway's own request schema has no image content part —
+    ;; six of its models answered an attached screenshot with HTTP 400
+    ;; `unknown variant image_url, expected text`. Catalog truth is about the
+    ;; MODEL; this flag is about the ENDPOINT, and the endpoint decides.
+    (it "vetoes the catalog's word for every model it serves"
+      (let [vetoed (llm/make-router [{:id :openrouter :api-key "k" :image-input? false
+                                      :models [{:name "qwen/qwen2.5-vl-72b-instruct"}
+                                               {:name "google/gemini-2.5-pro"}]}])
+            plain (llm/make-router [{:id :openrouter :api-key "k"
+                                     :models [{:name "qwen/qwen2.5-vl-72b-instruct"}
+                                              {:name "google/gemini-2.5-pro"}]}])]
+        (expect (nil? (router/resolve-effective-model vetoed {:capabilities #{:vision}})))
+        (expect (some? (router/resolve-effective-model plain {:capabilities #{:vision}})))))
+
+    (it "outranks a capability set written by hand"
+      ;; No config claim survives a wire that refuses to deserialize the part.
+      (let [r (llm/make-router [{:id :gw :api-key "k" :base-url "http://x" :image-input? false
+                                 :models [{:name "local-vlm" :capabilities #{:chat :vision}}]}])]
+        (expect (nil? (router/resolve-effective-model r {:capabilities #{:vision}})))))
+
+    (it "is inert when the flag is true or absent"
+      (let [r (llm/make-router [{:id :gw :api-key "k" :base-url "http://x" :image-input? true
+                                 :models [{:name "local-vlm" :capabilities #{:chat :vision}}]}])]
+        (expect (= "local-vlm" (:name (router/resolve-effective-model r {:capabilities #{:vision}}))))))
+
+    (it "leaves every other capability alone"
+      (let [r (llm/make-router [{:id :gw :api-key "k" :base-url "http://x" :image-input? false
+                                 :models [{:name "local-vlm" :capabilities #{:chat :vision :reasoning}}]}])
+            m (first (:models (first (:providers r))))]
+        (expect (contains? (:capabilities m) :chat))
+        (expect (contains? (:capabilities m) :reasoning))
+        (expect (not (contains? (:capabilities m) :vision))))))
 
   (describe "routing"
     (it "picks the catalog-sighted model over the one the name heuristic favors"

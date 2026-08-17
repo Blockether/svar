@@ -1476,6 +1476,22 @@
     (with-vision-capability (explicit-capabilities model-map)
       (merge normalized entry))))
 
+(defn- apply-image-input-policy
+  "Provider-level VETO on image input: `:image-input? false` strips `:vision` from
+   every model this provider serves, whatever the catalog or the model name says.
+
+   Capability is two independent facts and a model that has one can still lack the
+   other. The MODEL may be multimodal while the ENDPOINT in front of it refuses to
+   deserialize an image content part at all — a real gateway answers
+   `unknown variant image_url, expected text` with HTTP 400 for models models.dev
+   lists as taking image input. A 400 is not a preference, so this veto outranks
+   even a `:capabilities` set written per model; a provider that later grows image
+   support drops the flag (or sets it `true`) and the catalog decides again."
+  [image-input? model]
+  (if (false? image-input?)
+    (update model :capabilities #(disj (set %) :vision))
+    model))
+
 (defn- add-wire-capabilities
   "Stamp the CAPABILITY facts every surface needs onto one normalized model:
    the reasoning style the request path will actually use, whether the caller
@@ -1509,20 +1525,28 @@
    Uses `known-provider` for the policy lookup so plan-tier aliases
    inherit `:exclude-models`, `:llm-headers`, default
    models, and any other shared field from their base entry; only the
-   tier-local overrides (`:base-url`, ...) win on conflict."
+    tier-local overrides (`:base-url`, ...) win on conflict.
+
+   `:image-input? false` on the provider (or on its KNOWN_PROVIDERS entry) vetoes
+   `:vision` for every model it serves — see `apply-image-input-policy`."
   [idx provider-map]
   (let [id (:id provider-map)
         known (known-provider id)
         base-url (or (:base-url provider-map) (:base-url known))
         exclude-models (set (concat (:exclude-models known) (:exclude-models provider-map)))
         api-style (or (:api-style provider-map) (:api-style known) :openai-compatible-chat)
+        image-input? (if (contains? provider-map :image-input?)
+                       (:image-input? provider-map)
+                       (:image-input? known))
         models (->> (configured-model-inputs known provider-map)
                  (keep (fn [m]
                          (when-let [normalized (normalize-model m)]
                            (when-not (contains? exclude-models (:name normalized))
                              (add-wire-capabilities
                                api-style
-                               (provider-model-metadata id (if (map? m) m normalized)))))))
+                               (apply-image-input-policy
+                                 image-input?
+                                 (provider-model-metadata id (if (map? m) m normalized))))))))
                  (reduce conj-model-once []))
         root-name (:name (first models))]
     (when-not id
@@ -1905,11 +1929,18 @@
 
    Cross-provider ranking: models are scored by `:prefer` first, provider
    priority second. So `:optimize :intelligence` picks the frontier model
-   across the whole fleet; ties are broken by provider vector order."
+    across the whole fleet; ties are broken by provider vector order.
+
+   Honors `:exclude-providers` in `prefs`, exactly as the claiming path does: a
+   caller that already learned a provider cannot serve THIS call — its wire refused
+   the payload, its credential is missing — asks what the fleet would use instead,
+   and a read-only query must not answer with the provider it just ruled out."
   [router prefs]
   (let [{:keys [providers state]} router
         current-state @state
+        excluded (or (:exclude-providers prefs) #{})
         candidates (->> (force-provider-filter prefs providers)
+                     (remove #(contains? excluded (:id %)))
                      (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
                      (filter (fn [[p _]] (provider-available? router p (get current-state (:id p) {})))))]
     (when (seq candidates)
@@ -3213,7 +3244,10 @@
      :model     — explicit model name string
      :reasoning — reasoning level keyword (implies reasoning-capable model)
      :capabilities — set of capabilities the call REQUIRES, e.g. `#{:vision}`;
-                     nil when no routable model carries every one of them
+                      nil when no routable model carries every one of them
+     :exclude-providers — set of provider ids this call must NOT land on; a caller
+                      that already learned a provider's wire refuses its payload asks
+                      what it would use INSTEAD
 
    (resolve-effective-model router)                                         ;; root model
    (resolve-effective-model router {:optimize :cost})                       ;; cheapest
@@ -3223,7 +3257,8 @@
    (resolve-effective-model router nil))
   ([router overrides]
    (when router
-     (let [routing-opts (select-keys overrides [:optimize :provider :model :reasoning :capabilities])
+     (let [routing-opts (select-keys overrides
+                          [:optimize :provider :model :reasoning :capabilities :exclude-providers])
            {:keys [prefs]} (resolve-routing router routing-opts)
            [provider model-map] (select-provider router prefs)
            reasoning-level (some-> (:reasoning overrides) normalize-reasoning-level)]
