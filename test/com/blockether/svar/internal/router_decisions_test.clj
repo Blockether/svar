@@ -10,6 +10,7 @@
   (:require
    [lazytest.core :refer [defdescribe describe expect it throws?]]
    [com.blockether.svar.internal.llm :as llm]
+   [com.blockether.svar.internal.modelsdev :as modelsdev]
    [com.blockether.svar.internal.router :as router]))
 
 ;; =============================================================================
@@ -1949,3 +1950,102 @@
         ;; Pure `:cost` would have picked cheap-blind; the capability filter
         ;; is what moves the call to the other provider.
         (expect (= "pricey-seer" (:model @captured)))))))
+
+;; =============================================================================
+;; Provider-scoped capabilities
+;; =============================================================================
+
+(defn- catalog-model-names
+  "Every model name models.dev carries for `pid`, following the same catalog id
+   a plan tier inherits (`:zai-coding-plan` prices off `:zai`)."
+  [pid]
+  (keys (modelsdev/provider-models
+          (or (get-in router/KNOWN_PROVIDERS [pid :pricing-source])
+            (get-in router/KNOWN_PROVIDERS [pid :provider-model-source])
+            pid))))
+
+(defn- selected-name
+  "Name of the model `prefs` routes to in `r`, or nil when nothing qualifies."
+  [r prefs]
+  (some-> (router/select-provider r prefs) second :name))
+
+(defdescribe provider-scoped-capability-test
+  "`provider-model-metadata`: what image input THIS provider's serving accepts.
+   The model NAME cannot answer it — Copilot proxies vision-capable upstreams
+   under names the heuristic never learned, every OpenRouter slug is namespaced,
+   and one `gpt-4o` variant takes no images at all."
+  (describe "catalog decides"
+    (it "adds the vision a name heuristic misses"
+      (doseq [[pid model] [[:openrouter "qwen/qwen2.5-vl-72b-instruct"]
+                           [:mistral "mistral-medium-latest"]
+                           [:github-copilot "kimi-k2.7-code"]]]
+        (expect (not (contains? (:capabilities (router/infer-model-metadata {:name model})) :vision))
+          (str "precondition: the name alone reads as blind — " model))
+        (expect (contains? (:capabilities (router/provider-model-metadata pid {:name model})) :vision)
+          (str pid "/" model " takes image input per models.dev"))))
+
+    ;; Regression: `gpt-4o-search-preview` matches the `gpt-4o` vision pattern but
+    ;; serves text only. Vis gated image blocks on the name, so the whole fleet's
+    ;; one search model answered a picture with a 400 — and attachments replay, so
+    ;; the same 400 came back on every later turn of that session.
+    (it "removes the vision a name heuristic invents"
+      (let [model "openai/gpt-4o-search-preview"]
+        (expect (contains? (:capabilities (router/infer-model-metadata {:name model})) :vision))
+        (expect (= #{:text} (get-in (router/provider-model-entry :openrouter model) [:modalities :input])))
+        (expect (not (contains? (:capabilities (router/provider-model-metadata :openrouter {:name model}))
+                       :vision)))))
+
+    (it "answers per PROVIDER, so the same name can differ"
+      (let [model "openai/gpt-4o-search-preview"]
+        ;; No provider id (or one the catalog never heard of) leaves only the name.
+        (expect (contains? (:capabilities (router/provider-model-metadata nil {:name model})) :vision))
+        (expect (not (contains? (:capabilities (router/provider-model-metadata :openrouter {:name model}))
+                       :vision)))))
+
+    (it "reaches the same verdict the router's own normalization reaches"
+      (doseq [pid [:openrouter :mistral :github-copilot :openai :anthropic :zai-coding-plan]
+              ;; A provider hides models it will not serve (Copilot's old GPTs);
+              ;; normalizing one of those alone is an empty provider, not a verdict.
+              model (take 40 (filter #(router/provider-model-visible? pid %) (catalog-model-names pid)))]
+        (let [normalized (first (:models (router/normalize-provider
+                                           0 {:id pid :api-key "k" :models [{:name model}]})))]
+          (expect (= (contains? (:capabilities normalized) :vision)
+                    (contains? (:capabilities (router/provider-model-metadata pid {:name model})) :vision))
+            (str "one verdict for " pid "/" model))))))
+
+  (describe "evidence stronger than the catalog"
+    (it "honors capabilities the caller configured, both ways"
+      ;; The escape hatch for a model svar has never heard of: a local llava, a
+      ;; private deployment, anything newer than this catalog snapshot.
+      (expect (contains? (:capabilities (router/provider-model-metadata
+                                          :ollama {:name "llava:13b" :capabilities #{:chat :vision}}))
+                :vision))
+      (expect (not (contains? (:capabilities (router/provider-model-metadata
+                                               :anthropic {:name "claude-sonnet-5" :capabilities #{:chat}}))
+                     :vision))))
+
+    (it "honors the capability a provider's own /models body reported"
+      ;; `:vision?` is what `enrich-gateway-model` / `enrich-lmstudio-model` write
+      ;; from `supports_vision` and LM Studio's capability array.
+      (expect (contains? (:capabilities (router/provider-model-metadata
+                                          :lmstudio {:name "some-local-vlm" :vision? true}))
+                :vision))
+      (expect (not (contains? (:capabilities (router/provider-model-metadata
+                                               :openrouter {:name "google/gemini-2.5-pro" :vision? false}))
+                     :vision)))))
+
+  (describe "routing"
+    (it "picks the catalog-sighted model over the one the name heuristic favors"
+      (let [r (llm/make-router
+                [{:id :openrouter :api-key "k"
+                  :models [{:name "deepseek/deepseek-chat-v3.1"}
+                           {:name "qwen/qwen2.5-vl-72b-instruct"}]}])]
+        (expect (= "deepseek/deepseek-chat-v3.1" (selected-name r {:strategy :root})))
+        (expect (= "qwen/qwen2.5-vl-72b-instruct"
+                  (selected-name r {:strategy :root :capabilities #{:vision}})))))
+
+    (it "refuses a fleet whose only image-shaped name is text-only upstream"
+      (let [r (llm/make-router
+                [{:id :openrouter :api-key "k"
+                  :models [{:name "openai/gpt-4o-search-preview"}]}])]
+        (expect (nil? (router/resolve-effective-model r {:capabilities #{:vision}})))))))

@@ -789,6 +789,13 @@
     (it "surfaces tool_use capability"
       (expect (true? (:tool-call? ((var-get #'sut/enrich-lmstudio-model)
                                    {"id" "m" "capabilities" ["tool_use"]})))))
+    (it "surfaces the vision capability a locally served model advertises"
+      ;; A local runtime is invisible to models.dev, so this array is the only
+      ;; evidence the model in front of the user can read an image.
+      (expect (true? (:vision? ((var-get #'sut/enrich-lmstudio-model)
+                                {"id" "m" "capabilities" ["tool_use" "vision"]}))))
+      (expect (nil? (:vision? ((var-get #'sut/enrich-lmstudio-model)
+                               {"id" "m" "capabilities" ["tool_use"]})))))
     (it "leaves models without context fields untouched"
       (let [m ((var-get #'sut/enrich-lmstudio-model) {"id" "m"})]
         (expect (nil? (:context m)))

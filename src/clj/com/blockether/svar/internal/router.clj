@@ -1416,16 +1416,65 @@
 ;; Provider normalization
 ;; =============================================================================
 
-(defn- add-catalog-vision
-  "Ensure the `:vision` capability whenever the models.dev catalog reports
-   image input for a model. Catalog modalities are authoritative: a model that
-   accepts image input supports vision even when the static metadata heuristic
-   (KNOWN_MODEL_METADATA / regex) does not flag it — notably GitHub Copilot's
-   Claude / GPT / Gemini tiers, which proxy upstream vision-capable models."
-  [model]
-  (cond-> model
-    (contains? (set (get-in model [:modalities :input])) :image)
-    (update :capabilities (fnil conj #{:chat}) :vision)))
+(defn- explicit-capabilities
+  "The `:capabilities` the CALLER wrote for one configured model, as a set, or nil.
+
+   Config is the only place a human can tell svar something the catalog cannot know
+   — a local `llava`, a private gateway deployment, a model released after this
+   catalog snapshot — so an explicit set outranks every inference below it."
+  [model-map]
+  (when (and (map? model-map) (seq (:capabilities model-map)))
+    (set (:capabilities model-map))))
+
+(defn- with-vision-capability
+  "Decide `:vision` for ONE model from the strongest evidence available, and write
+   the verdict into `:capabilities`.
+
+   Precedence, strongest first:
+     1. `:capabilities` from the caller's own config (`explicit-capabilities`).
+     2. `:vision?` DISCOVERED from the provider's own `/models` body — LiteLLM's
+        `supports_vision`, LM Studio's `vision` capability. The endpoint that will
+        serve the request outranks any static table.
+     3. models.dev `:modalities :input`, authoritative BOTH ways whenever the catalog
+        carries the row. It ADDS the vision the name heuristic misses (Copilot's
+        proxied Claude/GPT, every OpenRouter slug, `mistral-medium-latest`, `o3`) and
+        REMOVES the vision the name heuristic invents: `gpt-4o-search-preview` matches
+        the `gpt-4o` pattern but takes text only, and an image block sent there is a
+        400 that repeats on every replay of that attachment.
+     4. Whatever KNOWN_MODEL_METADATA or the name regex guessed — the only evidence
+        left for a provider the catalog does not carry (Ollama, LM Studio, a custom
+        base-url), where a wrong guess is the caller's to override via 1."
+  [explicit model]
+  (let [inputs (set (get-in model [:modalities :input]))
+        sees? (cond
+                (some? explicit) (contains? explicit :vision)
+                (some? (:vision? model)) (boolean (:vision? model))
+                (seq inputs) (contains? inputs :image)
+                :else (contains? (set (:capabilities model)) :vision))
+        capabilities (set (or (:capabilities model) #{:chat}))]
+    (assoc model :capabilities (if sees?
+                                 (conj capabilities :vision)
+                                 (disj capabilities :vision)))))
+
+(defn provider-model-metadata
+  "Metadata for ONE model AS THIS PROVIDER SERVES IT: name inference ⊕ the provider's
+   catalog/overlay row ⊕ the capability verdict of `with-vision-capability`.
+
+   `infer-model-metadata` answers a provider-INDEPENDENT question from the model NAME,
+   so it cannot know that Copilot proxies vision-capable Claude, that an OpenRouter
+   slug is multimodal, or that one `gpt-4o` variant takes no images at all. Callers
+   that hold a provider id and a model name but no built router — Vis' image gate is
+   the one that matters — get here exactly the verdict `normalize-provider` reaches,
+   at map arithmetic cost and with no I/O.
+
+   `provider-id` may be nil (an unknown or caller-defined provider): the catalog layer
+   is then skipped and inference stands."
+  [provider-id model-map]
+  (let [model-map (if (map? model-map) model-map {:name (str model-map)})
+        normalized (infer-model-metadata model-map)
+        entry (when provider-id (provider-model-entry provider-id (:name normalized)))]
+    (with-vision-capability (explicit-capabilities model-map)
+      (merge normalized entry))))
 
 (defn- add-wire-capabilities
   "Stamp the CAPABILITY facts every surface needs onto one normalized model:
@@ -1473,9 +1522,7 @@
                            (when-not (contains? exclude-models (:name normalized))
                              (add-wire-capabilities
                                api-style
-                               (add-catalog-vision
-                                 (merge normalized
-                                   (provider-model-entry id (:name normalized)))))))))
+                               (provider-model-metadata id (if (map? m) m normalized)))))))
                  (reduce conj-model-once []))
         root-name (:name (first models))]
     (when-not id

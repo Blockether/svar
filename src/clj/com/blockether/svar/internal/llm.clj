@@ -6383,8 +6383,11 @@
   "Map LM Studio native `/api/v0/models` fields onto svar model keys.
    Prefers `loaded_context_length` (the window the runtime ACTUALLY loaded -
    LM Studio can load a 262k model at 16k to fit RAM, and advertising the max
-   would make the server truncate) over `max_context_length`. Surfaces
-   `tool_use` capability and load state. Non-native shapes pass through.
+   would make the server truncate) over `max_context_length`. Surfaces the
+   `tool_use` and `vision` capabilities and load state. A locally served model is
+   invisible to models.dev, so this array is the ONLY evidence that the runtime in
+   front of the user can read an image — `router/with-vision-capability` reads
+   `:vision?` back out. Non-native shapes pass through.
 
    `m` is a RAW wire entry: provider-chosen keys stay strings and are read
    with `get`. Only svar's own model keys are keywords."
@@ -6393,6 +6396,7 @@
     (cond-> m
       ctx (assoc :context (long ctx))
       (some #{"tool_use"} (get m "capabilities")) (assoc :tool-call? true)
+      (some #{"vision"} (get m "capabilities")) (assoc :vision? true)
       (some? (get m "state")) (assoc :loaded? (= "loaded" (get m "state"))))))
 
 (def ^:private GATEWAY_CAPABILITY_KEYS
