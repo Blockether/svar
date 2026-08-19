@@ -23,6 +23,8 @@
 (def ^:private sanitize         @#'sut/sanitize-replayed-messages)
 (def ^:private stamp            @#'sut/stamp-assistant-model)
 (def ^:private build-chat       @#'sut/build-request-body)
+(def ^:private chat-with-retry  @#'sut/chat-completion-with-retry)
+(def ^:private chat-streaming   @#'sut/chat-completion-streaming)
 
 (def ^:private sig-A
   "{\"type\":\"reasoning\",\"id\":\"rs_A\",\"encrypted_content\":\"ENC_A\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"t\"}]}")
@@ -214,6 +216,85 @@
           tr (first (filter #(= "tool_result" (:type %)) blocks))]
       (expect (= (:id tu) (:tool_use_id tr)))
       (expect (not (str/includes? (str (:id tu)) "|"))))))
+
+;; Regression, issue #152: after a mid-turn fallback from an OpenAI Responses
+;; provider to a chat/completions one, the replayed composite `call_id|item_id`
+;; was serialized VERBATIM — a 93-char id carrying an illegal `|` in both
+;; `tool_calls[0].id` and the paired `tool_call_id` — and the target answered
+;; 400 "Invalid 'input[N].call_id': string too long ... maximum length 64",
+;; classified non-correctable, so the turn died and the retry was useless.
+(def ^:private wire-tool-id-re #"^[A-Za-z0-9_-]{1,64}$")
+
+(defdescribe chat-completions-composite-id-test
+  (it "collapses a replayed Responses composite id, call and result still paired"
+    (let [composite (responses-id {"call_id" (str "call_" (apply str (repeat 24 \a)))
+                                   "id"      (str "fc_" (apply str (repeat 60 \b)))
+                                   "name"    "cat"})
+          body      (build-chat
+                      [{:role "assistant" :content [{:type "tool_use" :id composite :name "cat" :input {}}]}
+                       {:role "user" :content [{:type "tool_result" :tool_use_id composite :content "ok"}]}]
+                      "gpt-5.6-sol")
+          call      (first (mapcat :tool_calls (:messages body)))
+          result    (first (filter #(= "tool" (:role %)) (:messages body)))]
+      (expect (re-matches wire-tool-id-re (str (:id call)))
+        (str "tool_calls id must match the chat wire form, got " (pr-str (:id call))))
+      (expect (re-matches wire-tool-id-re (str (:tool_call_id result)))
+        (str "tool_call_id must match the chat wire form, got " (pr-str (:tool_call_id result))))
+      (expect (= (:id call) (:tool_call_id result)))))
+  (it "normalizes an orphan tool_result id the shared id map never saw"
+    ;; No assistant tool_use carries this id, so `normalize-tool-ids` builds no
+    ;; mapping for it and only the serializer can keep it off the wire malformed.
+    (let [body   (build-chat
+                   [{:role "user" :content [{:type "tool_result"
+                                             :tool_use_id "call_orphan|fc_zzz"
+                                             :content "ok"}]}]
+                   "gpt-5.6-sol")
+          result (first (filter #(= "tool" (:role %)) (:messages body)))]
+      (expect (re-matches wire-tool-id-re (str (:tool_call_id result)))
+        (str "orphan tool_call_id must match the chat wire form, got "
+          (pr-str (:tool_call_id result)))))))
+
+;; Regression, issue #152: the fix lives in the SHARED chat builder, so the
+;; request that actually leaves the process was pinned on BOTH call paths —
+;; `chat-completion-with-retry` and `chat-completion-streaming` each posted the
+;; Responses composite `call_id|item_id` verbatim (93 chars, illegal `|`), and
+;; the target answered 400 "Invalid 'input[N].call_id': string too long ...
+;; maximum length 64", classified non-correctable, so the turn died either way.
+(defdescribe chat-wire-composite-id-both-paths-test
+  (it "posts a collapsed, paired tool id on the non-streaming and the streaming path"
+    (let [composite (responses-id {"call_id" (str "call_" (apply str (repeat 24 \a)))
+                                   "id"      (str "fc_" (apply str (repeat 60 \b)))
+                                   "name"    "cat"})
+          messages  [{:role "assistant" :content [{:type "tool_use" :id composite :name "cat" :input {}}]}
+                     {:role "user" :content [{:type "tool_result" :tool_use_id composite :content "ok"}]}]
+          captured  (atom {})
+          envelope  {:parsed   {"choices" [{"message" {"content" "ok"} "finish_reason" "stop"}]}
+                     :raw-body "{}"
+                     :url      "https://api.example.com/v1/chat/completions"
+                     :status   200}]
+      (with-redefs-fn {#'sut/http-post! (fn [_url body _headers _timeout-ms]
+                                          (swap! captured assoc :non-streaming body)
+                                          envelope)}
+        (fn [] (chat-with-retry messages "gpt-5.6-sol" "sk-test"
+                 "https://api.example.com/v1" {} 1000 nil :openai-compatible-chat)))
+      (with-redefs-fn {#'sut/http-post-stream! (fn [_url body _headers _timeout-ms _ttft _idle _delta-fn _on-delta]
+                                                 (swap! captured assoc :streaming body)
+                                                 {:content "ok" :finish-reason "stop"})}
+        (fn [] (chat-streaming messages "gpt-5.6-sol" "sk-test"
+                 "https://api.example.com/v1" {} 1000 nil nil nil nil (fn [_]) :openai-compatible-chat)))
+      ;; Both paths were exercised, and only one of them asks for SSE.
+      (expect (= #{:non-streaming :streaming} (set (keys @captured))))
+      (expect (true? (:stream (:streaming @captured))))
+      (expect (nil? (:stream (:non-streaming @captured))))
+      (doseq [[path body] @captured
+              :let [call   (first (mapcat :tool_calls (:messages body)))
+                    result (first (filter #(= "tool" (:role %)) (:messages body)))]]
+        (expect (re-matches wire-tool-id-re (str (:id call)))
+          (str path " tool_calls id must match the chat wire form, got " (pr-str (:id call))))
+        (expect (re-matches wire-tool-id-re (str (:tool_call_id result)))
+          (str path " tool_call_id must match the chat wire form, got " (pr-str (:tool_call_id result))))
+        (expect (= (:id call) (:tool_call_id result))
+          (str path " must keep the tool call and its result paired"))))))
 
 (def ^:private sig-long-id
   (str "{\"type\":\"reasoning\",\"id\":\"rs_" (apply str (repeat 64 \a))

@@ -2842,7 +2842,10 @@
   ([messages model]
    (build-request-body messages model nil))
   ([messages model extra-body]
-   (let [messages (sanitize-replayed-messages messages model true)
+   ;; Issue #152: the chat/completions wire carries ONE id per call and caps it
+   ;; at 64 chars — preserving the Responses composite `call_id|item_id` is
+   ;; correct only on /v1/responses, so collapse it for this dialect.
+   (let [messages (sanitize-replayed-messages messages model false)
          [tools tool-choice extra-body] (extra-body-tools extra-body)
          echo-off? (echo-reasoning-disabled?)
          tool-use?    #(= "tool_use" (:type %))
@@ -2870,7 +2873,7 @@
                                  (openai-chat-reasoning-content thinking-blocks))
                                tool-calls
                                (when (seq tool-use-blocks)
-                                 (mapv (fn [b] {:id (:id b) :type "function"
+                                 (mapv (fn [b] {:id (normalize-tool-call-id (:id b) false) :type "function"
                                                 :function {:name (:name b)
                                                            :arguments (json/write-json-str (or (:input b) {}))}})
                                    tool-use-blocks))
@@ -2887,7 +2890,7 @@
                                ;; 400 on every OpenAI-compatible endpoint.
                                keep-base? (or (seq rest-blocks) (seq tool-calls) reasoning-content)
                                tool-msgs (mapv (fn [b] {:role "tool"
-                                                        :tool_call_id (:tool_use_id b)
+                                                        :tool_call_id (normalize-tool-call-id (:tool_use_id b) false)
                                                         :content (tool-result-text (:content b))})
                                            tool-result-blocks)]
                            (vec (concat (when keep-base? [base]) tool-msgs))))
