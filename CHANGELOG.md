@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.126] - 2026-08-20
+
+### Changed
+- feat(router): rename quick reasoning effort to low
+- release: update version files for v0.7.125, bump to next dev version
+
+
 ### Changed
 - Rename the lowest abstract reasoning effort from `:quick` to `:low`.
 ## [v0.7.125] - 2026-08-20
@@ -2261,7 +2268,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.125...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.126...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2421,3 +2428,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.123]: https://github.com/Blockether/svar/releases/tag/v0.7.123
 [v0.7.124]: https://github.com/Blockether/svar/releases/tag/v0.7.124
 [v0.7.125]: https://github.com/Blockether/svar/releases/tag/v0.7.125
+[v0.7.126]: https://github.com/Blockether/svar/releases/tag/v0.7.126
