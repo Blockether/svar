@@ -44,7 +44,7 @@
   router/REASONING_LEVELS)
 
 (def normalize-reasoning-level
-  "Coerce any accepted spelling to canonical :quick|:balanced|:deep.
+  "Coerce any accepted spelling to canonical :low|:balanced|:deep.
    Also accepts :low/:medium/:high aliases for OpenAI-style migrations."
   router/normalize-reasoning-level)
 

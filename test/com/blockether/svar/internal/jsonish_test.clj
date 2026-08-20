@@ -113,7 +113,7 @@
 ;;
 ;; GLM-5.1 and other reasoning models frequently emit Clojure/EDN syntax
 ;; instead of strict JSON — keyword keys (:code, :expr), keyword values
-;; (:quick, :deep), trailing whitespace/newlines before the opening brace.
+;; (:low, :deep), trailing whitespace/newlines before the opening brace.
 ;; These tests pin the exact behaviours we rely on in production.
 ;; =============================================================================
 
@@ -152,9 +152,9 @@
         (expect (= {:code []} (:value result))))))
 
   (describe "EDN keyword values"
-    (it "parses :quick as the string \"quick\""
-      (let [result (sut/parse-json "{:next {:reasoning :quick}}")]
-        (expect (= {:next {:reasoning "quick"}} (:value result)))))
+    (it "parses :low as the string \"low\""
+      (let [result (sut/parse-json "{:next {:reasoning :low}}")]
+        (expect (= {:next {:reasoning "low"}} (:value result)))))
 
     (it "parses :deep as the string \"deep\""
       (let [result (sut/parse-json "{:next {:reasoning :deep}}")]
@@ -170,7 +170,7 @@
                   (:value result)))))
 
     (it "produces a warning noting the EDN keyword value strip"
-      (let [result (sut/parse-json "{\"reasoning\": :quick}")]
+      (let [result (sut/parse-json "{\"reasoning\": :low}")]
         (expect (some #(re-find #"EDN keyword value" %) (:warnings result)))))
 
     (it "parses keyword value as first value in a map"
@@ -264,8 +264,8 @@
 
   (describe "mixed JSON + EDN (real production variants)"
     (it "handles JSON keys mixed with EDN keyword values"
-      (let [result (sut/parse-json "{\"reasoning\": :quick, \"code\": []}")]
-        (expect (= "quick" (get (:value result) :reasoning)))))
+      (let [result (sut/parse-json "{\"reasoning\": :low, \"code\": []}")]
+        (expect (= "low" (get (:value result) :reasoning)))))
 
     (it "handles JSON keys, JSON values, no EDN"
       (let [result (sut/parse-json "{\"code\": [{\"expr\": \"(+ 1 2)\", \"time-ms\": 50}]}")]

@@ -75,7 +75,7 @@
 ;; These live tests now run on glm-5.1, which did NOT exhibit the quirk in
 ;; measurement (0/16 thinking calls vs glm-4.7's ~25%); the retry is kept as
 ;; cheap defense-in-depth and documents the glm-4.7 behavior svar still handles.
-;; Only thinking-enabled asks merge it; `:quick` disables thinking.
+;; Only thinking-enabled asks merge it; `:low` disables thinking.
 (def ^:private reasoning-retry-opts
   {:format-retries  3
    :format-retry-on #{:svar.llm/empty-content
@@ -112,14 +112,14 @@
           (expect (= "glm-5.1" (:routed/model result)))
           (expect (some? (get-in result [:result :answer])))))))
 
-  (describe ":reasoning :quick on :zai direct"
-    (it "translates :quick → thinking:{type:\"disabled\"} and succeeds"
+  (describe ":reasoning :low on :zai direct"
+    (it "translates :low → thinking:{type:\"disabled\"} and succeeds"
       (when (zai-enabled?)
         (let [r (zai-router ["glm-5.1"])
               result (svar/ask! r
                        {:spec answer-spec
                         :messages [(svar/user "Reply with the word 'fast'.")]
-                        :reasoning :quick})]
+                        :reasoning :low})]
           (expect (= "glm-5.1" (:routed/model result)))
           (expect (some? (get-in result [:result :answer])))))))
 
@@ -158,14 +158,14 @@
    shape is covered by the unit tests in `router_reasoning_test.clj`; here
    we verify the round-trip works against real GLM-5.1."
 
-  (describe ":reasoning :quick on :zai-coding"
+  (describe ":reasoning :low on :zai-coding"
     (it "translates to `thinking:{type:\"disabled\"}` and succeeds"
       (when (zai-coding-enabled?)
         (let [r (zai-coding-router ["glm-5.1"])
               result (svar/ask! r
                        {:spec answer-spec
                         :messages [(svar/user "Reply with the word 'fast'.")]
-                        :reasoning :quick})]
+                        :reasoning :low})]
           (expect (= "glm-5.1" (:routed/model result)))
           (expect (some? (get-in result [:result :answer])))))))
 
@@ -205,16 +205,16 @@
     ;; The `:deep` + preserved variant was removed: glm-4.7 with deep
     ;; reasoning intermittently returns an empty content block under
     ;; load, producing CI flake unrelated to the preserved-thinking
-    ;; flag itself. The `:quick` variant below + the metadata sanity
+    ;; flag itself. The `:low` variant below + the metadata sanity
     ;; tests cover the wire shape; the `clear_thinking: false` body
     ;; emission is verified directly in `router-decisions-test`.
-    (it "`:quick` + preserved succeeds — thinking disabled but flag still accepted"
+    (it "`:low` + preserved succeeds — thinking disabled but flag still accepted"
       (when (zai-coding-enabled?)
         (let [r (zai-coding-router ["glm-5.1"])
               result (svar/ask! r
                        {:spec answer-spec
                         :messages [(svar/user "Reply with the word 'quick'.")]
-                        :reasoning :quick
+                        :reasoning :low
                         :preserved-thinking? true})]
           (expect (= "glm-5.1" (:routed/model result)))
           (expect (some? (get-in result [:result :answer]))))))))

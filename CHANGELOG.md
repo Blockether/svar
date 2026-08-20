@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Rename the lowest abstract reasoning effort from `:quick` to `:low`.
 ## [v0.7.125] - 2026-08-20
 
 ### Changed

@@ -251,14 +251,14 @@
           (expect (string? (get-in result [:result :thinking])))
           (expect (#{:low :medium :high} (get-in result [:result :confidence])))))))
 
-  (describe ":format-retries 0 on glm-5.1 :reasoning :quick on :zai-coding"
+  (describe ":format-retries 0 on glm-5.1 :reasoning :low on :zai-coding"
     (it "baseline: single attempt, simple spec, :format-attempts absent on success"
       (when (zai-coding-enabled?)
         (let [r (zai-coding-router ["glm-5.1"])
               result (ask-glm! r
                        {:spec answer-spec
                         :messages [(svar/user "Reply with the word 'baseline'.")]
-                        :reasoning :quick
+                        :reasoning :low
                         :format-retries 0})]
           (expect (= :zai-coding (:routed/provider-id result)))
           (expect (some? (get-in result [:result :answer])))
@@ -387,14 +387,14 @@
           (expect (string? (get-in result [:result :thinking])))
           (expect (#{:low :medium :high} (get-in result [:result :confidence])))))))
 
-  (describe ":format-retries 0 on glm-5.1 :reasoning :quick via :blockether proxy"
+  (describe ":format-retries 0 on glm-5.1 :reasoning :low via :blockether proxy"
     (it "baseline: single attempt, simple spec, :format-attempts absent on success"
       (when (blockether-enabled?)
         (let [r (blockether-router ["glm-5.1"])
               result (ask-glm! r
                        {:spec answer-spec
                         :messages [(svar/user "Reply with the word 'baseline'.")]
-                        :reasoning :quick
+                        :reasoning :low
                         :format-retries 0})]
           (expect (= :blockether (:routed/provider-id result)))
           (expect (some? (get-in result [:result :answer])))

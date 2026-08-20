@@ -53,7 +53,7 @@
         ;; Opus 5 is an adaptive-thinking family: depth is `output_config.effort`.
         (expect (= {:thinking {:type "adaptive" :display "summarized"}
                     :output_config {:effort "low"}}
-                  (body opus :quick)))
+                  (body opus :low)))
         ;; Regression: `:deep` used to resolve through the OPENAI effort column
         ;; and land on "high" — Anthropic's DEFAULT — so asking for deep
         ;; thinking bought nothing above the default posture.
@@ -64,7 +64,7 @@
         (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}
                   (body haiku :balanced)))
         ;; The lever that spiralled the proxy stays unreachable on this wire.
-        (doseq [level [:quick :balanced :deep]
+        (doseq [level [:low :balanced :deep]
                 m [opus haiku]]
           (expect (nil? (:reasoning_effort (body m level))))))))
 

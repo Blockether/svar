@@ -83,14 +83,14 @@
       (when (blockether-enabled?)
         ;; glm-5-turbo is a reasoning model; without an explicit reasoning
         ;; hint the proxy can burn the full output budget on internal
-        ;; reasoning and return empty content. `:reasoning :quick` keeps
+        ;; reasoning and return empty content. `:reasoning :low` keeps
         ;; the call deterministic without changing what the test verifies.
         (let [r (router-with-models ["glm-5-turbo"])
               result (svar/ask! r
                        {:spec answer-spec
                         :messages [(svar/user "What is 2+2? Reply with just the number.")]
                         :model "glm-5-turbo"
-                        :reasoning :quick})]
+                        :reasoning :low})]
           (expect (map? result))
           (expect (map? (:result result)))
           (expect (string? (get-in result [:result :answer])))
@@ -116,7 +116,7 @@
                         :messages [(svar/user "Reply with the word 'ok'.")]
                         :routing {:optimize :cost}
                         ;; Avoid reasoning-budget burn on glm-5-turbo.
-                        :reasoning :quick})]
+                        :reasoning :low})]
           (expect (= "glm-5-turbo" (:routed/model result)))
           (expect (some? (get-in result [:result :answer]))))))))
 

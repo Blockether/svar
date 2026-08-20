@@ -281,7 +281,7 @@
 
 (def REASONING_LEVELS
   "Abstract reasoning levels translated per reasoning-style.
-   Vocabulary is intentionally provider-neutral — callers pass :quick|:balanced|:deep
+   Vocabulary is intentionally provider-neutral — callers pass :low|:balanced|:deep
    and svar picks the right on-the-wire shape for the selected model.
 
    Sub-key semantics:
@@ -315,7 +315,7 @@
                              Older Claude 4 models use manual budget_tokens.
      `:zai-thinking`       → binary `:thinking {:type \"enabled\"|\"disabled\"}` on
                              Z.ai / GLM-4.6+. No budget_tokens — thinking is on/off.
-                             `:quick` disables, `:balanced`/`:deep` enable.
+                             `:low` disables, `:balanced`/`:deep` enable.
                              See also `:preserved-thinking?` below for the
                              `clear_thinking: false` flag that keeps reasoning
                              across assistant turns.
@@ -340,17 +340,13 @@
                              Copilot Claude is back on `/v1/messages` and
                              therefore back on `:anthropic-thinking`; the
                              OpenAI-compatible Copilot rows keep this style."
-  {:quick    {:openai-effort "low"    :anthropic-effort "low"  :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "low"  :server-managed nil}
+  {:low    {:openai-effort "low"    :anthropic-effort "low"  :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "low"  :server-managed nil}
    :balanced {:openai-effort "medium" :anthropic-effort "high" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
    :deep     {:openai-effort "max"    :anthropic-effort "max"  :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
 
 (defn normalize-reasoning-level
-  "Coerce any accepted spelling to a canonical :quick|:balanced|:deep keyword.
-   Accepts:
-     - :quick / :balanced / :deep (keywords, case-insensitive)
-     - \"quick\" / \"balanced\" / \"deep\" (strings, case-insensitive)
-     - OpenAI-style aliases :low→:quick, :medium→:balanced, :high→:deep
-       (so `:reasoning_effort` migrations don't break).
+  "Coerce any accepted spelling to a canonical :low|:balanced|:deep keyword.
+   Accepts those keywords or strings case-insensitively.
    Returns nil for unknown input."
   [v]
   (let [raw (cond
@@ -359,9 +355,9 @@
               :else        nil)
         s (when raw (str/lower-case (str/trim raw)))]
     (case s
-      ("quick" "low")       :quick
-      ("balanced" "medium") :balanced
-      ("deep" "high")       :deep
+      "low"      :low
+      "balanced" :balanced
+      "deep"     :deep
       nil)))
 
 (defn- infer-reasoning-style
@@ -428,7 +424,7 @@
    The vocabulary is the catalog's own (`reasoning_options[].values`) and is
    declared exactly once, here, so ordering and clamping cannot drift apart.
    `none` / `minimal` mean *do not think*; svar's abstract levels never aim
-   there — `:quick` is the weakest rung that still thinks."
+   there — `:low` is the weakest rung that still thinks."
   ["none" "minimal" "low" "medium" "high" "xhigh" "max"])
 
 (def ^:private EFFORT_RANK
@@ -490,7 +486,7 @@
 
    Clamping DOWN stops at `WEAKEST_THINKING_EFFORT`: a row that sells only
    `[\"none\" \"high\"]` (Mistral Medium, GLM-5.2 on several gateways, the Gemini
-   image rows) must answer `:quick` with \"high\", never \"none\" — silently
+   image rows) must answer `:low` with \"high\", never \"none\" — silently
    disabling reasoning for a caller who asked for the shallow END of it is the
    one clamp direction that changes what the request MEANS.
 
@@ -631,7 +627,7 @@
    them. A LIGHTER rung is real only when models.dev advertises it for the exact
    model — GLM-5.3 sells \"low\", GLM-5.2 sells nothing below \"high\" — because
    z.ai answers an effort a model does not know with its heavy `max` default,
-   the opposite of the short turn `:quick` asked for. The catalog decides, never
+   the opposite of the short turn `:low` asked for. The catalog decides, never
    the model name."
   [wanted model-map]
   (when wanted
@@ -699,7 +695,7 @@
              ;; GLM-5.2+ (DeepSeek-V4 mechanism): thinking is ON and the DEPTH
              ;; is chosen by `reasoning_effort`. GLM's rungs are "low"/"high"/
              ;; "max" — NOT OpenAI's low/medium/high — and they line up 1:1 with
-             ;; the abstract levels (`REASONING_LEVELS`): `:quick` → "low",
+             ;; the abstract levels (`REASONING_LEVELS`): `:low` → "low",
              ;; `:balanced` → "high", `:deep` → "max".
              ;;
              ;; "low" is the rung a row may not sell: GLM-5.2 stops at "high", and

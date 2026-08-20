@@ -14,27 +14,24 @@
    [com.blockether.svar.internal.llm :as llm]))
 
 (defdescribe normalize-reasoning-level-test
-  "Vocabulary normalization: canonical keywords + OpenAI aliases."
+  "Vocabulary normalization: canonical low, balanced, and deep keywords."
 
-  (describe "canonical vocabulary (quick/balanced/deep)"
+  (describe "canonical vocabulary (low/balanced/deep)"
     (it "accepts canonical keywords"
-      (expect (= :quick    (router/normalize-reasoning-level :quick)))
+      (expect (= :low      (router/normalize-reasoning-level :low)))
       (expect (= :balanced (router/normalize-reasoning-level :balanced)))
       (expect (= :deep     (router/normalize-reasoning-level :deep))))
 
     (it "accepts canonical strings, trimmed + case-insensitive"
-      (expect (= :quick    (router/normalize-reasoning-level "quick")))
+      (expect (= :low      (router/normalize-reasoning-level "LOW")))
       (expect (= :balanced (router/normalize-reasoning-level " Balanced ")))
       (expect (= :deep     (router/normalize-reasoning-level "DEEP")))))
 
-  (describe "OpenAI-style aliases (back-compat)"
-    (it "maps low/medium/high to quick/balanced/deep"
-      (expect (= :quick    (router/normalize-reasoning-level :low)))
-      (expect (= :balanced (router/normalize-reasoning-level :medium)))
-      (expect (= :deep     (router/normalize-reasoning-level :high)))
-      (expect (= :quick    (router/normalize-reasoning-level "low")))
-      (expect (= :balanced (router/normalize-reasoning-level "MEDIUM")))
-      (expect (= :deep     (router/normalize-reasoning-level " high ")))))
+  (it "rejects retired effort names"
+    (expect (nil? (router/normalize-reasoning-level :quick)))
+    (expect (nil? (router/normalize-reasoning-level :medium)))
+    (expect (nil? (router/normalize-reasoning-level :high)))
+    (expect (nil? (router/normalize-reasoning-level "quick"))))
 
   (describe "invalid input"
     (it "returns nil for unknown vocabulary"
@@ -54,25 +51,23 @@
     (it "emits flat :reasoning_effort for reasoning-capable models"
       (let [gpt5 {:name "gpt-5" :reasoning? true}]
         (expect (= {:reasoning_effort "low"}
-                  (router/reasoning-extra-body :openai-compatible-chat gpt5 :quick)))
+                  (router/reasoning-extra-body :openai-compatible-chat gpt5 :low)))
         (expect (= {:reasoning_effort "medium"}
                   (router/reasoning-extra-body :openai-compatible-chat gpt5 :balanced)))
         (expect (= {:reasoning_effort "high"}
                   (router/reasoning-extra-body :openai-compatible-chat gpt5 :deep)))))
 
-    (it "accepts OpenAI-alias input too"
+    (it "rejects retired abstract aliases"
       (let [gpt5 {:name "gpt-5" :reasoning? true}]
-        (expect (= {:reasoning_effort "low"}
-                  (router/reasoning-extra-body :openai-compatible-chat gpt5 :low)))
-        (expect (= {:reasoning_effort "high"}
-                  (router/reasoning-extra-body :openai-compatible-chat gpt5 "HIGH"))))))
+        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat gpt5 :quick)))
+        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat gpt5 "HIGH"))))))
 
   (describe "Anthropic api-style"
     (it "emits nested :thinking block for reasoning-capable models"
       ;; Fully-specified model (explicit :reasoning-style)
       (let [claude {:name "claude-sonnet-4-5" :reasoning? true :reasoning-style :anthropic-thinking}]
         (expect (= {:thinking {:type "enabled" :budget_tokens 1024}}
-                  (router/reasoning-extra-body :anthropic claude :quick)))
+                  (router/reasoning-extra-body :anthropic claude :low)))
         (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}
                   (router/reasoning-extra-body :anthropic claude :balanced)))
         (expect (= {:thinking {:type "enabled" :budget_tokens 24000}}
@@ -87,7 +82,7 @@
                                     ["claude-opus-4-8" :balanced "high"]
                                     ["claude-opus-4-7" :balanced "high"]
                                     ["claude-opus-4-6" :deep "max"]
-                                    ["claude-sonnet-4-6" :quick "low"]]]
+                                    ["claude-sonnet-4-6" :low "low"]]]
         (let [out (router/reasoning-extra-body :anthropic
                     {:name model :reasoning? true :reasoning-style :anthropic-thinking}
                     level)]
@@ -101,7 +96,7 @@
       (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}
             effort (fn [level] (get-in (router/reasoning-extra-body :anthropic opus level)
                                  [:output_config :effort]))]
-        (expect (= "low" (effort :quick)))
+        (expect (= "low" (effort :low)))
         (expect (= "high" (effort :balanced)))
         (expect (= "max" (effort :deep)))
         ;; The two columns are deliberately different data: `:balanced` is each
@@ -145,13 +140,13 @@
       (let [claude {:name "claude-opus-4-5" :reasoning? true :reasoning-style :anthropic-thinking}
             budget (fn [lvl] (get-in (router/reasoning-extra-body :anthropic claude lvl)
                                [:thinking :budget_tokens]))]
-        (expect (< (budget :quick) (budget :balanced) (budget :deep))))))
+        (expect (< (budget :low) (budget :balanced) (budget :deep))))))
 
   (describe "Z.ai / GLM binary thinking"
-    (it "emits `{:thinking {:type \"disabled\"}}` for :quick"
+    (it "emits `{:thinking {:type \"disabled\"}}` for :low"
       (let [glm {:name "glm-4.6" :reasoning? true :reasoning-style :zai-thinking}]
         (expect (= {:thinking {:type "disabled"}}
-                  (router/reasoning-extra-body :openai-compatible-chat glm :quick)))))
+                  (router/reasoning-extra-body :openai-compatible-chat glm :low)))))
 
     (it "emits `{:thinking {:type \"enabled\"}}` for :balanced and :deep"
       (let [glm {:name "glm-4.6" :reasoning? true :reasoning-style :zai-thinking}]
@@ -187,7 +182,7 @@
         ;; Edge: caller says \"don't think this turn, but preserve reasoning
         ;; from prior turns\". The abstract level disables thinking; the
         ;; preserved flag still rides along so the server can retain history.
-        (let [out (router/reasoning-extra-body :openai-compatible-chat glm :quick
+        (let [out (router/reasoning-extra-body :openai-compatible-chat glm :low
                     {:preserved-thinking? true})]
           (expect (= {:thinking {:type "disabled" :clear_thinking false}} out))))
 
@@ -223,18 +218,18 @@
     ;; GLM chooses thinking DEPTH via reasoning_effort and its rungs are
     ;; low/high/max, which the abstract levels ride 1:1. GLM-5.2 sells nothing
     ;; below "high" — z.ai answers a rung a model does not know with its heavy
-    ;; "max" default — so `:quick` stops thinking there instead (verified live:
+    ;; "max" default — so `:low` stops thinking there instead (verified live:
     ;; glm-5.2 honors thinking:{type "disabled"}).
     (let [glm {:name "glm-5.2" :reasoning? true :reasoning-style :zai-effort}]
-      (it "`:quick` disables thinking (no light effort rung exists)"
+      (it "`:low` disables thinking (no light effort rung exists)"
         (expect (= {:thinking {:type "disabled"}}
-                  (router/reasoning-extra-body :anthropic glm :quick))))
+                  (router/reasoning-extra-body :anthropic glm :low))))
 
-      (it "`:quick` still disables thinking when the catalog stops at high"
+      (it "`:low` still disables thinking when the catalog stops at high"
         (expect (= {:thinking {:type "disabled"}}
                   (router/reasoning-extra-body :anthropic
                     (assoc glm :reasoning-options [{:type "effort" :values ["high" "max"]}])
-                    :quick))))
+                    :low))))
 
       (it "`:balanced` keeps thinking on at high effort"
         (expect (= {:reasoning_effort "high" :thinking {:type "enabled"}}
@@ -244,24 +239,24 @@
         (expect (= {:reasoning_effort "max" :thinking {:type "enabled"}}
                   (router/reasoning-extra-body :anthropic glm :deep))))
 
-      (it "`:quick` ignores `:preserved-thinking?` (no thinking → nothing to preserve)"
+      (it "`:low` ignores `:preserved-thinking?` (no thinking → nothing to preserve)"
         (expect (= {:thinking {:type "disabled"}}
-                  (router/reasoning-extra-body :anthropic glm :quick
+                  (router/reasoning-extra-body :anthropic glm :low
                     {:preserved-thinking? true})))))
 
     ;; GLM-5.3 (2026-08-14) advertises ["low" "high" "max"] — the light rung
-    ;; GLM-5.2 never had — so the whole ladder is reachable and `:quick` spends
+    ;; GLM-5.2 never had — so the whole ladder is reachable and `:low` spends
     ;; it instead of turning thinking off (see `zai-effort-rung`).
     (let [glm53 {:name "glm-5.3" :reasoning? true :reasoning-style :zai-effort
                  :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}]
-      (it "`:quick` thinks at the advertised low rung instead of disabling thinking"
+      (it "`:low` thinks at the advertised low rung instead of disabling thinking"
         (expect (= {:reasoning_effort "low" :thinking {:type "enabled"}}
-                  (router/reasoning-extra-body :anthropic glm53 :quick))))
+                  (router/reasoning-extra-body :anthropic glm53 :low))))
 
-      (it "`:quick` + preserved keeps reasoning across turns"
+      (it "`:low` + preserved keeps reasoning across turns"
         (expect (= {:reasoning_effort "low"
                     :thinking {:type "enabled" :clear_thinking false}}
-                  (router/reasoning-extra-body :anthropic glm53 :quick
+                  (router/reasoning-extra-body :anthropic glm53 :low
                     {:preserved-thinking? true}))))
 
       (it "`:balanced` and `:deep` still ride high / max"
@@ -289,7 +284,7 @@
         (expect (= {:reasoning_effort "high"}
                   (router/reasoning-extra-body :custom-gateway model :deep)))
         (expect (= {:reasoning_effort "low"}
-                  (router/reasoning-extra-body nil model :quick)))))
+                  (router/reasoning-extra-body nil model :low)))))
 
     (it "explicit :reasoning-style always wins over api-style inference"
       ;; A z.ai model behind an OpenAI-compat api-style still emits z.ai thinking.
@@ -387,18 +382,18 @@
       (let [pro {:name "gpt-5-pro" :reasoning? true
                  :reasoning-options [{:type "effort" :values ["high"]}]}]
         (expect (= {:reasoning_effort "high"}
-                  (router/reasoning-extra-body :openai-compatible-chat pro :quick)))))
+                  (router/reasoning-extra-body :openai-compatible-chat pro :low)))))
 
     (it "never clamps a level down into \"none\" / \"minimal\""
       ;; Regression: clamping only looked DOWNWARD, so the 40 catalog rows that
       ;; sell reasoning as on/off (`["none" "high"]` — Mistral Medium, GLM-5.2 on
       ;; several gateways, `["minimal" "high"]` on the Gemini image rows) answered
-      ;; `:quick` and `:balanced` with "none": a caller asking for the shallow end
+      ;; `:low` and `:balanced` with "none": a caller asking for the shallow end
       ;; of thinking silently got NO thinking.
       (let [on-off {:name "mistral-medium-3.5" :reasoning? true
                     :reasoning-options [{:type "effort" :values ["none" "high"]}]}]
         (expect (= {:reasoning_effort "high"}
-                  (router/reasoning-extra-body :openai-compatible-chat on-off :quick)))
+                  (router/reasoning-extra-body :openai-compatible-chat on-off :low)))
         (expect (= {:reasoning_effort "high"}
                   (router/reasoning-extra-body :openai-compatible-chat on-off :balanced)))))
 
@@ -444,7 +439,7 @@
                 :let [advertised (into #{} (mapcat :values)
                                    (filter #(= "effort" (:type %)) (:reasoning-options model)))]
                 :when (seq advertised)
-                level [:quick :balanced :deep]
+                level [:low :balanced :deep]
                 :let [body (router/reasoning-extra-body api-style model level)
                       sent (or (:reasoning_effort body) (get-in body [:output_config :effort]))]
                 :when sent]
@@ -464,7 +459,7 @@
                 :let [model (modelsdev/normalize-model raw)]
                 :when (seq (:reasoning-options model))
                 api-style [:openai-compatible-chat :anthropic]
-                level [:quick :balanced :deep]
+                level [:low :balanced :deep]
                 :let [body (router/reasoning-extra-body api-style model level)
                       sent (or (:reasoning_effort body) (get-in body [:output_config :effort]))]
                 :when sent]
@@ -675,7 +670,7 @@
         (expect (= body (clamp body)))))
 
     (it "handles each documented reasoning level"
-      (doseq [[level expected-budget] [[:quick 1024] [:balanced 8192] [:deep 24000]]]
+      (doseq [[level expected-budget] [[:low 1024] [:balanced 8192] [:deep 24000]]]
         (let [tr (router/reasoning-extra-body :anthropic
                    {:name "claude-opus-4-5" :reasoning? true} level)
               body (merge {:model "claude-opus-4-5" :max_tokens 2048} tr)

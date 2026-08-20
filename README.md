@@ -294,7 +294,7 @@ Add `:strict true` to a tool definition to have the provider sample that tool's 
 
 Two knobs, different jobs:
 
-- `:reasoning` = how hard the model thinks before answering. Use `:quick`, `:balanced`, or `:deep`.
+- `:reasoning` = how hard the model thinks before answering. Use `:low`, `:balanced`, or `:deep`.
 - `:verbosity` = how verbose the visible answer should be. Use `:low`, `:medium`, or `:high`.
 
 They are independent. Example: `:reasoning :deep` + `:verbosity :low` means think hard, answer briefly.

@@ -846,7 +846,7 @@
 
     (it "raw effort bypasses abstract translation when both are supplied"
       (let [body (:extra-body
-                  (inject {:reasoning :quick :reasoning-effort "max"}
+                  (inject {:reasoning :low :reasoning-effort "max"}
                     provider model))]
         (expect (= "max" (:reasoning_effort body)))
         (expect (= {:type "enabled"} (:thinking body)))))

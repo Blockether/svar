@@ -4867,7 +4867,7 @@
    - `:model`, `:api-key`, `:base-url`, `:api-style`, `:provider-id` come from
      the selected provider/model.
    - `:extra-body` is built from (max_tokens auto-params) < (auto reasoning) <
-     (caller extra-body). The abstract `:reasoning :quick|:balanced|:deep` opt
+     (caller extra-body). The abstract `:reasoning :low|:balanced|:deep` opt
      is translated per the model's api-style; non-reasoning models ignore it.
    - `:reasoning` and `:preserved-thinking?` are consumed here and removed
      downstream (they're svar-level opts, not provider params). Callers who
@@ -5027,7 +5027,7 @@
        :on-auth-error - :fallback-provider opts into provider-scoped credential
                         failover before visible output; unset means fail.
        :exclude-providers - set of provider ids to skip for this call.
-     :reasoning - Abstract reasoning depth: :quick, :balanced, or :deep
+     :reasoning - Abstract reasoning depth: :low, :balanced, or :deep
        (strings + OpenAI-style :low/:medium/:high aliases also accepted).
        Automatically translated per the selected model's api-style:
          OpenAI/GPT-5/o-series → `{:reasoning_effort \"low|medium|high\"}`

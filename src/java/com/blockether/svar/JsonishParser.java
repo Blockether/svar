@@ -209,7 +209,7 @@ public class JsonishParser {
         } else if (c == '-' || Character.isDigit(c)) {
             return parseNumber();
         } else if (c == ':') {
-            // EDN/Clojure keyword value — e.g. :quick, :balanced, :deep.
+            // EDN/Clojure keyword value — e.g. :low, :balanced, :deep.
             // Strip the leading colon and return the name as a plain string
             // so spec keyword-field coercion can normalize it downstream.
             return parseEdnKeywordValue();
@@ -220,9 +220,9 @@ public class JsonishParser {
     }
 
     /**
-     * Parses a Clojure/EDN keyword used as a VALUE — e.g. :quick, :deep.
+     * Parses a Clojure/EDN keyword used as a VALUE — e.g. :low, :deep.
      * Strips the leading colon and returns the name as a plain string.
-     * The spec's keyword-field coercion layer will then turn "quick" → :quick.
+     * The spec's keyword-field coercion layer will then turn "low" → :low.
      */
     private String parseEdnKeywordValue() {
         pos++; // consume ':'
