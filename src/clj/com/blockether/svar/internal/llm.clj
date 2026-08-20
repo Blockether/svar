@@ -1077,55 +1077,49 @@
 ;; Native tool calling — canonical tool defs shaped per wire
 ;; ---------------------------------------------------------------------------
 ;;
-;; Caller passes canonical tool defs `{:name :description :schema <json-schema>}`
-;; — plus an optional `:strict` per tool (grammar-constrained tool inputs) —
-;; plus a canonical tool-choice. They ride in `extra-body` under `:svar/tools` /
+;; Caller passes canonical tool defs `{:name :description :schema <json-schema>}` plus
+;; a canonical tool-choice. They ride in `extra-body` under `:svar/tools` /
 ;; `:svar/tool-choice` (the universal passthrough that already reaches every
 ;; request-body builder), mirroring the `:svar/cache` marker convention. Each
 ;; builder strips the svar keys, shapes the tools for its wire, and assocs the
-;; native `:tools` / `:tool_choice` body fields.
+;; native `:tools` / `:tool_choice` body fields. Svar does not support strict
+;; tool sampling, so any `strict` field is removed before wire shaping.
 
 (def ^:private EMPTY_TOOL_SCHEMA {:type "object" :properties {}})
 
+(defn- strip-schema-fields
+  "Recursively remove `fields` (lower-cased key names) from a JSON-Schema value."
+  [x fields]
+  (cond
+    (map? x)        (reduce-kv (fn [m k v]
+                                 (if (contains? fields
+                                       (str/lower-case (if (keyword? k) (name k) (str k))))
+                                   m
+                                   (assoc m k (strip-schema-fields v fields))))
+                      (empty x) x)
+    (sequential? x) (mapv #(strip-schema-fields % fields) x)
+    :else           x))
+
 (defn- tool-def->wire
-  "Shape one canonical tool def `{:name :description :schema :strict}` for `api-style`.
+  "Shape one canonical tool def `{:name :description :schema}` for `api-style`.
 
-   `:strict true` opts THAT tool into the provider's grammar-constrained
-   sampling, so its `input` cannot come back malformed (the classic failure is
-   an array argument arriving as JSON TEXT). It is per-tool because each wire
-   enforces a different JSON-Schema subset:
-
-   - anthropic — `strict` sits next to `input_schema`. Generally available, no
-     beta header; optional properties may stay out of `required`.
-   - openai responses / chat — `strict` on the function tool (flat, resp. under
-     `:function`). The subset is harsher: EVERY property must be listed in
-     `required` (make optional ones nullable) and every object must carry
-     `additionalProperties false`, or the request is rejected. The ChatGPT
-     Codex backend accepts the field — Codex's own tools serialize
-     `strict: false`.
-   - gemini has no per-tool equivalent; the flag is ignored there.
-
-   A provider that rejects the field heals itself instead of failing the turn:
-   see `gateway-injected-tool-fields`."
-  [api-style {:keys [name description schema strict]}]
-  (let [schema  (or schema EMPTY_TOOL_SCHEMA)
-        strict? (boolean strict)]
+   Svar does not support provider strict-tool sampling. Any case-insensitive
+   `strict` key in the canonical schema is removed, and a tool-level `:strict`
+   option is ignored, so the field can never reach a provider wire."
+  [api-style {:keys [name description schema]}]
+  (let [schema (strip-schema-fields (or schema EMPTY_TOOL_SCHEMA) #{"strict"})]
     (case api-style
       :anthropic
       (cond-> {:name name :input_schema schema}
-        description (assoc :description description)
-        strict?     (assoc :strict true))
+        description (assoc :description description))
 
       :openai-compatible-responses
       (cond-> {:type "function" :name name :parameters schema}
-        description (assoc :description description)
-        strict?     (assoc :strict true))
+        description (assoc :description description))
 
-      ;; default = :openai-compatible-chat
       {:type "function"
        :function (cond-> {:name name :parameters schema}
-                   description (assoc :description description)
-                   strict?     (assoc :strict true))})))
+                   description (assoc :description description))})))
 
 (defn- tools->wire [api-style tools]
   (mapv #(tool-def->wire api-style %) tools))
@@ -1136,24 +1130,10 @@
    (`tools[0].parameters` — the OpenAI/Codex `param` on a rejected schema)."
   #"(?i)tools(?:\.(\d+)|\[(\d+)\])(?:\.(?:custom|function))?\.(input_schema|parameters|strict|additionalProperties)")
 
-(def ^:private strict-schema-rejection-pattern
-  #"(?i)invalid_function_parameters|Invalid schema for function")
-
 (defn- droppable-tool-field
-  "The tool field that can actually be DROPPED to make the call work.
-
-   OpenAI — and the ChatGPT Codex backend, verified live — blame
-   `tools[0].parameters` with `Invalid schema for function 'x': In context=(),
-   'additionalProperties' is required to be supplied and to be false` when a
-   tool asked for `:strict true` with a schema outside the strict subset. The
-   schema is perfectly legal WITHOUT strict, so the removable field is `strict`,
-   not the parameters the provider names."
-  [field text tool]
-  (if (and (= "parameters" field)
-        (:strict tool)
-        (re-find strict-schema-rejection-pattern text))
-    "strict"
-    field))
+  "Return the provider-reported tool field."
+  [field _text _tool]
+  field)
 
 (defn- enrich-tool-schema-rejection
   "Attach the canonical tool name to a provider schema error that only names
@@ -1175,34 +1155,14 @@
       e)))
 
 (def ^:private gateway-injected-tool-fields
-  "Tool fields the UPSTREAM model can reject on a wire tool
-   (`tools.0.custom.strict: Extra inputs are not permitted`).
+  "Tool fields the UPSTREAM model can reject on a wire tool.
 
-   They arrive two ways. A GATEWAY grafts them on: LiteLLM's Bedrock Converse
-   path builds `toolSpec` from the request tool, copying `function.strict` and
-   hoisting the schema ROOT `additionalProperties` into `inputSchema.json`,
-   then Bedrock validates that toolSpec against the native Anthropic tool
-   shape, which has neither key. Or WE sent them — a tool def carrying
-   `:strict true` (see `tool-def->wire`) routed to a model that cannot do
-   grammar-constrained sampling. Either way both fields are advisory for tool
-   calling: dropping them costs the sampling guarantee, never the call, so svar
-   re-sends without them instead of failing the turn. Lower-cased to match
-   `:tool-schema-field`."
+   A gateway may graft them on: LiteLLM's Bedrock Converse path may hoist the
+   schema root `additionalProperties` into `inputSchema.json`, then Bedrock
+   validates that toolSpec against the native Anthropic tool shape. Svar itself
+   never emits `strict`; `additionalProperties` remains advisory for tool
+   calling and can be dropped and retried when upstream rejects it."
   #{"strict" "additionalproperties"})
-
-(defn- strip-schema-fields
-  "Recursively remove `fields` (lower-cased key names) from a JSON-Schema value."
-  [x fields]
-  (cond
-    (map? x)        (reduce-kv (fn [m k v]
-                                 (if (contains? fields
-                                       (str/lower-case (if (keyword? k) (name k) (str k))))
-                                   m
-                                   (assoc m k (strip-schema-fields v fields))))
-                      (empty x)
-                      x)
-    (sequential? x) (mapv #(strip-schema-fields % fields) x)
-    :else           x))
 
 (defn- sanitize-tools-for-gateway
   "Drop `gateway-injected-tool-fields` from every canonical tool def and its
@@ -5977,9 +5937,9 @@
    opts:
      :messages    - REQUIRED. Canonical messages; may carry prior `tool_use`
                     (assistant) + `tool_result` (user) content blocks.
-     :tools       - Canonical defs `[{:name :description :schema :strict}]`
-                    (`:schema` is a JSON-Schema map for the tool input;
-                    `:strict true` constrains sampling to that schema).
+     :tools       - Canonical defs `[{:name :description :schema}]`
+                     (`:schema` is a JSON-Schema map for the tool input;
+                     any `strict` field is always removed).
      :tool-choice - Optional. :auto (default) | :required | :none | {:name \"x\"}
                     | \"x\" (force a specific tool).
      plus the usual :model/:timeout-ms/:extra-body/:on-chunk keys resolved
@@ -6178,12 +6138,11 @@
    keys (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`).
    Adds:
      :tools       - Canonical tool defs `[{:name :description :schema}]`, where
-                    `:schema` is a JSON-Schema map for the tool input. Shaped
-                    per wire (anthropic `tools`/`input_schema`; OpenAI chat
-                    `function`/`parameters`; responses flat `function`). Add
-                    `:strict true` to a tool to make the provider sample its
-                    `input` under the schema as a grammar — the wire subsets
-                    differ, see `tool-def->wire`.
+                     `:schema` is a JSON-Schema map for the tool input. Shaped
+                     per wire (anthropic `tools`/`input_schema`; OpenAI chat
+                     `function`/`parameters`; responses flat `function`). Svar
+                     does not support strict-tool sampling and always removes
+                     the `strict` field before sending.
      :tool-choice - :auto (default) | :required | :none | {:name \"x\"} |
                     \"x\" (force a specific tool).
 
@@ -6219,19 +6178,13 @@
    `:on-empty-reply-resend` (fn of 1 arg) to observe each re-send live:
    {:model :provider-id :attempt :max-resends :delay-ms :error}.
 
-   SELF-HEALING TOOL SCHEMAS: when the provider rejects a tool field that can be
+   SELF-HEALING TOOL SCHEMAS: `strict` is always removed before the first
+   request. When a provider rejects another advisory tool field that can be
    dropped, the call is re-sent ONCE without it and the model is remembered so
-   later calls send the sanitized shape first. Two sources. A GATEWAY grafted it
-   on (`tools.0.custom.strict: Extra inputs are not permitted` — LiteLLM's
-   Bedrock Converse `toolSpec` forwards `strict` and hoists a schema-root
-   `additionalProperties`); when our tools never carried the field, only a
-   gateway/model change can fix it and the error propagates with
-   `:tool-schema-field-source :gateway` next to
-   `:tool-name`/`:tool-schema-field`. Or WE asked for `:strict true` on a tool
-   whose schema is outside the provider's strict subset (OpenAI/Codex:
-   `tools[0].parameters` — `Invalid schema for function ...`); the schema is
-   valid without strict, so the turn degrades to unconstrained sampling instead
-   of failing."
+   later calls send the sanitized shape first. A gateway-generated `strict`
+   error cannot be healed by repeating an already strict-free request; it
+   propagates with `:tool-schema-field-source :gateway` next to
+   `:tool-name`/`:tool-schema-field`."
   [router opts]
   ;; Bind the caller's cancellation hook for the whole routed call so every
   ;; provider-fallback attempt (and its backoff sleeps) honours it. See
