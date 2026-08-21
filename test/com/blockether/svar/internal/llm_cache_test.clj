@@ -1,13 +1,13 @@
 (ns com.blockether.svar.internal.llm-cache-test
   "Prompt caching + multi-block content + spec-prompt placement.
 
-   These tests cover the wire-shape contract that `vis` (and any other
-   downstream agent loop) relies on for Anthropic prompt caching:
+   These tests cover the wire-shape contract that downstream agent loops rely
+   on for prompt caching:
 
-   - `cached` marker survives `system`/`user`/`assistant`.
-   - Anthropic body emits `cache_control: {type: \"ephemeral\"}` per
-     marked block; system is array-shaped only when needed.
-   - OpenAI body strips `:svar/*` markers; multimodal content untouched.
+   - `cached` markers survive `system`/`user`/`assistant` canonical content.
+   - Anthropic emits `cache_control: {type: \"ephemeral\"}` per marked block.
+   - GPT-5.6+ Responses emits exact rolling `prompt_cache_breakpoint` markers;
+     older OpenAI wires strip unsupported `:svar/*` markers.
    - `extract-anthropic-response-data` surfaces
      `cache_creation_input_tokens` / `cache_read_input_tokens` on
      `:prompt_tokens_details` so downstream callers see real cache hits.
@@ -129,6 +129,49 @@
           user-msg (-> body :messages second)]
       (expect (vector? (:content user-msg)))
       (expect (every? #(nil? (:svar/cache %)) (:content user-msg))))))
+
+(defdescribe openai-responses-prompt-cache-breakpoint-test
+  (it "GPT-5.6 marks the previous turn boundary so a growing conversation reads the cache"
+    (let [body (#'sut/build-openai-responses-request-body
+                [{:role "system" :content [(sut/cached "stable rules")]}
+                 {:role "user" :content "turn one"}
+                 {:role "assistant" :content "answer one"}
+                 {:role "user" :content [(sut/cached "turn two")]}]
+                "gpt-5.6-sol" {:prompt_cache_key "session-1"})
+          messages (filterv #(= "message" (:type %)) (:input body))
+          first-user (first messages)
+          current-user (last messages)]
+      ;; GPT-5.6 matches exact breakpoints and does not fall back to an older
+      ;; unmarked prefix. The previous user boundary is the prefix written by
+      ;; the preceding request; marking it is what reuses the whole prior turn.
+      (expect (= {:mode "explicit"}
+                (get-in first-user [:content 0 :prompt_cache_breakpoint])))
+      (expect (= {:mode "explicit"}
+                (get-in current-user [:content 0 :prompt_cache_breakpoint])))))
+
+  (it "carries a rolling breakpoint through function_call_output tool results"
+    (let [body (#'sut/build-openai-responses-request-body
+                [{:role "user" :content "run it"}
+                 {:role "assistant"
+                  :content [{:type "tool_use" :id "call-1|item-1"
+                             :name "python_execution" :input {:code "print(1)"}}]}
+                 {:role "user"
+                  :content [{:type "tool_result" :tool_use_id "call-1|item-1"
+                             :content "1" :svar/cache true}]}]
+                "gpt-5.6-sol" {:prompt_cache_key "session-1"})
+          first-user (first (:input body))
+          tool-output (last (:input body))]
+      (expect (= {:mode "explicit"}
+                (get-in first-user [:content 0 :prompt_cache_breakpoint])))
+      (expect (= "input_text" (get-in tool-output [:output 0 :type])))
+      (expect (= {:mode "explicit"}
+                (get-in tool-output [:output 0 :prompt_cache_breakpoint])))))
+
+  (it "models before GPT-5.6 keep stripping unsupported breakpoint fields"
+    (let [body (#'sut/build-openai-responses-request-body
+                [{:role "user" :content [(sut/cached "stable")]}]
+                "gpt-5.5" {})]
+      (expect (nil? (get-in body [:input 0 :content 0 :prompt_cache_breakpoint]))))))
 
 (defdescribe openai-canonical-usage-test
   ;; Phase A: normalize-openai-usage emits canonical shape — :input-tokens

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Reuse complete prior-turn prefixes on GPT-5.6 Responses with rolling explicit cache breakpoints.
 ## [v0.7.126] - 2026-08-20
 
 ### Changed

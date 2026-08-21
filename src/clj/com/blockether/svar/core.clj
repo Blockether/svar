@@ -133,8 +133,9 @@
 (def user "Creates a user message, optionally with images." llm/user)
 (def assistant "Creates an assistant message." llm/assistant)
 (def cached
-  "Wraps text in a cacheable content block. On `:anthropic` api-style emits
-   `cache_control: {type: \"ephemeral\"}`; on other styles the marker is stripped."
+  "Wraps text in a cacheable content block. Anthropic emits `cache_control`.
+   GPT-5.6+ Responses emits explicit prompt-cache breakpoints, including a
+   rolling prior-turn boundary; older OpenAI-compatible styles strip the marker."
   llm/cached)
 (def ask! "Asks the LLM and returns structured Clojure data with token usage and cost." llm/ask!)
 (def ask-code!

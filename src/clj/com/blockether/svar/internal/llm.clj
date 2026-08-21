@@ -504,10 +504,14 @@
 ;; provider; without it the tier is silently ignored server-side and
 ;; behaves as 5min).
 ;;
-;; On non-Anthropic styles (OpenAI, Z.ai, gateway-style proxies) the
-;; marker is stripped from the wire body. OpenAI's implicit caching
-;; still kicks in for stable ≥1024-tok prefixes - no client signal
-;; required.
+;; On older non-Anthropic styles (OpenAI, Z.ai, gateway-style proxies) the
+;; marker is stripped from the wire body. OpenAI's implicit caching still
+;; kicks in for stable ≥1024-token prefixes - no client signal required.
+;; GPT-5.6 Responses is different: it matches exact eligible breakpoints and
+;; does not fall back to an older unmarked prefix. Its body builder translates
+;; markers to `prompt_cache_breakpoint` and adds the previous input boundary,
+;; allowing an append-only conversation to read the prefix written by its
+;; preceding request.
 ;;
 ;; Up to 4 cache breakpoints per Anthropic call. A `cache_control` on a
 ;; block caches everything in the request UP TO and INCLUDING that
@@ -2375,7 +2379,57 @@
     :else
     (str content)))
 
-(defn- responses-content-blocks [role content]
+(defn- gpt-5-6-or-later?
+  "True for OpenAI GPT model names whose explicit prompt-cache breakpoint
+   contract is at least GPT-5.6. Provider-qualified names are accepted."
+  [model]
+  (when-let [[_ major minor] (re-find #"(?i)(?:^|/)gpt-(\d+)\.(\d+)(?:$|[-.])" (str model))]
+    (not (neg? (compare [(parse-long major) (parse-long minor)] [5 6])))))
+
+(def ^:private OPENAI_EXPLICIT_CACHE_BREAKPOINT {:mode "explicit"})
+
+(defn- responses-cacheable-input-block?
+  "True when `block` can carry a Responses `prompt_cache_breakpoint`."
+  [role block]
+  (and (not= role "assistant")
+    (contains? #{"text" "input_text" "image_url" "input_image" "tool_result"}
+      (:type block))))
+
+(defn- tag-last-responses-cacheable-block
+  "Tag the last cacheable input block in one canonical message."
+  [{:keys [role content] :as message}]
+  (let [blocks (vec (normalize-content content))
+        idx    (last (keep-indexed (fn [i block]
+                                     (when (responses-cacheable-input-block? role block) i))
+                       blocks))]
+    (if (some? idx)
+      (assoc message :content (update blocks idx assoc :svar/cache true))
+      message)))
+
+(defn- add-rolling-responses-cache-breakpoint
+  "Mark the input boundary immediately before the latest input boundary.
+
+   GPT-5.6 writes an implicit cache entry at the latest user/tool message but,
+   on a later request with appended context, does not fall back to that older
+   unmarked prefix. Re-marking the previous boundary makes the prior entry
+   eligible for an exact read while the new implicit boundary writes the
+   growing conversation for the following request."
+  [messages]
+  (let [eligible (keep-indexed
+                   (fn [i {:keys [role content]}]
+                     (when (some #(responses-cacheable-input-block? role %)
+                             (normalize-content content))
+                       i))
+                   messages)
+        previous (some-> eligible butlast last)]
+    (cond-> messages
+      (some? previous) (update previous tag-last-responses-cacheable-block))))
+
+(defn- responses-wire-cache-breakpoint [explicit-cache? block]
+  (when (and explicit-cache? (:svar/cache block))
+    OPENAI_EXPLICIT_CACHE_BREAKPOINT))
+
+(defn- responses-content-blocks [role content explicit-cache?]
   (let [text-type (if (= role "assistant") "output_text" "input_text")]
     (cond
       (string? content)
@@ -2389,11 +2443,16 @@
                   {:type text-type :text block}
 
                   (contains? #{"text" "input_text" "output_text"} (:type block))
-                  {:type text-type :text (:text block)}
+                  (cond-> {:type text-type :text (:text block)}
+                    (and (= text-type "input_text")
+                      (responses-wire-cache-breakpoint explicit-cache? block))
+                    (assoc :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT))
 
                   (= "image_url" (:type block))
                   (when-let [url (get-in block [:image_url :url])]
-                    {:type "input_image" :image_url url})
+                    (cond-> {:type "input_image" :image_url url}
+                      (responses-wire-cache-breakpoint explicit-cache? block)
+                      (assoc :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT)))
 
                   :else nil)))
         vec)
@@ -2435,38 +2494,46 @@
      - user `tool_result` blocks → `function_call_output` items
      - remaining text/image blocks → the message entry
    System messages are filtered out upstream; user/assistant only."
-  [{:keys [role content]}]
-  (let [normalized   (normalize-content content)
-        assistant?   (= role "assistant")
-        tool-use?    #(= "tool_use" (:type %))
-        tool-result? #(= "tool_result" (:type %))
-        thinking-blocks (when assistant? (filterv canonical-thinking-block? normalized))
-        tool-use-blocks (filterv tool-use? normalized)
-        tool-result-blocks (filterv tool-result? normalized)
-        rest-blocks  (filterv #(not (or (canonical-thinking-block? %)
-                                      (tool-use? %) (tool-result? %)))
-                       normalized)
-        reasoning-items (when assistant?
-                          (vec (keep canonical-thinking-block->responses-reasoning-item thinking-blocks)))
+  ([message]
+   (responses-message-input-entries message false))
+  ([{:keys [role content]} explicit-cache?]
+   (let [normalized   (normalize-content content)
+         assistant?   (= role "assistant")
+         tool-use?    #(= "tool_use" (:type %))
+         tool-result? #(= "tool_result" (:type %))
+         thinking-blocks (when assistant? (filterv canonical-thinking-block? normalized))
+         tool-use-blocks (filterv tool-use? normalized)
+         tool-result-blocks (filterv tool-result? normalized)
+         rest-blocks  (filterv #(not (or (canonical-thinking-block? %)
+                                       (tool-use? %) (tool-result? %)))
+                        normalized)
+         reasoning-items (when assistant?
+                           (vec (keep canonical-thinking-block->responses-reasoning-item thinking-blocks)))
         ;; The canonical id is the COMPOSITE `call_id|item_id` (see
         ;; `responses-tool-call-id`). Split it back into the two wire fields:
         ;; the function_call carries BOTH `id` (the `fc_…` item id OpenAI pairs
         ;; with the reasoning item) and `call_id`; the function_call_output and
         ;; the reasoning↔call pairing both key on `call_id`.
-        fn-call-items   (mapv (fn [b]
-                                (let [[call-id item-id] (str/split (str (:id b)) #"\|" 2)]
-                                  (cond-> {:type "function_call"
-                                           :call_id call-id
-                                           :name (:name b)
-                                           :arguments (json/write-json-str (or (:input b) {}))}
+         fn-call-items   (mapv (fn [b]
+                                 (let [[call-id item-id] (str/split (str (:id b)) #"\|" 2)]
+                                   (cond-> {:type "function_call"
+                                            :call_id call-id
+                                            :name (:name b)
+                                            :arguments (json/write-json-str (or (:input b) {}))}
                                     ;; every :input item id must be <=64 chars
                                     ;; (Responses/Copilot reject longer, HTTP 400)
-                                    (not (str/blank? item-id)) (assoc :id (normalize-id-part item-id)))))
-                          tool-use-blocks)
-        fn-output-items (mapv (fn [b] {:type "function_call_output"
-                                       :call_id (first (str/split (str (:tool_use_id b)) #"\|" 2))
-                                       :output (tool-result-text (:content b))})
-                          tool-result-blocks)
+                                     (not (str/blank? item-id)) (assoc :id (normalize-id-part item-id)))))
+                           tool-use-blocks)
+         fn-output-items (mapv (fn [b]
+                                 (let [text (tool-result-text (:content b))]
+                                   {:type "function_call_output"
+                                    :call_id (first (str/split (str (:tool_use_id b)) #"\|" 2))
+                                    :output (if (responses-wire-cache-breakpoint explicit-cache? b)
+                                              [{:type "input_text"
+                                                :text text
+                                                :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT}]
+                                              text)}))
+                           tool-result-blocks)
         ;; `:type "message"` is REQUIRED on a Responses input message item.
         ;; The public OpenAI `/v1/responses` API defaults a typeless item to
         ;; "message", but the ChatGPT Codex backend
@@ -2474,14 +2541,14 @@
         ;; rejects a typeless item with HTTP 400 `{"detail":"Unsupported
         ;; content type"}`. function_call / function_call_output / reasoning
         ;; items already carry their `:type`; the message entry must too.
-        message-entry (when (seq rest-blocks)
-                        {:type    "message"
-                         :role    (if assistant? "assistant" "user")
-                         :content (responses-content-blocks role rest-blocks)})]
-    (vec (concat reasoning-items
-           (when message-entry [message-entry])
-           fn-call-items
-           fn-output-items))))
+         message-entry (when (seq rest-blocks)
+                         {:type    "message"
+                          :role    (if assistant? "assistant" "user")
+                          :content (responses-content-blocks role rest-blocks explicit-cache?)})]
+     (vec (concat reasoning-items
+            (when message-entry [message-entry])
+            fn-call-items
+            fn-output-items)))))
 
 ;; ── Stateless replay (server-minted item ids) ──────────────────────────────
 ;; The OpenAI Responses wire lets the CLIENT replay items the SERVER minted:
@@ -2521,22 +2588,25 @@
   ([messages model extra-body]
    (build-openai-responses-request-body messages model extra-body false))
   ([messages model extra-body stateless-items?]
-   (let [messages (sanitize-replayed-messages messages model true)
+   (let [messages       (sanitize-replayed-messages messages model true)
+         explicit-cache? (gpt-5-6-or-later? model)
+         messages       (cond-> messages
+                          explicit-cache? add-rolling-responses-cache-breakpoint)
          [tools tool-choice extra-body] (extra-body-tools extra-body)
          system-text (->> messages
                        (filter #(= "system" (:role %)))
                        (map (comp responses-text-content :content))
                        (remove str/blank?)
                        (str/join "\n\n"))
-        ;; Canonical thinking blocks live inline on assistant messages.
-        ;; Each one is hoisted out as a `reasoning` input entry placed
-        ;; right before its parent message - the OpenAI Responses API
-        ;; pairs reasoning items with the assistant turn that produced
-        ;; them by ordering, not by id, so positional faithfulness here
-        ;; is what keeps the thinking session valid.
+         ;; Canonical thinking blocks live inline on assistant messages.
+         ;; Each one is hoisted out as a `reasoning` input entry placed
+         ;; right before its parent message - the OpenAI Responses API
+         ;; pairs reasoning items with the assistant turn that produced
+         ;; them by ordering, not by id, so positional faithfulness here
+         ;; is what keeps the thinking session valid.
          input       (cond-> (->> messages
                                (remove #(= "system" (:role %)))
-                               (mapcat responses-message-input-entries)
+                               (mapcat #(responses-message-input-entries % explicit-cache?))
                                vec)
                        stateless-items? strip-server-item-ids)
          effort      (:reasoning_effort extra-body)
