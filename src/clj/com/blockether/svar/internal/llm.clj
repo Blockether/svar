@@ -3181,7 +3181,7 @@
   (when-let [socket (:socket @transport-state)]
     (try ((if (= :abort mode) (:abort! socket) (:close! socket)))
          (catch Throwable _ nil)))
-  (swap! transport-state dissoc :socket :cursor :stable))
+  (swap! transport-state dissoc :socket :cursor :stable :warmup-input))
 
 (defn- disable-session-websockets!
   "Gives the WebSocket up for the REST of this session and drops the socket, so
@@ -3306,12 +3306,43 @@
     (assoc response "output"
       (into terminal-items (remove #(contains? seen (item-key %))) output-items))))
 
+(defn- normalize-codex-limit-id [limit-id]
+  (some-> limit-id str str/trim not-empty (str/replace "_" "-") str/lower-case))
+
+(defn- codex-rate-limit-snapshot
+  "Normalizes Codex's informational `codex.rate_limits` event. Missing sections
+   stay absent: a snapshot may update windows, credits, or both."
+  [event]
+  (when (= "codex.rate_limits" (get event "type"))
+    (let [window (fn [value]
+                   (when (map? value)
+                     (cond-> {:used-percent (get value "used_percent")}
+                       (some? (get value "window_minutes"))
+                       (assoc :window-minutes (get value "window_minutes"))
+                       (some? (get value "reset_at"))
+                       (assoc :resets-at (get value "reset_at")))))
+          limits (get event "rate_limits")
+          credits (get event "credits")]
+      (cond-> {:limit-id (or (normalize-codex-limit-id
+                               (or (get event "metered_limit_name")
+                                 (get event "limit_name")))
+                           "codex")}
+        (some? (get event "plan_type")) (assoc :plan-type (get event "plan_type"))
+        (map? (get limits "primary")) (assoc :primary (window (get limits "primary")))
+        (map? (get limits "secondary")) (assoc :secondary (window (get limits "secondary")))
+        (map? credits) (assoc :credits
+                         (cond-> {:has-credits (boolean (get credits "has_credits"))
+                                  :unlimited (boolean (get credits "unlimited"))}
+                           (some? (get credits "balance"))
+                           (assoc :balance (get credits "balance"))))))))
+
 (defn- receive-websocket-response!
-  [socket {:keys [timeout-ms on-chunk url]}]
+  [socket {:keys [timeout-ms on-chunk on-rate-limits url]}]
   (let [content (StringBuilder.)
         reasoning (StringBuilder.)
         tool-args (StringBuilder.)]
-    (loop [output-items [] accumulated-provider-state nil accumulated-api-usage nil]
+    (loop [output-items [] accumulated-provider-state nil accumulated-api-usage nil
+           latest-rate-limits nil]
       (let [raw ((:receive! socket) timeout-ms)]
         (cond
           (instance? Throwable raw) (throw raw)
@@ -3320,15 +3351,19 @@
                    {:type :svar.session/transport-closed :close raw}))
           :else
           (let [event (json/read-json raw)
-                event-type (get event "type")]
+                event-type (get event "type")
+                rate-limits (codex-rate-limit-snapshot event)]
             (when (contains? #{"error" "response.failed"} event-type)
               (throw (websocket-event-error event)))
+            (when (and rate-limits on-rate-limits)
+              (on-rate-limits rate-limits))
             (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
                           tool-args-delta tool-call-preview] :as delta}
                   (extract-stream-delta event)
                   next-provider-state (merge-provider-state accumulated-provider-state
                                         (:provider-state delta))
                   next-api-usage (or (:api-usage delta) accumulated-api-usage)
+                  next-rate-limits (or rate-limits latest-rate-limits)
                   item (when (= "response.output_item.done" event-type)
                          (get event "item"))]
               (when content-delta (.append content ^String content-delta))
@@ -3348,17 +3383,17 @@
                            :api-usage next-api-usage
                            :done? false}))
               (if (contains? #{"response.completed" "response.incomplete"} event-type)
-                (let [response (merge-response-output (get event "response")
-                                 (cond-> output-items item (conj item)))]
-                  (extract-response-data
-                    {:parsed response
-                     :raw-body raw
-                     :url url
-                     :status 200
-                     :streaming? true
-                     :transport :websocket}))
+                (cond-> (extract-response-data
+                          {:parsed (merge-response-output (get event "response")
+                                     (cond-> output-items item (conj item)))
+                           :raw-body raw
+                           :url url
+                           :status 200
+                           :streaming? true
+                           :transport :websocket})
+                  next-rate-limits (assoc :rate-limits next-rate-limits))
                 (recur (cond-> output-items item (conj item))
-                  next-provider-state next-api-usage)))))))))
+                  next-provider-state next-api-usage next-rate-limits)))))))))
 
 (defn- session-request-body [body input previous-response-id]
   (cond-> (-> body
@@ -3417,32 +3452,66 @@
   [transport-state request-body delta-input opts]
   (let [stable (dissoc request-body :input :stream :previous_response_id)
         prior @transport-state
-        continue? (and (:cursor prior) (= stable (:stable prior)))
         full-input (:input request-body)
+        warmup-continuation? (and (:cursor prior)
+                               (= stable (:stable prior))
+                               (= full-input (:warmup-input prior)))
+        continue? (and (:cursor prior)
+                    (= stable (:stable prior))
+                    (nil? (:warmup-input prior)))
         connect-opts (select-keys opts [:base-url :responses-path :api-key :headers :timeout-ms])
         max-retries (long (or (:websocket-max-retries opts) SESSION_WEBSOCKET_MAX_RETRIES))
+        prewarm? (and (not= false (:websocket-prewarm? opts))
+                   (not (:prewarmed? prior))
+                   (not continue?))
         restart! (or (:session-restart! opts) (fn [_] nil))
-        perform! (fn [socket input cursor]
+        rate-limits! (fn [snapshot]
+                       (swap! transport-state assoc :rate-limits snapshot)
+                       (when-let [notify! (:session-on-rate-limits opts)]
+                         (notify! {:event/type :llm.session/rate-limits
+                                   :rate-limits snapshot
+                                   :content ""
+                                   :done? false})))
+        perform! (fn [socket input cursor warmup?]
                    ((:send! socket)
                     (json/write-json-str
-                      (session-request-body request-body input cursor)))
+                      (cond-> (session-request-body request-body input cursor)
+                        warmup? (assoc :generate false))))
                    (receive-websocket-response! socket
                      {:timeout-ms (or (:idle-timeout-ms opts)
                                     (:timeout-ms opts)
                                     Long/MAX_VALUE)
-                      :on-chunk (:on-chunk opts)
+                      :on-chunk (when-not warmup? (:on-chunk opts))
+                      :on-rate-limits rate-limits!
                       :url (:url socket)}))]
-    (loop [input (if continue? delta-input full-input)
-           cursor (when continue? (:cursor prior))
-           retries 0]
+    (loop [input (cond warmup-continuation? []
+                       continue? delta-input
+                       :else full-input)
+           cursor (when (or warmup-continuation? continue?) (:cursor prior))
+           retries 0
+           warmup? prewarm?]
       (let [outcome (try
                       {:result (perform! (session-socket! transport-state connect-opts)
-                                 input cursor)}
+                                 input cursor warmup?)}
                       (catch Throwable e {:error e}))]
         (if-let [result (:result outcome)]
           (let [response-id (get-in result [:http-response :parsed "id"])]
-            (swap! transport-state assoc :stable stable :cursor response-id)
-            result)
+            (if warmup?
+              (do
+                (swap! transport-state assoc
+                  :prewarmed? true :stable stable :cursor response-id
+                  :warmup-input full-input)
+                ;; The warmup already supplied the full first request. The inference
+                ;; continues that response with an empty input delta.
+                (recur (if response-id [] full-input) response-id retries false))
+              (do
+                (swap! transport-state
+                  #(-> %
+                     (assoc :stable stable :cursor response-id)
+                     (dissoc :warmup-input)))
+                (cond-> result
+                  (:rate-limits @transport-state)
+                  (assoc :rate-limits (:rate-limits @transport-state))))))
           (let [error (:error outcome)
                 attempt (inc (long retries))
                 budget? (<= attempt max-retries)]
@@ -3456,7 +3525,7 @@
                              :attempt attempt
                              :max-retries max-retries
                              :error (ex-message error)})
-                  (recur full-input nil attempt))
+                  (recur full-input nil attempt false))
 
               (and (websocket-retryable-error? error) budget?)
               (do (close-session-socket! transport-state :abort)
@@ -3465,12 +3534,18 @@
                              :attempt attempt
                              :max-retries max-retries
                              :error (ex-message error)})
-                  (recur full-input nil attempt))
+                  (recur full-input nil attempt false))
 
               (websocket-retryable-error? error)
               (do (disable-session-websockets! transport-state)
                   (throw error))
 
+              warmup?
+              ;; Prewarm is an optimization, never a prerequisite for inference.
+              ;; A provider verdict about `generate=false` must not suppress the
+              ;; real request on an otherwise healthy socket.
+              (do (swap! transport-state assoc :prewarmed? true)
+                  (recur full-input nil retries false))
               :else (throw error))))))))
 
 (defn- responses-session-completion!
@@ -6614,7 +6689,7 @@
               :duration-ms duration-ms
               :stream-finalization stream-finalization)))
         {:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
-                stream-finalization duration-ms empty-reply-resends empty-reply-resend-usage]}
+                rate-limits stream-finalization duration-ms empty-reply-resends empty-reply-resend-usage]}
         (call-with-empty-reply-resend
           {:model model :provider-id provider-id
            :on-resend (:on-empty-reply-resend opts)}
@@ -6657,6 +6732,7 @@
         api-usage           (assoc :api-usage api-usage)
         http-response       (assoc :http-response http-response)
         rate-limit          (assoc :rate-limit rate-limit)
+        rate-limits         (assoc :rate-limits rate-limits)
         stream-finalization (assoc :stream-finalization stream-finalization)
         empty-reply-resends      (assoc :empty-reply-resends empty-reply-resends)
         empty-reply-resend-usage (assoc :empty-reply-resend-usage empty-reply-resend-usage)))))
@@ -6884,12 +6960,13 @@
              ;; tells the caller its stream restarted before re-emitting from zero.
             progress (atom false)
             session-opts (assoc (select-keys call-opts [:websocket-max-retries
-                                                        :websocket-retry-delay-ms])
+                                                        :websocket-retry-delay-ms
+                                                        :websocket-prewarm?])
                            :session-progress progress
-                            ;; The caller's OWN callback, not the accumulating
-                            ;; wrapper the streaming path builds: a restart is
-                            ;; news about the turn, not one more delta.
-                           :session-on-restart (:on-chunk call-opts))
+                           ;; Control events go to the caller's OWN callback, not the
+                           ;; accumulating text wrapper built by the streaming path.
+                           :session-on-restart (:on-chunk call-opts)
+                           :session-on-rate-limits (:on-chunk call-opts))
             result (binding [*responses-session-transport*
                              (fn [request-body completion-opts fallback!]
                                (responses-session-completion!
@@ -6913,10 +6990,14 @@
   "Opens an explicit, sequential LLM session. The public contract is provider
    neutral; the first stateful backend is `:openai-codex`, using one Responses
    WebSocket plus `previous_response_id`. Canonical history remains local and is
-   replayed after reconnect. A socket that keeps failing is left for the rest of
+   replayed after reconnect. Before its first inference the session prewarms the
+   socket with `generate=false`; `:websocket-prewarm? false` disables that
+   optimization. Informational `codex.rate_limits` snapshots are normalized into
+   the result's `:rate-limits` and emitted to `:on-chunk` as
+   `:llm.session/rate-limits`. A socket that keeps failing is left for the rest of
    the session, which then runs on HTTP/SSE; `:websocket-max-retries` (default 5)
-   and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune
-   that ladder. `opts` are ordinary `ask-code!` options and may include initial
+   and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune that
+   ladder. `opts` are ordinary `ask-code!` options and may include initial
    `:messages`. The returned value implements `Closeable`."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))

@@ -74,6 +74,8 @@
       :responses-path "/codex/responses"
       :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]))
 
+(defn- open-test-session [router opts]
+  (svar/open-session router (assoc opts :websocket-prewarm? false)))
 (defdescribe websocket-resource-cleanup-test
   (it "cancels an unfinished WebSocket operation after its timeout"
     (let [future (CompletableFuture.)]
@@ -124,7 +126,7 @@
           closes (atom 0)]
       (with-redefs [sut/open-responses-websocket!
                     (fake-websocket-factory events sent closes)]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}})]
           (expect (= "first" (:content (svar/ask! session "one"))))
           (expect (= "second" (:content (svar/ask! session "two"))))
@@ -159,7 +161,7 @@
                        :close! (fn [] (swap! closes inc))
                        :abort! (fn [] (swap! aborts inc))}))]
       (with-redefs [sut/open-responses-websocket! factory]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}})]
           (svar/ask! session "one")
           (expect (= "second" (:content (svar/ask! session "two"))))
@@ -189,7 +191,7 @@
                        :abort! (fn [] nil)}))]
       (with-redefs [sut/open-responses-websocket! factory
                     sut/openai-responses-completion (fn [_ _] (swap! http-calls inc) nil)]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}})]
           (svar/ask! session "one")
           (expect (= "turn2" (:content (svar/ask! session "two"))))))
@@ -208,7 +210,7 @@
                     (fn [body _]
                       (swap! http-inputs conj (count (:input body)))
                       {:content "http answer" :api-usage {}})]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}
                                :websocket-max-retries 1
                                :websocket-retry-delay-ms 0})]
@@ -222,7 +224,7 @@
                   (fn [_] (throw (ex-info "cancelled" {:type :svar.core/stream-cancelled})))
                   sut/openai-responses-completion
                   (fn [_ _] {:content "http answer" :api-usage {}})]
-      (with-open [session (svar/open-session (codex-router)
+      (with-open [session (open-test-session (codex-router)
                             {:routing {:provider :openai-codex :model "gpt-5.6"}})]
         (expect (= :svar.core/stream-cancelled
                   (try (svar/ask! session "one")
@@ -240,7 +242,7 @@
           closes (atom 0)]
       (with-redefs [sut/open-responses-websocket!
                     (fake-websocket-factory events sent closes)]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}})]
           (svar/ask! session "one")
           (expect (= "second" (:content (svar/ask! session "two"))))
@@ -284,7 +286,7 @@
                     (fake-websocket-factory events sent closes)
                     sut/openai-responses-completion
                     (fn [_ _] (swap! http-calls inc) nil)]
-        (with-open [session (svar/open-session router
+        (with-open [session (open-test-session router
                               {:routing {:provider :openai-codex :model "gpt-5.6"}})]
           (svar/ask! session "one")
           (expect (= "second" (:content (svar/ask! session "two"))))
@@ -317,7 +319,7 @@
           closes (atom 0)]
       (with-redefs [sut/open-responses-websocket!
                     (fake-websocket-factory events sent closes)]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}
                                :tools [{:name "run"
                                         :description "Runs a task"
@@ -352,7 +354,7 @@
                        :tool-calls []
                        :api-usage {:input-tokens 10 :output-tokens 2}
                        :http-response {:status 200 :streaming? true}})]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}
                                :websocket-max-retries 1
                                :websocket-retry-delay-ms 0})]
@@ -377,7 +379,7 @@
                     (fn [body _]
                       (swap! http-inputs conj (count (:input body)))
                       {:content "http answer" :api-usage {}})]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}
                                :websocket-max-retries 2
                                :websocket-retry-delay-ms 0})]
@@ -402,7 +404,7 @@
                     (fn [body _]
                       (swap! http-inputs conj (count (:input body)))
                       {:content "http answer" :api-usage {}})]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}
                                :websocket-retry-delay-ms 0})]
           (expect (= "http answer" (:content (svar/ask! session "one"))))
@@ -431,7 +433,7 @@
                        :close! (fn [] nil)
                        :abort! (fn [] nil)}))]
       (with-redefs [sut/open-responses-websocket! factory]
-        (with-open [session (svar/open-session (codex-router)
+        (with-open [session (open-test-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}
                                :websocket-retry-delay-ms 0
                                :on-chunk (fn [event] (swap! seen conj event))})]
@@ -442,13 +444,113 @@
         (expect (= "" (:content restart)))
         (expect (= :reconnect (:reason restart)))
         (expect (= 1 (:attempt restart))))))
+  (it "prewarms the first request with generate false before inference"
+    (let [events (atom [(completed-event "resp_warm" "")
+                        (completed-event "resp_1" "first")])
+          sent (atom [])
+          closes (atom 0)]
+      (with-redefs [sut/open-responses-websocket!
+                    (fake-websocket-factory events sent closes)]
+        (with-open [session (svar/open-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (expect (= "first" (:content (svar/ask! session "one"))))
+          (let [[warmup inference] @sent]
+            (expect (false? (:generate warmup)))
+            (expect (= "resp_warm" (:previous_response_id inference)))
+            (expect (= [] (:input inference))))))))
+
+  (it "continues with inference when the optional prewarm is rejected"
+    (let [events (atom [(json/write-json-str
+                          {"type" "error"
+                           "status" 400
+                           "error" {"code" "invalid_request"
+                                    "message" "Warmup unsupported"}})
+                        (completed-event "resp_1" "first")])
+          sent (atom [])
+          closes (atom 0)]
+      (with-redefs [sut/open-responses-websocket!
+                    (fake-websocket-factory events sent closes)]
+        (with-open [session (svar/open-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (expect (= "first" (:content (svar/ask! session "one"))))
+          (let [[warmup inference] @sent]
+            (expect (false? (:generate warmup)))
+            (expect (nil? (:previous_response_id inference)))
+            (expect (= 1 (count (:input inference)))))))))
+
+  (it "retries an interrupted first inference from its warmup cursor without duplicating input"
+    (let [events (atom [(completed-event "resp_warm" "")
+                        (json/write-json-str
+                          {"type" "error"
+                           "error" {"code" "rate_limit_exceeded"
+                                    "message" "Rate limit reached"}})
+                        (completed-event "resp_1" "first")])
+          sent (atom [])
+          closes (atom 0)
+          router (svar/make-router
+                   [{:id :openai-codex
+                     :api-key "test-key"
+                     :base-url "https://chatgpt.com/backend-api"
+                     :api-style :openai-compatible-responses
+                     :responses-path "/codex/responses"
+                     :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]
+                   {:rate-limit {:same-provider-delays-ms [0 0]
+                                 :respect-retry-after? false}})]
+      (with-redefs [sut/open-responses-websocket!
+                    (fake-websocket-factory events sent closes)]
+        (with-open [session (svar/open-session router
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (expect (= "first" (:content (svar/ask! session "one"))))
+          (let [[warmup first-attempt retry] @sent]
+            (expect (false? (:generate warmup)))
+            (expect (= ["resp_warm" "resp_warm"]
+                      (mapv :previous_response_id [first-attempt retry])))
+            (expect (= [[] []] (mapv :input [first-attempt retry]))))))))
+
+  (it "surfaces normalized Codex rate-limit snapshots without ending the response"
+    (let [rate-event (json/write-json-str
+                       {"type" "codex.rate_limits"
+                        "plan_type" "pro"
+                        "metered_limit_name" "codex_other"
+                        "rate_limits" {"primary" {"used_percent" 42.5
+                                                  "window_minutes" 300
+                                                  "reset_at" 1738888888}}
+                        "credits" {"has_credits" true
+                                   "unlimited" false
+                                   "balance" "12.50"}})
+          events (atom [rate-event (completed-event "resp_1" "first")])
+          sent (atom [])
+          closes (atom 0)
+          seen (atom [])]
+      (with-redefs [sut/open-responses-websocket!
+                    (fake-websocket-factory events sent closes)]
+        (with-open [session (open-test-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}
+                               :websocket-prewarm? false
+                               :on-chunk #(swap! seen conj %)})]
+          (let [result (svar/ask! session "one")
+                snapshot (:rate-limits result)]
+            (expect (= "first" (:content result)))
+            (expect (= {:limit-id "codex-other"
+                        :plan-type "pro"
+                        :primary {:used-percent 42.5
+                                  :window-minutes 300
+                                  :resets-at 1738888888}
+                        :credits {:has-credits true
+                                  :unlimited false
+                                  :balance "12.50"}}
+                      snapshot))
+            (expect (= snapshot (:rate-limits
+                                 (first (filter #(= :llm.session/rate-limits (:event/type %))
+                                          @seen))))))))))
+
   (it "rejects calls after close without sending another request"
     (let [events (atom [(completed-event "resp_1" "first")])
           sent (atom [])
           closes (atom 0)]
       (with-redefs [sut/open-responses-websocket!
                     (fake-websocket-factory events sent closes)]
-        (let [session (svar/open-session (codex-router)
+        (let [session (open-test-session (codex-router)
                         {:routing {:provider :openai-codex :model "gpt-5.6"}})]
           (svar/ask! session "one")
           (svar/close-session! session)
