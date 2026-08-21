@@ -72,7 +72,8 @@
       :base-url "https://chatgpt.com/backend-api"
       :api-style :openai-compatible-responses
       :responses-path "/codex/responses"
-      :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]))
+      :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}
+               {:name "gpt-5.6-terra" :context 100000 :input 1.0 :output 1.0}]}]))
 
 (defn- open-test-session [router opts]
   (svar/open-session router (assoc opts :websocket-prewarm? false)))
@@ -141,6 +142,52 @@
             (expect (= 1 (count (:input second-request))))
             (expect (= "two" (get-in second-request [:input 0 :content 0 :text])))))
         (expect (= 1 @closes)))))
+
+  (it "reuses one socket while a model change starts a full Responses chain"
+    ;; Codex keeps the provider transport alive across model switches, but a
+    ;; continuation cursor is model-bound: the first request for the new model
+    ;; must replay canonical history before later turns become incremental again.
+    (let [events (atom [(completed-event "resp_1" "first")
+                        (completed-event "resp_2" "second")
+                        (completed-event "resp_3" "third")])
+          sent (atom [])
+          opens (atom 0)
+          closes (atom 0)
+          factory (fake-websocket-factory events sent closes)]
+      (with-redefs [sut/open-responses-websocket!
+                    (fn [opts]
+                      (swap! opens inc)
+                      (factory opts))]
+        (with-open [session (open-test-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (expect (= "first" (:content (svar/ask! session "one"))))
+          (expect (= "second"
+                    (:content (svar/ask! session
+                                {:input "two"
+                                 :routing {:model "gpt-5.6-terra"}}))))
+          (expect (= "third"
+                    (:content (svar/ask! session
+                                {:input "three"
+                                 :routing {:model "gpt-5.6-terra"}}))))
+          (let [[first-request switched-request continued-request] @sent]
+            (expect (= "gpt-5.6" (:model first-request)))
+            (expect (= "gpt-5.6-terra" (:model switched-request)))
+            (expect (nil? (:previous_response_id switched-request)))
+            (expect (= 3 (count (:input switched-request))))
+            (expect (= "resp_2" (:previous_response_id continued-request)))
+            (expect (= 1 (count (:input continued-request)))))))
+      (expect (= 1 @opens))))
+
+  (it "rejects a provider change inside one explicit session"
+    (with-open [session (open-test-session (codex-router)
+                          {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+      (expect (= :svar.session/provider-switch
+                (try
+                  (svar/ask! session
+                    {:input "move"
+                     :routing {:provider :anthropic}})
+                  nil
+                  (catch Throwable e (:type (ex-data e))))))))
 
   (it "reconnects with canonical full-history replay after transport loss"
     (let [opens (atom 0)

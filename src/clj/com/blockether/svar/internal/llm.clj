@@ -5621,6 +5621,12 @@
 (defn ask!
   "Structured output with automatic provider routing, fallback, and rate limiting.
 
+   When `router` is an explicit session from `open-session`, `opts` is the next
+   turn (text, canonical message(s), or `{:input ...}` plus ordinary call
+   options). A per-turn `:routing :model` switches the logical Responses chain
+   while retaining the provider's physical WebSocket; changing providers on an
+   existing session is rejected.
+
    Params:
    `router` - Router instance from make-router. Required.
    `opts` - Map. Accepts all opts that ask!* accepts, plus:
@@ -6940,7 +6946,38 @@
       (mapcat #(responses-message-input-entries % explicit-cache?))
       vec)))
 
-(defrecord ResponsesSession [router base-opts provider-id model history transport-state closed? lock]
+(defn- session-call-route
+  [router base-opts turn-opts provider-id]
+  (let [turn-routing (:routing turn-opts)
+        requested-provider (:provider turn-routing)]
+    (when (and requested-provider (not= provider-id requested-provider))
+      (throw (ex-info "An explicit session cannot switch providers."
+               {:type :svar.session/provider-switch
+                :provider provider-id
+                :requested-provider requested-provider})))
+    (let [routing (assoc (merge (:routing base-opts) turn-routing)
+                    :provider provider-id)
+          call-opts (-> base-opts
+                      (merge turn-opts)
+                      (assoc :routing routing))
+          resolved (router/resolve-routing router (routing-opts-with-reasoning call-opts))
+          [provider model-map] (or (router/select-provider router (:prefs resolved))
+                                 (throw (ex-info "No provider is available for this session turn."
+                                          {:type :svar.session/no-provider
+                                           :provider provider-id})))
+          selected-provider (:id provider)
+          api-style (or (:api-style model-map) (:api-style provider))]
+      (when-not (and (= provider-id selected-provider)
+                  (= :openai-compatible-responses api-style))
+        (throw (ex-info "A session turn must remain on its Codex Responses provider."
+                 {:type :svar.session/provider-switch
+                  :provider provider-id
+                  :requested-provider selected-provider
+                  :api-style api-style})))
+      [(:name model-map)
+       (assoc call-opts :routing (assoc routing :model (:name model-map)))])))
+
+(defrecord ResponsesSession [router base-opts provider-id history transport-state closed? lock]
   StatefulSession
   (-ask-session! [_ input]
     (locking lock
@@ -6948,13 +6985,10 @@
         (throw (ex-info "The LLM session is closed."
                  {:type :svar.session/closed})))
       (let [{new-messages :messages turn-opts :opts} (session-turn input)
+            [active-model call-opts] (session-call-route router base-opts turn-opts provider-id)
             full-messages (into @history new-messages)
-            delta-input (messages->responses-input new-messages model)
-            call-opts (-> base-opts
-                        (merge turn-opts)
-                        (assoc :messages full-messages
-                          :routing (merge (:routing base-opts)
-                                     {:provider provider-id :model model})))
+            delta-input (messages->responses-input new-messages active-model)
+            call-opts (assoc call-opts :messages full-messages)
              ;; ONE progress flag per turn: every attempt inside it - a socket
              ;; reconnect, the degradation to HTTP, the router's own ladder -
              ;; tells the caller its stream restarted before re-emitting from zero.
@@ -6998,7 +7032,10 @@
    the session, which then runs on HTTP/SSE; `:websocket-max-retries` (default 5)
    and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune that
    ladder. `opts` are ordinary `ask-code!` options and may include initial
-   `:messages`. The returned value implements `Closeable`."
+   `:messages`. A session turn may override `:routing :model`: the logical
+   continuation resets and canonical history is replayed through the same physical
+   provider socket. A turn cannot change providers. The returned value implements
+   `Closeable`."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))
         [provider model-map] (or (router/select-provider router (:prefs resolved))
@@ -7016,7 +7053,7 @@
                 :provider provider-id :api-style api-style})))
     (->ResponsesSession router
       base-opts
-      provider-id (:name model-map)
+      provider-id
       (atom (vec (:messages opts)))
       (atom {}) (atom false) (Object.))))
 
