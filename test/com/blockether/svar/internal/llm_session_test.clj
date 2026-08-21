@@ -209,7 +209,9 @@
                       (swap! http-inputs conj (count (:input body)))
                       {:content "http answer" :api-usage {}})]
         (with-open [session (svar/open-session (codex-router)
-                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}
+                               :websocket-max-retries 1
+                               :websocket-retry-delay-ms 0})]
           (expect (= "http answer" (:content (svar/ask! session "one"))))
           (expect (= "http answer" (:content (svar/ask! session "two"))))))
       ;; Each fallback turn carries the FULL canonical history, never a delta.
@@ -351,11 +353,95 @@
                        :api-usage {:input-tokens 10 :output-tokens 2}
                        :http-response {:status 200 :streaming? true}})]
         (with-open [session (svar/open-session (codex-router)
-                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}
+                               :websocket-max-retries 1
+                               :websocket-retry-delay-ms 0})]
           (expect (= "http fallback" (:content (svar/ask! session "one"))))
           (expect (= 1 (count @http-bodies)))
           (expect (= "one" (get-in @http-bodies [0 :input 0 :content 0 :text])))))))
 
+  (it "leaves the WebSocket for good once a turn has spent its retry ladder"
+    ;; Codex parity: after `stream_max_retries` the session sets
+    ;; `disable_websockets` and every later turn goes straight to HTTP. A session
+    ;; that re-tried the handshake per turn paid a doomed round trip on each one.
+    (let [opens (atom 0)
+          http-inputs (atom [])
+          factory (fn [_]
+                    (swap! opens inc)
+                    {:send! (fn [_] nil)
+                     :receive! (fn [_] (java.io.IOException. "connection lost"))
+                     :close! (fn [] nil)
+                     :abort! (fn [] nil)})]
+      (with-redefs [sut/open-responses-websocket! factory
+                    sut/openai-responses-completion
+                    (fn [body _]
+                      (swap! http-inputs conj (count (:input body)))
+                      {:content "http answer" :api-usage {}})]
+        (with-open [session (svar/open-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}
+                               :websocket-max-retries 2
+                               :websocket-retry-delay-ms 0})]
+          (expect (= "http answer" (:content (svar/ask! session "one"))))
+          (expect (= "http answer" (:content (svar/ask! session "two"))))))
+      ;; The first turn tries once and reconnects twice; the second never touches
+      ;; the socket again, and both carry the FULL canonical history over HTTP.
+      (expect (= 3 @opens))
+      (expect (= [1 3] @http-inputs))))
+
+  (it "stops upgrading after the endpoint refused the handshake with 426"
+    ;; 426 Upgrade Required is the endpoint saying it serves no WebSocket at all,
+    ;; so no retry can change the answer - Codex switches that session to HTTP on
+    ;; the spot.
+    (let [opens (atom 0)
+          http-inputs (atom [])]
+      (with-redefs [sut/open-responses-websocket!
+                    (fn [_]
+                      (swap! opens inc)
+                      (throw (ex-info "Upgrade Required" {:status 426})))
+                    sut/openai-responses-completion
+                    (fn [body _]
+                      (swap! http-inputs conj (count (:input body)))
+                      {:content "http answer" :api-usage {}})]
+        (with-open [session (svar/open-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}
+                               :websocket-retry-delay-ms 0})]
+          (expect (= "http answer" (:content (svar/ask! session "one"))))
+          (expect (= "http answer" (:content (svar/ask! session "two"))))))
+      (expect (= 1 @opens))
+      (expect (= [1 3] @http-inputs))))
+
+  (it "tells a streaming caller that its turn started over"
+    ;; Every attempt streams its own cumulative text from zero. With no signal a
+    ;; consumer that appends deltas kept the text of the attempt the lost
+    ;; connection threw away.
+    (let [opens (atom 0)
+          seen (atom [])
+          factory (fn [_]
+                    (let [n (swap! opens inc)
+                          receives (atom (if (= n 1)
+                                           [(json/write-json-str
+                                              {"type" "response.output_text.delta"
+                                               "delta" "par"})
+                                            (java.io.IOException. "connection lost")]
+                                           [(completed-event "resp_1" "whole answer")]))]
+                      {:send! (fn [_] nil)
+                       :receive! (fn [_] (let [event (first @receives)]
+                                           (swap! receives subvec 1)
+                                           event))
+                       :close! (fn [] nil)
+                       :abort! (fn [] nil)}))]
+      (with-redefs [sut/open-responses-websocket! factory]
+        (with-open [session (svar/open-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}
+                               :websocket-retry-delay-ms 0
+                               :on-chunk (fn [event] (swap! seen conj event))})]
+          (expect (= "whole answer" (:content (svar/ask! session "one"))))))
+      (expect (= "par" (:content (first @seen))))
+      (let [restart (first (filter :restarted? @seen))]
+        (expect (= :llm.session/stream-restarted (:event/type restart)))
+        (expect (= "" (:content restart)))
+        (expect (= :reconnect (:reason restart)))
+        (expect (= 1 (:attempt restart))))))
   (it "rejects calls after close without sending another request"
     (let [events (atom [(completed-event "resp_1" "first")])
           sent (atom [])

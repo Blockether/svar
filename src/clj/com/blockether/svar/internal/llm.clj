@@ -17,7 +17,8 @@
   (:import
    (java.io BufferedReader Closeable InputStreamReader)
    (java.net URI)
-   (java.net.http HttpClient WebSocket WebSocket$Listener)
+   (java.net.http HttpClient HttpResponse WebSocket WebSocket$Listener
+     WebSocketHandshakeException)
    (java.util.concurrent CompletableFuture LinkedBlockingQueue TimeUnit TimeoutException)))
 
 ;; =============================================================================
@@ -3144,6 +3145,31 @@
                  (abort-websocket! socket)))
      :url url}))
 
+(def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRIES
+  "Stream failures ONE turn may answer by reconnecting and replaying before the
+   session gives its WebSocket up for good - Codex's `stream_max_retries`
+   default. Beyond it a socket is not having a bad moment, it is unusable."
+  5)
+
+(def ^:private ^:const SESSION_WEBSOCKET_RETRY_DELAY_MS
+  "Un-jittered wait before the first reconnect; each further attempt doubles it."
+  250)
+
+(def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS
+  "Ceiling for a reconnect wait: a transport hiccup is not a rate limit."
+  4000)
+
+(defn- websocket-handshake-status
+  "HTTP status behind a refused WebSocket handshake, or nil. The JDK carries the
+   refusing response on its own `WebSocketHandshakeException`; a transport seam
+   that refuses in its own way may carry `:status` in ex-data instead."
+  [^Throwable e]
+  (when e
+    (or (when (instance? WebSocketHandshakeException e)
+          (.statusCode ^HttpResponse (.getResponse ^WebSocketHandshakeException e)))
+      (:status (ex-data e))
+      (recur (ex-cause e)))))
+
 (defn- close-session-socket!
   "Drops the socket AND the response chain that lives on it, so the next turn
    starts a fresh chain with the full canonical history. `mode` is `:abort` on
@@ -3157,16 +3183,28 @@
          (catch Throwable _ nil)))
   (swap! transport-state dissoc :socket :cursor :stable))
 
+(defn- disable-session-websockets!
+  "Gives the WebSocket up for the REST of this session and drops the socket, so
+   every later turn goes straight to HTTP/SSE. Codex parity: a transport that
+   just spent its retry budget, or an endpoint that answered 426 Upgrade
+   Required, answers the next turn no better - and a session that re-tried the
+   handshake per turn would pay a doomed round trip for every one of them."
+  [transport-state]
+  (close-session-socket! transport-state :abort)
+  (swap! transport-state assoc :http-only? true))
+
 (defn- session-socket!
   "The session's live socket, opening one when it has none.
 
    A socket that cannot be OPENED is infrastructure, not a model verdict, so
-   every open failure is typed `:svar.session/transport-unavailable` and the
-   caller degrades THIS turn to HTTP/SSE. Only the JDK's `IOException` (its
-   handshake refusal, including 426 Upgrade Required) used to degrade: a bad
-   URI, a changed client shape or a provider answering a plain error object
-   ended the turn instead, even though the stateless path would have answered
-   it. A caller cancellation is never masked - it is the caller asking to stop."
+   every open failure is typed `:svar.session/transport-unavailable` and joins
+   the turn's reconnect ladder; when the ladder is spent the session leaves the
+   WebSocket for good. Only the JDK's `IOException` (its handshake refusal) used
+   to degrade: a bad URI, a changed client shape or a provider answering a plain
+   error object ended the turn instead, even though the stateless path would have
+   answered it. The refusing HTTP status travels along as `:status`, so a 426
+   Upgrade Required is recognized as 'this endpoint has no WebSocket'. A caller
+   cancellation is never masked - it is the caller asking to stop."
   [transport-state connect-opts]
   (or (:socket @transport-state)
     (let [socket (try
@@ -3176,10 +3214,12 @@
                      (if (contains? failure/DELIBERATE_STREAM_ABORT_TYPES
                            (:type (ex-data e)))
                        (throw e)
-                       (throw (ex-info (str "Responses WebSocket unavailable: " (ex-message e))
-                                {:type :svar.session/transport-unavailable
-                                 :cause-class (.getName (class e))}
-                                e)))))]
+                       (let [status (websocket-handshake-status e)]
+                         (throw (ex-info (str "Responses WebSocket unavailable: " (ex-message e))
+                                  (cond-> {:type :svar.session/transport-unavailable
+                                           :cause-class (.getName (class e))}
+                                    status (assoc :status status))
+                                  e))))))]
       (swap! transport-state assoc :socket socket)
       socket)))
 
@@ -3326,15 +3366,62 @@
             (assoc :type "response.create" :stream true :input input))
     previous-response-id (assoc :previous_response_id previous-response-id)))
 
+(defn- websocket-transport-error? [error]
+  (or (instance? java.io.IOException error)
+    (instance? TimeoutException error)
+    (instance? java.util.concurrent.ExecutionException error)
+    (instance? java.util.concurrent.CompletionException error)
+    (= :svar.session/transport-closed (:type (ex-data error)))
+    (= :svar.session/transport-unavailable (:type (ex-data error)))
+    (some-> (ex-cause error) websocket-transport-error?)))
+
+(defn- websocket-retryable-error?
+  "True for a failure a RECONNECT can answer: the connection itself, or the
+   server refusing one more socket from this client. A model verdict never lands
+   here - that belongs to the caller and to the router's own retry ladder."
+  [error]
+  (or (= "websocket_connection_limit_reached" (:code (ex-data error)))
+    (websocket-transport-error? error)))
+
+(defn- websocket-upgrade-refused?
+  "True when the handshake was refused with 426 Upgrade Required: this endpoint
+   serves no WebSocket at all, so every later handshake of this session would be
+   refused the same way. Codex switches such a session to HTTP immediately
+   instead of retrying the upgrade."
+  [error]
+  (let [data (ex-data error)]
+    (and (= :svar.session/transport-unavailable (:type data))
+      (= 426 (:status data)))))
+
+(defn- session-retry-sleep!
+  "Waits before reconnect `attempt` (1-based) with the full-jitter shape the HTTP
+   ladder uses. `:websocket-retry-delay-ms` 0 turns the wait off."
+  [attempt opts]
+  (let [base (long (or (:websocket-retry-delay-ms opts) SESSION_WEBSOCKET_RETRY_DELAY_MS))]
+    (when (pos? base)
+      (Thread/sleep
+        (long (failure/backoff-ms (* base (bit-shift-left 1 (dec (long attempt))))
+                SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS))))))
+
 (defn- responses-websocket-session-completion!
+  "Runs ONE turn on the session's socket, with Codex's stream-retry ladder.
+
+   An interrupted turn reconnects and replays the canonical history, up to
+   `:websocket-max-retries` times with a jittered wait between attempts. Only
+   when that budget is spent - or when the endpoint refused the upgrade outright
+   - does the session give the WebSocket up (`disable-session-websockets!`), so
+   the caller degrades to HTTP/SSE ONCE for the rest of the session instead of
+   paying a doomed handshake on every turn. A rejected continuation cursor costs
+   one ladder step too, but keeps the socket: nothing about the connection is
+   wrong, only the chain the server no longer remembers."
   [transport-state request-body delta-input opts]
   (let [stable (dissoc request-body :input :stream :previous_response_id)
         prior @transport-state
         continue? (and (:cursor prior) (= stable (:stable prior)))
         full-input (:input request-body)
-        initial-input (if continue? delta-input full-input)
-        initial-cursor (when continue? (:cursor prior))
         connect-opts (select-keys opts [:base-url :responses-path :api-key :headers :timeout-ms])
+        max-retries (long (or (:websocket-max-retries opts) SESSION_WEBSOCKET_MAX_RETRIES))
+        restart! (or (:session-restart! opts) (fn [_] nil))
         perform! (fn [socket input cursor]
                    ((:send! socket)
                     (json/write-json-str
@@ -3345,53 +3432,90 @@
                                     Long/MAX_VALUE)
                       :on-chunk (:on-chunk opts)
                       :url (:url socket)}))]
-    (loop [socket (session-socket! transport-state connect-opts)
-           input initial-input
-           cursor initial-cursor
-           recovered? false]
-      (let [outcome (try {:result (perform! socket input cursor)}
-                         (catch Throwable e {:error e}))]
+    (loop [input (if continue? delta-input full-input)
+           cursor (when continue? (:cursor prior))
+           retries 0]
+      (let [outcome (try
+                      {:result (perform! (session-socket! transport-state connect-opts)
+                                 input cursor)}
+                      (catch Throwable e {:error e}))]
         (if-let [result (:result outcome)]
           (let [response-id (get-in result [:http-response :parsed "id"])]
             (swap! transport-state assoc :stable stable :cursor response-id)
             result)
-          (let [error (:error outcome)]
+          (let [error (:error outcome)
+                attempt (inc (long retries))
+                budget? (<= attempt max-retries)]
             (cond
-              (and cursor (previous-response-missing? error) (not recovered?))
-              (recur socket full-input nil true)
+              (websocket-upgrade-refused? error)
+              (do (disable-session-websockets! transport-state)
+                  (throw error))
 
-              (and (not recovered?)
-                (or (= "websocket_connection_limit_reached" (:code (ex-data error)))
-                  (instance? java.io.IOException error)
-                  (instance? TimeoutException error)
-                  (= :svar.session/transport-closed (:type (ex-data error)))))
-              (do
-                (close-session-socket! transport-state :abort)
-                (recur (session-socket! transport-state connect-opts)
-                  full-input nil true))
+              (and cursor (previous-response-missing? error) budget?)
+              (do (restart! {:reason :cursor-rejected
+                             :attempt attempt
+                             :max-retries max-retries
+                             :error (ex-message error)})
+                  (recur full-input nil attempt))
+
+              (and (websocket-retryable-error? error) budget?)
+              (do (close-session-socket! transport-state :abort)
+                  (session-retry-sleep! attempt opts)
+                  (restart! {:reason :reconnect
+                             :attempt attempt
+                             :max-retries max-retries
+                             :error (ex-message error)})
+                  (recur full-input nil attempt))
+
+              (websocket-retryable-error? error)
+              (do (disable-session-websockets! transport-state)
+                  (throw error))
 
               :else (throw error))))))))
 
-(defn- websocket-transport-error? [error]
-  (or (instance? java.io.IOException error)
-    (instance? TimeoutException error)
-    (instance? java.util.concurrent.ExecutionException error)
-    (instance? java.util.concurrent.CompletionException error)
-    (= :svar.session/transport-closed (:type (ex-data error)))
-    (= :svar.session/transport-unavailable (:type (ex-data error)))
-    (some-> (ex-cause error) websocket-transport-error?)))
-
 (defn- responses-session-completion!
+  "One turn of an explicit session: the socket owns it until the socket gives up,
+   and from then on the session is HTTP/SSE for good.
+
+   A turn that STARTS OVER says so on the caller's own streaming callback - one
+   `{:event/type :llm.session/stream-restarted :restarted? true :content \"\"}`
+   map carrying the reason and the ladder position, the way Codex reports
+   `Reconnecting... n/N`. Every attempt streams its own cumulative text from
+   zero, so without that signal a consumer appending deltas would keep the text
+   of an attempt the transport threw away."
   [transport-state request-body delta-input opts fallback!]
-  (try
-    (responses-websocket-session-completion!
-      transport-state request-body delta-input opts)
-    (catch Throwable error
-      (if (websocket-transport-error? error)
-        (do
-          (close-session-socket! transport-state :abort)
-          (fallback!))
-        (throw error)))))
+  (let [progress (:session-progress opts)
+        notify! (:session-on-restart opts)
+        on-chunk (:on-chunk opts)
+        restart! (fn restart!
+                   ([] (restart! nil))
+                   ([event]
+                    (let [restarted? (and progress (compare-and-set! progress true false))]
+                      (when (and notify! (or event restarted?))
+                        (notify! (merge {:event/type :llm.session/stream-restarted
+                                         :restarted? true
+                                         :content ""
+                                         :reasoning nil
+                                         :tool-input nil
+                                         :done? false}
+                                   event))))))
+        opts (cond-> (assoc opts :session-restart! restart!)
+               (and on-chunk progress)
+               (assoc :on-chunk (fn [chunk] (reset! progress true) (on-chunk chunk))))]
+    ;; The router may re-enter this turn after its own ladder slept; a stream it
+    ;; already fed the caller starts over here too.
+    (restart!)
+    (if (:http-only? @transport-state)
+      (fallback!)
+      (try
+        (responses-websocket-session-completion!
+          transport-state request-body delta-input opts)
+        (catch Throwable error
+          (if (websocket-retryable-error? error)
+            (do (close-session-socket! transport-state :abort)
+                (restart! {:reason :http-fallback :error (ex-message error)})
+                (fallback!))
+            (throw error)))))))
 
 (defn openai-responses-completion
   "Low-level OpenAI Responses transport.
@@ -6755,10 +6879,22 @@
                         (assoc :messages full-messages
                           :routing (merge (:routing base-opts)
                                      {:provider provider-id :model model})))
+             ;; ONE progress flag per turn: every attempt inside it - a socket
+             ;; reconnect, the degradation to HTTP, the router's own ladder -
+             ;; tells the caller its stream restarted before re-emitting from zero.
+            progress (atom false)
+            session-opts (assoc (select-keys call-opts [:websocket-max-retries
+                                                        :websocket-retry-delay-ms])
+                           :session-progress progress
+                            ;; The caller's OWN callback, not the accumulating
+                            ;; wrapper the streaming path builds: a restart is
+                            ;; news about the turn, not one more delta.
+                           :session-on-restart (:on-chunk call-opts))
             result (binding [*responses-session-transport*
                              (fn [request-body completion-opts fallback!]
                                (responses-session-completion!
-                                 transport-state request-body delta-input completion-opts fallback!))]
+                                 transport-state request-body delta-input
+                                 (merge completion-opts session-opts) fallback!))]
                      (ask-code! router call-opts))
             assistant-message (or (:assistant-message result)
                                 (when-not (str/blank? (or (:content result) ""))
@@ -6777,8 +6913,11 @@
   "Opens an explicit, sequential LLM session. The public contract is provider
    neutral; the first stateful backend is `:openai-codex`, using one Responses
    WebSocket plus `previous_response_id`. Canonical history remains local and is
-   replayed after reconnect. `opts` are ordinary `ask-code!` options and may
-   include initial `:messages`. The returned value implements `Closeable`."
+   replayed after reconnect. A socket that keeps failing is left for the rest of
+   the session, which then runs on HTTP/SSE; `:websocket-max-retries` (default 5)
+   and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune
+   that ladder. `opts` are ordinary `ask-code!` options and may include initial
+   `:messages`. The returned value implements `Closeable`."
   [router opts]
   (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))
         [provider model-map] (or (router/select-provider router (:prefs resolved))
