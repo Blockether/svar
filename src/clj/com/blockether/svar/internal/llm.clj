@@ -3057,6 +3057,10 @@
       :else http-url)))
 
 (defn- await-websocket-future!
+  "Awaits one WebSocket future and cancels it when we stop waiting. `.get` wraps
+   every failure in an ExecutionException, so the cause is rethrown: the session
+   classifies a lost connection by exception type and must reconnect and replay
+   rather than degrade the turn to the HTTP transport."
   [^CompletableFuture future timeout-ms]
   (try
     (.get future (long timeout-ms) TimeUnit/MILLISECONDS)
@@ -3064,6 +3068,9 @@
       (.cancel future true)
       (.interrupt (Thread/currentThread))
       (throw e))
+    (catch java.util.concurrent.ExecutionException e
+      (.cancel future true)
+      (throw (or (ex-cause e) e)))
     (catch Throwable e
       (.cancel future true)
       (throw e))))

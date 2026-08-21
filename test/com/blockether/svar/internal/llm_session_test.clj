@@ -96,7 +96,19 @@
     (let [aborts (atom 0)]
       (close-websocket!
         (test-websocket (CompletableFuture/completedFuture nil) aborts))
-      (expect (zero? @aborts)))))
+      (expect (zero? @aborts))))
+
+  (it "rethrows the cause behind a failed WebSocket operation"
+    ;; A session that saw only the JDK's ExecutionException wrapper could not
+    ;; recognize a lost connection, so it degraded the turn to HTTP instead of
+    ;; reconnecting.
+    (let [failed (doto (CompletableFuture.)
+                   (.completeExceptionally (java.io.IOException. "connection lost")))]
+      (expect (= java.io.IOException
+                (try
+                  (await-websocket-future! failed 100)
+                  nil
+                  (catch Throwable e (class e))))))))
 
 (defdescribe codex-responses-session-test
   (it "continues a second turn with only its delta and previous response id"
@@ -148,6 +160,29 @@
             (expect (= 3 (count (:input replay)))))))
       (expect (= 2 @opens))
       (expect (= 2 @closes))))
+
+  (it "reconnects when a send fails on a lost connection"
+    (let [opens (atom 0)
+          http-calls (atom 0)
+          sends (atom 0)
+          factory (fn [_]
+                    (let [n (swap! opens inc)
+                          receives (atom [(completed-event (str "resp_" n) (str "turn" n))])]
+                      {:send! (fn [_]
+                                (when (and (= 1 n) (= 2 (swap! sends inc)))
+                                  (throw (java.io.IOException. "connection lost"))))
+                       :receive! (fn [_] (let [event (first @receives)]
+                                           (swap! receives subvec 1)
+                                           event))
+                       :close! (fn [] nil)}))]
+      (with-redefs [sut/open-responses-websocket! factory
+                    sut/openai-responses-completion (fn [_ _] (swap! http-calls inc) nil)]
+        (with-open [session (svar/open-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (svar/ask! session "one")
+          (expect (= "turn2" (:content (svar/ask! session "two"))))))
+      (expect (= 2 @opens))
+      (expect (zero? @http-calls))))
 
   (it "replays full history when the server rejects its continuation cursor"
     (let [events (atom [(completed-event "resp_1" "first")
