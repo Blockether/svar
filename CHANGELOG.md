@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.128] - 2026-08-21
+
+### Changed
+- feat(llm): reuse Codex socket across model switches
+- feat(llm): prewarm Codex sessions and surface limits
+- feat(llm): match Codex websocket retry and sticky fallback
+- fix(llm): fall back to HTTP when a session socket cannot open
+- fix(llm): retry a rate limit that arrives over the Codex socket
+- fix(llm): reconnect on a wrapped WebSocket send failure
+- fix(llm): clean up failed WebSocket operations
+- release: update version files for v0.7.127, bump to next dev version
+
+
 ## [v0.7.127] - 2026-08-21
 
 ### Changed
@@ -2278,7 +2291,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.127...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.128...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2440,3 +2453,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.125]: https://github.com/Blockether/svar/releases/tag/v0.7.125
 [v0.7.126]: https://github.com/Blockether/svar/releases/tag/v0.7.126
 [v0.7.127]: https://github.com/Blockether/svar/releases/tag/v0.7.127
+[v0.7.128]: https://github.com/Blockether/svar/releases/tag/v0.7.128
