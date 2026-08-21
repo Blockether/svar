@@ -196,6 +196,37 @@
       (expect (= 2 @opens))
       (expect (zero? @http-calls))))
 
+  (it "degrades a turn to HTTP when the socket cannot be opened at all"
+    ;; Only an IOException - the JDK's own handshake refusal - degraded to the
+    ;; stateless path. A bad URI, a changed client shape or a provider that
+    ;; answers a plain error object ended the turn with no answer, although the
+    ;; HTTP transport would have served it.
+    (let [http-inputs (atom [])]
+      (with-redefs [sut/open-responses-websocket!
+                    (fn [_] (throw (IllegalArgumentException. "invalid URI")))
+                    sut/openai-responses-completion
+                    (fn [body _]
+                      (swap! http-inputs conj (count (:input body)))
+                      {:content "http answer" :api-usage {}})]
+        (with-open [session (svar/open-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (expect (= "http answer" (:content (svar/ask! session "one"))))
+          (expect (= "http answer" (:content (svar/ask! session "two"))))))
+      ;; Each fallback turn carries the FULL canonical history, never a delta.
+      (expect (= [1 3] @http-inputs))))
+
+  (it "never masks a caller cancellation as an unavailable transport"
+    (with-redefs [sut/open-responses-websocket!
+                  (fn [_] (throw (ex-info "cancelled" {:type :svar.core/stream-cancelled})))
+                  sut/openai-responses-completion
+                  (fn [_ _] {:content "http answer" :api-usage {}})]
+      (with-open [session (svar/open-session (codex-router)
+                            {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+        (expect (= :svar.core/stream-cancelled
+                  (try (svar/ask! session "one")
+                       nil
+                       (catch Throwable e (:type (ex-data e)))))))))
+
   (it "replays full history when the server rejects its continuation cursor"
     (let [events (atom [(completed-event "resp_1" "first")
                         (json/write-json-str
@@ -225,6 +256,42 @@
                                                  "message" "Rate limit reached"}})]
       (expect (= 429 (:status (ex-data error))))
       (expect (failure/transient-error? error))))
+
+  (it "lets the ordinary retry ladder finish a turn a socket rate limit interrupted"
+    ;; Typing the error is only half the contract: the retry has to reach the
+    ;; SAME session - reusing its socket and its continuation cursor - instead of
+    ;; ending the turn or degrading it to a fresh stateless request.
+    (let [events (atom [(completed-event "resp_1" "first")
+                        (json/write-json-str
+                          {"type" "error"
+                           "error" {"code" "rate_limit_exceeded"
+                                    "message" "Rate limit reached"}})
+                        (completed-event "resp_2" "second")])
+          sent (atom [])
+          closes (atom 0)
+          http-calls (atom 0)
+          router (svar/make-router
+                   [{:id :openai-codex
+                     :api-key "test-key"
+                     :base-url "https://chatgpt.com/backend-api"
+                     :api-style :openai-compatible-responses
+                     :responses-path "/codex/responses"
+                     :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]
+                   {:rate-limit {:same-provider-delays-ms [0 0] :respect-retry-after? false}})]
+      (with-redefs [sut/open-responses-websocket!
+                    (fake-websocket-factory events sent closes)
+                    sut/openai-responses-completion
+                    (fn [_ _] (swap! http-calls inc) nil)]
+        (with-open [session (svar/open-session router
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (svar/ask! session "one")
+          (expect (= "second" (:content (svar/ask! session "two"))))
+          (let [[_ rejected retried] @sent]
+            (expect (= "resp_1" (:previous_response_id rejected)))
+            ;; The retry repeats the same delta on the same cursor.
+            (expect (= "resp_1" (:previous_response_id retried)))
+            (expect (= 1 (count (:input retried)))))))
+      (expect (zero? @http-calls))))
 
   (it "keeps the status the server wrapped into the error event"
     (let [error (websocket-event-error {"type" "error"

@@ -3157,9 +3157,29 @@
          (catch Throwable _ nil)))
   (swap! transport-state dissoc :socket :cursor :stable))
 
-(defn- session-socket! [transport-state connect-opts]
+(defn- session-socket!
+  "The session's live socket, opening one when it has none.
+
+   A socket that cannot be OPENED is infrastructure, not a model verdict, so
+   every open failure is typed `:svar.session/transport-unavailable` and the
+   caller degrades THIS turn to HTTP/SSE. Only the JDK's `IOException` (its
+   handshake refusal, including 426 Upgrade Required) used to degrade: a bad
+   URI, a changed client shape or a provider answering a plain error object
+   ended the turn instead, even though the stateless path would have answered
+   it. A caller cancellation is never masked - it is the caller asking to stop."
+  [transport-state connect-opts]
   (or (:socket @transport-state)
-    (let [socket (open-responses-websocket! connect-opts)]
+    (let [socket (try
+                   (open-responses-websocket! connect-opts)
+                   (catch InterruptedException e (throw e))
+                   (catch Throwable e
+                     (if (contains? failure/DELIBERATE_STREAM_ABORT_TYPES
+                           (:type (ex-data e)))
+                       (throw e)
+                       (throw (ex-info (str "Responses WebSocket unavailable: " (ex-message e))
+                                {:type :svar.session/transport-unavailable
+                                 :cause-class (.getName (class e))}
+                                e)))))]
       (swap! transport-state assoc :socket socket)
       socket)))
 
@@ -3358,6 +3378,7 @@
     (instance? java.util.concurrent.ExecutionException error)
     (instance? java.util.concurrent.CompletionException error)
     (= :svar.session/transport-closed (:type (ex-data error)))
+    (= :svar.session/transport-unavailable (:type (ex-data error)))
     (some-> (ex-cause error) websocket-transport-error?)))
 
 (defn- responses-session-completion!
