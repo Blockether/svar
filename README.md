@@ -38,6 +38,7 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 | [**Router**](#router) | `make-router`, `router-stats`, `reset-budget!`, `reset-provider!` | Multi-provider routing with circuit breakers, cost budgets, automatic fallback. The entry point to the library. |
 | [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Supports [streaming](#streaming) via `:on-chunk`. Token counting + cost estimation via JTokkit. |
 | [**Tool Calling**](#tool-calling-ask-code) | `ask-code!` | Native tool-calling completion. The model acts by calling your tools (`tool_use` / `tool_calls` / `function_call` — shaped per wire); no tool call means its text IS the final answer. Supports [streaming](#streaming) via `:on-chunk`. |
+| [**Stateful Codex Sessions**](#stateful-codex-sessions-open-session) | `open-session`, `ask!`, `close-session!`, `session-history` | Persistent Responses WebSocket, delta-only turns, server continuation, and canonical replay fallback for `:openai-codex`. |
 | [**Spec DSL**](#spec-dsl-reference) | `spec`, `field`, `spec->prompt`, `validate-data` | Define output shapes: types, enums, refs, optional fields, namespaced keys, fixed-size vectors. |
 | [**Parsing**](#parsing--validation) | `str->data`, `str->data-with-spec`, `data->str` | Schemaless and spec-validated JSON↔Clojure. Handles malformed JSON out of the box. |
 | [**Models**](#available-models-models) | `models!` | List available models from your provider. |
@@ -289,6 +290,30 @@ Returns `{:stop-reason :tool-calls|:end :tool-calls [{:id <str> :name <str> :inp
 `ask-code!` accepts the same routing, reasoning, verbosity, network, and streaming controls as `ask!`, minus the structured-output-only knobs (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`). See [TOOL_CALLING.md](TOOL_CALLING.md) for the full wire-level design.
 
 Add `:strict true` to a tool definition to have the provider sample that tool's `input` under `:schema` as a grammar, so an argument can never come back malformed (an array arriving as JSON text, a missing required key). Anthropic takes it as-is and still allows optional properties. The OpenAI wires (chat, responses, and the ChatGPT Codex backend) enforce a harsher subset: every property must be listed in `required` — mark optional ones nullable — and every object must set `additionalProperties: false`. Gemini has no per-tool equivalent and ignores the flag. When a route rejects the field, svar re-sends once with it stripped rather than failing the turn.
+
+
+### Stateful Codex sessions (`open-session`)
+
+For a multi-turn `:openai-codex` agent, open one explicit session instead of rebuilding every turn manually:
+
+```clojure lazytest/skip=true
+(with-open [session (svar/open-session
+                      router
+                      {:routing {:provider :openai-codex
+                                 :model "gpt-5.6"}
+                       :tools [run-python-tool]})]
+  (let [turn-1 (svar/ask! session "Compute Fibonacci 10.")
+        call   (first (:tool-calls turn-1))]
+    (svar/ask! session
+      {:role "user"
+       :content [{:type "tool_result"
+                  :tool_use_id (:id call)
+                  :content "55"}]})))
+```
+
+The session keeps one Responses WebSocket, a stable `prompt_cache_key`, and the latest `previous_response_id`. After the first turn it sends only new user/tool items. Svar still owns canonical history: a rejected cursor or dropped connection triggers full-history replay, and an unavailable WebSocket falls back to the existing HTTP/SSE Responses transport. Calls on one session are serialized; `with-open` or `close-session!` closes its socket. `session-history` returns the replayable canonical messages.
+
+The API name is provider-neutral, but the stateful backend currently supports only `:openai-codex`; opening it for another provider fails explicitly instead of pretending that provider has server-side continuation.
 
 ### Reasoning depth and output verbosity
 

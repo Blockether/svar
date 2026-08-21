@@ -137,7 +137,14 @@
    GPT-5.6+ Responses emits explicit prompt-cache breakpoints, including a
    rolling prior-turn boundary; older OpenAI-compatible styles strip the marker."
   llm/cached)
-(def ask! "Asks the LLM and returns structured Clojure data with token usage and cost." llm/ask!)
+(def open-session
+  "Opens a sequential LLM session. OpenAI Codex uses a persistent Responses
+   WebSocket and server continuation; close it with `close-session!` or
+   `with-open`."
+  llm/open-session)
+(def close-session! "Closes an explicit LLM session. Idempotent." llm/close-session!)
+(def session-history "Returns an explicit session's canonical replay history." llm/session-history)
+(def ask! "Asks the LLM and returns structured Clojure data with token usage and cost. With an explicit session, appends one native completion turn." llm/ask!)
 (def ask-code!
   "Native tool-calling completion. Sibling of `ask!` (structured `:spec`).
    The model takes action by calling a `:tool`; no tool call ⇒ its text is the

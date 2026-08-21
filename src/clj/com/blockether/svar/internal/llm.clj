@@ -15,8 +15,10 @@
    [taoensso.trove :as trove]
    [com.blockether.svar.internal.usage :as usage])
   (:import
-   (java.io BufferedReader InputStreamReader)
-   (java.net URI)))
+   (java.io BufferedReader Closeable InputStreamReader)
+   (java.net URI)
+   (java.net.http HttpClient WebSocket WebSocket$Listener)
+   (java.util.concurrent CompletableFuture LinkedBlockingQueue TimeUnit TimeoutException)))
 
 ;; =============================================================================
 ;; Correlation context
@@ -3042,6 +3044,229 @@
 (defn- stream-finalization-error? [e]
   (contains? stream-finalization-error-types (:type (ex-data e))))
 
+(def ^:dynamic *responses-session-transport*
+  "When bound, intercepts one OpenAI Codex Responses call with an explicit
+   session transport. Ordinary routed calls remain on HTTP/SSE."
+  nil)
+
+(defn- responses-websocket-url [base-url responses-path]
+  (let [http-url (responses-url base-url responses-path)]
+    (cond
+      (str/starts-with? http-url "https://") (str "wss://" (subs http-url 8))
+      (str/starts-with? http-url "http://")  (str "ws://" (subs http-url 7))
+      :else http-url)))
+
+(defn open-responses-websocket!
+  "Opens one Responses WebSocket and returns the small transport map used by
+   explicit sessions: `:send!`, `:receive!`, and idempotent `:close!`. This is
+   public only as a deterministic transport seam for tests."
+  [{:keys [base-url responses-path api-key headers timeout-ms]
+    :or {responses-path "/responses" timeout-ms router/DEFAULT_TIMEOUT_MS}}]
+  (let [url       (responses-websocket-url base-url responses-path)
+        operation-timeout-ms (long (or timeout-ms Long/MAX_VALUE))
+        inbox     (LinkedBlockingQueue.)
+        fragments (StringBuilder.)
+        listener  (reify WebSocket$Listener
+                    (onOpen [_ socket]
+                      (.request ^WebSocket socket 1))
+                    (onText [_ socket data last?]
+                      (.append fragments ^CharSequence data)
+                      (when last?
+                        (.put inbox (str fragments))
+                        (.setLength fragments 0))
+                      (.request ^WebSocket socket 1)
+                      (CompletableFuture/completedFuture nil))
+                    (onError [_ _ error]
+                      (.put inbox error))
+                    (onClose [_ _ status reason]
+                      (.put inbox {:svar.websocket/closed true
+                                   :status status :reason reason})
+                      (CompletableFuture/completedFuture nil)))
+        client    ^HttpClient (:client (current-http-client))
+        builder   (.newWebSocketBuilder client)
+        all-headers (merge {"Authorization" (str "Bearer " api-key)
+                            "OpenAI-Beta" "responses_websockets=2026-02-06"}
+                      headers)
+        _         (doseq [[k v] all-headers :when (some? v)]
+                    (.header builder (name k) (str v)))
+        socket    (.get (.buildAsync builder (URI/create url) listener)
+                    operation-timeout-ms TimeUnit/MILLISECONDS)
+        closed?   (atom false)]
+    {:send! (fn [payload]
+              (.get (.sendText ^WebSocket socket ^CharSequence payload true)
+                operation-timeout-ms TimeUnit/MILLISECONDS))
+     :receive! (fn [wait-ms]
+                 (or (.poll inbox (long wait-ms) TimeUnit/MILLISECONDS)
+                   (throw (TimeoutException.
+                            (str "Responses WebSocket timed out after " wait-ms "ms.")))))
+     :close! (fn []
+               (when (compare-and-set! closed? false true)
+                 (try
+                   (.get (.sendClose ^WebSocket socket WebSocket/NORMAL_CLOSURE "session closed")
+                     1000 TimeUnit/MILLISECONDS)
+                   (catch Throwable _ nil))))
+     :url url}))
+
+(defn- close-session-socket! [transport-state]
+  (when-let [socket (:socket @transport-state)]
+    (try ((:close! socket)) (catch Throwable _ nil)))
+  (swap! transport-state dissoc :socket :cursor :stable))
+
+(defn- session-socket! [transport-state connect-opts]
+  (or (:socket @transport-state)
+    (let [socket (open-responses-websocket! connect-opts)]
+      (swap! transport-state assoc :socket socket)
+      socket)))
+
+(defn- websocket-event-error [event]
+  (let [error (or (get event "error") event)
+        code  (or (get error "code") (get event "code"))
+        message (or (get error "message") (get event "message") "Responses WebSocket request failed.")]
+    (ex-info message {:type :svar.session/server-error
+                      :code code
+                      :event event})))
+
+(defn- previous-response-missing? [e]
+  (let [data (ex-data e)
+        code (some-> (:code data) str str/lower-case)
+        message (some-> (ex-message e) str/lower-case)]
+    (or (contains? #{"previous_response_not_found" "previous_response_id_not_found"} code)
+      (and (str/includes? (or message "") "previous_response")
+        (str/includes? (or message "") "not found")))))
+
+(defn- merge-response-output [response output-items]
+  (let [terminal-items (vec (or (get response "output") []))
+        item-key (fn [item] (or (get item "id") (get item "call_id") (pr-str item)))
+        seen (set (map item-key terminal-items))]
+    (assoc response "output"
+      (into terminal-items (remove #(contains? seen (item-key %))) output-items))))
+
+(defn- receive-websocket-response!
+  [socket {:keys [timeout-ms on-chunk url]}]
+  (let [content (StringBuilder.)
+        reasoning (StringBuilder.)
+        tool-args (StringBuilder.)]
+    (loop [output-items [] accumulated-provider-state nil accumulated-api-usage nil]
+      (let [raw ((:receive! socket) timeout-ms)]
+        (cond
+          (instance? Throwable raw) (throw raw)
+          (:svar.websocket/closed raw)
+          (throw (ex-info "Responses WebSocket closed before a terminal response."
+                   {:type :svar.session/transport-closed :close raw}))
+          :else
+          (let [event (json/read-json raw)
+                event-type (get event "type")]
+            (when (contains? #{"error" "response.failed"} event-type)
+              (throw (websocket-event-error event)))
+            (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
+                          tool-args-delta tool-call-preview] :as delta}
+                  (extract-stream-delta event)
+                  next-provider-state (merge-provider-state accumulated-provider-state
+                                        (:provider-state delta))
+                  next-api-usage (or (:api-usage delta) accumulated-api-usage)
+                  item (when (= "response.output_item.done" event-type)
+                         (get event "item"))]
+              (when content-delta (.append content ^String content-delta))
+              (when reasoning-delta (.append reasoning ^String reasoning-delta))
+              (when tool-args-delta (.append tool-args ^String tool-args-delta))
+              (when (and (zero? (.length content)) content-fallback)
+                (.append content ^String content-fallback))
+              (when (and (zero? (.length reasoning)) reasoning-fallback)
+                (.append reasoning ^String reasoning-fallback))
+              (when (and on-chunk
+                      (or content-delta reasoning-delta tool-args-delta tool-call-preview))
+                (on-chunk {:content (str content)
+                           :reasoning (nonblank-str (str reasoning))
+                           :tool-input (nonblank-str (str tool-args))
+                           :tool-call-preview tool-call-preview
+                           :provider-state next-provider-state
+                           :api-usage next-api-usage
+                           :done? false}))
+              (if (contains? #{"response.completed" "response.incomplete"} event-type)
+                (let [response (merge-response-output (get event "response")
+                                 (cond-> output-items item (conj item)))]
+                  (extract-response-data
+                    {:parsed response
+                     :raw-body raw
+                     :url url
+                     :status 200
+                     :streaming? true
+                     :transport :websocket}))
+                (recur (cond-> output-items item (conj item))
+                  next-provider-state next-api-usage)))))))))
+
+(defn- session-request-body [body input previous-response-id]
+  (cond-> (-> body
+            (dissoc :previous_response_id :max_tokens :max_output_tokens :text)
+            (assoc :type "response.create" :stream true :input input))
+    previous-response-id (assoc :previous_response_id previous-response-id)))
+
+(defn- responses-websocket-session-completion!
+  [transport-state request-body delta-input opts]
+  (let [stable (dissoc request-body :input :stream :previous_response_id)
+        prior @transport-state
+        continue? (and (:cursor prior) (= stable (:stable prior)))
+        full-input (:input request-body)
+        initial-input (if continue? delta-input full-input)
+        initial-cursor (when continue? (:cursor prior))
+        connect-opts (select-keys opts [:base-url :responses-path :api-key :headers :timeout-ms])
+        perform! (fn [socket input cursor]
+                   ((:send! socket)
+                    (json/write-json-str
+                      (session-request-body request-body input cursor)))
+                   (receive-websocket-response! socket
+                     {:timeout-ms (or (:idle-timeout-ms opts)
+                                    (:timeout-ms opts)
+                                    Long/MAX_VALUE)
+                      :on-chunk (:on-chunk opts)
+                      :url (:url socket)}))]
+    (loop [socket (session-socket! transport-state connect-opts)
+           input initial-input
+           cursor initial-cursor
+           recovered? false]
+      (let [outcome (try {:result (perform! socket input cursor)}
+                         (catch Throwable e {:error e}))]
+        (if-let [result (:result outcome)]
+          (let [response-id (get-in result [:http-response :parsed "id"])]
+            (swap! transport-state assoc :stable stable :cursor response-id)
+            result)
+          (let [error (:error outcome)]
+            (cond
+              (and cursor (previous-response-missing? error) (not recovered?))
+              (recur socket full-input nil true)
+
+              (and (not recovered?)
+                (or (= "websocket_connection_limit_reached" (:code (ex-data error)))
+                  (instance? java.io.IOException error)
+                  (instance? TimeoutException error)
+                  (= :svar.session/transport-closed (:type (ex-data error)))))
+              (do
+                (close-session-socket! transport-state)
+                (recur (session-socket! transport-state connect-opts)
+                  full-input nil true))
+
+              :else (throw error))))))))
+
+(defn- websocket-transport-error? [error]
+  (or (instance? java.io.IOException error)
+    (instance? TimeoutException error)
+    (instance? java.util.concurrent.ExecutionException error)
+    (instance? java.util.concurrent.CompletionException error)
+    (= :svar.session/transport-closed (:type (ex-data error)))
+    (some-> (ex-cause error) websocket-transport-error?)))
+
+(defn- responses-session-completion!
+  [transport-state request-body delta-input opts fallback!]
+  (try
+    (responses-websocket-session-completion!
+      transport-state request-body delta-input opts)
+    (catch Throwable error
+      (if (websocket-transport-error? error)
+        (do
+          (close-session-socket! transport-state)
+          (fallback!))
+        (throw error)))))
+
 (defn openai-responses-completion
   "Low-level OpenAI Responses transport.
 
@@ -4650,17 +4875,22 @@
          (= api-style :openai-compatible-responses)
          (let [responses-call
                (fn [stateless?]
-                 (openai-responses-completion
-                   (build-openai-responses-request-body messages model extra-body stateless?)
-                   {:api-key         api-key
-                    :base-url        base-url
-                    :responses-path  (or responses-path "/responses")
-                    :headers         headers
-                    :timeout-ms      timeout-ms
-                    :ttft-timeout-ms ttft-timeout-ms
-                    :idle-timeout-ms idle-timeout-ms
-                    :semantic-timeout-ms semantic-timeout-ms
-                    :on-chunk        on-chunk}))]
+                 (let [request-body (build-openai-responses-request-body messages model extra-body stateless?)
+                       completion-opts {:api-key         api-key
+                                        :base-url        base-url
+                                        :responses-path  (or responses-path "/responses")
+                                        :headers         headers
+                                        :timeout-ms      timeout-ms
+                                        :ttft-timeout-ms ttft-timeout-ms
+                                        :idle-timeout-ms idle-timeout-ms
+                                        :semantic-timeout-ms semantic-timeout-ms
+                                        :on-chunk        on-chunk}]
+                   (if (and *responses-session-transport*
+                         (= :openai-codex provider-id))
+                     (*responses-session-transport*
+                       request-body completion-opts
+                       #(openai-responses-completion request-body completion-opts))
+                     (openai-responses-completion request-body completion-opts))))]
            ;; Stateless is sticky per host: an explicit provider opt, or a host
            ;; that already rejected a replayed server item id. Otherwise try the
            ;; full replay once and self-heal on THAT exact 400 — but never after
@@ -5072,6 +5302,15 @@
               llm-headers        (assoc :llm-headers llm-headers))))))))
 
 ;; =============================================================================
+;; Explicit session protocol
+;; =============================================================================
+
+(defprotocol StatefulSession
+  (-ask-session! [session input])
+  (-close-session! [session])
+  (-session-history [session]))
+
+;; =============================================================================
 ;; ask!* - Low-level structured output (primitive, no routing)
 ;; =============================================================================
 
@@ -5162,14 +5401,16 @@
      to 240000-300000; reproductions of legitimate 185 s silences are
      documented in anthropics/claude-agent-sdk-typescript#44."
   [router opts]
-  ;; Bind the caller's cancellation hook across the whole routed call (all
-  ;; fallback attempts + backoff sleeps). See `*cancel-fn*`.
-  (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
-    (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
-      (router/with-provider-fallback
-        router (:prefs resolved)
-        (fn [provider model-map]
-          (ask!* router (inject-routed-params opts provider model-map)))))))
+  (if (satisfies? StatefulSession router)
+    (-ask-session! router opts)
+    ;; Bind the caller's cancellation hook across the whole routed call (all
+    ;; fallback attempts + backoff sleeps). See `*cancel-fn*`.
+    (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
+      (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+        (router/with-provider-fallback
+          router (:prefs resolved)
+          (fn [provider model-map]
+            (ask!* router (inject-routed-params opts provider model-map))))))))
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
 ;; =============================================================================
@@ -6369,6 +6610,111 @@
                   (vec (rest remaining))
                   (conj tried {:model from-model
                                :category (get details "category")}))))))))))
+
+;; =============================================================================
+;; Explicit stateful sessions
+;; =============================================================================
+
+(defn- session-turn [input]
+  (cond
+    (string? input) {:messages [(user input)] :opts {}}
+    (and (map? input) (:role input)) {:messages [input] :opts {}}
+    (sequential? input) {:messages (vec input) :opts {}}
+    (map? input) (let [turn-input (or (:input input) (:messages input))]
+                   (when-not turn-input
+                     (throw (ex-info "A session turn requires :input or :messages."
+                              {:type :svar.session/invalid-input})))
+                   {:messages (cond
+                                (string? turn-input) [(user turn-input)]
+                                (and (map? turn-input) (:role turn-input)) [turn-input]
+                                (sequential? turn-input) (vec turn-input)
+                                :else (throw (ex-info "Session input must be text or canonical messages."
+                                               {:type :svar.session/invalid-input})))
+                    :opts (dissoc input :input :messages)})
+    :else (throw (ex-info "Session input must be text, a canonical message, or turn options."
+                   {:type :svar.session/invalid-input}))))
+
+(defn- messages->responses-input [messages model]
+  (let [messages (sanitize-replayed-messages messages model true)
+        explicit-cache? (gpt-5-6-or-later? model)]
+    (->> messages
+      (remove #(= "system" (:role %)))
+      (mapcat #(responses-message-input-entries % explicit-cache?))
+      vec)))
+
+(defrecord ResponsesSession [router base-opts provider-id model history transport-state closed? lock]
+  StatefulSession
+  (-ask-session! [_ input]
+    (locking lock
+      (when @closed?
+        (throw (ex-info "The LLM session is closed."
+                 {:type :svar.session/closed})))
+      (let [{new-messages :messages turn-opts :opts} (session-turn input)
+            full-messages (into @history new-messages)
+            delta-input (messages->responses-input new-messages model)
+            call-opts (-> base-opts
+                        (merge turn-opts)
+                        (assoc :messages full-messages
+                          :routing (merge (:routing base-opts)
+                                     {:provider provider-id :model model})))
+            result (binding [*responses-session-transport*
+                             (fn [request-body completion-opts fallback!]
+                               (responses-session-completion!
+                                 transport-state request-body delta-input completion-opts fallback!))]
+                     (ask-code! router call-opts))
+            assistant-message (or (:assistant-message result)
+                                (when-not (str/blank? (or (:content result) ""))
+                                  (assistant (:content result))))]
+        (reset! history (cond-> full-messages assistant-message (conj assistant-message)))
+        result)))
+  (-close-session! [_]
+    (when (compare-and-set! closed? false true)
+      (close-session-socket! transport-state))
+    nil)
+  (-session-history [_] @history)
+  Closeable
+  (close [this] (-close-session! this)))
+
+(defn open-session
+  "Opens an explicit, sequential LLM session. The public contract is provider
+   neutral; the first stateful backend is `:openai-codex`, using one Responses
+   WebSocket plus `previous_response_id`. Canonical history remains local and is
+   replayed after reconnect. `opts` are ordinary `ask-code!` options and may
+   include initial `:messages`. The returned value implements `Closeable`."
+  [router opts]
+  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))
+        [provider model-map] (or (router/select-provider router (:prefs resolved))
+                               (throw (ex-info "No provider is available for this session."
+                                        {:type :svar.session/no-provider})))
+        provider-id (:id provider)
+        api-style (or (:api-style model-map) (:api-style provider))
+        base-opts (cond-> (dissoc opts :messages)
+                    (nil? (:cache-key opts))
+                    (assoc :cache-key (str "svar-session-" (java.util.UUID/randomUUID))))]
+    (when-not (and (= :openai-codex provider-id)
+                (= :openai-compatible-responses api-style))
+      (throw (ex-info "Stateful sessions currently require the OpenAI Codex Responses provider."
+               {:type :svar.session/unsupported-provider
+                :provider provider-id :api-style api-style})))
+    (->ResponsesSession router
+      base-opts
+      provider-id (:name model-map)
+      (atom (vec (:messages opts)))
+      (atom {}) (atom false) (Object.))))
+
+(defn close-session!
+  "Closes an explicit session and its transport. Idempotent."
+  [session]
+  (when-not (satisfies? StatefulSession session)
+    (throw (ex-info "Value is not an LLM session." {:type :svar.session/invalid-session})))
+  (-close-session! session))
+
+(defn session-history
+  "Returns the session's canonical replay history."
+  [session]
+  (when-not (satisfies? StatefulSession session)
+    (throw (ex-info "Value is not an LLM session." {:type :svar.session/invalid-session})))
+  (-session-history session))
 
 ;; =============================================================================
 ;; models! - Fetch available models
