@@ -3093,7 +3093,8 @@
 
 (defn open-responses-websocket!
   "Opens one Responses WebSocket and returns the small transport map used by
-   explicit sessions: `:send!`, `:receive!`, and idempotent `:close!`. This is
+   explicit sessions: `:send!`, `:receive!`, an idempotent `:close!` that sends a
+   close frame, and an `:abort!` that drops the connection at once. This is
    public only as a deterministic transport seam for tests."
   [{:keys [base-url responses-path api-key headers timeout-ms]
     :or {responses-path "/responses" timeout-ms router/DEFAULT_TIMEOUT_MS}}]
@@ -3138,11 +3139,22 @@
      :close! (fn []
                (when (compare-and-set! closed? false true)
                  (close-websocket! socket)))
+     :abort! (fn []
+               (when (compare-and-set! closed? false true)
+                 (abort-websocket! socket)))
      :url url}))
 
-(defn- close-session-socket! [transport-state]
+(defn- close-session-socket!
+  "Drops the socket AND the response chain that lives on it, so the next turn
+   starts a fresh chain with the full canonical history. `mode` is `:abort` on
+   every failure path - Codex parity: after a terminal stream error a graceful
+   close handshake can stall on a connection that is already gone, and the socket
+   is being replaced anyway - and `:graceful` only when the caller closes the
+   session itself."
+  [transport-state mode]
   (when-let [socket (:socket @transport-state)]
-    (try ((:close! socket)) (catch Throwable _ nil)))
+    (try ((if (= :abort mode) (:abort! socket) (:close! socket)))
+         (catch Throwable _ nil)))
   (swap! transport-state dissoc :socket :cursor :stable))
 
 (defn- session-socket! [transport-state connect-opts]
@@ -3151,13 +3163,73 @@
       (swap! transport-state assoc :socket socket)
       socket)))
 
-(defn- websocket-event-error [event]
-  (let [error (or (get event "error") event)
-        code  (or (get error "code") (get event "code"))
-        message (or (get error "message") (get event "message") "Responses WebSocket request failed.")]
-    (ex-info message {:type :svar.session/server-error
-                      :code code
-                      :event event})))
+(def ^:private stream-failed-code->status
+  "Best-effort HTTP-status equivalent for a streamed failure's provider error
+   CODE (OpenAI `response.failed`) or error TYPE (Anthropic mid-stream `error`
+   event), so the router's transient-status classification (429/5xx) applies to
+   streamed failures exactly as it does to pre-stream HTTP errors."
+  {"rate_limit_exceeded" 429   ; OpenAI / Responses
+   "rate_limit_error"    429   ; Anthropic (also Copilot-Claude on /v1/messages)
+   "server_error"        500
+   "internal_error"      500
+   "api_error"           500   ; Anthropic transient server error
+   "overloaded"          529
+   "server_is_overloaded" 529  ; OpenAI Codex/ChatGPT backend mid-stream overload (opencode parseStreamError → retryable)
+   "overloaded_error"    529})
+
+(def ^:private context-overflow-codes
+  #{"context_length_exceeded" "context_window_exceeded" "prompt_too_long" "input_too_long"})
+
+(defn- context-overflow-failure?
+  [code message]
+  (let [code (some-> code str/lower-case)
+        message (some-> message str/lower-case)]
+    (or (contains? context-overflow-codes code)
+      (boolean
+        (some #(str/includes? (or message "") %)
+          ["context length exceeded" "context window exceeded"
+           "maximum context length" "prompt is too long" "input is too long"
+           "too many tokens"])))))
+
+(defn- websocket-event-status
+  "HTTP status for a Responses WebSocket failure event: the one the server wrapped
+   into the event when it sent one (Codex reads both `status` and `status_code`),
+   else the status its error CODE stands for."
+  [event error code]
+  (let [raw (or (get event "status") (get event "status_code")
+              (get error "status") (get error "status_code"))]
+    (cond
+      (number? raw) (long raw)
+      (string? raw) (parse-long raw)
+      :else (get stream-failed-code->status (some-> code str/lower-case)))))
+
+(defn- websocket-event-error
+  "Types an `error` / `response.failed` event from the Responses WebSocket exactly
+   as the SSE path types a mid-stream failure - carrying the `:status` that makes
+   the router's transient classification (429/5xx) fire. Without it a rate limit
+   that arrived over the socket ended the turn while the identical failure over
+   SSE was retried; the Codex CLI maps its wrapped websocket error events onto the
+   same HTTP-status errors for that reason. `:code` stays: the session's own
+   recovery (rejected cursor, connection limit) classifies on it."
+  [event]
+  (let [error   (or (get event "error") event)
+        code    (some-> (or (get error "code") (get error "type") (get event "code")) str)
+        message (or (get error "message") (get event "message")
+                  "Responses WebSocket request failed.")
+        status  (websocket-event-status event error code)
+        overflow? (context-overflow-failure? code message)]
+    (ex-info message
+      (cond-> {:type (if overflow?
+                       :svar.tokens/context-overflow
+                       :svar.session/server-error)
+               :source :provider
+               :stream? true
+               :code code
+               :provider-error-code code
+               :provider-message message
+               :event event}
+        overflow? (assoc :status 400)
+        (and (not overflow?) status) (assoc :status status)))))
 
 (defn- previous-response-missing? [e]
   (let [data (ex-data e)
@@ -3274,7 +3346,7 @@
                   (instance? TimeoutException error)
                   (= :svar.session/transport-closed (:type (ex-data error)))))
               (do
-                (close-session-socket! transport-state)
+                (close-session-socket! transport-state :abort)
                 (recur (session-socket! transport-state connect-opts)
                   full-input nil true))
 
@@ -3296,7 +3368,7 @@
     (catch Throwable error
       (if (websocket-transport-error? error)
         (do
-          (close-session-socket! transport-state)
+          (close-session-socket! transport-state :abort)
           (fallback!))
         (throw error)))))
 
@@ -3625,34 +3697,6 @@
         {:code (some-> (or (get err "code") (get err "type")) str)
          :message (or (get err "message") "provider reported stream failure")
          :event-type event-type}))))
-
-(def ^:private stream-failed-code->status
-  "Best-effort HTTP-status equivalent for a streamed failure's provider error
-   CODE (OpenAI `response.failed`) or error TYPE (Anthropic mid-stream `error`
-   event), so the router's transient-status classification (429/5xx) applies to
-   streamed failures exactly as it does to pre-stream HTTP errors."
-  {"rate_limit_exceeded" 429   ; OpenAI / Responses
-   "rate_limit_error"    429   ; Anthropic (also Copilot-Claude on /v1/messages)
-   "server_error"        500
-   "internal_error"      500
-   "api_error"           500   ; Anthropic transient server error
-   "overloaded"          529
-   "server_is_overloaded" 529  ; OpenAI Codex/ChatGPT backend mid-stream overload (opencode parseStreamError → retryable)
-   "overloaded_error"    529})
-
-(def ^:private context-overflow-codes
-  #{"context_length_exceeded" "context_window_exceeded" "prompt_too_long" "input_too_long"})
-
-(defn- context-overflow-failure?
-  [code message]
-  (let [code (some-> code str/lower-case)
-        message (some-> message str/lower-case)]
-    (or (contains? context-overflow-codes code)
-      (boolean
-        (some #(str/includes? (or message "") %)
-          ["context length exceeded" "context window exceeded"
-           "maximum context length" "prompt is too long" "input is too long"
-           "too many tokens"])))))
 
 (defn- stream-finalization-summary
   [{:keys [terminal incomplete last-event-type last-finish-reason stop-details
@@ -6702,7 +6746,7 @@
         result)))
   (-close-session! [_]
     (when (compare-and-set! closed? false true)
-      (close-session-socket! transport-state))
+      (close-session-socket! transport-state :graceful))
     nil)
   (-session-history [_] @history)
   Closeable

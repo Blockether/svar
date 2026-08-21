@@ -3,6 +3,7 @@
   (:require
    [charred.api :as json]
    [com.blockether.svar.core :as svar]
+   [com.blockether.svar.internal.failure :as failure]
    [com.blockether.svar.internal.llm :as sut]
    [lazytest.core :refer [defdescribe expect it]])
   (:import
@@ -13,6 +14,8 @@
   (ns-resolve 'com.blockether.svar.internal.llm 'await-websocket-future!))
 (def ^:private close-websocket!
   (ns-resolve 'com.blockether.svar.internal.llm 'close-websocket!))
+(def ^:private websocket-event-error
+  (ns-resolve 'com.blockether.svar.internal.llm 'websocket-event-error))
 
 (defn- completed-event [id text]
   (json/write-json-str
@@ -37,14 +40,17 @@
                             "arguments" "{\"x\":1}"}]
                  "usage" {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}))
 
-(defn- fake-websocket-factory [events sent closes]
-  (fn [_]
-    {:send! (fn [payload]
-              (swap! sent conj (json/read-json payload :key-fn keyword)))
-     :receive! (fn [_] (let [event (first @events)]
-                         (swap! events subvec 1)
-                         event))
-     :close! (fn [] (swap! closes inc))}))
+(defn- fake-websocket-factory
+  ([events sent closes] (fake-websocket-factory events sent closes (atom 0)))
+  ([events sent closes aborts]
+   (fn [_]
+     {:send! (fn [payload]
+               (swap! sent conj (json/read-json payload :key-fn keyword)))
+      :receive! (fn [_] (let [event (first @events)]
+                          (swap! events subvec 1)
+                          event))
+      :close! (fn [] (swap! closes inc))
+      :abort! (fn [] (swap! aborts inc))})))
 
 (defn- test-websocket [close-future aborts]
   (reify WebSocket
@@ -138,6 +144,7 @@
     (let [opens (atom 0)
           sent (atom [])
           closes (atom 0)
+          aborts (atom 0)
           factory (fn [_]
                     (let [n (swap! opens inc)
                           receives (atom (if (= n 1)
@@ -149,7 +156,8 @@
                        :receive! (fn [_] (let [event (first @receives)]
                                            (swap! receives subvec 1)
                                            event))
-                       :close! (fn [] (swap! closes inc))}))]
+                       :close! (fn [] (swap! closes inc))
+                       :abort! (fn [] (swap! aborts inc))}))]
       (with-redefs [sut/open-responses-websocket! factory]
         (with-open [session (svar/open-session (codex-router)
                               {:routing {:provider :openai-codex :model "gpt-5.6"}})]
@@ -159,7 +167,10 @@
             (expect (nil? (:previous_response_id replay)))
             (expect (= 3 (count (:input replay)))))))
       (expect (= 2 @opens))
-      (expect (= 2 @closes))))
+      ;; The lost connection is ABORTED, never closed by handshake: waiting for a
+      ;; close frame from a socket that is already gone stalls the recovery.
+      (expect (= 1 @aborts))
+      (expect (= 1 @closes))))
 
   (it "reconnects when a send fails on a lost connection"
     (let [opens (atom 0)
@@ -174,7 +185,8 @@
                        :receive! (fn [_] (let [event (first @receives)]
                                            (swap! receives subvec 1)
                                            event))
-                       :close! (fn [] nil)}))]
+                       :close! (fn [] nil)
+                       :abort! (fn [] nil)}))]
       (with-redefs [sut/open-responses-websocket! factory
                     sut/openai-responses-completion (fn [_ _] (swap! http-calls inc) nil)]
         (with-open [session (svar/open-session (codex-router)
@@ -203,6 +215,31 @@
             (expect (= "resp_1" (:previous_response_id continuation)))
             (expect (nil? (:previous_response_id replay)))
             (expect (= 3 (count (:input replay)))))))))
+
+  (it "types a rate limit from the socket like the retryable one from SSE"
+    ;; A 429 that arrived as a websocket `error` event carried no status, so the
+    ;; router read a terminal session error and ended the turn - while the very
+    ;; same rate limit over SSE was retried.
+    (let [error (websocket-event-error {"type" "error"
+                                        "error" {"code" "rate_limit_exceeded"
+                                                 "message" "Rate limit reached"}})]
+      (expect (= 429 (:status (ex-data error))))
+      (expect (failure/transient-error? error))))
+
+  (it "keeps the status the server wrapped into the error event"
+    (let [error (websocket-event-error {"type" "error"
+                                        "status_code" 503
+                                        "error" {"code" "server_is_busy"
+                                                 "message" "Busy"}})]
+      (expect (= 503 (:status (ex-data error))))
+      (expect (failure/transient-error? error))))
+
+  (it "leaves a rejected continuation cursor classified by its code"
+    (let [error (websocket-event-error {"type" "error"
+                                        "error" {"code" "previous_response_not_found"
+                                                 "message" "Previous response not found"}})]
+      (expect (= "previous_response_not_found" (:code (ex-data error))))
+      (expect (nil? (:status (ex-data error))))))
 
   (it "sends a tool result as the next incremental Responses item"
     (let [events (atom [(tool-call-event)
