@@ -3056,6 +3056,34 @@
       (str/starts-with? http-url "http://")  (str "ws://" (subs http-url 7))
       :else http-url)))
 
+(defn- await-websocket-future!
+  [^CompletableFuture future timeout-ms]
+  (try
+    (.get future (long timeout-ms) TimeUnit/MILLISECONDS)
+    (catch InterruptedException e
+      (.cancel future true)
+      (.interrupt (Thread/currentThread))
+      (throw e))
+    (catch Throwable e
+      (.cancel future true)
+      (throw e))))
+
+(defn- abort-websocket! [^WebSocket socket]
+  (try
+    (.abort socket)
+    (catch Throwable _ nil)))
+
+(defn- close-websocket!
+  ([socket]
+   (close-websocket! socket 1000))
+  ([^WebSocket socket timeout-ms]
+   (try
+     (await-websocket-future!
+       (.sendClose socket WebSocket/NORMAL_CLOSURE "session closed")
+       timeout-ms)
+     (catch Throwable _
+       (abort-websocket! socket)))))
+
 (defn open-responses-websocket!
   "Opens one Responses WebSocket and returns the small transport map used by
    explicit sessions: `:send!`, `:receive!`, and idempotent `:close!`. This is
@@ -3089,22 +3117,20 @@
                       headers)
         _         (doseq [[k v] all-headers :when (some? v)]
                     (.header builder (name k) (str v)))
-        socket    (.get (.buildAsync builder (URI/create url) listener)
-                    operation-timeout-ms TimeUnit/MILLISECONDS)
+        handshake (.buildAsync builder (URI/create url) listener)
+        socket    (await-websocket-future! handshake operation-timeout-ms)
         closed?   (atom false)]
     {:send! (fn [payload]
-              (.get (.sendText ^WebSocket socket ^CharSequence payload true)
-                operation-timeout-ms TimeUnit/MILLISECONDS))
+              (await-websocket-future!
+                (.sendText ^WebSocket socket ^CharSequence payload true)
+                operation-timeout-ms))
      :receive! (fn [wait-ms]
                  (or (.poll inbox (long wait-ms) TimeUnit/MILLISECONDS)
                    (throw (TimeoutException.
                             (str "Responses WebSocket timed out after " wait-ms "ms.")))))
      :close! (fn []
                (when (compare-and-set! closed? false true)
-                 (try
-                   (.get (.sendClose ^WebSocket socket WebSocket/NORMAL_CLOSURE "session closed")
-                     1000 TimeUnit/MILLISECONDS)
-                   (catch Throwable _ nil))))
+                 (close-websocket! socket)))
      :url url}))
 
 (defn- close-session-socket! [transport-state]

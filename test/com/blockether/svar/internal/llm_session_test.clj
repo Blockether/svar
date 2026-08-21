@@ -4,7 +4,15 @@
    [charred.api :as json]
    [com.blockether.svar.core :as svar]
    [com.blockether.svar.internal.llm :as sut]
-   [lazytest.core :refer [defdescribe expect it]]))
+   [lazytest.core :refer [defdescribe expect it]])
+  (:import
+   (java.net.http WebSocket)
+   (java.util.concurrent CompletableFuture TimeoutException)))
+
+(def ^:private await-websocket-future!
+  (ns-resolve 'com.blockether.svar.internal.llm 'await-websocket-future!))
+(def ^:private close-websocket!
+  (ns-resolve 'com.blockether.svar.internal.llm 'close-websocket!))
 
 (defn- completed-event [id text]
   (json/write-json-str
@@ -38,6 +46,19 @@
                          event))
      :close! (fn [] (swap! closes inc))}))
 
+(defn- test-websocket [close-future aborts]
+  (reify WebSocket
+    (sendText [_ _ _] (CompletableFuture/completedFuture nil))
+    (sendBinary [_ _ _] (CompletableFuture/completedFuture nil))
+    (sendPing [_ _] (CompletableFuture/completedFuture nil))
+    (sendPong [_ _] (CompletableFuture/completedFuture nil))
+    (sendClose [_ _ _] close-future)
+    (request [_ _])
+    (getSubprotocol [_] "")
+    (isOutputClosed [_] false)
+    (isInputClosed [_] false)
+    (abort [_] (swap! aborts inc))))
+
 (defn- codex-router []
   (svar/make-router
     [{:id :openai-codex
@@ -46,6 +67,36 @@
       :api-style :openai-compatible-responses
       :responses-path "/codex/responses"
       :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]))
+
+(defdescribe websocket-resource-cleanup-test
+  (it "cancels an unfinished WebSocket operation after its timeout"
+    (let [future (CompletableFuture.)]
+      (expect (= TimeoutException
+                (try
+                  (await-websocket-future! future 1)
+                  nil
+                  (catch Throwable e (class e)))))
+      (expect (.isCancelled future))))
+
+  (it "aborts the socket when graceful close times out"
+    (let [close-future (CompletableFuture.)
+          aborts (atom 0)]
+      (close-websocket! (test-websocket close-future aborts) 1)
+      (expect (.isCancelled close-future))
+      (expect (= 1 @aborts))))
+
+  (it "aborts the socket when graceful close fails"
+    (let [close-future (doto (CompletableFuture.)
+                         (.completeExceptionally (RuntimeException. "close failed")))
+          aborts (atom 0)]
+      (close-websocket! (test-websocket close-future aborts) 1)
+      (expect (= 1 @aborts))))
+
+  (it "does not abort the socket after a successful graceful close"
+    (let [aborts (atom 0)]
+      (close-websocket!
+        (test-websocket (CompletableFuture/completedFuture nil) aborts))
+      (expect (zero? @aborts)))))
 
 (defdescribe codex-responses-session-test
   (it "continues a second turn with only its delta and previous response id"
