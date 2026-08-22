@@ -2061,9 +2061,28 @@
                          (when-not (str/blank? s) s))
     :else nil))
 
+(def ^:private reasoning-summary-settings
+  "The `summary` SETTINGS a Responses request may ask for. A response echoes the
+   request's reasoning config back, so seeing one of these as a summary means
+   configuration, never text the model wrote."
+  #{"auto" "concise" "detailed" "none"})
+
+(defn- reasoning-config-echo?
+  "True for the reasoning CONFIG a Responses envelope echoes back -
+   `{\"effort\" \"high\" \"summary\" \"detailed\"}`. Reasoning TEXT rides
+   `output` reasoning items; reading the echo as text renders the literal
+   setting (`detailed`) as the model's thinking."
+  [part]
+  (and (map? part)
+       (nil? (get part "type"))
+       (or (contains? part "effort")
+           (contains? part "generate_summary")
+           (contains? reasoning-summary-settings (get part "summary")))))
+
 (defn- reasoning-part-text
   [part]
   (cond (string? part) (when-not (str/blank? part) part)
+        (reasoning-config-echo? part) nil
         (map? part) (let [type (get part "type")]
                       (cond (reasoning-block-types type) (or (some-> (get part "thinking")
                                                                      reasoning-part-text)
@@ -2554,12 +2573,19 @@
         message-reasoning-content
         (get message "reasoning_content")
 
+        ;; A Responses envelope echoes the REQUEST's reasoning config under
+        ;; `reasoning` ({"effort" "high" "summary" "detailed"}); its reasoning
+        ;; TEXT rides `output` reasoning items alone, the same split openai/codex
+        ;; parses. Reading the echo made the literal setting the model's thinking.
+        responses-envelope?
+        (or (contains? response "output") (= "response" (get response "object")))
+
         raw-reasoning
         (or message-reasoning-content
             (get message "reasoning")
             (get message "reasoning_text")
             (get message "reasoning_summary")
-            (get response "reasoning")
+            (when-not responses-envelope? (get response "reasoning"))
             (get response "reasoning_text")
             (get response "reasoning_summary"))
 

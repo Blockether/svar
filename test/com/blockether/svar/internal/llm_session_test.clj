@@ -26,6 +26,26 @@
                                     "usage"
                                     {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}))
 
+(defn- reasoning-echo-event
+  "Terminal Codex response shaped the way the ChatGPT backend really answers:
+   the request's reasoning CONFIG echoed under `reasoning`, and the reasoning
+   TEXT - when the model wrote a summary at all - as an `output` item."
+  [id text summary]
+  (json/write-json-str {"type" "response.completed"
+                        "response"
+                        {"id" id
+                         "status" "completed"
+                         "reasoning" {"effort" "high" "summary" "detailed"}
+                         "output" (into (if summary
+                                          [{"id" (str "rs_" id)
+                                            "type" "reasoning"
+                                            "summary" [{"type" "summary_text" "text" summary}]}]
+                                          [])
+                                        [{"id" (str "msg_" id)
+                                          "type" "message"
+                                          "role" "assistant"
+                                          "content" [{"type" "output_text" "text" text}]}])
+                         "usage" {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}))
 (defn- tool-call-event
   []
   (json/write-json-str
@@ -202,6 +222,34 @@
               (expect (= 1 (count (:input delta-request))))
               (expect (nil? (re-find #"prompt_cache_breakpoint"
                                      (json/write-json-str delta-request)))))))))
+  (it "never reads the reasoning config echo as the model's thinking"
+      ;; Regression: a Responses envelope echoes the request's reasoning CONFIG
+      ;; back under `reasoning` ({"effort" "high" "summary" "detailed"}), and the
+      ;; terminal extraction read that setting as reasoning TEXT, beating the real
+      ;; summary from the output items. Every answer reached the caller with a
+      ;; thinking block whose whole content was the literal word `detailed`.
+      (let [events
+            (atom [(reasoning-echo-event "resp_1" "answer" "**Checking the footer**")
+                   (reasoning-echo-event "resp_2" "second" nil)])
+
+            sent
+            (atom [])
+
+            closes
+            (atom 0)]
+
+        (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (let [summarized (svar/ask! session "one")
+                  silent (svar/ask! session "two")]
+
+              (expect (= "answer" (:content summarized)))
+              (expect (= "**Checking the footer**" (:reasoning summarized)))
+              ;; a turn the model wrote no summary for carries NO thinking at all
+              (expect (= "second" (:content silent)))
+              (expect (nil? (:reasoning silent))))))))
   (it "reuses one socket while a model change starts a full Responses chain"
       ;; Codex keeps the provider transport alive across model switches, but a
       ;; continuation cursor is model-bound: the first request for the new model
