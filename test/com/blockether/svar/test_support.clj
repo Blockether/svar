@@ -1,5 +1,4 @@
-(ns com.blockether.svar.test-support
-  "Shared helpers for svar's live/integration test gating.")
+(ns com.blockether.svar.test-support "Shared helpers for svar's live/integration test gating.")
 
 (defn env
   "Value of env var `k`, or nil when it is unset OR blank.

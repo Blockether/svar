@@ -20,16 +20,14 @@
    3. Parse response with `str->data-with-spec` (LLM response -> typed Clojure map)
    4. Optionally validate with `validate-data`
    5. Optionally serialize with `data->str`"
-  (:require
-   [charred.api :as json]
-   [clojure.set :as set]
-   [clojure.string :as str]
-   [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.internal.jsonish :as jsonish]
-   [com.blockether.svar.internal.util :as util]
-   [taoensso.trove :as trove])
-  (:import
-   [java.time LocalDate OffsetDateTime ZonedDateTime]))
+  (:require [charred.api :as json]
+            [clojure.set :as set]
+            [clojure.string :as str]
+            [com.blockether.anomaly.core :as anomaly]
+            [com.blockether.svar.internal.jsonish :as jsonish]
+            [com.blockether.svar.internal.util :as util]
+            [taoensso.trove :as trove])
+  (:import [java.time LocalDate OffsetDateTime ZonedDateTime]))
 
 ;; =============================================================================
 ;; Spec DSL
@@ -79,17 +77,17 @@
    Map. JSON path string -> original keyword (e.g., {\"verifiable\" :verifiable?})."
   [spec-def]
   (let [fields (::fields spec-def)]
-    (reduce (fn [acc field-def]
-              (let [field-name (::name field-def)
-                    json-path (keyword->path field-name)
-                    ;; Get the simple key (last segment of path)
-                    simple-key (last (str/split json-path #"\."))
-                    ;; Get the original simple name (with special chars)
-                    original-simple (keyword (name field-name))]
-                ;; Only add mapping if they differ (special chars were stripped)
-                (if (not= simple-key (name original-simple))
-                  (assoc acc simple-key original-simple)
-                  acc)))
+    (reduce
+      (fn [acc field-def]
+        (let [field-name (::name field-def)
+              json-path (keyword->path field-name)
+              ;; Get the simple key (last segment of path)
+              simple-key (last (str/split json-path #"\."))
+              ;; Get the original simple name (with special chars)
+              original-simple (keyword (name field-name))]
+
+          ;; Only add mapping if they differ (special chars were stripped)
+          (if (not= simple-key (name original-simple)) (assoc acc simple-key original-simple) acc)))
       {}
       fields)))
 
@@ -103,27 +101,25 @@
    Returns:
    Data with keys remapped to original spec keywords."
   [data key-mapping]
-  (cond
-    (map? data)
-    (into {}
-      (map (fn [[k v]]
-             (let [key-str (name k)
-                       ;; Look up in mapping, or keep original
-                   remapped-key (get key-mapping key-str k)]
-               [remapped-key (remap-keys v key-mapping)]))
-        data))
+  (cond (map? data) (into {}
+                          (map (fn [[k v]]
+                                 (let [key-str
+                                       (name k)
 
-    (vector? data)
-    (mapv #(remap-keys % key-mapping) data)
+                                       ;; Look up in mapping, or keep original
+                                       remapped-key
+                                       (get key-mapping key-str k)]
 
-    :else
-    data))
+                                   [remapped-key (remap-keys v key-mapping)]))
+                               data))
+        (vector? data) (mapv #(remap-keys % key-mapping) data)
+        :else data))
 
 ;; Type keywords - using namespace alias pattern :spec.type/*
 (def ^:private VALID_TYPES
   "Valid field types using Datomic-style namespaced keywords."
-  #{:spec.type/string :spec.type/int :spec.type/float :spec.type/bool
-    :spec.type/date :spec.type/datetime :spec.type/ref :spec.type/keyword})
+  #{:spec.type/string :spec.type/int :spec.type/float :spec.type/bool :spec.type/date
+    :spec.type/datetime :spec.type/ref :spec.type/keyword})
 
 ;; Fixed-size vector type patterns: :spec.type/int-v-N, :spec.type/string-v-N, :spec.type/double-v-N
 (def ^:private VECTOR_TYPE_PATTERN
@@ -149,9 +145,8 @@
     (when-let [match (re-matches VECTOR_TYPE_PATTERN (name type-kw))]
       (let [[_ base-type size-str] match
             size (parse-long size-str)]
-        (when (and size (pos? (long size)))
-          {:base-type (keyword base-type)
-           :size size})))))
+
+        (when (and size (pos? (long size))) {:base-type (keyword base-type) :size size})))))
 
 (defn- valid-type?
   "Checks if a type keyword is valid (either a base type or a fixed-size vector type).
@@ -162,8 +157,7 @@
    Returns:
    Boolean. True if the type is valid."
   [type-kw]
-  (or (contains? VALID_TYPES type-kw)
-    (some? (parse-vector-type type-kw))))
+  (or (contains? VALID_TYPES type-kw) (some? (parse-vector-type type-kw))))
 
 ;; Cardinality keywords - using namespace alias pattern :spec.cardinality/*
 (def ^:private VALID_CARDINALITIES
@@ -182,48 +176,62 @@
   (when (nil? the-name)
     (anomaly/incorrect! "Field ::name is required" {:type :svar.spec/missing-name :option ::name}))
   (when-not (keyword? the-name)
-    (anomaly/incorrect! "Field ::name must be a keyword" {:type :svar.spec/invalid-name :option ::name :value the-name}))
+    (anomaly/incorrect! "Field ::name must be a keyword"
+                        {:type :svar.spec/invalid-name :option ::name :value the-name}))
   ;; Validate Datomic-style keyword format: dots are only allowed in namespace, not in name
   ;; Valid: :name, :org/name, :org.division/name
   ;; Invalid: :users.name (dot in name part - use :users/name instead)
   (when (str/includes? (name the-name) ".")
     (anomaly/incorrect! (str "Field ::name contains dot in name part. "
-                          "Use Datomic-style namespaced keywords instead. "
-                          "Example: Use :users/name not :users.name")
-      {:type :svar.spec/dotted-name
-       :option ::name
-       :value the-name
-       :hint (str "Change " the-name " to "
-               (keyword (str/replace (name the-name) "." "/")))}))
+                             "Use Datomic-style namespaced keywords instead. "
+                             "Example: Use :users/name not :users.name")
+                        {:type :svar.spec/dotted-name
+                         :option ::name
+                         :value the-name
+                         :hint (str "Change " the-name
+                                    " to " (keyword (str/replace (name the-name) "." "/")))}))
   (when (nil? the-type)
     (anomaly/incorrect! "Field ::type is required" {:type :svar.spec/missing-type :option ::type}))
   (when-not (valid-type? the-type)
-    (anomaly/incorrect! "Field ::type must be one of the valid types or a fixed-size vector type (e.g., :spec.type/int-v-4)"
-      {:type :svar.spec/invalid-type :option ::type :value the-type :valid-types VALID_TYPES
+    (anomaly/incorrect!
+      "Field ::type must be one of the valid types or a fixed-size vector type (e.g., :spec.type/int-v-4)"
+      {:type :svar.spec/invalid-type
+       :option ::type
+       :value the-type
+       :valid-types VALID_TYPES
        :vector-type-examples [:spec.type/int-v-4 :spec.type/string-v-2 :spec.type/double-v-3]}))
   (when (nil? the-cardinality)
-    (anomaly/incorrect! "Field ::cardinality is required" {:type :svar.spec/missing-cardinality :option ::cardinality}))
+    (anomaly/incorrect! "Field ::cardinality is required"
+                        {:type :svar.spec/missing-cardinality :option ::cardinality}))
   (when-not (contains? VALID_CARDINALITIES the-cardinality)
-    (anomaly/incorrect! "Field ::cardinality must be :spec.cardinality/one or :spec.cardinality/many"
-      {:type :svar.spec/invalid-cardinality :option ::cardinality :value the-cardinality :valid-cardinalities VALID_CARDINALITIES}))
+    (anomaly/incorrect!
+      "Field ::cardinality must be :spec.cardinality/one or :spec.cardinality/many"
+      {:type :svar.spec/invalid-cardinality
+       :option ::cardinality
+       :value the-cardinality
+       :valid-cardinalities VALID_CARDINALITIES}))
   (when (nil? the-description)
-    (anomaly/incorrect! "Field ::description is required" {:type :svar.spec/missing-description :option ::description}))
+    (anomaly/incorrect! "Field ::description is required"
+                        {:type :svar.spec/missing-description :option ::description}))
   ;; Validate ::target for :spec.type/ref types
   ;; Target can be a single keyword or a vector of keywords (union type)
   (when (= the-type :spec.type/ref)
     (when (nil? the-target)
       (anomaly/incorrect! "Field ::target is required when ::type is :spec.type/ref"
-        {:type :svar.spec/missing-target :option ::target :field-type the-type})))
+                          {:type :svar.spec/missing-target :option ::target :field-type the-type})))
   (when (and the-target (not= the-type :spec.type/ref))
     (anomaly/incorrect! "Field ::target can only be used with ::type :spec.type/ref"
-      {:type :svar.spec/target-without-ref :option ::target :field-type the-type :target the-target}))
+                        {:type :svar.spec/target-without-ref
+                         :option ::target
+                         :field-type the-type
+                         :target the-target}))
   (when the-target
-    (let [valid-target? (or (keyword? the-target)
-                          (and (vector? the-target)
-                            (seq the-target)
-                            (every? keyword? the-target)))]
+    (let [valid-target? (or
+                          (keyword? the-target)
+                          (and (vector? the-target) (seq the-target) (every? keyword? the-target)))]
       (when-not valid-target?
-        (anomaly/incorrect! "Field ::target must be a keyword or a vector of keywords (for union types)"
+        (anomaly/incorrect!
+          "Field ::target must be a keyword or a vector of keywords (for union types)"
           {:type :svar.spec/invalid-target :option ::target :value the-target}))))
   nil)
 
@@ -234,10 +242,10 @@
   (let [invalid-chars (filter VALUES_RESERVED_CHARS value)]
     (when (seq invalid-chars)
       (anomaly/incorrect! "Enum value contains reserved characters"
-        {:type :svar.spec/reserved-chars-in-enum
-         :value value
-         :invalid-chars (set invalid-chars)
-         :reserved-chars VALUES_RESERVED_CHARS}))))
+                          {:type :svar.spec/reserved-chars-in-enum
+                           :value value
+                           :invalid-chars (set invalid-chars)
+                           :reserved-chars VALUES_RESERVED_CHARS}))))
 
 (defn- process-values
   "Processes :values option — accepts two shapes:
@@ -259,37 +267,35 @@
    Both shapes enforce the same reserved-character rules on each value."
   [v]
   (cond
-    (vector? v)
-    (do
-      (when (empty? v)
-        (anomaly/incorrect! "::values vector must be non-empty"
-          {:type :svar.spec/empty-values :values v}))
-      (doseq [value v]
-        (when-not (string? value)
-          (anomaly/incorrect! "Every enum value in a ::values vector must be a string"
-            {:type :svar.spec/invalid-enum-value :value value :value-type (type value)}))
-        (validate-enum-value value))
-      v)
-
+    (vector? v) (do (when (empty? v)
+                      (anomaly/incorrect! "::values vector must be non-empty"
+                                          {:type :svar.spec/empty-values :values v}))
+                    (doseq [value v]
+                      (when-not (string? value)
+                        (anomaly/incorrect! "Every enum value in a ::values vector must be a string"
+                                            {:type :svar.spec/invalid-enum-value
+                                             :value value
+                                             :value-type (type value)}))
+                      (validate-enum-value value))
+                    v)
     (map? v)
     (do
       (doseq [k (keys v)]
         (validate-enum-value k))
       (doseq [[value desc] v]
         (when (nil? desc)
-          (anomaly/incorrect! "Every enum value must have a description (or pass values as a vector to skip descriptions)"
+          (anomaly/incorrect!
+            "Every enum value must have a description (or pass values as a vector to skip descriptions)"
             {:type :svar.spec/missing-enum-description :value value :description desc})))
       v)
-
-    :else
-    (anomaly/incorrect! "::values must be a map {value desc} or a vector [value ...]"
-      {:type :svar.spec/invalid-values
-       :values v
-       :value-type (type v)
-       :expected-formats
-       {:with-descriptions {"value1" "Description of value1"
-                            "value2" "Description of value2"}
-        :values-only       ["value1" "value2"]}})))
+    :else (anomaly/incorrect! "::values must be a map {value desc} or a vector [value ...]"
+                              {:type :svar.spec/invalid-values
+                               :values v
+                               :value-type (type v)
+                               :expected-formats {:with-descriptions
+                                                  {"value1" "Description of value1"
+                                                   "value2" "Description of value2"}
+                                                  :values-only ["value1" "value2"]}})))
 
 (defn field
   "Defines a spec field with namespaced keyword options.
@@ -329,18 +335,28 @@
     Returns:
     Map. Field definition with keys ::name, ::type, ::cardinality, ::description,
     and optionally ::union (for optional fields), ::values (for enums), ::target (for refs)."
-  [& {the-name ::name the-type ::type the-cardinality ::cardinality
-      the-description ::description the-required ::required the-values ::values
-      the-target ::target
-      :or {the-required true}}]
+  [&
+   {the-name ::name
+    the-type ::type
+    the-cardinality ::cardinality
+    the-description ::description
+    the-required ::required
+    the-values ::values
+    the-target ::target
+    :or {the-required true}}]
   (validate-field-options the-name the-type the-cardinality the-description the-target)
   (cond-> {::name the-name
            ::type the-type
            ::cardinality the-cardinality
            ::description the-description}
-    (not the-required) (assoc ::union #{::nil})
-    the-values (assoc ::values (process-values the-values))
-    the-target (assoc ::target the-target)))
+    (not the-required)
+    (assoc ::union #{::nil})
+
+    the-values
+    (assoc ::values (process-values the-values))
+
+    the-target
+    (assoc ::target the-target)))
 
 (defn spec
   "Creates a spec from field definitions.
@@ -362,72 +378,98 @@
    Returns:
    Map. Spec definition with ::fields key and optionally ::spec-name, ::refs, and ::key-ns keys."
   [& args]
-  (let [[spec-name opts-map fields] (cond
-                                      ;; First arg is keyword (name)
-                                      (keyword? (first args))
-                                      (let [name-arg (first args)
-                                            rest-args (rest args)]
-                                        (if (and (map? (first rest-args))
-                                              (or (contains? (first rest-args) :refs)
-                                                (contains? (first rest-args) ::key-ns)))
-                                          ;; Has opts map
-                                          [name-arg (first rest-args) (rest rest-args)]
-                                          ;; No opts map
-                                          [name-arg nil rest-args]))
+  (let [[spec-name opts-map fields]
+        (cond
+          ;; First arg is keyword (name)
+          (keyword? (first args)) (let [name-arg
+                                        (first args)
 
-                                      ;; First arg is map (opts without name)
-                                      (and (map? (first args))
-                                        (or (contains? (first args) :refs)
-                                          (contains? (first args) ::key-ns)))
-                                      [nil (first args) (rest args)]
+                                        rest-args
+                                        (rest args)]
 
-                                      ;; No name, no opts
-                                      :else
-                                      [nil nil args])
+                                    (if (and (map? (first rest-args))
+                                             (or (contains? (first rest-args) :refs)
+                                                 (contains? (first rest-args) ::key-ns)))
+                                      ;; Has opts map
+                                      [name-arg (first rest-args) (rest rest-args)]
+                                      ;; No opts map
+                                      [name-arg nil rest-args]))
+          ;; First arg is map (opts without name)
+          (and (map? (first args))
+               (or (contains? (first args) :refs) (contains? (first args) ::key-ns)))
+          [nil (first args) (rest args)]
+          ;; No name, no opts
+          :else [nil nil args])
+
         ;; Extract key-ns from opts
-        key-ns (::key-ns opts-map)
+        key-ns
+        (::key-ns opts-map)
+
         ;; Validate key-ns if provided
-        _ (when (and key-ns (not (string? key-ns)))
-            (anomaly/incorrect! "::key-ns must be a string (e.g., \"page.node\")"
-              {:type :svar.spec/invalid-key-ns :key-ns key-ns :value-type (clojure.core/type key-ns)}))
+        _
+        (when (and key-ns (not (string? key-ns)))
+          (anomaly/incorrect! "::key-ns must be a string (e.g., \"page.node\")"
+                              {:type :svar.spec/invalid-key-ns
+                               :key-ns key-ns
+                               :value-type (clojure.core/type key-ns)}))
+
         ;; Validate refs if provided
-        refs (when opts-map
-               (let [ref-vec (:refs opts-map)]
-                 (when ref-vec
-                   (when-not (vector? ref-vec)
-                     (anomaly/incorrect! "Refs must be a vector" {:type :svar.spec/invalid-refs :refs ref-vec}))
-                   (doseq [ref ref-vec]
-                     (when-not (map? ref)
-                       (anomaly/incorrect! "Each ref must be a spec map" {:type :svar.spec/invalid-ref :ref ref}))
-                     (when-not (contains? ref ::fields)
-                       (anomaly/incorrect! "Each ref must have ::fields key" {:type :svar.spec/ref-missing-fields :ref ref})))
-                   ref-vec)))
+        refs
+        (when opts-map
+          (let [ref-vec (:refs opts-map)]
+            (when ref-vec
+              (when-not (vector? ref-vec)
+                (anomaly/incorrect! "Refs must be a vector"
+                                    {:type :svar.spec/invalid-refs :refs ref-vec}))
+              (doseq [ref ref-vec]
+                (when-not (map? ref)
+                  (anomaly/incorrect! "Each ref must be a spec map"
+                                      {:type :svar.spec/invalid-ref :ref ref}))
+                (when-not (contains? ref ::fields)
+                  (anomaly/incorrect! "Each ref must have ::fields key"
+                                      {:type :svar.spec/ref-missing-fields :ref ref})))
+              ref-vec)))
+
         ;; Build set of available ref names
-        available-refs (into #{} (map ::spec-name refs))
+        available-refs
+        (into #{} (map ::spec-name refs))
+
         ;; Find all :spec.type/ref fields with ::target
-        ref-fields (filter #(= :spec.type/ref (::type %)) fields)
+        ref-fields
+        (filter #(= :spec.type/ref (::type %)) fields)
+
         ;; Validate that all targets exist in refs
         ;; Target can be a single keyword or a vector of keywords (union type)
-        _ (doseq [field ref-fields]
-            (let [target (::target field)
-                  field-name (::name field)
-                  ;; Normalize target to a vector for validation
-                  targets (if (vector? target) target [target])]
-              (doseq [t targets]
-                (when-not (contains? available-refs t)
-                  (anomaly/incorrect! (str "Field '" field-name "' references target '" t
-                                        "' but no ref with that name exists. "
-                                        "Add the referenced spec via {:refs [ref-spec]} parameter.")
-                    {:type :svar.spec/unresolved-ref-target
-                     :field field-name
-                     :target t
-                     :all-targets targets
-                     :available-refs available-refs
-                     :hint "Use (spec {:refs [referenced-spec]} (field ...)) to register refs"})))))]
+        _
+        (doseq [field ref-fields]
+          (let [target (::target field)
+                field-name (::name field)
+                ;; Normalize target to a vector for validation
+                targets (if (vector? target) target [target])]
+
+            (doseq [t targets]
+              (when-not (contains? available-refs t)
+                (anomaly/incorrect!
+                  (str "Field '" field-name
+                       "' references target '" t
+                       "' but no ref with that name exists. "
+                       "Add the referenced spec via {:refs [ref-spec]} parameter.")
+                  {:type :svar.spec/unresolved-ref-target
+                   :field field-name
+                   :target t
+                   :all-targets targets
+                   :available-refs available-refs
+                   :hint "Use (spec {:refs [referenced-spec]} (field ...)) to register refs"})))))]
+
     (cond-> {::fields (vec fields)}
-      spec-name (assoc ::spec-name spec-name)
-      refs (assoc ::refs refs)
-      key-ns (assoc ::key-ns key-ns))))
+      spec-name
+      (assoc ::spec-name spec-name)
+
+      refs
+      (assoc ::refs refs)
+
+      key-ns
+      (assoc ::key-ns key-ns))))
 
 (defn build-ref-registry
   "Builds a registry of referenced specs from a spec's ::refs.
@@ -450,29 +492,31 @@
       {}
       (loop [remaining refs
              registry {}]
+
         (if (empty? remaining)
           registry
           (let [ref (first remaining)
                 ref-name (::spec-name ref)]
+
             (when-not ref-name
               (anomaly/incorrect! "Referenced spec must have ::spec-name"
-                {:type :svar.spec/missing-spec-name :ref ref}))
+                                  {:type :svar.spec/missing-spec-name :ref ref}))
             (when (contains? registry ref-name)
               (anomaly/incorrect! "Duplicate spec name in refs"
-                {:type :svar.spec/duplicate-spec-name
-                 :spec-name ref-name
-                 :existing (get registry ref-name)
-                 :duplicate ref}))
+                                  {:type :svar.spec/duplicate-spec-name
+                                   :spec-name ref-name
+                                   :existing (get registry ref-name)
+                                   :duplicate ref}))
             ;; Recursively collect refs from this ref
             (let [nested-registry (build-ref-registry ref)
                   ;; Check for conflicts with nested refs
-                  conflicts (set/intersection (set (keys registry))
-                              (set (keys nested-registry)))]
+                  conflicts (set/intersection (set (keys registry)) (set (keys nested-registry)))]
+
               (when (seq conflicts)
                 (anomaly/incorrect! "Duplicate spec names in nested refs"
-                  {:type :svar.spec/duplicate-nested-spec-name :conflicts conflicts}))
-              (recur (rest remaining)
-                (merge registry {ref-name ref} nested-registry)))))))))
+                                    {:type :svar.spec/duplicate-nested-spec-name
+                                     :conflicts conflicts}))
+              (recur (rest remaining) (merge registry {ref-name ref} nested-registry)))))))))
 
 ;; =============================================================================
 ;; BAML-Style Prompt Generation
@@ -484,15 +528,13 @@
    :spec.type/int "int"
    :spec.type/float "float"
    :spec.type/bool "bool"
-   :spec.type/date "string"      ; Rendered as string with hint in description
-   :spec.type/datetime "string"  ; Rendered as string with hint in description
+   :spec.type/date "string"     ; Rendered as string with hint in description
+   :spec.type/datetime "string" ; Rendered as string with hint in description
    :spec.type/keyword "string"}) ; Rendered as string, keywordized on parse
 
 (def ^:private VECTOR_BASE_TYPE_TO_BAML
   "Maps vector base types to BAML type strings."
-  {:int "int"
-   :string "string"
-   :double "float"})  ; double maps to float in BAML
+  {:int "int" :string "string" :double "float"})  ; double maps to float in BAML
 
 (defn- enum-values
   "Extract the plain seq of enum values regardless of whether `::values` was
@@ -501,10 +543,9 @@
    Returns nil when no enum constraint is present, so callers can keep
    using a single truthy check to branch."
   [values]
-  (cond
-    (map? values)        (keys values)
-    (sequential? values) values
-    :else                nil))
+  (cond (map? values) (keys values)
+        (sequential? values) values
+        :else nil))
 
 (defn- enum-canon
   "Canonical form of an enum member for membership comparison.
@@ -519,7 +560,9 @@
   "Canonicalized set view of enum values — used by the validator for
    membership checks (see `enum-canon`)."
   [values]
-  (some->> (enum-values values) (map enum-canon) set))
+  (some->> (enum-values values)
+           (map enum-canon)
+           set))
 
 (defn- field->baml-type
   "Converts a field definition to BAML type string.
@@ -542,53 +585,63 @@
    :spec.type/int-v-4 -> \"int[4]\"
    :spec.type/double-v-3 -> \"float[3]\""
   [field-def]
-  (let [field-type (::type field-def)
-        target (::target field-def)
-        cardinality (::cardinality field-def)
-        union (::union field-def)
-        values (::values field-def)
-        vector-type-info (parse-vector-type field-type)
+  (let [field-type
+        (::type field-def)
+
+        target
+        (::target field-def)
+
+        cardinality
+        (::cardinality field-def)
+
+        union
+        (::union field-def)
+
+        values
+        (::values field-def)
+
+        vector-type-info
+        (parse-vector-type field-type)
 
         ;; Base type conversion
-        base-type (cond
-                    ;; Enum - use union of literal values. Works for both
-                    ;; `{val desc}` maps and `[val ...]` vectors thanks to
-                    ;; `enum-values`.
-                    values
-                    (->> (enum-values values)
+        base-type
+        (cond
+          ;; Enum - use union of literal values. Works for both
+          ;; `{val desc}` maps and `[val ...]` vectors thanks to
+          ;; `enum-values`.
+          values (->> (enum-values values)
                       sort
                       (map #(str "\\\"" % "\\\""))
                       (str/join " or "))
+          ;; Fixed-size vector type - e.g., int[4]
+          vector-type-info (let [{:keys [base-type size]}
+                                 vector-type-info
 
-                    ;; Fixed-size vector type - e.g., int[4]
-                    vector-type-info
-                    (let [{:keys [base-type size]} vector-type-info
-                          baml-base (get VECTOR_BASE_TYPE_TO_BAML base-type "string")]
-                      (str baml-base "[" size "]"))
+                                 baml-base
+                                 (get VECTOR_BASE_TYPE_TO_BAML base-type "string")]
 
-                    ;; Ref - use target spec name (single keyword or vector for union)
-                    (= field-type :spec.type/ref)
-                    (if (vector? target)
-                      ;; Union type - render as "Type1 | Type2 | Type3"
-                      (->> target
-                        (map name)
-                        (str/join " | "))
-                      ;; Single target
-                      (name target))
-
-                    ;; Use mapping for standard types
-                    :else
-                    (get TYPE_TO_BAML field-type "string"))
+                             (str baml-base "[" size "]"))
+          ;; Ref - use target spec name (single keyword or vector for union)
+          (= field-type :spec.type/ref) (if (vector? target)
+                                          ;; Union type - render as "Type1 | Type2 | Type3"
+                                          (->> target
+                                               (map name)
+                                               (str/join " | "))
+                                          ;; Single target
+                                          (name target))
+          ;; Use mapping for standard types
+          :else (get TYPE_TO_BAML field-type "string"))
 
         ;; Add array suffix if cardinality is many (NOT for fixed-size vectors)
-        with-array (if (and (= cardinality :spec.cardinality/many) (nil? vector-type-info))
-                     (str base-type "[]")
-                     base-type)
+        with-array
+        (if (and (= cardinality :spec.cardinality/many) (nil? vector-type-info))
+          (str base-type "[]")
+          base-type)
 
         ;; Add optional suffix if field is optional
-        with-optional (if (and union (contains? union ::nil))
-                        (str with-array " or null")
-                        with-array)]
+        with-optional
+        (if (and union (contains? union ::nil)) (str with-array " or null") with-array)]
+
     with-optional))
 
 (defn- parse-field-path
@@ -610,6 +663,7 @@
     (let [path-parts (str/split ns #"\.")
           path (mapv keyword path-parts)
           field-name (keyword (name kw))]
+
       [path field-name])
     ;; No namespace - empty path
     [[] kw]))
@@ -630,13 +684,19 @@
    [:org.division/name] -> {[:org :division] [:name]}"
   [fields]
   (reduce (fn [acc field-def]
-            (let [field-name (::name field-def)
-                  [path simple-name] (parse-field-path field-name)
+            (let [field-name
+                  (::name field-def)
+
+                  [path simple-name]
+                  (parse-field-path field-name)
+
                   ;; Create new field def with simple name
-                  simple-field (assoc field-def ::name simple-name)]
+                  simple-field
+                  (assoc field-def ::name simple-name)]
+
               (update acc path (fnil conj []) simple-field)))
-    {}
-    fields))
+          {}
+          fields))
 
 (defn- find-array-containers-with-children
   "Finds field names that are array containers AND have nested child fields.
@@ -649,23 +709,28 @@
    Set of keywords. Field names that are array containers with children."
   [fields]
   (let [;; Find all fields with cardinality many
-        array-containers (->> fields
-                           (filter #(= :spec.cardinality/many (::cardinality %)))
-                           (map ::name)
-                           set)
+        array-containers
+        (->> fields
+             (filter #(= :spec.cardinality/many (::cardinality %)))
+             (map ::name)
+             set)
+
         ;; For each array container, check if there are nested fields
-        has-children? (fn [container-name]
-                        (let [container-ns (name container-name)]
-                          (some (fn [field]
-                                  (let [field-name (::name field)
-                                        field-ns (namespace field-name)]
-                                    (and field-ns
-                                      (or (= field-ns container-ns)
-                                        (str/starts-with? field-ns (str container-ns "."))))))
-                            fields)))]
+        has-children?
+        (fn [container-name]
+          (let [container-ns (name container-name)]
+            (some (fn [field]
+                    (let [field-name (::name field)
+                          field-ns (namespace field-name)]
+
+                      (and field-ns
+                           (or (= field-ns container-ns)
+                               (str/starts-with? field-ns (str container-ns "."))))))
+                  fields)))]
+
     (->> array-containers
-      (filter has-children?)
-      set)))
+         (filter has-children?)
+         set)))
 
 (defn- render-enum-values-comment
   "Renders enum values with their descriptions as a comment block.
@@ -685,16 +750,18 @@
    String. Comment block with enum values and descriptions, or empty string
    when values is empty, a vector, or nil."
   [values indent]
-  (cond
-    (or (nil? values) (empty? values)) ""
-    ;; Values-only shorthand — no per-value comment block
-    (sequential? values) ""
-    :else
-    (let [sorted-values (sort-by first values)
-          value-lines (map (fn [[v desc]]
-                             (str indent "//   - \"" v "\": " desc))
-                        sorted-values)]
-      (str (str/join "\n" value-lines) "\n"))))
+  (cond (or (nil? values) (empty? values)) ""
+        ;; Values-only shorthand — no per-value comment block
+        (sequential? values) ""
+        :else (let [sorted-values
+                    (sort-by first values)
+
+                    value-lines
+                    (map (fn [[v desc]]
+                           (str indent "//   - \"" v "\": " desc))
+                         sorted-values)]
+
+                (str (str/join "\n" value-lines) "\n"))))
 
 (defn- render-baml-field
   "Renders a single field in BAML format with description and type.
@@ -707,38 +774,52 @@
    String. BAML field representation with description comment."
   [field-def indent]
   (let [;; Strip special chars from field name for JSON compatibility
-        field-name (strip-special-chars (name (::name field-def)))
-        field-type (field->baml-type field-def)
-        description (::description field-def)
-        type-kw (::type field-def)
-        union (::union field-def)
-        values (::values field-def)
-        vector-type-info (parse-vector-type type-kw)
+        field-name
+        (strip-special-chars (name (::name field-def)))
+
+        field-type
+        (field->baml-type field-def)
+
+        description
+        (::description field-def)
+
+        type-kw
+        (::type field-def)
+
+        union
+        (::union field-def)
+
+        values
+        (::values field-def)
+
+        vector-type-info
+        (parse-vector-type type-kw)
+
         ;; Check if field is optional (has ::nil in union)
-        optional? (and union (contains? union ::nil))
+        optional?
+        (and union (contains? union ::nil))
+
         ;; Add required/optional suffix
-        req-suffix (if optional? " (optional)" " (required)")
+        req-suffix
+        (if optional? " (optional)" " (required)")
+
         ;; Add date/datetime/vector hints (keyword is just a string to the LLM)
-        desc-with-hint (cond
-                         (= type-kw :spec.type/date)
-                         (str description " (ISO date YYYY-MM-DD)")
+        desc-with-hint
+        (cond (= type-kw :spec.type/date) (str description " (ISO date YYYY-MM-DD)")
+              (= type-kw :spec.type/datetime) (str description " (ISO datetime)")
+              vector-type-info (let [{:keys [size]} vector-type-info]
+                                 (str description " (exactly " size " elements)"))
+              :else description)
 
-                         (= type-kw :spec.type/datetime)
-                         (str description " (ISO datetime)")
-
-                         vector-type-info
-                         (let [{:keys [size]} vector-type-info]
-                           (str description " (exactly " size " elements)"))
-
-                         :else
-                         description)
         ;; Combine description and suffix
-        full-description (str desc-with-hint req-suffix)
+        full-description
+        (str desc-with-hint req-suffix)
+
         ;; Render enum values with descriptions if present
-        enum-comment (render-enum-values-comment values indent)]
-    (str indent "// " full-description "\n"
-      enum-comment
-      indent field-name ": " field-type ",")))
+        enum-comment
+        (render-enum-values-comment values indent)]
+
+    (str indent "// " full-description "\n" enum-comment indent field-name ": " field-type ",")))
 
 (defn- build-path-tree
   "Builds a tree structure from grouped paths.
@@ -751,21 +832,30 @@
    Returns:
    Map with :fields (fields at this level) and :children (map of child-name -> subtree)."
   [grouped]
-  (let [root-fields (get grouped [])
-        nested (dissoc grouped [])
+  (let [root-fields
+        (get grouped [])
+
+        nested
+        (dissoc grouped [])
+
         ;; Group nested paths by their first segment
-        by-first (group-by (fn [[path _]] (first path)) nested)
-        children (into {}
-                   (map (fn [[first-seg entries]]
-                          (let [;; Remove first segment from paths
-                                sub-grouped (into {}
-                                              (map (fn [[path fields]]
-                                                     [(vec (rest path)) fields])
-                                                entries))]
-                            [first-seg (build-path-tree sub-grouped)]))
-                     by-first))]
-    {:fields (or root-fields [])
-     :children children}))
+        by-first
+        (group-by (fn [[path _]]
+                    (first path))
+                  nested)
+
+        children
+        (into {}
+              (map (fn [[first-seg entries]]
+                     (let [;; Remove first segment from paths
+                           sub-grouped (into {}
+                                             (map (fn [[path fields]]
+                                                    [(vec (rest path)) fields])
+                                                  entries))]
+                       [first-seg (build-path-tree sub-grouped)]))
+                   by-first))]
+
+    {:fields (or root-fields []) :children children}))
 
 (declare render-baml-tree)
 
@@ -782,28 +872,38 @@
   [tree indent array-containers]
   (let [;; Filter out fields that are array containers with children
         ;; (they will be rendered via the children map instead)
-        filtered-fields (remove #(contains? array-containers (::name %)) (:fields tree))
-        field-lines (map #(render-baml-field % indent) filtered-fields)
-        child-lines (mapcat (fn [[child-name child-tree]]
-                              (let [array? (contains? array-containers child-name)
-                                    ;; For arrays, we need extra indentation for content inside { }
-                                    inner-indent (if array?
-                                                   (str indent "    ")  ; 4 spaces for array content
-                                                   (str indent "  "))   ; 2 spaces for object content
-                                    inner-lines (render-baml-tree child-tree inner-indent array-containers)
-                                    inner-content (str/join "\n" inner-lines)]
-                                (if array?
-                                  ;; Render as array of objects: name: [{ ... }],
-                                  [(str indent (name child-name) ": [")
-                                   (str indent "  {")
-                                   inner-content
-                                   (str indent "  }")
-                                   (str indent "],")]
-                                  ;; Render as single object: name: { ... },
-                                  [(str indent (name child-name) ": {")
-                                   inner-content
-                                   (str indent "},")])))
-                      (sort (:children tree)))]
+        filtered-fields
+        (remove #(contains? array-containers (::name %)) (:fields tree))
+
+        field-lines
+        (map #(render-baml-field % indent) filtered-fields)
+
+        child-lines
+        (mapcat (fn [[child-name child-tree]]
+                  (let [array?
+                        (contains? array-containers child-name)
+
+                        ;; For arrays, we need extra indentation for content inside { }
+                        inner-indent
+                        (if array?
+                          (str indent "    ") ; 4 spaces for array content
+                          (str indent "  "))
+
+                        ; 2 spaces for object content
+                        inner-lines
+                        (render-baml-tree child-tree inner-indent array-containers)
+
+                        inner-content
+                        (str/join "\n" inner-lines)]
+
+                    (if array?
+                      ;; Render as array of objects: name: [{ ... }],
+                      [(str indent (name child-name) ": [") (str indent "  {") inner-content
+                       (str indent "  }") (str indent "],")]
+                      ;; Render as single object: name: { ... },
+                      [(str indent (name child-name) ": {") inner-content (str indent "},")])))
+                (sort (:children tree)))]
+
     (concat field-lines child-lines)))
 
 (defn- spec->baml-class
@@ -821,15 +921,30 @@
    Named spec -> \"SpecName { field: type, }\"
    With nested -> \"{ address: { city: string, }, }\""
   [spec-def class-name]
-  (let [fields (::fields spec-def)
-        grouped (group-fields-by-namespace fields)
-        name-prefix (or class-name (some-> spec-def ::spec-name name))
-        array-containers (find-array-containers-with-children fields)
+  (let [fields
+        (::fields spec-def)
+
+        grouped
+        (group-fields-by-namespace fields)
+
+        name-prefix
+        (or class-name
+            (some-> spec-def
+                    ::spec-name
+                    name))
+
+        array-containers
+        (find-array-containers-with-children fields)
 
         ;; Build tree from grouped paths and render
-        tree (build-path-tree grouped)
-        body-lines (render-baml-tree tree "  " array-containers)
-        body (str/join "\n" body-lines)]
+        tree
+        (build-path-tree grouped)
+
+        body-lines
+        (render-baml-tree tree "  " array-containers)
+
+        body
+        (str/join "\n" body-lines)]
 
     (if name-prefix
       ;; Named class
@@ -844,12 +959,19 @@
   [counts fields]
   (reduce (fn [c field-def]
             (if (= (::type field-def) :spec.type/ref)
-              (let [target  (::target field-def)
-                    targets (if (vector? target) target [target])]
-                (reduce (fn [c t] (update c t (fnil inc 0))) c targets))
+              (let [target
+                    (::target field-def)
+
+                    targets
+                    (if (vector? target) target [target])]
+
+                (reduce (fn [c t]
+                          (update c t (fnil inc 0)))
+                        c
+                        targets))
               c))
-    counts
-    fields))
+          counts
+          fields))
 
 (defn- count-ref-usages
   "Count how many times each ref spec is referenced across the WHOLE
@@ -877,8 +999,8 @@
   (let [base-counts (count-field-ref-targets {} (::fields spec-def))]
     (reduce-kv (fn [counts _spec-name sub-spec-def]
                  (count-field-ref-targets counts (::fields sub-spec-def)))
-      base-counts
-      ref-registry)))
+               base-counts
+               ref-registry)))
 
 (defn- partition-refs-by-usage
   "Partitions refs into hoisted (used 2+ times) and inlined (used once).
@@ -890,20 +1012,41 @@
    Returns:
    Map with :hoisted and :inlined keys, each containing vector of [name spec-def] pairs."
   [spec-def ref-registry]
-  (let [usage-counts (count-ref-usages spec-def ref-registry)
-        all-refs (map (fn [[name spec]] [name spec (get usage-counts name 0)])
-                   ref-registry)
-        hoisted (filter (fn [[_ _ count]] (>= (long count) 2)) all-refs)
-        inlined (filter (fn [[_ _ count]] (= count 1)) all-refs)
-        unused (filter (fn [[_ _ count]] (= count 0)) all-refs)]
+  (let [usage-counts
+        (count-ref-usages spec-def ref-registry)
+
+        all-refs
+        (map (fn [[name spec]]
+               [name spec (get usage-counts name 0)])
+             ref-registry)
+
+        hoisted
+        (filter (fn [[_ _ count]]
+                  (>= (long count) 2))
+                all-refs)
+
+        inlined
+        (filter (fn [[_ _ count]]
+                  (= count 1))
+                all-refs)
+
+        unused
+        (filter (fn [[_ _ count]]
+                  (= count 0))
+                all-refs)]
+
     ;; Warn about unused refs
     (doseq [[name _ _] unused]
       (trove/log! {:level :warn
                    :id ::unused-spec-ref
                    :data {:ref-name name}
                    :msg "detected unused ref in spec definition"}))
-    {:hoisted (mapv (fn [[name spec _]] [name spec]) hoisted)
-     :inlined (mapv (fn [[name spec _]] [name spec]) inlined)}))
+    {:hoisted (mapv (fn [[name spec _]]
+                      [name spec])
+                    hoisted)
+     :inlined (mapv (fn [[name spec _]]
+                      [name spec])
+                    inlined)}))
 
 ;; =============================================================================
 ;; Spec Fields Text Representation - Serialization
@@ -925,25 +1068,33 @@
    Simple spec -> \"{ field: type, }\"
    With refs -> \"Address { city: string, }\\n\\n{ home: Address, }\""
   [the-spec]
-  (let [ref-registry (build-ref-registry the-spec)
-        {:keys [hoisted inlined]} (partition-refs-by-usage the-spec ref-registry)
+  (let [ref-registry
+        (build-ref-registry the-spec)
+
+        {:keys [hoisted inlined]}
+        (partition-refs-by-usage the-spec ref-registry)
 
         ;; Render hoisted specs (used 2+ times)
-        hoisted-lines (map (fn [[_name spec-def]]
-                             (spec->baml-class spec-def nil))
-                        hoisted)
+        hoisted-lines
+        (map (fn [[_name spec-def]]
+               (spec->baml-class spec-def nil))
+             hoisted)
 
         ;; Render inlined specs (used exactly once)
-        inlined-lines (map (fn [[_name spec-def]]
-                             (spec->baml-class spec-def nil))
-                        inlined)
+        inlined-lines
+        (map (fn [[_name spec-def]]
+               (spec->baml-class spec-def nil))
+             inlined)
 
         ;; Render main spec
-        main-class (spec->baml-class the-spec nil)
+        main-class
+        (spec->baml-class the-spec nil)
 
         ;; Combine: hoisted specs, then inlined specs, then main spec
         ;; All separated by blank lines
-        all-parts (concat hoisted-lines inlined-lines [main-class])]
+        all-parts
+        (concat hoisted-lines inlined-lines [main-class])]
+
     (str/join "\n\n" all-parts)))
 
 ;; =============================================================================
@@ -987,19 +1138,27 @@
    Set. Field name keywords that should be keywordized."
   [spec-def]
   (let [;; Get keyword fields from main spec
-        main-fields (::fields spec-def)
-        main-keyword-fields (->> main-fields
-                              (filter #(= :spec.type/keyword (::type %)))
-                              (map ::name)
-                              (map #(keyword (name %))))
+        main-fields
+        (::fields spec-def)
+
+        main-keyword-fields
+        (->> main-fields
+             (filter #(= :spec.type/keyword (::type %)))
+             (map ::name)
+             (map #(keyword (name %))))
+
         ;; Get keyword fields from all referenced specs (for union types)
-        refs (::refs spec-def)
-        ref-keyword-fields (when refs
-                             (->> refs
-                               (mapcat ::fields)
-                               (filter #(= :spec.type/keyword (::type %)))
-                               (map ::name)
-                               (map #(keyword (name %)))))]
+        refs
+        (::refs spec-def)
+
+        ref-keyword-fields
+        (when refs
+          (->> refs
+               (mapcat ::fields)
+               (filter #(= :spec.type/keyword (::type %)))
+               (map ::name)
+               (map #(keyword (name %)))))]
+
     (into #{} (concat main-keyword-fields ref-keyword-fields))))
 
 (defn- keywordize-fields
@@ -1012,30 +1171,28 @@
    Returns:
    Data with specified string fields converted to keywords."
   [data keyword-fields]
-  (cond
-    (map? data)
-    (into {}
-      (map (fn [[k v]]
-             (let [simple-key (keyword (name k))
-                   should-keywordize? (contains? keyword-fields simple-key)
-                   new-v (cond
-                               ;; Keywordize string value
-                           (and should-keywordize? (string? v))
-                           (keyword v)
-                               ;; Keywordize vector of strings
-                           (and should-keywordize? (vector? v))
-                           (mapv #(if (string? %) (keyword %) %) v)
-                               ;; Recurse into nested structures
-                           :else
-                           (keywordize-fields v keyword-fields))]
-               [k new-v]))
-        data))
+  (cond (map? data) (into {}
+                          (map (fn [[k v]]
+                                 (let [simple-key
+                                       (keyword (name k))
 
-    (vector? data)
-    (mapv #(keywordize-fields % keyword-fields) data)
+                                       should-keywordize?
+                                       (contains? keyword-fields simple-key)
 
-    :else
-    data))
+                                       new-v
+                                       (cond
+                                         ;; Keywordize string value
+                                         (and should-keywordize? (string? v)) (keyword v)
+                                         ;; Keywordize vector of strings
+                                         (and should-keywordize? (vector? v))
+                                         (mapv #(if (string? %) (keyword %) %) v)
+                                         ;; Recurse into nested structures
+                                         :else (keywordize-fields v keyword-fields))]
+
+                                   [k new-v]))
+                               data))
+        (vector? data) (mapv #(keywordize-fields % keyword-fields) data)
+        :else data))
 
 (defn- collect-key-namespaces
   "Collects all ::key-ns values from a spec and its refs.
@@ -1043,15 +1200,23 @@
    Returns a map of spec-name -> key-ns string for specs that have ::key-ns defined.
    Also includes nil -> key-ns for the main spec if it has ::key-ns."
   [spec-def]
-  (let [main-key-ns (::key-ns spec-def)
-        refs (::refs spec-def)
-        ref-key-ns (when refs
-                     (->> refs
-                       (filter ::key-ns)
-                       (map (fn [ref] [(::spec-name ref) (::key-ns ref)]))
-                       (into {})))]
+  (let [main-key-ns
+        (::key-ns spec-def)
+
+        refs
+        (::refs spec-def)
+
+        ref-key-ns
+        (when refs
+          (->> refs
+               (filter ::key-ns)
+               (map (fn [ref]
+                      [(::spec-name ref) (::key-ns ref)]))
+               (into {})))]
+
     (cond-> ref-key-ns
-      main-key-ns (assoc nil main-key-ns))))
+      main-key-ns
+      (assoc nil main-key-ns))))
 
 (defn- namespace-keys
   "Recursively adds namespace to keys based on spec's ::key-ns setting.
@@ -1065,32 +1230,33 @@
    Returns:
    Data with keys namespaced according to spec configuration."
   [data key-ns-map]
-  (cond
-    (map? data)
-    (let [;; Check if this is a union type node by looking for :type field
-          type-val (get data :type)
-          ;; Find the key-ns to use: either from type-specific ref or main spec (nil key)
-          key-ns (or (get key-ns-map type-val)
-                   (get key-ns-map nil))]
-      (if key-ns
-        ;; Apply namespace to all keys
-        (into {}
-          (map (fn [[k v]]
-                 (let [new-key (keyword key-ns (name k))
-                       new-v (namespace-keys v key-ns-map)]
-                   [new-key new-v]))
-            data))
-        ;; No key-ns, just recurse
-        (into {}
-          (map (fn [[k v]]
-                 [k (namespace-keys v key-ns-map)])
-            data))))
+  (cond (map? data) (let [;; Check if this is a union type node by looking for :type field
+                          type-val
+                          (get data :type)
 
-    (vector? data)
-    (mapv #(namespace-keys % key-ns-map) data)
+                          ;; Find the key-ns to use: either from type-specific ref or main spec (nil key)
+                          key-ns
+                          (or (get key-ns-map type-val) (get key-ns-map nil))]
 
-    :else
-    data))
+                      (if key-ns
+                        ;; Apply namespace to all keys
+                        (into {}
+                              (map (fn [[k v]]
+                                     (let [new-key
+                                           (keyword key-ns (name k))
+
+                                           new-v
+                                           (namespace-keys v key-ns-map)]
+
+                                       [new-key new-v]))
+                                   data))
+                        ;; No key-ns, just recurse
+                        (into {}
+                              (map (fn [[k v]]
+                                     [k (namespace-keys v key-ns-map)])
+                                   data))))
+        (vector? data) (mapv #(namespace-keys % key-ns-map) data)
+        :else data))
 
 (defn- spec-expects-map?
   "Returns true if the spec defines a top-level object (not a single bare array).
@@ -1098,8 +1264,7 @@
   [spec-def]
   (let [fields (::fields spec-def)]
     (or (> (count fields) 1)
-      (and (= 1 (count fields))
-        (not= :spec.cardinality/many (::cardinality (first fields)))))))
+        (and (= 1 (count fields)) (not= :spec.cardinality/many (::cardinality (first fields)))))))
 
 (defn- maybe-normalize-array-result
   "Normalizes array results from LLMs based on spec cardinality.
@@ -1123,47 +1288,36 @@
       (cond
         ;; Case 1: Spec has single :many field, got bare array → pass through as-is
         ;; The caller already has the correct shape — no wrapping needed.
-        (and (= 1 (count fields))
-          (= :spec.cardinality/many (::cardinality (first fields))))
-        result
-
+        (and (= 1 (count fields)) (= :spec.cardinality/many (::cardinality (first fields)))) result
         ;; Case 2: Spec expects a map, got single-element array [{...}] → unwrap
-        (and (spec-expects-map? spec-def)
-          (= 1 (count result))
-          (map? (first result)))
-        (do
-          (trove/log! {:level :debug :data {:keys (keys (first result))}
-                       :msg "Unwrapping single-element array — spec expects map"})
-          (first result))
-
+        (and (spec-expects-map? spec-def) (= 1 (count result)) (map? (first result)))
+        (do (trove/log! {:level :debug
+                         :data {:keys (keys (first result))}
+                         :msg "Unwrapping single-element array — spec expects map"})
+            (first result))
         ;; Case 3: Spec expects a map, got multi-element array of maps → merge them
         ;; LLMs sometimes split a single object across multiple JSON objects
-        (and (spec-expects-map? spec-def)
-          (> (count result) 1)
-          (every? map? result))
-        (do
-          (trove/log! {:level :debug :data {:count (count result) :keys (mapcat keys result)}
-                       :msg "Merging multi-element array of maps — spec expects single map"})
-          (apply merge result))
-
+        (and (spec-expects-map? spec-def) (> (count result) 1) (every? map? result))
+        (do (trove/log! {:level :debug
+                         :data {:count (count result) :keys (mapcat keys result)}
+                         :msg "Merging multi-element array of maps — spec expects single map"})
+            (apply merge result))
         ;; Case 4: Spec has multiple fields, got bare array of maps → wrap into
         ;; the first :many/:ref field. Common model mistake: sends
         ;; [{:expr "..." :time-ms N} ...] instead of {:code [{:expr ...}]}.
         ;; Only fires when elements are maps (not bare strings/numbers) and
         ;; there's exactly one :many/:ref field that could own them.
-        (and (> (count fields) 1)
-          (seq result)
-          (every? map? result))
+        (and (> (count fields) 1) (seq result) (every? map? result))
         (let [many-ref-fields (filter #(and (= :spec.cardinality/many (::cardinality %))
-                                         (= :spec.type/ref (::type %)))
-                                fields)]
+                                            (= :spec.type/ref (::type %)))
+                                      fields)]
           (if (= 1 (count many-ref-fields))
             (let [target-field (::name (first many-ref-fields))]
-              (trove/log! {:level :debug :data {:field target-field :count (count result)}
+              (trove/log! {:level :debug
+                           :data {:field target-field :count (count result)}
                            :msg "Auto-wrapping bare array into :many/:ref field"})
               {target-field result})
             result))
-
         :else result))))
 
 (defn- schema-reject-message
@@ -1178,10 +1332,9 @@
    accepted — the parser extracts their content automatically."
   []
   (str "Your response did not match the JSON schema contract. "
-    "PRODUCE valid JSON/EDN matching the schema fields. "
-    "NO prose outside the structure. "
-    "Required fields MUST be present and non-null. "
-    "Re-read the schema and emit the COMPLETE top-level object."))
+       "PRODUCE valid JSON/EDN matching the schema fields. " "NO prose outside the structure. "
+       "Required fields MUST be present and non-null. "
+       "Re-read the schema and emit the COMPLETE top-level object."))
 
 (defn- apply-spec-field-defaults
   "Ensures all spec-defined fields exist in parsed result with type-appropriate defaults.
@@ -1222,88 +1375,106 @@
   (cond
     ;; Bare vector + single :many field → apply defaults to each ref element
     (and (vector? data)
-      (= 1 (count (::fields spec-def)))
-      (= :spec.cardinality/many (::cardinality (first (::fields spec-def)))))
+         (= 1 (count (::fields spec-def)))
+         (= :spec.cardinality/many (::cardinality (first (::fields spec-def)))))
     (let [field (first (::fields spec-def))]
       (if (= :spec.type/ref (::type field))
         (let [ref-registry (build-ref-registry spec-def)
               ref-spec (get ref-registry (::target field))
-              ref-key-ns (some-> ref-spec ::key-ns)]
-          (if ref-spec
-            (mapv #(apply-spec-field-defaults % ref-spec ref-key-ns) data)
-            data))
-        data))
+              ref-key-ns (some-> ref-spec
+                                 ::key-ns)]
 
+          (if ref-spec (mapv #(apply-spec-field-defaults % ref-spec ref-key-ns) data) data))
+        data))
     ;; Non-map at the top level of a multi-field spec → rejection. This is
     ;; the markdown-fence / bare-prose / bare-vector-without-single-many-field
     ;; case. Loudly reject so callers don't carry on with garbage.
-    (and (not (map? data))
-      (seq (::fields spec-def)))
+    (and (not (map? data)) (seq (::fields spec-def)))
     (throw (ex-info (schema-reject-message)
-             ;; FULL ENVELOPE — never truncate. Callers (ask!*, Vis triage) need
-             ;; the complete raw value to reproduce / persist / show in TUI.
-             ;; If a consumer wants a preview, they can `(subs (pr-str data) 0 N)`
-             ;; themselves; svar must not destroy forensic data here.
-             {:type :svar.spec/schema-rejected
-              :reason :not-a-map
-              :received-type (if (nil? data) :nil (-> data class .getSimpleName))
-              :raw-data data
-              :message (schema-reject-message)}))
-
-    (not (map? data))
-    data
-
+                    ;; FULL ENVELOPE — never truncate. Callers (ask!*, Vis triage) need
+                    ;; the complete raw value to reproduce / persist / show in TUI.
+                    ;; If a consumer wants a preview, they can `(subs (pr-str data) 0 N)`
+                    ;; themselves; svar must not destroy forensic data here.
+                    {:type :svar.spec/schema-rejected
+                     :reason :not-a-map
+                     :received-type (if (nil? data)
+                                      :nil
+                                      (-> data
+                                          class
+                                          .getSimpleName))
+                     :raw-data data
+                     :message (schema-reject-message)}))
+    (not (map? data)) data
     :else
-    (let [fields (::fields spec-def)
-          ref-registry (build-ref-registry spec-def)]
+    (let [fields
+          (::fields spec-def)
+
+          ref-registry
+          (build-ref-registry spec-def)]
+
       (reduce
         (fn [result field]
-          (let [field-name (::name field)
-               ;; Apply namespace if configured
-                actual-key (if key-ns
-                             (keyword key-ns (name field-name))
-                             field-name)
-                cardinality (::cardinality field)
-                field-type (::type field)
-                current-val (get result actual-key ::not-found)
-                missing? (= current-val ::not-found)
-                nil-val? (nil? current-val)]
+          (let [field-name
+                (::name field)
+
+                ;; Apply namespace if configured
+                actual-key
+                (if key-ns (keyword key-ns (name field-name)) field-name)
+
+                cardinality
+                (::cardinality field)
+
+                field-type
+                (::type field)
+
+                current-val
+                (get result actual-key ::not-found)
+
+                missing?
+                (= current-val ::not-found)
+
+                nil-val?
+                (nil? current-val)]
+
             (cond
-             ;; :many field is nil or missing → default to []
+              ;; :many field is nil or missing → default to []
+              (and (= cardinality :spec.cardinality/many) (or missing? nil-val?)) (assoc result
+                                                                                    actual-key [])
+              ;; :many ref field with items → recurse into each item
               (and (= cardinality :spec.cardinality/many)
-                (or missing? nil-val?))
-              (assoc result actual-key [])
+                   (= field-type :spec.type/ref)
+                   (vector? current-val)
+                   (seq current-val))
+              (let [target
+                    (::target field)
 
-             ;; :many ref field with items → recurse into each item
-              (and (= cardinality :spec.cardinality/many)
-                (= field-type :spec.type/ref)
-                (vector? current-val)
-                (seq current-val))
-              (let [target (::target field)
-                    ref-spec (get ref-registry target)]
+                    ref-spec
+                    (get ref-registry target)]
+
                 (if ref-spec
                   (let [ref-key-ns (::key-ns ref-spec)]
-                    (assoc result actual-key
-                      (mapv #(apply-spec-field-defaults % ref-spec ref-key-ns) current-val)))
+                    (assoc result
+                      actual-key (mapv #(apply-spec-field-defaults % ref-spec ref-key-ns)
+                                       current-val)))
                   result))
-
-             ;; :one ref field with value → recurse into it
+              ;; :one ref field with value → recurse into it
               (and (= cardinality :spec.cardinality/one)
-                (= field-type :spec.type/ref)
-                (map? current-val))
-              (let [target (::target field)
-                    ref-spec (get ref-registry target)]
+                   (= field-type :spec.type/ref)
+                   (map? current-val))
+              (let [target
+                    (::target field)
+
+                    ref-spec
+                    (get ref-registry target)]
+
                 (if ref-spec
                   (let [ref-key-ns (::key-ns ref-spec)]
-                    (assoc result actual-key
-                      (apply-spec-field-defaults current-val ref-spec ref-key-ns)))
+                    (assoc result
+                      actual-key (apply-spec-field-defaults current-val ref-spec ref-key-ns)))
                   result))
-
-             ;; :one field is missing → add key with nil
-              (and (= cardinality :spec.cardinality/one) missing?)
-              (assoc result actual-key nil)
-
-             ;; Field present and non-nil → leave as-is
+              ;; :one field is missing → add key with nil
+              (and (= cardinality :spec.cardinality/one) missing?) (assoc result actual-key nil)
+              ;; Field present and non-nil → leave as-is
               :else result)))
         data
         fields))))
@@ -1350,34 +1521,36 @@
                 wrapped-result (maybe-normalize-array-result raw-result spec-def)
                 ;; Build key mapping from spec and remap keys
                 key-mapping (build-key-mapping spec-def)
-                remapped (if (empty? key-mapping)
-                           wrapped-result
-                           (remap-keys wrapped-result key-mapping))
+                remapped
+                (if (empty? key-mapping) wrapped-result (remap-keys wrapped-result key-mapping))
                 ;; Build keyword fields set and convert strings to keywords
                 keyword-fields (build-keyword-fields spec-def)
-                keywordized (if (empty? keyword-fields)
-                              remapped
-                              (keywordize-fields remapped keyword-fields))
+                keywordized
+                (if (empty? keyword-fields) remapped (keywordize-fields remapped keyword-fields))
                 ;; Apply key namespace if configured
                 key-ns-map (collect-key-namespaces spec-def)
-                namespaced (if (empty? key-ns-map)
-                             keywordized
-                             (namespace-keys keywordized key-ns-map))
+                namespaced
+                (if (empty? key-ns-map) keywordized (namespace-keys keywordized key-ns-map))
                 ;; Apply spec-aware field defaults (nil :many → [], missing keys → nil)
                 main-key-ns (::key-ns spec-def)
                 result (apply-spec-field-defaults namespaced spec-def main-key-ns)]
-            {:result result :key-mapping key-mapping :keyword-fields keyword-fields
-             :key-ns-map key-ns-map :warnings warnings}))]
+
+            {:result result
+             :key-mapping key-mapping
+             :keyword-fields keyword-fields
+             :key-ns-map key-ns-map
+             :warnings warnings}))]
     (when (seq warnings)
-      (trove/log! {:level :debug :id ::sap-warnings
-                   :data {:warnings-count (count warnings)
-                          :warnings warnings}
+      (trove/log! {:level :debug
+                   :id ::sap-warnings
+                   :data {:warnings-count (count warnings) :warnings warnings}
                    :msg "spec-aware parse completed with warnings"}))
-    (trove/log! {:level :debug :data {:duration-ms duration-ms
-                                      :warnings-count (count warnings)
-                                      :key-remaps (count key-mapping)
-                                      :keyword-fields (count keyword-fields)
-                                      :key-ns-applied (seq key-ns-map)}
+    (trove/log! {:level :debug
+                 :data {:duration-ms duration-ms
+                        :warnings-count (count warnings)
+                        :key-remaps (count key-mapping)
+                        :keyword-fields (count keyword-fields)
+                        :key-ns-applied (seq key-ns-map)}
                  :msg "Parsed JSON response with spec-aware processing"})
     result))
 
@@ -1389,66 +1562,82 @@
   (cond
     ;; Bare vector + single :many field → apply defaults to each ref element
     (and (vector? data)
-      (= 1 (count (::fields spec-def)))
-      (= :spec.cardinality/many (::cardinality (first (::fields spec-def)))))
+         (= 1 (count (::fields spec-def)))
+         (= :spec.cardinality/many (::cardinality (first (::fields spec-def)))))
     (let [field (first (::fields spec-def))]
       (if (= :spec.type/ref (::type field))
         (let [ref-registry (build-ref-registry spec-def)
               ref-spec (get ref-registry (::target field))]
-          (if ref-spec
-            (mapv #(apply-field-defaults-no-ns % ref-spec) data)
-            data))
+
+          (if ref-spec (mapv #(apply-field-defaults-no-ns % ref-spec) data) data))
         data))
-
-    (not (map? data))
-    data
-
+    (not (map? data)) data
     :else
-    (let [fields (::fields spec-def)
-          ref-registry (build-ref-registry spec-def)]
+    (let [fields
+          (::fields spec-def)
+
+          ref-registry
+          (build-ref-registry spec-def)]
+
       (reduce
         (fn [result field]
-          (let [field-name (::name field)
-                actual-key field-name ;; never namespace
-                cardinality (::cardinality field)
-                field-type (::type field)
-                current-val (get result actual-key ::not-found)
-                missing? (= current-val ::not-found)
-                nil-val? (nil? current-val)]
+          (let [field-name
+                (::name field)
+
+                actual-key
+                field-name
+
+                ;; never namespace
+                cardinality
+                (::cardinality field)
+
+                field-type
+                (::type field)
+
+                current-val
+                (get result actual-key ::not-found)
+
+                missing?
+                (= current-val ::not-found)
+
+                nil-val?
+                (nil? current-val)]
+
             (cond
-             ;; :many field is nil or missing → default to []
+              ;; :many field is nil or missing → default to []
+              (and (= cardinality :spec.cardinality/many) (or missing? nil-val?)) (assoc result
+                                                                                    actual-key [])
+              ;; :many ref field with items → recurse into each item (no namespace)
               (and (= cardinality :spec.cardinality/many)
-                (or missing? nil-val?))
-              (assoc result actual-key [])
+                   (= field-type :spec.type/ref)
+                   (vector? current-val)
+                   (seq current-val))
+              (let [target
+                    (::target field)
 
-             ;; :many ref field with items → recurse into each item (no namespace)
-              (and (= cardinality :spec.cardinality/many)
-                (= field-type :spec.type/ref)
-                (vector? current-val)
-                (seq current-val))
-              (let [target (::target field)
-                    ref-spec (get ref-registry target)]
+                    ref-spec
+                    (get ref-registry target)]
+
                 (if ref-spec
-                  (assoc result actual-key
-                    (mapv #(apply-field-defaults-no-ns % ref-spec) current-val))
+                  (assoc result
+                    actual-key (mapv #(apply-field-defaults-no-ns % ref-spec) current-val))
                   result))
-
-             ;; :one ref field with value → recurse into it (no namespace)
+              ;; :one ref field with value → recurse into it (no namespace)
               (and (= cardinality :spec.cardinality/one)
-                (= field-type :spec.type/ref)
-                (map? current-val))
-              (let [target (::target field)
-                    ref-spec (get ref-registry target)]
+                   (= field-type :spec.type/ref)
+                   (map? current-val))
+              (let [target
+                    (::target field)
+
+                    ref-spec
+                    (get ref-registry target)]
+
                 (if ref-spec
-                  (assoc result actual-key
-                    (apply-field-defaults-no-ns current-val ref-spec))
+                  (assoc result actual-key (apply-field-defaults-no-ns current-val ref-spec))
                   result))
-
-             ;; :one field is missing → add key with nil
-              (and (= cardinality :spec.cardinality/one) missing?)
-              (assoc result actual-key nil)
-
-             ;; Field present and non-nil → leave as-is
+              ;; :one field is missing → add key with nil
+              (and (= cardinality :spec.cardinality/one) missing?) (assoc result actual-key nil)
+              ;; Field present and non-nil → leave as-is
               :else result)))
         data
         fields))))
@@ -1474,14 +1663,20 @@
    Coerced data with keyword fields converted and defaults applied."
   [data spec-def]
   (let [;; Normalize array wrapping (e.g., [{...}] when spec expects single object)
-        normalized (maybe-normalize-array-result data spec-def)
+        normalized
+        (maybe-normalize-array-result data spec-def)
+
         ;; Apply keyword type coercion for :spec.type/keyword fields
-        keyword-fields (build-keyword-fields spec-def)
-        keywordized (if (empty? keyword-fields)
-                      normalized
-                      (keywordize-fields normalized keyword-fields))
+        keyword-fields
+        (build-keyword-fields spec-def)
+
+        keywordized
+        (if (empty? keyword-fields) normalized (keywordize-fields normalized keyword-fields))
+
         ;; Apply field defaults without key-ns (SCI data uses un-namespaced keys)
-        result (apply-field-defaults-no-ns keywordized spec-def)]
+        result
+        (apply-field-defaults-no-ns keywordized spec-def)]
+
     result))
 
 ;; =============================================================================
@@ -1492,21 +1687,14 @@
   "Prepares Clojure data for JSON serialization.
    Converts dates/datetimes to ISO strings, keywords to strings."
   [data]
-  (cond
-    (instance? LocalDate data)
-    (.toString ^LocalDate data)
-
-    (or (instance? OffsetDateTime data) (instance? ZonedDateTime data))
-    (str data)
-
-    (map? data)
-    (into {} (map (fn [[k v]] [(name k) (prepare-for-json v)]) data))
-
-    (vector? data)
-    (mapv prepare-for-json data)
-
-    :else
-    data))
+  (cond (instance? LocalDate data) (.toString ^LocalDate data)
+        (or (instance? OffsetDateTime data) (instance? ZonedDateTime data)) (str data)
+        (map? data) (into {}
+                          (map (fn [[k v]]
+                                 [(name k) (prepare-for-json v)])
+                               data))
+        (vector? data) (mapv prepare-for-json data)
+        :else data))
 
 (defn data->str
   "Serializes Clojure data to JSON string.
@@ -1527,8 +1715,8 @@
    => \"{\\\"date\\\":\\\"2024-01-15\\\"}\""
   [data]
   (-> data
-    prepare-for-json
-    json/write-json-str))
+      prepare-for-json
+      json/write-json-str))
 
 ;; =============================================================================
 ;; Spec Fields Response Format - Validation
@@ -1539,9 +1727,9 @@
    Returns a set of path strings that represent arrays."
   [fields]
   (->> fields
-    (filter #(= :spec.cardinality/many (::cardinality %)))
-    (map #(keyword->path (::name %)))
-    set))
+       (filter #(= :spec.cardinality/many (::cardinality %)))
+       (map #(keyword->path (::name %)))
+       set))
 
 (defn- has-nested-fields?
   "Checks if an array container path has nested field definitions.
@@ -1565,59 +1753,87 @@
    
    Returns:
    The value at the path, or a vector of values if path goes through an array."
-  ([data path-str array-containers]
-   (get-value-at-path data path-str array-containers nil))
+  ([data path-str array-containers] (get-value-at-path data path-str array-containers nil))
   ([data path-str array-containers original-keyword]
-   (let [segments (str/split path-str #"\.")
+   (let [segments
+         (str/split path-str #"\.")
+
          ;; Use original keyword for final segment if provided
-         final-key (if original-keyword
-                     (keyword (name original-keyword))
-                     (keyword (last segments)))
+         final-key
+         (if original-keyword (keyword (name original-keyword)) (keyword (last segments)))
+
          ;; Check if any prefix of this path is an array container
-         prefixes (reductions (fn [acc seg] (if (empty? acc) seg (str acc "." seg))) "" segments)
-         prefixes (rest prefixes) ;; skip empty first element
-         array-prefix (first (filter array-containers prefixes))]
+         prefixes
+         (reductions (fn [acc seg]
+                       (if (empty? acc) seg (str acc "." seg)))
+                     ""
+                     segments)
+
+         prefixes
+         (rest prefixes)
+
+         ;; skip empty first element
+         array-prefix
+         (first (filter array-containers prefixes))]
+
      (if (and array-prefix (not= array-prefix path-str))
        ;; Path goes through an array - extract values from each array element
-       (let [array-segments (str/split array-prefix #"\.")
-             rest-segments (drop (count array-segments) segments)
-             array-value (reduce (fn [current seg]
-                                   (when (some? current)
-                                     (get current (keyword seg))))
-                           data
-                           array-segments)]
+       (let [array-segments
+             (str/split array-prefix #"\.")
+
+             rest-segments
+             (drop (count array-segments) segments)
+
+             array-value
+             (reduce (fn [current seg]
+                       (when (some? current) (get current (keyword seg))))
+                     data
+                     array-segments)]
+
          (when (vector? array-value)
            (mapv (fn [item]
                    ;; Use final-key for last segment
                    (let [intermediate-segments (butlast rest-segments)]
                      (-> (reduce (fn [current seg]
-                                   (when (some? current)
-                                     (get current (keyword seg))))
-                           item
-                           intermediate-segments)
-                       (get final-key))))
-             array-value)))
+                                   (when (some? current) (get current (keyword seg))))
+                                 item
+                                 intermediate-segments)
+                         (get final-key))))
+                 array-value)))
        ;; Regular path traversal - use final-key for last segment
        (let [intermediate-segments (butlast segments)]
          (-> (reduce (fn [current seg]
-                       (when (some? current)
-                         (get current (keyword seg))))
-               data
-               intermediate-segments)
-           (get final-key)))))))
+                       (when (some? current) (get current (keyword seg))))
+                     data
+                     intermediate-segments)
+             (get final-key)))))))
 
 (defn- check-scalar-type
   "Checks if a scalar value matches the expected type."
   [value expected-type]
   (case expected-type
-    :spec.type/string (string? value)
-    :spec.type/int (int? value)
-    :spec.type/float (number? value)
-    :spec.type/bool (boolean? value)
-    :spec.type/keyword (keyword? value)  ; After post-processing, should be keyword
-    :spec.type/date (instance? LocalDate value)
-    :spec.type/datetime (or (instance? OffsetDateTime value)
-                          (instance? ZonedDateTime value))
+    :spec.type/string
+    (string? value)
+
+    :spec.type/int
+    (int? value)
+
+    :spec.type/float
+    (number? value)
+
+    :spec.type/bool
+    (boolean? value)
+
+    :spec.type/keyword
+    (keyword? value)
+
+    ; After post-processing, should be keyword
+    :spec.type/date
+    (instance? LocalDate value)
+
+    :spec.type/datetime
+    (or (instance? OffsetDateTime value) (instance? ZonedDateTime value))
+
     ;; Not a standard type - might be a vector type, handle separately
     false))
 
@@ -1625,9 +1841,15 @@
   "Checks if a value matches the base type for a fixed-size vector."
   [value base-type]
   (case base-type
-    :int (int? value)
-    :string (string? value)
-    :double (number? value)
+    :int
+    (int? value)
+
+    :string
+    (string? value)
+
+    :double
+    (number? value)
+
     false))
 
 (defn- check-fixed-size-vector
@@ -1643,8 +1865,8 @@
   (when vector-type-info
     (let [{:keys [base-type size]} vector-type-info]
       (and (vector? value)
-        (= (count value) size)
-        (every? #(check-vector-element-type % base-type) value)))))
+           (= (count value) size)
+           (every? #(check-vector-element-type % base-type) value)))))
 
 (defn- check-type
   "Checks if a value matches the expected type. Returns true if valid, false otherwise.
@@ -1653,26 +1875,20 @@
    For fixed-size vector types, checks size and element types.
    For ref types, checks it's a map (one) or vector of maps (many)."
   [value expected-type cardinality has-nested?]
-  (cond
-    (nil? value) true ;; nil handling is done separately via ::union
-
-    ;; Fixed-size vector type (e.g., :spec.type/int-v-4)
-    (parse-vector-type expected-type)
-    (check-fixed-size-vector value (parse-vector-type expected-type))
-
-    ;; Ref type - map for one, vector of maps for many
-    (= expected-type :spec.type/ref)
-    (if (= cardinality :spec.cardinality/many)
-      (and (vector? value) (every? map? value))
-      (map? value))
-
-    (= cardinality :spec.cardinality/many)
-    (if has-nested?
-      (vector? value) ;; Array of objects - just check it's a vector
-      (and (vector? value) ;; Simple array - check each element's type
-        (every? #(check-scalar-type % expected-type) value)))
-    :else
-    (check-scalar-type value expected-type)))
+  (cond (nil? value) true ;; nil handling is done separately via ::union
+        ;; Fixed-size vector type (e.g., :spec.type/int-v-4)
+        (parse-vector-type expected-type)
+        (check-fixed-size-vector value (parse-vector-type expected-type))
+        ;; Ref type - map for one, vector of maps for many
+        (= expected-type :spec.type/ref) (if (= cardinality :spec.cardinality/many)
+                                           (and (vector? value) (every? map? value))
+                                           (map? value))
+        (= cardinality :spec.cardinality/many) (if has-nested?
+                                                 (vector? value) ;; Array of objects - just check it's a vector
+                                                 (and (vector? value) ;; Simple array - check each element's type
+                                                      (every? #(check-scalar-type % expected-type)
+                                                              value)))
+        :else (check-scalar-type value expected-type)))
 
 (defn- check-type-in-array
   "Checks if all values in a vector match the expected type.
@@ -1699,22 +1915,29 @@
    For cardinality many, checks every item in the vector."
   [value allowed-values cardinality]
   (let [allowed-set (enum-values-set allowed-values)]
-    (cond
-      (nil? value) true
-      (nil? allowed-set) true
-      (= cardinality :spec.cardinality/many)
-      (and (vector? value)
-        (every? #(contains? allowed-set (enum-canon %)) value))
-      :else
-      (contains? allowed-set (enum-canon value)))))
+    (cond (nil? value) true
+          (nil? allowed-set) true
+          (= cardinality :spec.cardinality/many)
+          (and (vector? value) (every? #(contains? allowed-set (enum-canon %)) value))
+          :else (contains? allowed-set (enum-canon value)))))
 
 (defn- nested-in-array?
   "Checks if a path is nested inside an array container.
    E.g., 'books.title' is nested in 'books' if 'books' is an array container."
   [path-str array-containers]
-  (let [segments (str/split path-str #"\.")
-        prefixes (reductions (fn [acc seg] (if (empty? acc) seg (str acc "." seg))) "" segments)
-        prefixes (butlast (rest prefixes))] ;; skip empty first and the full path itself
+  (let [segments
+        (str/split path-str #"\.")
+
+        prefixes
+        (reductions (fn [acc seg]
+                      (if (empty? acc) seg (str acc "." seg)))
+                    ""
+                    segments)
+
+        prefixes
+        (butlast (rest prefixes))]
+
+    ;; skip empty first and the full path itself
     (some array-containers prefixes)))
 
 (declare validate-data)
@@ -1737,25 +1960,23 @@
     []
     (let [ref-fields (filter #(= :spec.type/ref (::type %)) fields)]
       (into []
-        (mapcat
-          (fn [field-def]
-            (let [field-name (::name field-def)
-                  target (::target field-def)
-                  cardinality (::cardinality field-def)
-                  value (get data field-name)
-                  target-spec (get ref-registry target)]
-              (when (and value target-spec)
-                (let [items (if (= cardinality :spec.cardinality/many)
-                              (when (vector? value) value)
-                              [value])]
-                  (mapcat
-                    (fn [item]
-                      (when (map? item)
-                        (let [sub-result (validate-data target-spec item)]
-                          (when-not (:valid? sub-result)
-                            (:errors sub-result)))))
-                    items))))))
-        ref-fields))))
+            (mapcat (fn [field-def]
+                      (let [field-name (::name field-def)
+                            target (::target field-def)
+                            cardinality (::cardinality field-def)
+                            value (get data field-name)
+                            target-spec (get ref-registry target)]
+
+                        (when (and value target-spec)
+                          (let [items (if (= cardinality :spec.cardinality/many)
+                                        (when (vector? value) value)
+                                        [value])]
+                            (mapcat (fn [item]
+                                      (when (map? item)
+                                        (let [sub-result (validate-data target-spec item)]
+                                          (when-not (:valid? sub-result) (:errors sub-result)))))
+                                    items))))))
+            ref-fields))))
 
 (defn validate-data
   "Validates parsed data against a spec.
@@ -1779,9 +2000,15 @@
    Returns:
    Map with :valid? boolean and optional :errors vector of error maps."
   [the-spec data]
-  (let [fields (::fields the-spec)
-        array-containers (find-array-container-paths fields)
-        errors (atom [])
+  (let [fields
+        (::fields the-spec)
+
+        array-containers
+        (find-array-container-paths fields)
+
+        errors
+        (atom [])
+
         [_ duration-ms]
         (util/with-elapsed
           (doseq [field-def fields]
@@ -1793,58 +2020,66 @@
                   allowed-values (::values field-def)
                   in-array? (nested-in-array? path-str array-containers)
                   has-nested? (and (= cardinality :spec.cardinality/many)
-                                (has-nested-fields? path-str fields))
+                                   (has-nested-fields? path-str fields))
                   ;; Pass original field-name keyword to handle special chars like ?!
                   value (get-value-at-path data path-str array-containers field-name)
-                  missing? (if in-array?
-                             (or (nil? value) (every? nil? value))
-                             (nil? value))]
+                  missing? (if in-array? (or (nil? value) (every? nil? value)) (nil? value))]
+
               ;; Check required
               (when (and missing? (not optional?))
-                (swap! errors conj {:error :missing-required-field
-                                    :field field-name
-                                    :path path-str}))
+                (swap! errors conj
+                  {:error :missing-required-field :field field-name :path path-str}))
               ;; Check type (only if present)
               (when (not missing?)
                 (if in-array?
                   ;; For nested fields in arrays, check each extracted value
                   (when-not (check-type-in-array value field-type)
-                    (swap! errors conj {:error :type-mismatch
-                                        :field field-name
-                                        :path path-str
-                                        :expected-type field-type
-                                        :actual-value value
-                                        :actual-type (type value)}))
+                    (swap! errors conj
+                      {:error :type-mismatch
+                       :field field-name
+                       :path path-str
+                       :expected-type field-type
+                       :actual-value value
+                       :actual-type (type value)}))
                   ;; Regular type check
                   (when-not (check-type value field-type cardinality has-nested?)
-                    (swap! errors conj {:error :type-mismatch
-                                        :field field-name
-                                        :path path-str
-                                        :expected-type field-type
-                                        :actual-value value
-                                        :actual-type (type value)}))))
+                    (swap! errors conj
+                      {:error :type-mismatch
+                       :field field-name
+                       :path path-str
+                       :expected-type field-type
+                       :actual-value value
+                       :actual-type (type value)}))))
               ;; Check enum (only if present and has values constraint)
               (when (and (not missing?)
-                      allowed-values
-                      (not (check-enum value allowed-values cardinality)))
-                (swap! errors conj {:error :invalid-enum-value
-                                    :field field-name
-                                    :path path-str
-                                    :value value
-                                    :allowed-values (vec (enum-values allowed-values))}))))
+                         allowed-values
+                         (not (check-enum value allowed-values cardinality)))
+                (swap! errors conj
+                  {:error :invalid-enum-value
+                   :field field-name
+                   :path path-str
+                   :value value
+                   :allowed-values (vec (enum-values allowed-values))}))))
           ;; Recurse into TYPE_REF fields
-          (let [ref-registry (build-ref-registry the-spec)
-                ref-errors (validate-ref-items data fields ref-registry)]
-            (when (seq ref-errors)
-              (swap! errors into ref-errors))))
-        result (if (empty? @errors)
-                 {:valid? true}
-                 {:valid? false :errors @errors})]
+          (let [ref-registry
+                (build-ref-registry the-spec)
+
+                ref-errors
+                (validate-ref-items data fields ref-registry)]
+
+            (when (seq ref-errors) (swap! errors into ref-errors))))
+
+        result
+        (if (empty? @errors) {:valid? true} {:valid? false :errors @errors})]
+
     (if (:valid? result)
-      (trove/log! {:level :debug :data {:fields-count (count fields) :duration-ms duration-ms}
+      (trove/log! {:level :debug
+                   :data {:fields-count (count fields) :duration-ms duration-ms}
                    :msg "Spec validation passed"})
-      (trove/log! {:level :warn :data {:fields-count (count fields) :error-count (count @errors) :duration-ms duration-ms}
-                   :msg "Spec validation failed"}))
+      (trove/log!
+        {:level :warn
+         :data {:fields-count (count fields) :error-count (count @errors) :duration-ms duration-ms}
+         :msg "Spec validation failed"}))
     result))
 
 ;; =============================================================================
@@ -1866,13 +2101,13 @@
    extracts their content. The only hard rejections are bare prose and
    missing required fields."
   (str "RESPONSE FORMAT — NON-NEGOTIABLE:\n"
-    "• The ENTIRE response body MUST be a JSON object matching the schema below.\n"
-    "• Top-level value MUST be a JSON object {…}, never a JSON string \"…\".\n"
-    "• First non-whitespace character MUST be `{`.\n"
-    "• Markdown fences (```json, ```clojure, ```edn) are OK — the content will be extracted.\n"
-    "• NO prose outside the JSON structure. NO leading apologies.\n"
-    "• Required fields MUST be present and non-null.\n"
-    "• Anything else is REJECTED and you will be asked to retry.\n\n"))
+       "• The ENTIRE response body MUST be a JSON object matching the schema below.\n"
+       "• Top-level value MUST be a JSON object {…}, never a JSON string \"…\".\n"
+       "• First non-whitespace character MUST be `{`.\n"
+       "• Markdown fences (```json, ```clojure, ```edn) are OK — the content will be extracted.\n"
+       "• NO prose outside the JSON structure. NO leading apologies.\n"
+       "• Required fields MUST be present and non-null.\n"
+       "• Anything else is REJECTED and you will be asked to retry.\n\n"))
 
 (defn spec->prompt
   "Converts a spec to a full prompt for LLM with BAML-style schema.
@@ -1891,6 +2126,4 @@
    Returns:
    String. Prompt with enforcement banner + BAML-style schema."
   [the-spec]
-  (str SCHEMA_ENFORCEMENT_BANNER
-    "Schema:\n"
-    (spec->str the-spec)))
+  (str SCHEMA_ENFORCEMENT_BANNER "Schema:\n" (spec->str the-spec)))

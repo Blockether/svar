@@ -1,19 +1,18 @@
 (ns com.blockether.svar.internal.llm-tool-calling-test
   "Native tool calling: per-wire tool/tool-choice shaping, request-body
    injection, response tool_use extraction, and the anthropic round-trip."
-  (:require
-   [charred.api :as json]
-   [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.internal.llm :as sut]))
+  (:require [charred.api :as json]
+            [lazytest.core :refer [defdescribe describe expect it]]
+            [com.blockether.svar.internal.llm :as sut]))
 
-(def ^:private tool-def->wire   @#'sut/tool-def->wire)
+(def ^:private tool-def->wire @#'sut/tool-def->wire)
 (def ^:private tool-choice->wire @#'sut/tool-choice->wire)
-(def ^:private build-anthropic  @#'sut/build-anthropic-request-body)
-(def ^:private build-chat       @#'sut/build-request-body)
-(def ^:private build-responses  @#'sut/build-openai-responses-request-body)
+(def ^:private build-anthropic @#'sut/build-anthropic-request-body)
+(def ^:private build-chat @#'sut/build-request-body)
+(def ^:private build-responses @#'sut/build-openai-responses-request-body)
 (def ^:private extract-anthropic @#'sut/extract-anthropic-response-data)
-(def ^:private extract-openai    @#'sut/extract-response-data)
-(def ^:private responses-input   @#'sut/responses-message-input-entries)
+(def ^:private extract-openai @#'sut/extract-response-data)
+(def ^:private responses-input @#'sut/responses-message-input-entries)
 (def ^:private assemble-chat-frags @#'sut/assemble-chat-tool-call-fragments)
 (def ^:private openai-responses-state @#'sut/openai-responses-state)
 (def ^:private merge-provider-state @#'sut/merge-provider-state)
@@ -22,11 +21,11 @@
 (def ^:private fn-item->tool-call @#'sut/function-call-item->tool-call)
 (def ^:private extract-stream-delta @#'sut/extract-stream-delta)
 (def ^:private make-anthropic-stream-delta-fn @#'sut/make-anthropic-stream-delta-fn)
-(def ^:private build-gemini      @#'sut/build-gemini-request-body)
-(def ^:private extract-gemini    @#'sut/extract-gemini-response-data)
+(def ^:private build-gemini @#'sut/build-gemini-request-body)
+(def ^:private extract-gemini @#'sut/extract-gemini-response-data)
 (def ^:private gemini-tool-config @#'sut/gemini-tool-config)
 
-(def ^:private parse-sse-data      @#'sut/parse-sse-data)
+(def ^:private parse-sse-data @#'sut/parse-sse-data)
 
 (defn- parse-body
   "One RAW provider body through svar's real response parse — the only honest
@@ -38,335 +37,422 @@
 (def ^:private run-python
   {:name "run_python"
    :description "Execute Python in the sandbox."
-   :schema {:type "object"
-            :properties {"code" {:type "string"}}
-            :required ["code"]}})
+   :schema {:type "object" :properties {"code" {:type "string"}} :required ["code"]}})
 
 (defdescribe tool-def-shaping-test
-  (describe "tool-def->wire per api-style"
-    (it "anthropic uses :name/:description/:input_schema"
-      (let [w (tool-def->wire :anthropic run-python)]
-        (expect (= "run_python" (:name w)))
-        (expect (= "Execute Python in the sandbox." (:description w)))
-        (expect (= (:schema run-python) (:input_schema w)))
-        (expect (nil? (:parameters w)))))
+             (describe "tool-def->wire per api-style"
+                       (it "anthropic uses :name/:description/:input_schema"
+                           (let [w (tool-def->wire :anthropic run-python)]
+                             (expect (= "run_python" (:name w)))
+                             (expect (= "Execute Python in the sandbox." (:description w)))
+                             (expect (= (:schema run-python) (:input_schema w)))
+                             (expect (nil? (:parameters w)))))
+                       (it "openai-chat nests under :function with :parameters"
+                           (let [w (tool-def->wire :openai-compatible-chat run-python)]
+                             (expect (= "function" (:type w)))
+                             (expect (= "run_python" (get-in w [:function :name])))
+                             (expect (= (:schema run-python) (get-in w [:function :parameters])))))
+                       (it "responses is flat :type/:name/:parameters"
+                           (let [w (tool-def->wire :openai-compatible-responses run-python)]
+                             (expect (= "function" (:type w)))
+                             (expect (= "run_python" (:name w)))
+                             (expect (= (:schema run-python) (:parameters w)))
+                             (expect (nil? (:function w)))))
+                       (it "missing schema falls back to an empty object schema"
+                           (expect (= {:type "object" :properties {}}
+                                      (:input_schema (tool-def->wire :anthropic {:name "x"})))))))
 
-    (it "openai-chat nests under :function with :parameters"
-      (let [w (tool-def->wire :openai-compatible-chat run-python)]
-        (expect (= "function" (:type w)))
-        (expect (= "run_python" (get-in w [:function :name])))
-        (expect (= (:schema run-python) (get-in w [:function :parameters])))))
+(defdescribe
+  strict-tool-shaping-test
+  (describe
+    "strict is never sent to a provider"
+    (let [strict-tool
+          (assoc-in (assoc run-python :strict true) [:schema :strict] true)
 
-    (it "responses is flat :type/:name/:parameters"
-      (let [w (tool-def->wire :openai-compatible-responses run-python)]
-        (expect (= "function" (:type w)))
-        (expect (= "run_python" (:name w)))
-        (expect (= (:schema run-python) (:parameters w)))
-        (expect (nil? (:function w)))))
+          strict-of
+          {:anthropic #(:strict %)
+           :openai-compatible-responses #(:strict %)
+           :openai-compatible-chat #(get-in % [:function :strict])}
 
-    (it "missing schema falls back to an empty object schema"
-      (expect (= {:type "object" :properties {}}
-                (:input_schema (tool-def->wire :anthropic {:name "x"})))))))
+          schema-of
+          {:anthropic #(:input_schema %)
+           :openai-compatible-responses #(:parameters %)
+           :openai-compatible-chat #(get-in % [:function :parameters])}]
 
-(defdescribe strict-tool-shaping-test
-  (describe "strict is never sent to a provider"
-    (let [strict-tool (assoc-in (assoc run-python :strict true)
-                        [:schema :strict] true)
-          strict-of   {:anthropic                   #(:strict %)
-                       :openai-compatible-responses #(:strict %)
-                       :openai-compatible-chat      #(get-in % [:function :strict])}
-          schema-of   {:anthropic                   #(:input_schema %)
-                       :openai-compatible-responses #(:parameters %)
-                       :openai-compatible-chat      #(get-in % [:function :parameters])}]
       (it "drops canonical and schema strict fields from every wire shape"
-        (doseq [[api-style read-strict] strict-of]
-          (let [wire (tool-def->wire api-style strict-tool)]
-            (expect (nil? (read-strict wire)))
-            (expect (nil? (:strict ((get schema-of api-style) wire)))))))
-
-      (it "never lets strict reach request bodies or JSON encoding"
-        (let [bodies [(build-anthropic [{:role "user" :content "hi"}] "claude"
-                        {:svar/tools [strict-tool]})
-                      (build-chat [{:role "user" :content "hi"}] "gpt"
-                        {:svar/tools [strict-tool]})
-                      (build-responses [{:role "user" :content "hi"}] "gpt"
-                        {:svar/tools [strict-tool]})]]
+          (doseq [[api-style read-strict] strict-of]
+            (let [wire (tool-def->wire api-style strict-tool)]
+              (expect (nil? (read-strict wire)))
+              (expect (nil? (:strict ((get schema-of api-style) wire)))))))
+      (it
+        "never lets strict reach request bodies or JSON encoding"
+        (let [bodies
+              [(build-anthropic [{:role "user" :content "hi"}] "claude" {:svar/tools [strict-tool]})
+               (build-chat [{:role "user" :content "hi"}] "gpt" {:svar/tools [strict-tool]})
+               (build-responses [{:role "user" :content "hi"}] "gpt" {:svar/tools [strict-tool]})]]
           (doseq [body bodies]
             (expect (not (re-find #"(?i)strict" (json/write-json-str body)))))))
-
       (it "still omits the field when unset or false"
-        (doseq [[api-style read-strict] strict-of
-                tool                    [run-python (assoc run-python :strict false)]]
-          (expect (nil? (read-strict (tool-def->wire api-style tool))))))
+          (doseq [[api-style read-strict]
+                  strict-of
 
+                  tool
+                  [run-python (assoc run-python :strict false)]]
+
+            (expect (nil? (read-strict (tool-def->wire api-style tool))))))
       (it "gateway sanitizing still removes strict from canonical tools"
-        (let [sanitized (sanitize-tools-for-gateway [strict-tool])]
-          (expect (nil? (:strict (first sanitized)))))))))
+          (let [sanitized (sanitize-tools-for-gateway [strict-tool])]
+            (expect (nil? (:strict (first sanitized)))))))))
 
 (defdescribe tool-choice-shaping-test
-  (describe "tool-choice->wire"
-    (it "anthropic: auto/any/tool"
-      (expect (= {:type "auto"} (tool-choice->wire :anthropic :auto)))
-      (expect (= {:type "any"}  (tool-choice->wire :anthropic :required)))
-      (expect (= {:type "tool" :name "run_python"}
-                (tool-choice->wire :anthropic {:name "run_python"}))))
-    (it "chat: string/required/none/forced-function"
-      (expect (= "auto"     (tool-choice->wire :openai-compatible-chat :auto)))
-      (expect (= "required" (tool-choice->wire :openai-compatible-chat :required)))
-      (expect (= "none"     (tool-choice->wire :openai-compatible-chat :none)))
-      (expect (= {:type "function" :function {:name "run_python"}}
-                (tool-choice->wire :openai-compatible-chat "run_python"))))
-    (it "responses: forced function is flat"
-      (expect (= {:type "function" :name "run_python"}
-                (tool-choice->wire :openai-compatible-responses {:name "run_python"}))))))
+             (describe "tool-choice->wire"
+                       (it "anthropic: auto/any/tool"
+                           (expect (= {:type "auto"} (tool-choice->wire :anthropic :auto)))
+                           (expect (= {:type "any"} (tool-choice->wire :anthropic :required)))
+                           (expect (= {:type "tool" :name "run_python"}
+                                      (tool-choice->wire :anthropic {:name "run_python"}))))
+                       (it "chat: string/required/none/forced-function"
+                           (expect (= "auto" (tool-choice->wire :openai-compatible-chat :auto)))
+                           (expect (= "required"
+                                      (tool-choice->wire :openai-compatible-chat :required)))
+                           (expect (= "none" (tool-choice->wire :openai-compatible-chat :none)))
+                           (expect (= {:type "function" :function {:name "run_python"}}
+                                      (tool-choice->wire :openai-compatible-chat "run_python"))))
+                       (it "responses: forced function is flat"
+                           (expect (= {:type "function" :name "run_python"}
+                                      (tool-choice->wire :openai-compatible-responses
+                                                         {:name "run_python"}))))))
 
 (defdescribe anthropic-body-injection-test
-  (let [msgs [{:role "user" :content "hi"}]]
-    (it "injects shaped :tools + :tool_choice and strips :svar/* keys"
-      (let [body (build-anthropic msgs "claude"
-                   {:svar/tools [run-python] :svar/tool-choice :required})]
-        (expect (= 1 (count (:tools body))))
-        (expect (= "run_python" (:name (first (:tools body)))))
-        (expect (= {:type "any"} (:tool_choice body)))
-        ;; svar-internal keys never reach the wire
-        (expect (not (contains? body :svar/tools)))
-        (expect (not (contains? body :svar/tool-choice)))))
+             (let [msgs [{:role "user" :content "hi"}]]
+               (it "injects shaped :tools + :tool_choice and strips :svar/* keys"
+                   (let [body (build-anthropic msgs
+                                               "claude"
+                                               {:svar/tools [run-python]
+                                                :svar/tool-choice :required})]
+                     (expect (= 1 (count (:tools body))))
+                     (expect (= "run_python" (:name (first (:tools body)))))
+                     (expect (= {:type "any"} (:tool_choice body)))
+                     ;; svar-internal keys never reach the wire
+                     (expect (not (contains? body :svar/tools)))
+                     (expect (not (contains? body :svar/tool-choice)))))
+               (it "no tools => no :tools / :tool_choice keys"
+                   (let [body (build-anthropic msgs "claude" {})]
+                     (expect (not (contains? body :tools)))
+                     (expect (not (contains? body :tool_choice)))))
+               (it "tool_choice without tools is dropped"
+                   (let [body (build-anthropic msgs "claude" {:svar/tool-choice :required})]
+                     (expect (not (contains? body :tool_choice)))))))
 
-    (it "no tools => no :tools / :tool_choice keys"
-      (let [body (build-anthropic msgs "claude" {})]
-        (expect (not (contains? body :tools)))
-        (expect (not (contains? body :tool_choice)))))
-
-    (it "tool_choice without tools is dropped"
-      (let [body (build-anthropic msgs "claude" {:svar/tool-choice :required})]
-        (expect (not (contains? body :tool_choice)))))))
-
-(defdescribe other-wire-injection-test
+(defdescribe
+  other-wire-injection-test
   (let [msgs [{:role "user" :content "hi"}]]
     (it "chat body carries function-shaped tools, no :svar/* leak"
-      (let [body (build-chat msgs "glm" {:svar/tools [run-python]})]
-        (expect (= "function" (:type (first (:tools body)))))
-        (expect (not (contains? body :svar/tools)))))
+        (let [body (build-chat msgs "glm" {:svar/tools [run-python]})]
+          (expect (= "function" (:type (first (:tools body)))))
+          (expect (not (contains? body :svar/tools)))))
     (it "responses body carries flat tools"
-      (let [body (build-responses msgs "gpt" {:svar/tools [run-python] :svar/tool-choice :auto})]
-        (expect (= "run_python" (:name (first (:tools body)))))
-        (expect (= "auto" (:tool_choice body)))
-        (expect (not (contains? body :svar/tools)))))))
+        (let [body (build-responses msgs "gpt" {:svar/tools [run-python] :svar/tool-choice :auto})]
+          (expect (= "run_python" (:name (first (:tools body)))))
+          (expect (= "auto" (:tool_choice body)))
+          (expect (not (contains? body :svar/tools)))))))
 
-(defdescribe large-tool-argument-fidelity-test
-  (it "preserves large arguments byte-for-byte on every provider wire"
-    (let [payload (apply str (take 20000 (cycle ["x" "\"" "\n" "\\" "λ"])))
-          msgs [{:role "user" :content "write it"}
-                {:role "assistant"
-                 :content [{:type "tool_use"
-                            :id "call_big"
-                            :name "write"
-                            :input {"path" "generated.txt" "content" payload}}]}
-                {:role "user"
-                 :content [{:type "tool_result"
-                            :tool_use_id "call_big"
-                            :content "ok"}]}]
-          anthropic (build-anthropic msgs "claude" {})
-          chat (build-chat msgs "gpt" {})
-          responses (build-responses msgs "gpt" {})
-          gemini (build-gemini msgs "gemini" {})
-          anthropic-input (->> (:messages anthropic)
-                            (filter #(= "assistant" (:role %)))
-                            first
-                            :content
-                            (filter #(= "tool_use" (:type %)))
-                            first
-                            :input)
-          chat-args (->> (:messages chat)
-                      (filter #(= "assistant" (:role %)))
-                      first
-                      :tool_calls
-                      first
-                      :function
-                      :arguments)
-          responses-args (->> (:input responses)
-                           (filter #(= "function_call" (:type %)))
-                           first
-                           :arguments)
-          gemini-args (->> (:contents gemini)
-                        (filter #(= "model" (:role %)))
-                        first
-                        :parts
-                        (filter :functionCall)
-                        first
-                        :functionCall
-                        :args)]
+(defdescribe
+  large-tool-argument-fidelity-test
+  (it
+    "preserves large arguments byte-for-byte on every provider wire"
+    (let [payload
+          (apply str (take 20000 (cycle ["x" "\"" "\n" "\\" "λ"])))
+
+          msgs
+          [{:role "user" :content "write it"}
+           {:role "assistant"
+            :content [{:type "tool_use"
+                       :id "call_big"
+                       :name "write"
+                       :input {"path" "generated.txt" "content" payload}}]}
+           {:role "user" :content [{:type "tool_result" :tool_use_id "call_big" :content "ok"}]}]
+
+          anthropic
+          (build-anthropic msgs "claude" {})
+
+          chat
+          (build-chat msgs "gpt" {})
+
+          responses
+          (build-responses msgs "gpt" {})
+
+          gemini
+          (build-gemini msgs "gemini" {})
+
+          anthropic-input
+          (->> (:messages anthropic)
+               (filter #(= "assistant" (:role %)))
+               first
+               :content
+               (filter #(= "tool_use" (:type %)))
+               first
+               :input)
+
+          chat-args
+          (->> (:messages chat)
+               (filter #(= "assistant" (:role %)))
+               first
+               :tool_calls
+               first
+               :function
+               :arguments)
+
+          responses-args
+          (->> (:input responses)
+               (filter #(= "function_call" (:type %)))
+               first
+               :arguments)
+
+          gemini-args
+          (->> (:contents gemini)
+               (filter #(= "model" (:role %)))
+               first
+               :parts
+               (filter :functionCall)
+               first
+               :functionCall
+               :args)]
+
       (expect (= payload (get anthropic-input "content")))
       (expect (= payload (get (json/read-json chat-args :key-fn identity) "content")))
       (expect (= payload (get (json/read-json responses-args :key-fn identity) "content")))
       (expect (= payload (get gemini-args "content"))))))
 
-(defdescribe tool-schema-rejection-context-test
+(defdescribe
+  tool-schema-rejection-context-test
   (it "resolves a provider tool-array index to the exact canonical name"
-    (let [body "{\"error\":{\"message\":\"tools.1.custom.input_schema: unsupported root\"}}"
-          cause (ex-info "Provider unavailable" {:status 400 :body body})
-          enriched (enrich-tool-schema-rejection cause
-                     [{:name "python_execution"} {:name "patch"}])]
-      (expect (= 1 (:tool-index (ex-data enriched))))
-      (expect (= "patch" (:tool-name (ex-data enriched))))
-      (expect (= "input_schema" (:tool-schema-field (ex-data enriched))))
-      (expect (= "tools.1.custom.input_schema" (:tool-schema-path (ex-data enriched))))))
+      (let [body
+            "{\"error\":{\"message\":\"tools.1.custom.input_schema: unsupported root\"}}"
+
+            cause
+            (ex-info "Provider unavailable" {:status 400 :body body})
+
+            enriched
+            (enrich-tool-schema-rejection cause [{:name "python_execution"} {:name "patch"}])]
+
+        (expect (= 1 (:tool-index (ex-data enriched))))
+        (expect (= "patch" (:tool-name (ex-data enriched))))
+        (expect (= "input_schema" (:tool-schema-field (ex-data enriched))))
+        (expect (= "tools.1.custom.input_schema" (:tool-schema-path (ex-data enriched))))))
   (it "resolves a gateway-injected `strict` field the same way"
-    (let [body (str "{\"error\":{\"message\":\"BedrockException - tools.0.custom.strict: "
+      (let [body
+            (str "{\"error\":{\"message\":\"BedrockException - tools.0.custom.strict: "
                  "Extra inputs are not permitted\"}}")
-          cause (ex-info "Provider unavailable" {:status 400 :body body})
-          enriched (enrich-tool-schema-rejection cause [{:name "grep"} {:name "patch"}])]
-      (expect (= "grep" (:tool-name (ex-data enriched))))
-      (expect (= "strict" (:tool-schema-field (ex-data enriched))))))
+
+            cause
+            (ex-info "Provider unavailable" {:status 400 :body body})
+
+            enriched
+            (enrich-tool-schema-rejection cause [{:name "grep"} {:name "patch"}])]
+
+        (expect (= "grep" (:tool-name (ex-data enriched))))
+        (expect (= "strict" (:tool-schema-field (ex-data enriched))))))
   (it "keeps the provider-reported parameters field for schema errors"
-    (let [cause (ex-info "Provider unavailable"
-                  {:status 400
-                   :body (str "{\"error\":{\"message\":\"Invalid schema for function 'patch': "
-                           "In context=(), 'additionalProperties' is required to be supplied and "
-                           "to be false.\",\"type\":\"invalid_request_error\","
-                           "\"param\":\"tools[1].parameters\",\"code\":\"invalid_function_parameters\"}}")})
-          enriched (enrich-tool-schema-rejection cause
-                     [{:name "grep"} {:name "patch" :strict true}])]
-      (expect (= 1 (:tool-index (ex-data enriched))))
-      (expect (= "patch" (:tool-name (ex-data enriched))))
-      (expect (= "parameters" (:tool-schema-field (ex-data enriched))))
-      (expect (= "tools[1].parameters" (:tool-schema-path (ex-data enriched))))))
+      (let [cause
+            (ex-info
+              "Provider unavailable"
+              {:status 400
+               :body
+               (str
+                 "{\"error\":{\"message\":\"Invalid schema for function 'patch': "
+                 "In context=(), 'additionalProperties' is required to be supplied and "
+                 "to be false.\",\"type\":\"invalid_request_error\","
+                 "\"param\":\"tools[1].parameters\",\"code\":\"invalid_function_parameters\"}}")})
+
+            enriched
+            (enrich-tool-schema-rejection cause [{:name "grep"} {:name "patch" :strict true}])]
+
+        (expect (= 1 (:tool-index (ex-data enriched))))
+        (expect (= "patch" (:tool-name (ex-data enriched))))
+        (expect (= "parameters" (:tool-schema-field (ex-data enriched))))
+        (expect (= "tools[1].parameters" (:tool-schema-path (ex-data enriched))))))
   (it "leaves an out-of-range provider index untouched"
-    (let [cause (ex-info "bad tools.9.function.parameters" {:status 400})]
-      (expect (identical? cause (enrich-tool-schema-rejection cause [{:name "patch"}]))))))
+      (let [cause (ex-info "bad tools.9.function.parameters" {:status 400})]
+        (expect (identical? cause (enrich-tool-schema-rejection cause [{:name "patch"}]))))))
 
 (defdescribe gateway-tool-field-sanitizing-test
-  (it "strips a gateway-forwardable field from the tool def and its schema"
-    (let [tools     [{:name "grep"
-                      :strict true
-                      :schema {:type "object"
-                               :additionalProperties false
-                               :properties {:query {:type "string"}
-                                            :opts {:type "object"
-                                                   :additionalProperties false
-                                                   :properties {:n {:type "integer"}}}}}}]
-          sanitized (sanitize-tools-for-gateway tools)
-          tool      (first sanitized)]
-      (expect (nil? (:strict tool)))
-      (expect (nil? (get-in tool [:schema :additionalProperties])))
-      ;; nested objects lose it too — the gateway hoists the ROOT, but a nested
-      ;; one survives a schema rewrite and is equally advisory-only.
-      (expect (nil? (get-in tool [:schema :properties :opts :additionalProperties])))
-      ;; everything else is untouched
-      (expect (= "grep" (:name tool)))
-      (expect (= {:type "string"} (get-in tool [:schema :properties :query])))
-      (expect (= "object" (get-in tool [:schema :properties :opts :type])))))
-  (it "keeps string-keyed schemas working"
-    (let [tool (first (sanitize-tools-for-gateway
-                        [{:name "cat" :schema {"type" "object" "additionalProperties" false}}]))]
-      (expect (= {"type" "object"} (:schema tool)))))
-  (it "returns nil when there is nothing a gateway could forward"
-    (expect (nil? (sanitize-tools-for-gateway
-                    [{:name "grep" :schema {:type "object" :properties {}}}])))
-    (expect (nil? (sanitize-tools-for-gateway [])))
-    (expect (nil? (sanitize-tools-for-gateway nil)))))
+             (it "strips a gateway-forwardable field from the tool def and its schema"
+                 (let [tools
+                       [{:name "grep"
+                         :strict true
+                         :schema {:type "object"
+                                  :additionalProperties false
+                                  :properties {:query {:type "string"}
+                                               :opts {:type "object"
+                                                      :additionalProperties false
+                                                      :properties {:n {:type "integer"}}}}}}]
 
-(defdescribe anthropic-tool-call-extraction-test
+                       sanitized
+                       (sanitize-tools-for-gateway tools)
+
+                       tool
+                       (first sanitized)]
+
+                   (expect (nil? (:strict tool)))
+                   (expect (nil? (get-in tool [:schema :additionalProperties])))
+                   ;; nested objects lose it too — the gateway hoists the ROOT, but a nested
+                   ;; one survives a schema rewrite and is equally advisory-only.
+                   (expect (nil? (get-in tool [:schema :properties :opts :additionalProperties])))
+                   ;; everything else is untouched
+                   (expect (= "grep" (:name tool)))
+                   (expect (= {:type "string"} (get-in tool [:schema :properties :query])))
+                   (expect (= "object" (get-in tool [:schema :properties :opts :type])))))
+             (it "keeps string-keyed schemas working"
+                 (let [tool (first (sanitize-tools-for-gateway
+                                     [{:name "cat"
+                                       :schema {"type" "object" "additionalProperties" false}}]))]
+                   (expect (= {"type" "object"} (:schema tool)))))
+             (it "returns nil when there is nothing a gateway could forward"
+                 (expect (nil? (sanitize-tools-for-gateway
+                                 [{:name "grep" :schema {:type "object" :properties {}}}])))
+                 (expect (nil? (sanitize-tools-for-gateway [])))
+                 (expect (nil? (sanitize-tools-for-gateway nil)))))
+
+(defdescribe
+  anthropic-tool-call-extraction-test
   (it "extracts tool_use blocks as canonical :tool-calls and keeps them on assistant-message"
-    (let [envelope {:parsed {"content" [{"type" "text" "text" "let me run that"}
-                                        {"type" "tool_use" "id" "toolu_1"
-                                         "name" "run_python"
-                                        ;; the envelope parse interns svar's OWN
-                                        ;; schema and NEVER tool arguments
-                                         "input" {"code" "rg(\"x\")"}}]
-                             "usage" {"input_tokens" 10 "output_tokens" 5}}}
-          out (extract-anthropic envelope)]
-      (expect (= "let me run that" (:content out)))
-      (expect (= [{:id "toolu_1" :name "run_python" :input {"code" "rg(\"x\")"}}]
-                (:tool-calls out)))
-      ;; tool_use survives into the canonical assistant message for round-trip
-      (let [blocks (get-in out [:assistant-message :content])]
-        (expect (some #(= "tool_use" (:type %)) blocks)))))
+      (let [envelope
+            {:parsed {"content" [{"type" "text" "text" "let me run that"}
+                                 {"type" "tool_use"
+                                  "id" "toolu_1"
+                                  "name" "run_python"
+                                  ;; the envelope parse interns svar's OWN
+                                  ;; schema and NEVER tool arguments
+                                  "input" {"code" "rg(\"x\")"}}]
+                      "usage" {"input_tokens" 10 "output_tokens" 5}}}
 
+            out
+            (extract-anthropic envelope)]
+
+        (expect (= "let me run that" (:content out)))
+        (expect (= [{:id "toolu_1" :name "run_python" :input {"code" "rg(\"x\")"}}]
+                   (:tool-calls out)))
+        ;; tool_use survives into the canonical assistant message for round-trip
+        (let [blocks (get-in out [:assistant-message :content])]
+          (expect (some #(= "tool_use" (:type %)) blocks)))))
   (it "no tool_use => no :tool-calls key (plain answer)"
-    (let [out (extract-anthropic {:parsed {"content" [{"type" "text" "text" "the answer"}]
-                                           "usage" {"input_tokens" 3 "output_tokens" 2}}})]
-      (expect (not (contains? out :tool-calls)))
-      (expect (= "the answer" (:content out))))))
+      (let [out (extract-anthropic {:parsed {"content" [{"type" "text" "text" "the answer"}]
+                                             "usage" {"input_tokens" 3 "output_tokens" 2}}})]
+        (expect (not (contains? out :tool-calls)))
+        (expect (= "the answer" (:content out))))))
 
-(defdescribe chat-tool-call-extraction-test
-  (it "extracts message.tool_calls (JSON-string args decoded) + carries tool_use on assistant-message"
-    (let [envelope {:parsed {"choices" [{"message" {"content" nil
-                                                    "tool_calls" [{"id" "call_1" "type" "function"
-                                                                   "function" {"name" "run_python"
-                                                                               "arguments" "{\"code\":\"print(1)\"}"}}]}}]
-                             "usage" {"prompt_tokens" 9 "completion_tokens" 4}}}
-          out (extract-openai envelope)]
-      (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(1)"}}]
-                (:tool-calls out)))
+(defdescribe
+  chat-tool-call-extraction-test
+  (it
+    "extracts message.tool_calls (JSON-string args decoded) + carries tool_use on assistant-message"
+    (let [envelope
+          {:parsed {"choices" [{"message" {"content" nil
+                                           "tool_calls"
+                                           [{"id" "call_1"
+                                             "type" "function"
+                                             "function" {"name" "run_python"
+                                                         "arguments" "{\"code\":\"print(1)\"}"}}]}}]
+                    "usage" {"prompt_tokens" 9 "completion_tokens" 4}}}
+
+          out
+          (extract-openai envelope)]
+
+      (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(1)"}}] (:tool-calls out)))
       (expect (some #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))))
-
   (it "plain chat answer => no :tool-calls"
-    (let [out (extract-openai {:parsed {"choices" [{"message" {"content" "hello"}}]
-                                        "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
-      (expect (not (contains? out :tool-calls)))
-      (expect (= "hello" (:content out))))))
+      (let [out (extract-openai {:parsed {"choices" [{"message" {"content" "hello"}}]
+                                          "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
+        (expect (not (contains? out :tool-calls)))
+        (expect (= "hello" (:content out))))))
 
 (defdescribe responses-tool-call-extraction-test
-  (it "extracts function_call items from :output and decodes arguments"
-    (let [envelope {:parsed {"output" [{"type" "function_call" "call_id" "fc_1"
-                                        "name" "run_python" "arguments" "{\"code\":\"print(2)\"}"}]
-                             "usage" {"input_tokens" 7 "output_tokens" 3}}}
-          out (extract-openai envelope)]
-      (expect (= [{:id "fc_1" :name "run_python" :input {"code" "print(2)"}}]
-                (:tool-calls out))))))
+             (it "extracts function_call items from :output and decodes arguments"
+                 (let [envelope
+                       {:parsed {"output" [{"type" "function_call"
+                                            "call_id" "fc_1"
+                                            "name" "run_python"
+                                            "arguments" "{\"code\":\"print(2)\"}"}]
+                                 "usage" {"input_tokens" 7 "output_tokens" 3}}}
 
-(defdescribe responses-round-trip-test
-  (it "assistant tool_use -> function_call item; user tool_result -> function_call_output item"
-    (let [asst (responses-input {:role "assistant"
-                                 :content [{:type "tool_use" :id "fc_1" :name "run_python"
-                                            :input {:code "print(2)"}}]})
-          usr  (responses-input {:role "user"
-                                 :content [{:type "tool_result" :tool_use_id "fc_1" :content "2\n"}]})]
+                       out
+                       (extract-openai envelope)]
+
+                   (expect (= [{:id "fc_1" :name "run_python" :input {"code" "print(2)"}}]
+                              (:tool-calls out))))))
+
+(defdescribe
+  responses-round-trip-test
+  (it
+    "assistant tool_use -> function_call item; user tool_result -> function_call_output item"
+    (let [asst
+          (responses-input
+            {:role "assistant"
+             :content [{:type "tool_use" :id "fc_1" :name "run_python" :input {:code "print(2)"}}]})
+
+          usr
+          (responses-input {:role "user"
+                            :content [{:type "tool_result" :tool_use_id "fc_1" :content "2\n"}]})]
+
       (expect (= "function_call" (:type (first asst))))
       (expect (= "fc_1" (:call_id (first asst))))
       (expect (= "{\"code\":\"print(2)\"}" (:arguments (first asst))))
       (expect (= "function_call_output" (:type (first usr))))
       (expect (= "fc_1" (:call_id (first usr))))
       (expect (= "2\n" (:output (first usr))))))
-
   (it "a text message entry carries :type \"message\" (Codex backend rejects a typeless item)"
-    ;; Regression: the ChatGPT Codex backend (chatgpt.com/backend-api/codex/
-    ;; responses) validates strictly and 400s a typeless message item with
-    ;; {"detail":"Unsupported content type"}. A text-bearing user/assistant
-    ;; turn must emit `{:type "message" :role ... :content [...]}`.
-    (let [usr  (responses-input {:role "user" :content "hello there"})
-          asst (responses-input {:role "assistant" :content [{:type "text" :text "hi"}]})]
-      (expect (= "message" (:type (first usr))))
-      (expect (= "user" (:role (first usr))))
-      (expect (= [{:type "input_text" :text "hello there"}] (:content (first usr))))
-      (expect (= "message" (:type (first asst))))
-      (expect (= "output_text" (:type (first (:content (first asst))))))))
+      ;; Regression: the ChatGPT Codex backend (chatgpt.com/backend-api/codex/
+      ;; responses) validates strictly and 400s a typeless message item with
+      ;; {"detail":"Unsupported content type"}. A text-bearing user/assistant
+      ;; turn must emit `{:type "message" :role ... :content [...]}`.
+      (let [usr
+            (responses-input {:role "user" :content "hello there"})
 
+            asst
+            (responses-input {:role "assistant" :content [{:type "text" :text "hi"}]})]
+
+        (expect (= "message" (:type (first usr))))
+        (expect (= "user" (:role (first usr))))
+        (expect (= [{:type "input_text" :text "hello there"}] (:content (first usr))))
+        (expect (= "message" (:type (first asst))))
+        (expect (= "output_text" (:type (first (:content (first asst))))))))
   (it "every Responses input item has a non-nil :type"
-    ;; A mixed turn (text + tool_use + thinking, then a tool_result) must not
-    ;; produce any item without `:type` — the trap that broke the Codex wire.
-    (let [input ((deref (var sut/build-openai-responses-request-body))
-                 [{:role "system" :content "sys"}
-                  {:role "user" :content "do it"}
-                  {:role "assistant"
-                   :content [{:type "thinking" :thinking "h" :thinking-signature "sig"}
-                             {:type "text" :text "working"}
-                             {:type "tool_use" :id "c1" :name "run_python" :input {:code "1"}}]}
-                  {:role "user" :content [{:type "tool_result" :tool_use_id "c1" :content "1\n"}]}]
-                 "gpt-5.5" {})]
-      (expect (every? (comp some? :type) (:input input))))))
+      ;; A mixed turn (text + tool_use + thinking, then a tool_result) must not
+      ;; produce any item without `:type` — the trap that broke the Codex wire.
+      (let [input ((deref (var sut/build-openai-responses-request-body))
+                    [{:role "system" :content "sys"} {:role "user" :content "do it"}
+                     {:role "assistant"
+                      :content [{:type "thinking" :thinking "h" :thinking-signature "sig"}
+                                {:type "text" :text "working"}
+                                {:type "tool_use" :id "c1" :name "run_python" :input {:code "1"}}]}
+                     {:role "user"
+                      :content [{:type "tool_result" :tool_use_id "c1" :content "1\n"}]}]
+                    "gpt-5.5"
+                    {})]
+        (expect (every? (comp some? :type) (:input input))))))
 
-(defdescribe chat-round-trip-test
-  (it "assistant tool_use -> message-level :tool_calls; user tool_result -> separate role:tool message"
-    (let [msgs [{:role "user" :content "go"}
-                {:role "assistant" :content [{:type "tool_use" :id "call_1" :name "run_python"
-                                              :input {:code "print(1)"}}]}
-                {:role "user" :content [{:type "tool_result" :tool_use_id "call_1" :content "1\n"}]}]
-          body (build-chat msgs "glm" {})
-          wire (:messages body)
-          asst (first (filter #(= "assistant" (:role %)) wire))
-          tool (first (filter #(= "tool" (:role %)) wire))]
+(defdescribe
+  chat-round-trip-test
+  (it
+    "assistant tool_use -> message-level :tool_calls; user tool_result -> separate role:tool message"
+    (let [msgs
+          [{:role "user" :content "go"}
+           {:role "assistant"
+            :content [{:type "tool_use" :id "call_1" :name "run_python" :input {:code "print(1)"}}]}
+           {:role "user" :content [{:type "tool_result" :tool_use_id "call_1" :content "1\n"}]}]
+
+          body
+          (build-chat msgs "glm" {})
+
+          wire
+          (:messages body)
+
+          asst
+          (first (filter #(= "assistant" (:role %)) wire))
+
+          tool
+          (first (filter #(= "tool" (:role %)) wire))]
+
       (expect (= "run_python" (get-in asst [:tool_calls 0 :function :name])))
       (expect (= "{\"code\":\"print(1)\"}" (get-in asst [:tool_calls 0 :function :arguments])))
       (expect (= "call_1" (:tool_call_id tool)))
@@ -374,290 +460,387 @@
       ;; the tool_result-only user message must NOT survive as an empty user msg
       (expect (= 1 (count (filter #(= "user" (:role %)) wire)))))))
 
-(defdescribe chat-streaming-fragment-assembly-test
+(defdescribe
+  chat-streaming-fragment-assembly-test
   (it "reassembles delta.tool_calls fragments (id/name first, args concatenated) by index"
-    (let [frags [{"index" 0 "id" "call_1" "type" "function" "function" {"name" "run_python" "arguments" "{\"co"}}
-                 {"index" 0 "function" {"arguments" "de\":\"print(1)\"}"}}]
-          out (assemble-chat-frags frags)]
-      (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(1)"}}] out))))
+      (let [frags
+            [{"index" 0
+              "id" "call_1"
+              "type" "function"
+              "function" {"name" "run_python" "arguments" "{\"co"}}
+             {"index" 0 "function" {"arguments" "de\":\"print(1)\"}"}}]
 
+            out
+            (assemble-chat-frags frags)]
+
+        (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(1)"}}] out))))
   (it "handles two parallel tool calls keyed by distinct :index"
-    (let [frags [{"index" 0 "id" "a" "function" {"name" "f" "arguments" "{}"}}
-                 {"index" 1 "id" "b" "function" {"name" "g" "arguments" "{\"x\":1}"}}]
-          out (assemble-chat-frags frags)]
-      (expect (= 2 (count out)))
-      (expect (= "a" (:id (first out))))
-      (expect (= {"x" 1} (:input (second out))))))
+      (let [frags
+            [{"index" 0 "id" "a" "function" {"name" "f" "arguments" "{}"}}
+             {"index" 1 "id" "b" "function" {"name" "g" "arguments" "{\"x\":1}"}}]
 
+            out
+            (assemble-chat-frags frags)]
+
+        (expect (= 2 (count out)))
+        (expect (= "a" (:id (first out))))
+        (expect (= {"x" 1} (:input (second out))))))
   (it "merge-provider-state accumulates openai-chat fragments across chunks"
-    (let [a {:provider :openai-chat :tool-call-fragments [{"index" 0 "id" "c" "function" {"name" "f" "arguments" "{\"a"}}]}
-          b {:provider :openai-chat :tool-call-fragments [{"index" 0 "function" {"arguments" "\":2}"}}]}
-          merged (merge-provider-state a b)
-          calls (assemble-chat-frags (:tool-call-fragments merged))]
-      (expect (= [{:id "c" :name "f" :input {"a" 2}}] calls)))))
+      (let [a
+            {:provider :openai-chat
+             :tool-call-fragments [{"index" 0 "id" "c" "function" {"name" "f" "arguments" "{\"a"}}]}
 
-(defdescribe responses-streaming-function-call-test
+            b
+            {:provider :openai-chat
+             :tool-call-fragments [{"index" 0 "function" {"arguments" "\":2}"}}]}
+
+            merged
+            (merge-provider-state a b)
+
+            calls
+            (assemble-chat-frags (:tool-call-fragments merged))]
+
+        (expect (= [{:id "c" :name "f" :input {"a" 2}}] calls)))))
+
+(defdescribe
+  responses-streaming-function-call-test
   (it "extract-stream-delta surfaces a completed function_call as provider-state :tool-calls"
-    (let [out (extract-stream-delta
-                {"type" "response.output_item.done"
-                 "item" {"type" "function_call" "call_id" "call_1" "name" "run_python"
-                         "arguments" "{\"code\":\"print(6*7)\"}"}})]
-      (expect (= :openai-responses (get-in out [:provider-state :provider])))
-      (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(6*7)"}}]
-                (get-in out [:provider-state :tool-calls])))))
-
+      (let [out (extract-stream-delta {"type" "response.output_item.done"
+                                       "item" {"type" "function_call"
+                                               "call_id" "call_1"
+                                               "name" "run_python"
+                                               "arguments" "{\"code\":\"print(6*7)\"}"}})]
+        (expect (= :openai-responses (get-in out [:provider-state :provider])))
+        (expect (= [{:id "call_1" :name "run_python" :input {"code" "print(6*7)"}}]
+                   (get-in out [:provider-state :tool-calls])))))
   (it "identifies a Responses function call before its arguments stream"
-    (let [out (extract-stream-delta
-                {"type" "response.output_item.added"
-                 "item" {"type" "function_call" "call_id" "call_early" "name" "run_python"
-                         "arguments" ""}})]
-      (expect (= {:id "call_early" :name "run_python"}
-                (:tool-call-preview out)))
-      (expect (nil? (:content-delta out)))
-      (expect (nil? (:reasoning-delta out)))))
-
-  (it "surfaces function_call args delta as :tool-args-delta (live tool-call preview), no provider-state yet"
+      (let [out (extract-stream-delta {"type" "response.output_item.added"
+                                       "item" {"type" "function_call"
+                                               "call_id" "call_early"
+                                               "name" "run_python"
+                                               "arguments" ""}})]
+        (expect (= {:id "call_early" :name "run_python"} (:tool-call-preview out)))
+        (expect (nil? (:content-delta out)))
+        (expect (nil? (:reasoning-delta out)))))
+  (it
+    "surfaces function_call args delta as :tool-args-delta (live tool-call preview), no provider-state yet"
     ;; The finalized call still assembles at output_item.done; mid-stream the
     ;; raw argument fragment rides :tool-args-delta so the live bubble can paint
     ;; the Python (the tool args) being written.
-    (let [out (extract-stream-delta {"type" "response.function_call_arguments.delta" "delta" "{\"code\":\"pri" "output_index" 0})]
+    (let [out (extract-stream-delta {"type" "response.function_call_arguments.delta"
+                                     "delta" "{\"code\":\"pri"
+                                     "output_index" 0})]
       (expect (= "{\"code\":\"pri" (:tool-args-delta out)))
       (expect (nil? (:provider-state out)))))
-
   (it "function-call-item->tool-call decodes a complete item; nil for non-function items"
-    (expect (= {:id "c" :name "f" :input {"x" 1}}
-              (fn-item->tool-call {"type" "function_call" "call_id" "c" "name" "f" "arguments" "{\"x\":1}"})))
-    (expect (nil? (fn-item->tool-call {"type" "reasoning"}))))
-
+      (expect (= {:id "c" :name "f" :input {"x" 1}}
+                 (fn-item->tool-call
+                   {"type" "function_call" "call_id" "c" "name" "f" "arguments" "{\"x\":1}"})))
+      (expect (nil? (fn-item->tool-call {"type" "reasoning"}))))
   (it "merge-provider-state concats + dedupes responses tool calls across output_item.done events"
-    (let [a {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
-          b {:provider :openai-responses :tool-calls [{:id "c2" :name "g" :input {}}]}
-          dup {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
-          m (merge-provider-state (merge-provider-state a b) dup)]
-      (expect (= ["c1" "c2"] (mapv :id (:tool-calls m))))))
+      (let [a
+            {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
 
+            b
+            {:provider :openai-responses :tool-calls [{:id "c2" :name "g" :input {}}]}
+
+            dup
+            {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
+
+            m
+            (merge-provider-state (merge-provider-state a b) dup)]
+
+        (expect (= ["c1" "c2"] (mapv :id (:tool-calls m))))))
   (it "propagates native-call identity through the public streaming callback"
-    (let [seen (atom nil)
-          fake-transport (fn [_url _body _headers _timeout _ttft _idle _delta-fn on-delta]
-                           (on-delta {:content-acc ""
-                                      :reasoning-acc ""
-                                      :tool-args-acc ""
-                                      :tool-call-preview {:id "call_early" :name "run_python"}})
-                           {})]
-      (with-redefs-fn {#'sut/http-post-stream! fake-transport}
-        #(sut/openai-responses-completion
-           {:model "gpt-test"}
-           {:api-key "test" :base-url "https://example.invalid"
-            :on-chunk (fn [chunk] (reset! seen chunk))}))
-      (expect (= {:id "call_early" :name "run_python"}
-                (:tool-call-preview @seen)))
-      ;; `:content` is the RAW accumulator, never blank-normalized: a
-      ;; whitespace-only delta can be semantically required source, so an
-      ;; empty accumulation stays "" rather than collapsing to nil.
-      ;; `:reasoning` IS blank-normalized, hence nil here.
-      (expect (= "" (:content @seen)))
-      (expect (nil? (:reasoning @seen))))))
+      (let [seen
+            (atom nil)
 
-(defdescribe streaming-tool-args-delta-test
+            fake-transport
+            (fn [_url _body _headers _timeout _ttft _idle _delta-fn on-delta]
+              (on-delta {:content-acc ""
+                         :reasoning-acc ""
+                         :tool-args-acc ""
+                         :tool-call-preview {:id "call_early" :name "run_python"}})
+              {})]
+
+        (with-redefs-fn {#'sut/http-post-stream! fake-transport}
+          #(sut/openai-responses-completion {:model "gpt-test"}
+                                            {:api-key "test"
+                                             :base-url "https://example.invalid"
+                                             :on-chunk (fn [chunk]
+                                                         (reset! seen chunk))}))
+        (expect (= {:id "call_early" :name "run_python"} (:tool-call-preview @seen)))
+        ;; `:content` is the RAW accumulator, never blank-normalized: a
+        ;; whitespace-only delta can be semantically required source, so an
+        ;; empty accumulation stays "" rather than collapsing to nil.
+        ;; `:reasoning` IS blank-normalized, hence nil here.
+        (expect (= "" (:content @seen)))
+        (expect (nil? (:reasoning @seen))))))
+
+(defdescribe
+  streaming-tool-args-delta-test
   ;; Native tool calling puts the model's work in the tool-call arguments. To
   ;; render that live (the "watch it code" UX), every wire surfaces the raw
   ;; argument fragments as :tool-args-delta on each stream tick.
   (it "anthropic identifies the tool before input_json_delta and still accumulates the block"
-    (let [f (make-anthropic-stream-delta-fn)
-          start (f {"type" "content_block_start" "index" 0
-                    "content_block" {"type" "tool_use" "id" "t1" "name" "run_python"}})
-          d1 (f {"type" "content_block_delta" "index" 0
-                 "delta" {"type" "input_json_delta" "partial_json" "{\"code\":\""}})
-          d2 (f {"type" "content_block_delta" "index" 0
-                 "delta" {"type" "input_json_delta" "partial_json" "print(1)\"}"}})]
-      (expect (= {:id "t1" :name "run_python"} (:tool-call-preview start)))
-      (expect (= "{\"code\":\"" (:tool-args-delta d1)))
-      (expect (= "print(1)\"}" (:tool-args-delta d2)))
-      (expect (nil? (:content-delta d1)))
-      ;; The closed block still flushes the canonical tool_use via provider-state.
-      (let [stop (f {"type" "content_block_stop" "index" 0})]
-        (expect (= :anthropic (get-in stop [:provider-state :provider]))))))
+      (let [f
+            (make-anthropic-stream-delta-fn)
 
+            start
+            (f {"type" "content_block_start"
+                "index" 0
+                "content_block" {"type" "tool_use" "id" "t1" "name" "run_python"}})
+
+            d1
+            (f {"type" "content_block_delta"
+                "index" 0
+                "delta" {"type" "input_json_delta" "partial_json" "{\"code\":\""}})
+
+            d2
+            (f {"type" "content_block_delta"
+                "index" 0
+                "delta" {"type" "input_json_delta" "partial_json" "print(1)\"}"}})]
+
+        (expect (= {:id "t1" :name "run_python"} (:tool-call-preview start)))
+        (expect (= "{\"code\":\"" (:tool-args-delta d1)))
+        (expect (= "print(1)\"}" (:tool-args-delta d2)))
+        (expect (nil? (:content-delta d1)))
+        ;; The closed block still flushes the canonical tool_use via provider-state.
+        (let [stop (f {"type" "content_block_stop" "index" 0})]
+          (expect (= :anthropic (get-in stop [:provider-state :provider]))))))
   (it "chat-completions identifies the tool and surfaces concatenated argument deltas"
-    (let [out (extract-stream-delta
-                {"choices" [{"delta" {"tool_calls" [{"index" 0 "id" "c1"
-                                                     "function" {"name" "run_python" "arguments" "{\"code\":\""}}]}}]})]
-      (expect (= "{\"code\":\"" (:tool-args-delta out)))
-      (expect (= {:id "c1" :name "run_python"} (:tool-call-preview out)))
-      (expect (= :openai-chat (get-in out [:provider-state :provider]))))
-    ;; A plain text delta carries no tool args or native-call identity.
-    (let [out (extract-stream-delta {"choices" [{"delta" {"content" "hello"}}]})]
-      (expect (nil? (:tool-args-delta out)))
-      (expect (nil? (:tool-call-preview out)))
-      (expect (= "hello" (:content-delta out))))))
+      (let [out (extract-stream-delta {"choices" [{"delta" {"tool_calls" [{"index" 0
+                                                                           "id" "c1"
+                                                                           "function"
+                                                                           {"name" "run_python"
+                                                                            "arguments"
+                                                                            "{\"code\":\""}}]}}]})]
+        (expect (= "{\"code\":\"" (:tool-args-delta out)))
+        (expect (= {:id "c1" :name "run_python"} (:tool-call-preview out)))
+        (expect (= :openai-chat (get-in out [:provider-state :provider]))))
+      ;; A plain text delta carries no tool args or native-call identity.
+      (let [out (extract-stream-delta {"choices" [{"delta" {"content" "hello"}}]})]
+        (expect (nil? (:tool-args-delta out)))
+        (expect (nil? (:tool-call-preview out)))
+        (expect (= "hello" (:content-delta out))))))
 
 (defdescribe responses-state-tool-calls-test
-  (it "openai-responses-state carries function_call items as :tool-calls"
-    (let [ps (openai-responses-state {"output" [{"type" "function_call" "call_id" "fc" "name" "run_python"
-                                                 "arguments" "{\"code\":\"x\"}"}]})]
-      (expect (= [{:id "fc" :name "run_python" :input {"code" "x"}}] (:tool-calls ps)))))
-  (it "returns nil when neither reasoning items nor tool calls present"
-    (expect (nil? (openai-responses-state {"output" [{"type" "message"}]})))))
+             (it "openai-responses-state carries function_call items as :tool-calls"
+                 (let [ps (openai-responses-state {"output" [{"type" "function_call"
+                                                              "call_id" "fc"
+                                                              "name" "run_python"
+                                                              "arguments" "{\"code\":\"x\"}"}]})]
+                   (expect (= [{:id "fc" :name "run_python" :input {"code" "x"}}]
+                              (:tool-calls ps)))))
+             (it "returns nil when neither reasoning items nor tool calls present"
+                 (expect (nil? (openai-responses-state {"output" [{"type" "message"}]})))))
 
-(defdescribe gemini-wire-test
-  (describe "build-gemini-request-body"
+(defdescribe
+  gemini-wire-test
+  (describe
+    "build-gemini-request-body"
     (it "maps system→systemInstruction, tools→functionDeclarations, choice→toolConfig"
-      (let [body (build-gemini ["x"] "gemini-3-pro"
-                   {:svar/tools [run-python] :svar/tool-choice :required})]
-        (expect (= [{:functionDeclarations
-                     [{:name "run_python" :parameters (:schema run-python)
-                       :description "Execute Python in the sandbox."}]}]
-                  (:tools body)))
-        (expect (= {:functionCallingConfig {:mode "ANY"}} (:toolConfig body)))
-        ;; no :svar/* leak
-        (expect (not (contains? body :svar/tools)))))
-
+        (let [body (build-gemini ["x"]
+                                 "gemini-3-pro"
+                                 {:svar/tools [run-python] :svar/tool-choice :required})]
+          (expect (= [{:functionDeclarations [{:name "run_python"
+                                               :parameters (:schema run-python)
+                                               :description "Execute Python in the sandbox."}]}]
+                     (:tools body)))
+          (expect (= {:functionCallingConfig {:mode "ANY"}} (:toolConfig body)))
+          ;; no :svar/* leak
+          (expect (not (contains? body :svar/tools)))))
     (it "system message folds into systemInstruction; user→\"user\", assistant→\"model\""
-      (let [body (build-gemini [{:role "system" :content "be terse"}
-                                {:role "user" :content "hi"}
-                                {:role "assistant" :content "yo"}]
-                   "gemini-3-pro" {})]
-        (expect (= {:parts [{:text "be terse"}]} (:systemInstruction body)))
-        (expect (= ["user" "model"] (mapv :role (:contents body))))
-        (expect (= [{:text "hi"}] (:parts (first (:contents body))))))))
-
+        (let [body (build-gemini [{:role "system" :content "be terse"} {:role "user" :content "hi"}
+                                  {:role "assistant" :content "yo"}]
+                                 "gemini-3-pro"
+                                 {})]
+          (expect (= {:parts [{:text "be terse"}]} (:systemInstruction body)))
+          (expect (= ["user" "model"] (mapv :role (:contents body))))
+          (expect (= [{:text "hi"}] (:parts (first (:contents body))))))))
   (describe "gemini-tool-config"
-    (it "auto/required/none/named"
-      (expect (= {:functionCallingConfig {:mode "AUTO"}} (gemini-tool-config :auto)))
-      (expect (= {:functionCallingConfig {:mode "NONE"}} (gemini-tool-config :none)))
-      (expect (= {:functionCallingConfig {:mode "ANY" :allowedFunctionNames ["run_python"]}}
-                (gemini-tool-config {:name "run_python"})))))
-
-  (describe "extract-gemini-response-data"
+            (it "auto/required/none/named"
+                (expect (= {:functionCallingConfig {:mode "AUTO"}} (gemini-tool-config :auto)))
+                (expect (= {:functionCallingConfig {:mode "NONE"}} (gemini-tool-config :none)))
+                (expect (= {:functionCallingConfig {:mode "ANY"
+                                                    :allowedFunctionNames ["run_python"]}}
+                           (gemini-tool-config {:name "run_python"})))))
+  (describe
+    "extract-gemini-response-data"
     (it "pulls text + functionCall (args already a map) into :tool-calls + assistant tool_use"
-      (let [out (extract-gemini {:parsed {"candidates" [{"content" {"role" "model"
-                                                                    "parts" [{"text" "let me run it"}
-                                                                             {"functionCall" {"name" "run_python"
-                                                                                              "args" {"code" "print(1)"}}}]}}]
-                                          "usageMetadata" {"promptTokenCount" 10 "candidatesTokenCount" 4}}})]
-        (expect (= "let me run it" (:content out)))
-        (expect (= "run_python" (:name (first (:tool-calls out)))))
-        (expect (= {"code" "print(1)"} (:input (first (:tool-calls out)))))
-        (expect (some #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))
-        (expect (= 10 (get-in out [:api-usage :input-tokens])))))
-
+        (let [out (extract-gemini
+                    {:parsed {"candidates" [{"content" {"role" "model"
+                                                        "parts" [{"text" "let me run it"}
+                                                                 {"functionCall"
+                                                                  {"name" "run_python"
+                                                                   "args" {"code" "print(1)"}}}]}}]
+                              "usageMetadata" {"promptTokenCount" 10 "candidatesTokenCount" 4}}})]
+          (expect (= "let me run it" (:content out)))
+          (expect (= "run_python" (:name (first (:tool-calls out)))))
+          (expect (= {"code" "print(1)"} (:input (first (:tool-calls out)))))
+          (expect (some #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))
+          (expect (= 10 (get-in out [:api-usage :input-tokens])))))
     (it "plain text answer => no :tool-calls"
-      (let [out (extract-gemini {:parsed {"candidates" [{"content" {"parts" [{"text" "42"}]}}]
-                                          "usageMetadata" {"promptTokenCount" 1 "candidatesTokenCount" 1}}})]
-        (expect (not (contains? out :tool-calls)))
-        (expect (= "42" (:content out))))))
-
-  (describe "round-trip"
+        (let [out (extract-gemini {:parsed {"candidates" [{"content" {"parts" [{"text" "42"}]}}]
+                                            "usageMetadata" {"promptTokenCount" 1
+                                                             "candidatesTokenCount" 1}}})]
+          (expect (not (contains? out :tool-calls)))
+          (expect (= "42" (:content out))))))
+  (describe
+    "round-trip"
     (it "tool_use→functionCall part; tool_result→functionResponse with name resolved by id"
-      (let [body (build-gemini [{:role "user" :content "go"}
-                                {:role "assistant"
-                                 :content [{:type "tool_use" :id "gemini-run_python-0"
-                                            :name "run_python" :input {:code "print(1)"}}]}
-                                {:role "user"
-                                 :content [{:type "tool_result" :tool_use_id "gemini-run_python-0"
-                                            :content "1\n"}]}]
-                   "gemini-3-pro" {})
-            model-msg (first (filter #(= "model" (:role %)) (:contents body)))
-            last-user (last (:contents body))]
-        (expect (= {:name "run_python" :args {:code "print(1)"}}
-                  (:functionCall (first (:parts model-msg)))))
-        (expect (= "run_python" (get-in (first (:parts last-user)) [:functionResponse :name])))
-        ;; Gemini 3 requires `{:output v}` for success (the legacy `{:result v}`
-        ;; shape is rejected by newer models).
-        (expect (= {:output "1\n"} (get-in (first (:parts last-user)) [:functionResponse :response])))))
+        (let [body
+              (build-gemini [{:role "user" :content "go"}
+                             {:role "assistant"
+                              :content [{:type "tool_use"
+                                         :id "gemini-run_python-0"
+                                         :name "run_python"
+                                         :input {:code "print(1)"}}]}
+                             {:role "user"
+                              :content [{:type "tool_result"
+                                         :tool_use_id "gemini-run_python-0"
+                                         :content "1\n"}]}]
+                            "gemini-3-pro"
+                            {})
 
+              model-msg
+              (first (filter #(= "model" (:role %)) (:contents body)))
+
+              last-user
+              (last (:contents body))]
+
+          (expect (= {:name "run_python" :args {:code "print(1)"}}
+                     (:functionCall (first (:parts model-msg)))))
+          (expect (= "run_python" (get-in (first (:parts last-user)) [:functionResponse :name])))
+          ;; Gemini 3 requires `{:output v}` for success (the legacy `{:result v}`
+          ;; shape is rejected by newer models).
+          (expect (= {:output "1\n"}
+                     (get-in (first (:parts last-user)) [:functionResponse :response])))))
     (it "a tool_result flagged :is_error emits Gemini's structured `{:error v}` channel"
-      (let [body (build-gemini [{:role "user" :content "go"}
-                                {:role "assistant"
-                                 :content [{:type "tool_use" :id "gemini-cat-0"
-                                            :name "cat" :input {:path "x"}}]}
-                                {:role "user"
-                                 :content [{:type "tool_result" :tool_use_id "gemini-cat-0"
-                                            :is_error true :content "No such file"}]}]
-                   "gemini-3-pro" {})
-            last-user (last (:contents body))]
-        (expect (= {:error "No such file"}
-                  (get-in (first (:parts last-user)) [:functionResponse :response])))))))
+        (let [body
+              (build-gemini
+                [{:role "user" :content "go"}
+                 {:role "assistant"
+                  :content [{:type "tool_use" :id "gemini-cat-0" :name "cat" :input {:path "x"}}]}
+                 {:role "user"
+                  :content [{:type "tool_result"
+                             :tool_use_id "gemini-cat-0"
+                             :is_error true
+                             :content "No such file"}]}]
+                "gemini-3-pro"
+                {})
 
-(defdescribe anthropic-round-trip-test
+              last-user
+              (last (:contents body))]
+
+          (expect (= {:error "No such file"}
+                     (get-in (first (:parts last-user)) [:functionResponse :response])))))))
+
+(defdescribe
+  anthropic-round-trip-test
   (it "prior tool_use (assistant) + tool_result (user) blocks re-emit onto the wire body"
-    (let [msgs [{:role "user" :content "do it"}
-                {:role "assistant"
-                 :content [{:type "tool_use" :id "toolu_1" :name "run_python"
-                            :input {"code" "1+1"}}]}
-                {:role "user"
-                 :content [{:type "tool_result" :tool_use_id "toolu_1" :content "2"}]}]
-          body (build-anthropic msgs "claude" {:svar/tools [run-python]})
-          wire-msgs (:messages body)
-          asst (first (filter #(= "assistant" (:role %)) wire-msgs))
-          usr  (last wire-msgs)]
-      (expect (some #(= "tool_use" (:type %)) (:content asst)))
-      (expect (= "toolu_1" (:tool_use_id (first (:content usr)))))
-      (expect (= "tool_result" (:type (first (:content usr))))))))
+      (let [msgs
+            [{:role "user" :content "do it"}
+             {:role "assistant"
+              :content [{:type "tool_use" :id "toolu_1" :name "run_python" :input {"code" "1+1"}}]}
+             {:role "user" :content [{:type "tool_result" :tool_use_id "toolu_1" :content "2"}]}]
 
-(defdescribe tool-arguments-are-strings-only-test
+            body
+            (build-anthropic msgs "claude" {:svar/tools [run-python]})
+
+            wire-msgs
+            (:messages body)
+
+            asst
+            (first (filter #(= "assistant" (:role %)) wire-msgs))
+
+            usr
+            (last wire-msgs)]
+
+        (expect (some #(= "tool_use" (:type %)) (:content asst)))
+        (expect (= "toolu_1" (:tool_use_id (first (:content usr)))))
+        (expect (= "tool_result" (:type (first (:content usr))))))))
+
+(defdescribe
+  tool-arguments-are-strings-only-test
   ;; Tool arguments are MODEL-AUTHORED data in the tool's own key space, not
   ;; svar's schema. svar NEVER interns them — not even for one intermediate step
   ;; a later pass would undo — so every wire hands the caller the SAME
   ;; strings-only map, at every depth, and a caller that renders them (JSON, a
   ;; Python literal, a dict lookup) can never meet an interned `:kw`.
-  (describe "the response parse interns svar's envelope but not tool arguments"
+  (describe
+    "the response parse interns svar's envelope but not tool arguments"
     (it "anthropic: `tool_use.input` comes off the wire strings-only"
-      (let [parsed (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\","
-                                 "\"name\":\"patch\",\"input\":{\"edits\":[{\"path\":\"a.clj\","
-                                 "\"from_anchor\":\"1:aa\"}],\"op\":\"delete\"}}],"
-                                 "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))
-            args   {"edits" [{"path" "a.clj" "from_anchor" "1:aa"}] "op" "delete"}]
-        ;; the ENVELOPE is svar's own schema, so it is interned as before
-        (expect (= "tool_use" (get (first (get parsed "content")) "type")))
-        (expect (= 1 (get-in parsed ["usage" "input_tokens"])))
-        ;; the ARGUMENTS never were a keyword at any point
-        (expect (= args (get (first (get parsed "content")) "input")))
-        (expect (= [args] (mapv :input (:tool-calls (extract-anthropic {:parsed parsed})))))))
+        (let [parsed
+              (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_1\","
+                               "\"name\":\"patch\",\"input\":{\"edits\":[{\"path\":\"a.clj\","
+                               "\"from_anchor\":\"1:aa\"}],\"op\":\"delete\"}}],"
+                               "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))
 
+              args
+              {"edits" [{"path" "a.clj" "from_anchor" "1:aa"}] "op" "delete"}]
+
+          ;; the ENVELOPE is svar's own schema, so it is interned as before
+          (expect (= "tool_use" (get (first (get parsed "content")) "type")))
+          (expect (= 1 (get-in parsed ["usage" "input_tokens"])))
+          ;; the ARGUMENTS never were a keyword at any point
+          (expect (= args (get (first (get parsed "content")) "input")))
+          (expect (= [args] (mapv :input (:tool-calls (extract-anthropic {:parsed parsed})))))))
     (it "keys with no faithful keyword form survive verbatim"
-      ;; `name` would drop the `a` of `a/b`, `str` would keep the interning
-      ;; colon, and a space or a leading colon has no round-trip at all.
-      (let [parsed (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"cat\","
-                                 "\"input\":{\"a/b\":1,\"1:aa\":2,\"has space\":3,\":path\":4}}],"
-                                 "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))]
-        (expect (= [{"a/b" 1 "1:aa" 2 "has space" 3 ":path" 4}]
-                  (mapv :input (:tool-calls (extract-anthropic {:parsed parsed})))))))
-
+        ;; `name` would drop the `a` of `a/b`, `str` would keep the interning
+        ;; colon, and a space or a leading colon has no round-trip at all.
+        (let [parsed (parse-body
+                       (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"cat\","
+                            "\"input\":{\"a/b\":1,\"1:aa\":2,\"has space\":3,\":path\":4}}],"
+                            "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))]
+          (expect (= [{"a/b" 1 "1:aa" 2 "has space" 3 ":path" 4}]
+                     (mapv :input (:tool-calls (extract-anthropic {:parsed parsed})))))))
     (it "gemini: `functionCall.args` is uninterned on the streaming wire too"
-      (let [parsed (parse-sse-data
-                     (str "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":"
-                       "[{\"functionCall\":{\"name\":\"fs\",\"args\":{\"op\":\"delete\","
-                       "\"paths\":[\"x\"]}}}]}}]}"))]
-        (expect (= "model" (get-in parsed ["candidates" 0 "content" "role"])))
-        (expect (= [{"op" "delete" "paths" ["x"]}]
-                  (mapv :input (:tool-calls (extract-gemini {:parsed parsed})))))))
-
+        (let [parsed (parse-sse-data
+                       (str "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":"
+                            "[{\"functionCall\":{\"name\":\"fs\",\"args\":{\"op\":\"delete\","
+                            "\"paths\":[\"x\"]}}}]}}]}"))]
+          (expect (= "model" (get-in parsed ["candidates" 0 "content" "role"])))
+          (expect (= [{"op" "delete" "paths" ["x"]}]
+                     (mapv :input (:tool-calls (extract-gemini {:parsed parsed})))))))
     (it "openai chat: JSON arguments decode without interning"
-      (let [out (extract-openai
-                  {:parsed {"choices" [{"message" {"tool_calls"
-                                                   [{"id" "call_1" "type" "function"
-                                                     "function" {"name" "patch"
-                                                                 "arguments" "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}}]}}]
-                            "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
-        (expect (= [{"edits" [{"from_anchor" "1:aa"}]}] (mapv :input (:tool-calls out))))))
-
+        (let [out (extract-openai {:parsed {"choices"
+                                            [{"message"
+                                              {"tool_calls"
+                                               [{"id" "call_1"
+                                                 "type" "function"
+                                                 "function"
+                                                 {"name" "patch"
+                                                  "arguments"
+                                                  "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}}]}}]
+                                            "usage" {"prompt_tokens" 1 "completion_tokens" 1}}})]
+          (expect (= [{"edits" [{"from_anchor" "1:aa"}]}] (mapv :input (:tool-calls out))))))
     (it "openai responses: streamed and completed items agree"
-      (expect (= {"edits" [{"from_anchor" "1:aa"}]}
-                (:input (fn-item->tool-call
-                          {"type" "function_call" "call_id" "c" "name" "patch"
-                           "arguments" "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}))))
-      (expect (= {"code" "print(1)"}
-                (:input (first (assemble-chat-frags
-                                 [{"index" 0 "id" "c" "function" {"name" "run_python"
-                                                                  "arguments" "{\"code\":\"print(1)\"}"}}]))))))
+        (expect (= {"edits" [{"from_anchor" "1:aa"}]}
+                   (:input (fn-item->tool-call {"type" "function_call"
+                                                "call_id" "c"
+                                                "name" "patch"
+                                                "arguments"
+                                                "{\"edits\":[{\"from_anchor\":\"1:aa\"}]}"}))))
+        (expect (= {"code" "print(1)"}
+                   (:input (first (assemble-chat-frags
+                                    [{"index" 0
+                                      "id" "c"
+                                      "function" {"name" "run_python"
+                                                  "arguments" "{\"code\":\"print(1)\"}"}}]))))))
+    (it
+      "the canonical assistant message carries the strings-only input onward"
+      (let [parsed
+            (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"fs\","
+                             "\"input\":{\"op\":\"delete\"}}],"
+                             "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))
 
-    (it "the canonical assistant message carries the strings-only input onward"
-      (let [parsed (parse-body (str "{\"content\":[{\"type\":\"tool_use\",\"id\":\"t\",\"name\":\"fs\","
-                                 "\"input\":{\"op\":\"delete\"}}],"
-                                 "\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"))
-            out    (extract-anthropic {:parsed parsed})
-            block  (first (filter #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))]
+            out
+            (extract-anthropic {:parsed parsed})
+
+            block
+            (first (filter #(= "tool_use" (:type %)) (get-in out [:assistant-message :content])))]
+
         (expect (= {"op" "delete"} (:input block)))
         ;; and it re-encodes to the wire unchanged
         (expect (= "{\"op\":\"delete\"}" (json/write-json-str (:input block))))))))

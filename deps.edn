@@ -24,6 +24,8 @@
                  slipset/deps-deploy {:mvn/version "0.2.2"}}
           :ns-default build}
 
+  :format {:deps {zprint/zprint {:mvn/version "1.2.9"}}
+           :ns-default fmt}
   :antq {:deps {com.github.liquidz/antq {:mvn/version "RELEASE"}}
          :main-opts ["-m" "antq.core"]}
 

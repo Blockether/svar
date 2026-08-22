@@ -1,4 +1,4 @@
-.PHONY: test test-ff test-readme test-watch clean jar install deploy lint compile-java prepare test-allure allure-serve allure bench bench-4clojure bench-4clojure-quick bench-humaneval bench-humaneval-quick bench-list refresh-models
+.PHONY: test test-ff test-readme test-watch clean jar install deploy format format-check lint compile-java prepare test-allure allure-serve allure bench bench-4clojure bench-4clojure-quick bench-humaneval bench-humaneval-quick bench-list refresh-models
 
 # Snapshot models.dev catalog. Bundled at build time; refresh manually per release.
 refresh-models:
@@ -35,8 +35,11 @@ test-readme: target/classes
 test-watch:
 	clojure -M:test --watch
 
-format: 
-	clojure-lsp format
+format:
+	clojure -T:format fix
+
+format-check:
+	clojure -T:format check
 
 lint:
 	clojure-lsp diagnostics --raw

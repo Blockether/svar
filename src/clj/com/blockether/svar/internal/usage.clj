@@ -47,15 +47,13 @@
    Reject: the additive convention (e.g. litellm PR #23342) leaves
    `total_tokens` inconsistent with `prompt_tokens` and breaks naive
    aggregation downstream."
-  (:require
-   [taoensso.trove :as trove]))
+  (:require [taoensso.trove :as trove]))
 
 ;; =============================================================================
 ;; Canonical shape constructors per provider
 ;; =============================================================================
 
-(defn ^:private long-or-0 ^long [v]
-  (long (or v 0)))
+(defn ^:private long-or-0 ^long [v] (long (or v 0)))
 
 (defn ^:private build-canonical
   "Build the canonical shape from already-split components. Enforces the
@@ -67,46 +65,56 @@
    bring down the LLM call)."
   [{:keys [input-tokens output-tokens raw cache-read cache-write regular reasoning]
     :or {cache-read 0 cache-write 0 reasoning 0}}]
-  (let [input-tokens  (long-or-0 input-tokens)
-        output-tokens (long-or-0 output-tokens)
-        cache-read    (long-or-0 cache-read)
-        cache-write   (long-or-0 cache-write)
-        reasoning     (long-or-0 reasoning)
-        regular       (long (if (some? regular)
-                              (long-or-0 regular)
-                              ;; Compute when omitted. Anthropic feeds us split
-                              ;; values directly so we calculate input-tokens
-                              ;; from regular + cache; OpenAI feeds us total +
-                              ;; subset so we calculate regular from total -
-                              ;; cache.
-                              (let [n (- (long input-tokens)
-                                        (long cache-read)
-                                        (long cache-write))]
-                                (if (neg? n) 0 n))))
+  (let [input-tokens
+        (long-or-0 input-tokens)
+
+        output-tokens
+        (long-or-0 output-tokens)
+
+        cache-read
+        (long-or-0 cache-read)
+
+        cache-write
+        (long-or-0 cache-write)
+
+        reasoning
+        (long-or-0 reasoning)
+
+        regular
+        (long (if (some? regular)
+                (long-or-0 regular)
+                ;; Compute when omitted. Anthropic feeds us split
+                ;; values directly so we calculate input-tokens
+                ;; from regular + cache; OpenAI feeds us total +
+                ;; subset so we calculate regular from total -
+                ;; cache.
+                (let [n (- (long input-tokens) (long cache-read) (long cache-write))]
+                  (if (neg? n) 0 n))))
+
         ;; Invariant check — log but don't throw. The cost calculator
         ;; will still produce sane output even if a provider returns
         ;; weird data; user-facing surfaces just see a 0/0/0 fallback.
-        computed-total (long (+ (long regular)
-                               (long cache-write)
-                               (long cache-read)))]
+        computed-total
+        (long (+ (long regular) (long cache-write) (long cache-read)))]
+
     (when (and (pos? (long input-tokens)) (not= computed-total input-tokens))
-      (trove/log!
-        {:level :debug
-         :id ::invariant-violation
-         :data {:provider-input-tokens input-tokens
-                :computed-sum          computed-total
-                :regular               regular
-                :cache-write           cache-write
-                :cache-read            cache-read}}))
-    (cond-> {:input-tokens         input-tokens
-             :output-tokens        output-tokens
-             :input-tokens-details {:regular     regular
-                                    :cache-write cache-write
-                                    :cache-read  cache-read}
-             :total-tokens         (long (+ (long input-tokens)
-                                           (long output-tokens)))}
-      (pos? (long reasoning)) (assoc :output-tokens-details {:reasoning reasoning})
-      raw              (assoc :raw raw))))
+      (trove/log! {:level :debug
+                   :id ::invariant-violation
+                   :data {:provider-input-tokens input-tokens
+                          :computed-sum computed-total
+                          :regular regular
+                          :cache-write cache-write
+                          :cache-read cache-read}}))
+    (cond-> {:input-tokens input-tokens
+             :output-tokens output-tokens
+             :input-tokens-details
+             {:regular regular :cache-write cache-write :cache-read cache-read}
+             :total-tokens (long (+ (long input-tokens) (long output-tokens)))}
+      (pos? (long reasoning))
+      (assoc :output-tokens-details {:reasoning reasoning})
+
+      raw
+      (assoc :raw raw))))
 
 (defn anthropic-canonical
   "Anthropic Messages API → canonical shape.
@@ -121,18 +129,22 @@
    Returns nil for nil input."
   [usage]
   (when usage
-    (let [input-uncached (long-or-0 (get usage "input_tokens"))
-          cache-read     (long-or-0 (get usage "cache_read_input_tokens"))
-          cache-write    (long-or-0 (get usage "cache_creation_input_tokens"))]
-      (build-canonical
-        {:input-tokens  (long (+ (long input-uncached)
-                                (long cache-write)
-                                (long cache-read)))
-         :regular       input-uncached
-         :cache-write   cache-write
-         :cache-read    cache-read
-         :output-tokens (get usage "output_tokens")
-         :raw           usage}))))
+    (let [input-uncached
+          (long-or-0 (get usage "input_tokens"))
+
+          cache-read
+          (long-or-0 (get usage "cache_read_input_tokens"))
+
+          cache-write
+          (long-or-0 (get usage "cache_creation_input_tokens"))]
+
+      (build-canonical {:input-tokens
+                        (long (+ (long input-uncached) (long cache-write) (long cache-read)))
+                        :regular input-uncached
+                        :cache-write cache-write
+                        :cache-read cache-read
+                        :output-tokens (get usage "output_tokens")
+                        :raw usage}))))
 
 (defn gemini-canonical
   "Google Gemini `usageMetadata` → canonical shape.
@@ -146,16 +158,23 @@
    Returns nil for nil input."
   [usage]
   (when usage
-    (let [prompt   (long-or-0 (get usage "promptTokenCount"))
-          cand     (long-or-0 (get usage "candidatesTokenCount"))
-          thoughts (long-or-0 (get usage "thoughtsTokenCount"))
-          cached   (long-or-0 (get usage "cachedContentTokenCount"))]
-      (build-canonical
-        {:input-tokens  prompt
-         :cache-read    cached
-         :output-tokens (+ cand thoughts)
-         :reasoning     thoughts
-         :raw           usage}))))
+    (let [prompt
+          (long-or-0 (get usage "promptTokenCount"))
+
+          cand
+          (long-or-0 (get usage "candidatesTokenCount"))
+
+          thoughts
+          (long-or-0 (get usage "thoughtsTokenCount"))
+
+          cached
+          (long-or-0 (get usage "cachedContentTokenCount"))]
+
+      (build-canonical {:input-tokens prompt
+                        :cache-read cached
+                        :output-tokens (+ cand thoughts)
+                        :reasoning thoughts
+                        :raw usage}))))
 
 (defn openai-canonical
   "OpenAI Chat / Responses API → canonical shape.
@@ -173,30 +192,39 @@
    Returns nil for nil input."
   [usage]
   (when usage
-    (let [in-tot         (long-or-0 (or (get usage "prompt_tokens")
-                                      (get usage "input_tokens")))
-          out-tot        (long-or-0 (or (get usage "completion_tokens")
-                                      (get usage "output_tokens")))
-          details        (or (get usage "prompt_tokens_details")
-                           (get usage "input_tokens_details"))
-          cache-read     (long-or-0 (get details "cached_tokens"))
+    (let [in-tot
+          (long-or-0 (or (get usage "prompt_tokens") (get usage "input_tokens")))
+
+          out-tot
+          (long-or-0 (or (get usage "completion_tokens") (get usage "output_tokens")))
+
+          details
+          (or (get usage "prompt_tokens_details") (get usage "input_tokens_details"))
+
+          cache-read
+          (long-or-0 (get details "cached_tokens"))
+
           ;; OpenRouter → Anthropic surfaces cache_creation_input_tokens
           ;; as a pydantic-extra. Standard OpenAI Chat / Responses does
           ;; not have a cache-write field (server-managed). 0 default
           ;; covers both.
-          cache-write    (long-or-0 (or (get details "cache_creation_tokens")
-                                      (get usage "cache_creation_input_tokens")
-                                      (get details "cache_write_tokens")))
-          out-details    (or (get usage "completion_tokens_details")
-                           (get usage "output_tokens_details"))
-          reasoning      (long-or-0 (get out-details "reasoning_tokens"))]
-      (build-canonical
-        {:input-tokens  in-tot
-         :cache-write   cache-write
-         :cache-read    cache-read
-         :output-tokens out-tot
-         :reasoning     reasoning
-         :raw           usage}))))
+          cache-write
+          (long-or-0 (or (get details "cache_creation_tokens")
+                         (get usage "cache_creation_input_tokens")
+                         (get details "cache_write_tokens")))
+
+          out-details
+          (or (get usage "completion_tokens_details") (get usage "output_tokens_details"))
+
+          reasoning
+          (long-or-0 (get out-details "reasoning_tokens"))]
+
+      (build-canonical {:input-tokens in-tot
+                        :cache-write cache-write
+                        :cache-read cache-read
+                        :output-tokens out-tot
+                        :reasoning reasoning
+                        :raw usage}))))
 
 ;; =============================================================================
 ;; Caller-facing :tokens projection
@@ -221,10 +249,10 @@
   [canonical]
   (when canonical
     (let [details (:input-tokens-details canonical)]
-      {:input         (:input-tokens canonical)
-       :output        (:output-tokens canonical)
-       :reasoning     (long-or-0 (get-in canonical [:output-tokens-details :reasoning]))
-       :total         (:total-tokens canonical)
-       :cached        (long-or-0 (:cache-read details))
+      {:input (:input-tokens canonical)
+       :output (:output-tokens canonical)
+       :reasoning (long-or-0 (get-in canonical [:output-tokens-details :reasoning]))
+       :total (:total-tokens canonical)
+       :cached (long-or-0 (:cache-read details))
        :cache-created (long-or-0 (:cache-write details))
        :input-regular (long-or-0 (:regular details))})))

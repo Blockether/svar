@@ -17,13 +17,13 @@
    `:anthropic-coding-plan` we explicitly want **retail** pricing
    (the user pays at API rates once metered), so the overlay declares
    `:pricing-source` to redirect catalog lookup to the retail provider."
-  (:require
-   [charred.api :as json]
-   [clojure.java.io :as io]))
+  (:require [charred.api :as json]
+            [clojure.java.io :as io]))
 
 (def ^:private RESOURCE "models.dev.json")
 
-(defn- load-raw []
+(defn- load-raw
+  []
   (when-let [r (io/resource RESOURCE)]
     (with-open [rdr (io/reader r)]
       (json/read-json rdr :key-fn keyword))))
@@ -31,10 +31,12 @@
 (def catalog
   "Delayed lazy load of models.dev snapshot.
    Map: provider-id (keyword) -> raw provider entry."
-  (delay
-    (when-let [raw (load-raw)]
-      ;; raw keys are strings of provider ids; keyword them for consistency.
-      (into {} (map (fn [[k v]] [(keyword (name k)) v])) raw))))
+  (delay (when-let [raw (load-raw)]
+           ;; raw keys are strings of provider ids; keyword them for consistency.
+           (into {}
+                 (map (fn [[k v]]
+                        [(keyword (name k)) v]))
+                 raw))))
 
 (defn normalize-model
   "Translate one models.dev model entry → svar-shaped model metadata.
@@ -58,49 +60,95 @@
      :release-date     — yyyy-mm-dd
      :last-updated     — yyyy-mm-dd"
   [m]
-  (let [d     (fn [n] (when (some? n) (double n)))
-        cost  (:cost m)
-        lim   (:limit m)
-        modal (:modalities m)]
+  (let [d
+        (fn [n]
+          (when (some? n) (double n)))
+
+        cost
+        (:cost m)
+
+        lim
+        (:limit m)
+
+        modal
+        (:modalities m)]
+
     (cond-> {:name (:id m)}
-      (:name m)          (assoc :display-name (:name m))
-      (:family m)        (assoc :family (:family m))
-      cost               (assoc :pricing
-                           ;; Coerce to double — models.dev ships ints
-                           ;; (`5`) where svar code/tests assume floats (`5.0`).
-                           (cond-> {}
-                             (some? (:input cost))       (assoc :input (d (:input cost)))
-                             (some? (:output cost))      (assoc :output (d (:output cost)))
-                             ;; Surface cache_read under both modern
-                             ;; (`:cache-read`) and svar-legacy (`:cached-input`)
-                             ;; keys so existing token/estimate-cost paths
-                             ;; pick it up without an overlay shim.
-                             (some? (:cache_read cost))  (assoc :cache-read   (d (:cache_read cost))
-                                                           :cached-input (d (:cache_read cost)))
-                             ;; Anthropic ships ONE `cache_write` = the 5-minute
-                             ;; write rate. Surface it under `:cache-write` AND the
-                             ;; svar cost-path key `:cache-write-5m` so a slimmed
-                             ;; overlay need only add the 1h tier (`:cache-write-1h`).
-                             (some? (:cache_write cost)) (assoc :cache-write    (d (:cache_write cost))
-                                                           :cache-write-5m (d (:cache_write cost)))))
-      (:context lim)     (assoc :context (:context lim))
-      (:input lim)       (assoc :input-limit (:input lim))
-      (:output lim)      (assoc :output-limit (:output lim))
+      (:name m)
+      (assoc :display-name (:name m))
+
+      (:family m)
+      (assoc :family (:family m))
+
+      cost
+      (assoc :pricing
+        ;; Coerce to double — models.dev ships ints
+        ;; (`5`) where svar code/tests assume floats (`5.0`).
+        (cond-> {}
+          (some? (:input cost))
+          (assoc :input (d (:input cost)))
+
+          (some? (:output cost))
+          (assoc :output (d (:output cost)))
+
+          ;; Surface cache_read under both modern
+          ;; (`:cache-read`) and svar-legacy (`:cached-input`)
+          ;; keys so existing token/estimate-cost paths
+          ;; pick it up without an overlay shim.
+          (some? (:cache_read cost))
+          (assoc :cache-read
+            (d (:cache_read cost)) :cached-input
+            (d (:cache_read cost)))
+
+          ;; Anthropic ships ONE `cache_write` = the 5-minute
+          ;; write rate. Surface it under `:cache-write` AND the
+          ;; svar cost-path key `:cache-write-5m` so a slimmed
+          ;; overlay need only add the 1h tier (`:cache-write-1h`).
+          (some? (:cache_write cost))
+          (assoc :cache-write
+            (d (:cache_write cost)) :cache-write-5m
+            (d (:cache_write cost)))))
+
+      (:context lim)
+      (assoc :context (:context lim))
+
+      (:input lim)
+      (assoc :input-limit (:input lim))
+
+      (:output lim)
+      (assoc :output-limit (:output lim))
+
       (:reasoning_options m)
       (assoc :reasoning-options
-        (mapv #(select-keys % [:type :values :min :max])
-          (:reasoning_options m)))
-      (some? (:reasoning m))    (assoc :reasoning? (boolean (:reasoning m)))
-      (some? (:tool_call m))    (assoc :tool-call? (boolean (:tool_call m)))
-      (some? (:attachment m))   (assoc :attachment? (boolean (:attachment m)))
-      (some? (:temperature m))  (assoc :temperature? (boolean (:temperature m)))
-      (some? (:open_weights m)) (assoc :open-weights? (boolean (:open_weights m)))
-      modal              (assoc :modalities
-                           {:input  (set (map keyword (:input modal)))
-                            :output (set (map keyword (:output modal)))})
-      (:knowledge m)     (assoc :knowledge-cutoff (:knowledge m))
-      (:release_date m)  (assoc :release-date (:release_date m))
-      (:last_updated m)  (assoc :last-updated (:last_updated m)))))
+        (mapv #(select-keys % [:type :values :min :max]) (:reasoning_options m)))
+
+      (some? (:reasoning m))
+      (assoc :reasoning? (boolean (:reasoning m)))
+
+      (some? (:tool_call m))
+      (assoc :tool-call? (boolean (:tool_call m)))
+
+      (some? (:attachment m))
+      (assoc :attachment? (boolean (:attachment m)))
+
+      (some? (:temperature m))
+      (assoc :temperature? (boolean (:temperature m)))
+
+      (some? (:open_weights m))
+      (assoc :open-weights? (boolean (:open_weights m)))
+
+      modal
+      (assoc :modalities
+        {:input (set (map keyword (:input modal))) :output (set (map keyword (:output modal)))})
+
+      (:knowledge m)
+      (assoc :knowledge-cutoff (:knowledge m))
+
+      (:release_date m)
+      (assoc :release-date (:release_date m))
+
+      (:last_updated m)
+      (assoc :last-updated (:last_updated m)))))
 
 (defn provider-models
   "Returns a map of model-name (string) → normalized metadata for
@@ -110,9 +158,11 @@
   [provider-id]
   (let [entry (get @catalog provider-id)]
     (->> (:models entry)
-      vals
-      (map normalize-model)
-      (reduce (fn [acc m] (assoc acc (:name m) m)) {}))))
+         vals
+         (map normalize-model)
+         (reduce (fn [acc m]
+                   (assoc acc (:name m) m))
+                 {}))))
 
 (defn provider-meta
   "Returns top-level provider info from models.dev:
@@ -126,11 +176,12 @@
    Overlay keys win (api-style, reasoning-style, extra-body, etc).
    Pricing/context/modalities flow from catalog unless overlay overrides."
   [catalog-entry overlay-entry]
-  (merge catalog-entry overlay-entry
-    ;; pricing: deep-merge so an overlay can override one rate without
-    ;; nuking the cache-read/cache-write tier from the catalog.
-    (when (or (:pricing catalog-entry) (:pricing overlay-entry))
-      {:pricing (merge (:pricing catalog-entry) (:pricing overlay-entry))})))
+  (merge catalog-entry
+         overlay-entry
+         ;; pricing: deep-merge so an overlay can override one rate without
+         ;; nuking the cache-read/cache-write tier from the catalog.
+         (when (or (:pricing catalog-entry) (:pricing overlay-entry))
+           {:pricing (merge (:pricing catalog-entry) (:pricing overlay-entry))})))
 
 (defn resolve-models
   "Build the final model map for a svar provider id.
@@ -143,12 +194,16 @@
 
    `overlay-models` is the per-model map from KNOWN_PROVIDER_MODELS."
   [provider-id overlay-models {:keys [pricing-source]}]
-  (let [src        (or pricing-source provider-id)
-        cat-models (provider-models src)
-        all-names  (into (set (keys cat-models)) (keys overlay-models))]
-    (reduce
-      (fn [acc nm]
-        (assoc acc nm
-          (merge-overlay (get cat-models nm) (get overlay-models nm))))
-      {}
-      all-names)))
+  (let [src
+        (or pricing-source provider-id)
+
+        cat-models
+        (provider-models src)
+
+        all-names
+        (into (set (keys cat-models)) (keys overlay-models))]
+
+    (reduce (fn [acc nm]
+              (assoc acc nm (merge-overlay (get cat-models nm) (get overlay-models nm))))
+            {}
+            all-names)))

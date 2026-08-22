@@ -44,70 +44,89 @@
 
    Token spend: each `it` makes a single tiny call (one-word answer). Full
    run is well under 1c across both endpoints."
-  (:require
-   [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.core :as svar]
-   [com.blockether.svar.internal.router :as router]
-   [com.blockether.svar.test-support :as ts]))
+  (:require [lazytest.core :refer [defdescribe describe expect it]]
+            [com.blockether.svar.core :as svar]
+            [com.blockether.svar.internal.router :as router]
+            [com.blockether.svar.test-support :as ts]))
 
 ;; =============================================================================
 ;; Env-var gating (blank env vars read as ABSENT — see `ts/env`)
 ;; =============================================================================
 
-(defn- zai-coding-key [] (ts/first-env "ZAI_CODING_PLAN_API_KEY"
-                           "Z_AI_CODING_API_KEY" "ZAI_API_KEY"))
-(defn- blockether-key [] (ts/first-env "BLOCKETHER_LLM_API_KEY"
-                           "BLOCKETHER_OPENAI_API_KEY"))
-(defn- blockether-base-url []
+(defn- zai-coding-key
+  []
+  (ts/first-env "ZAI_CODING_PLAN_API_KEY" "Z_AI_CODING_API_KEY" "ZAI_API_KEY"))
+(defn- blockether-key [] (ts/first-env "BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"))
+(defn- blockether-base-url
+  []
   (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL" "BLOCKETHER_OPENAI_BASE_URL")
-    "https://llm.blockether.com/v1"))
+      "https://llm.blockether.com/v1"))
 
 (defn- zai-coding-enabled? [] (some? (zai-coding-key)))
 (defn- blockether-enabled? [] (some? (blockether-key)))
 
-(defn- zai-coding-router [model-names]
-  (svar/make-router
-    [{:id :zai-coding
-      :api-key (zai-coding-key)
-      :models (mapv (fn [n] {:name n}) model-names)}]))
+(defn- zai-coding-router
+  [model-names]
+  (svar/make-router [{:id :zai-coding
+                      :api-key (zai-coding-key)
+                      :models (mapv (fn [n]
+                                      {:name n})
+                                    model-names)}]))
 
-(defn- blockether-router [model-names]
-  (svar/make-router
-    [{:id :blockether
-      :api-key (blockether-key)
-      :base-url (blockether-base-url)
-      :models (mapv (fn [n] {:name n}) model-names)}]))
+(defn- blockether-router
+  [model-names]
+  (svar/make-router [{:id :blockether
+                      :api-key (blockether-key)
+                      :base-url (blockether-base-url)
+                      :models (mapv (fn [n]
+                                      {:name n})
+                                    model-names)}]))
 
 ;; =============================================================================
 ;; Specs
 ;; =============================================================================
 
 (def ^:private answer-spec
-  (svar/spec
-    (svar/field svar/NAME :answer
-      svar/TYPE svar/TYPE_STRING
-      svar/CARDINALITY svar/CARDINALITY_ONE
-      svar/DESCRIPTION "The single-word answer")))
+  (svar/spec (svar/field svar/NAME
+                         :answer
+                         svar/TYPE
+                         svar/TYPE_STRING
+                         svar/CARDINALITY
+                         svar/CARDINALITY_ONE
+                         svar/DESCRIPTION
+                         "The single-word answer")))
 
 ;; A multi-field iteration-envelope-shaped spec -- multiple required fields
 ;; with strict typing. This is the flavour of spec where GLM-5.1 historically
 ;; leaks prose into `content` instead of producing the schema-conformant
 ;; object, especially under `:reasoning :deep`.
 (def ^:private iteration-shaped-spec
-  (svar/spec
-    (svar/field svar/NAME :thinking
-      svar/TYPE svar/TYPE_STRING
-      svar/CARDINALITY svar/CARDINALITY_ONE
-      svar/DESCRIPTION "What you're thinking about the task")
-    (svar/field svar/NAME :answer
-      svar/TYPE svar/TYPE_STRING
-      svar/CARDINALITY svar/CARDINALITY_ONE
-      svar/DESCRIPTION "The single-word answer")
-    (svar/field svar/NAME :confidence
-      svar/TYPE svar/TYPE_KEYWORD
-      svar/CARDINALITY svar/CARDINALITY_ONE
-      svar/DESCRIPTION "How confident you are: low, medium, or high"
-      svar/VALUES ["low" "medium" "high"])))
+  (svar/spec (svar/field svar/NAME
+                         :thinking
+                         svar/TYPE
+                         svar/TYPE_STRING
+                         svar/CARDINALITY
+                         svar/CARDINALITY_ONE
+                         svar/DESCRIPTION
+                         "What you're thinking about the task")
+             (svar/field svar/NAME
+                         :answer
+                         svar/TYPE
+                         svar/TYPE_STRING
+                         svar/CARDINALITY
+                         svar/CARDINALITY_ONE
+                         svar/DESCRIPTION
+                         "The single-word answer")
+             (svar/field svar/NAME
+                         :confidence
+                         svar/TYPE
+                         svar/TYPE_KEYWORD
+                         svar/CARDINALITY
+                         svar/CARDINALITY_ONE
+                         svar/DESCRIPTION
+                         "How confident you are: low, medium, or high"
+                         svar/VALUES
+                         ["low" "medium" "high"])))
 
 ;; ROOT CAUSE (measured live, glm-4.7 Coding Plan, May 2026): with thinking
 ;; enabled, GLM emits a tiny (~14-token) thinking block then STOPS —
@@ -123,9 +142,8 @@
 ;; ~25%); the retry is kept as cheap defense-in-depth and documents the glm-4.7
 ;; behavior svar still handles.
 (def ^:private flake-retry-opts
-  {:format-retries  3
-   :format-retry-on #{:svar.llm/empty-content
-                      :svar.spec/schema-rejected
+  {:format-retries 3
+   :format-retry-on #{:svar.llm/empty-content :svar.spec/schema-rejected
                       :svar.spec/required-field-missing}})
 
 (defn- ask-glm!
@@ -137,132 +155,153 @@
 ;; Metadata sanity -- GLM models carry :json-object-mode? after normalize
 ;; =============================================================================
 
-(defdescribe glm-json-object-mode-metadata-test
+(defdescribe
+  glm-json-object-mode-metadata-test
   "Verifies `KNOWN_PROVIDER_MODELS` flags GLM models for auto-injection on
    the endpoints exercised below. Runs unconditionally -- only touches static
    tables, no HTTP."
-
-  (describe ":zai-coding provider GLM models"
+  (describe
+    ":zai-coding provider GLM models"
     (it "glm-4.7 has :json-object-mode? true"
-      (expect (true? (:json-object-mode?
-                      (router/provider-model-entry :zai-coding "glm-4.7")))))
+        (expect (true? (:json-object-mode? (router/provider-model-entry :zai-coding "glm-4.7")))))
     (it "glm-5.1 has :json-object-mode? true"
-      (expect (true? (:json-object-mode?
-                      (router/provider-model-entry :zai-coding "glm-5.1"))))))
-
+        (expect (true? (:json-object-mode? (router/provider-model-entry :zai-coding "glm-5.1"))))))
   (describe "non-GLM models are NOT flagged"
-    (it "gpt-5-mini has no :json-object-mode? flag"
-      (expect (not (:json-object-mode?
-                    (router/provider-model-entry :openai "gpt-5-mini")))))
-    (it "claude-sonnet-4-6 has no :json-object-mode? flag"
-      (expect (not (:json-object-mode?
-                    (router/provider-model-entry :anthropic "claude-sonnet-4-6")))))))
+            (it "gpt-5-mini has no :json-object-mode? flag"
+                (expect (not (:json-object-mode? (router/provider-model-entry :openai
+                                                                              "gpt-5-mini")))))
+            (it "claude-sonnet-4-6 has no :json-object-mode? flag"
+                (expect (not (:json-object-mode?
+                               (router/provider-model-entry :anthropic "claude-sonnet-4-6")))))))
 
-(defdescribe glm-router-propagates-json-object-mode-test
+(defdescribe
+  glm-router-propagates-json-object-mode-test
   "Verifies `normalize-provider` carries the metadata flag onto the resolved
    model-map. Runs unconditionally."
-
   (describe "make-router on :zai-coding with glm-4.7"
-    (it "model-map gets :json-object-mode? true via Coding-Plan-scoped metadata"
-      (let [r (svar/make-router
-                [{:id :zai-coding
-                  :api-key "sk-fake"
-                  :models [{:name "glm-4.7"}]}])
-            model (first (filter #(= "glm-4.7" (:name %))
-                           (:models (first (:providers r)))))]
-        (expect (true? (:json-object-mode? model)))))))
+            (it "model-map gets :json-object-mode? true via Coding-Plan-scoped metadata"
+                (let [r
+                      (svar/make-router
+                        [{:id :zai-coding :api-key "sk-fake" :models [{:name "glm-4.7"}]}])
+
+                      model
+                      (first (filter #(= "glm-4.7" (:name %)) (:models (first (:providers r)))))]
+
+                  (expect (true? (:json-object-mode? model)))))))
 
 ;; =============================================================================
 ;; Live: :zai-coding endpoint (Coding Plan)
 ;; =============================================================================
 
-(defdescribe zai-coding-glm-json-object-mode-accepted-live-test
+(defdescribe
+  zai-coding-glm-json-object-mode-accepted-live-test
   (describe ":json-object-mode? auto-on for glm-5.1 on :zai-coding"
-    (it "Coding Plan endpoint accepts response_format json_object (no 400)"
-      (when (zai-coding-enabled?)
-        (let [r (zai-coding-router ["glm-5.1"])
-              ;; No explicit :json-object-mode? -- model metadata flips it on.
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'coded'.")]
-                        :reasoning :deep})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :zai-coding (:routed/provider-id result)))
-          (expect (some? (get-in result [:result :answer])))
-          (expect (pos? (:duration-ms result)))))))
+            (it "Coding Plan endpoint accepts response_format json_object (no 400)"
+                (when (zai-coding-enabled?)
+                  (let [r
+                        (zai-coding-router ["glm-5.1"])
 
+                        ;; No explicit :json-object-mode? -- model metadata flips it on.
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'coded'.")]
+                                   :reasoning :deep})]
+
+                    (expect (= "glm-5.1" (:routed/model result)))
+                    (expect (= :zai-coding (:routed/provider-id result)))
+                    (expect (some? (get-in result [:result :answer])))
+                    (expect (pos? (:duration-ms result)))))))
   (describe ":json-object-mode? false opt-out for glm-5.1 on :zai-coding"
-    (it "explicit false suppresses auto-injection and still succeeds"
-      (when (zai-coding-enabled?)
-        (let [r (zai-coding-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'optout'.")]
-                        :json-object-mode? false})]
-          (expect (= :zai-coding (:routed/provider-id result)))
-          (expect (string? (get-in result [:result :answer])))))))
+            (it "explicit false suppresses auto-injection and still succeeds"
+                (when (zai-coding-enabled?)
+                  (let [r
+                        (zai-coding-router ["glm-5.1"])
 
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'optout'.")]
+                                   :json-object-mode? false})]
+
+                    (expect (= :zai-coding (:routed/provider-id result)))
+                    (expect (string? (get-in result [:result :answer])))))))
   (describe ":extra-body :response_format wins on :zai-coding"
-    (it "caller's explicit response_format is forwarded verbatim"
-      (when (zai-coding-enabled?)
-        (let [r (zai-coding-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'wins'.")]
-                        :extra-body {:response_format {:type "json_object"}}})]
-          (expect (= :zai-coding (:routed/provider-id result)))
-          (expect (string? (get-in result [:result :answer]))))))))
+            (it "caller's explicit response_format is forwarded verbatim"
+                (when (zai-coding-enabled?)
+                  (let [r
+                        (zai-coding-router ["glm-5.1"])
 
-(defdescribe zai-coding-glm-format-retries-live-test
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'wins'.")]
+                                   :extra-body {:response_format {:type "json_object"}}})]
+
+                    (expect (= :zai-coding (:routed/provider-id result)))
+                    (expect (string? (get-in result [:result :answer]))))))))
+
+(defdescribe
+  zai-coding-glm-format-retries-live-test
   (describe ":format-retries 2 on glm-5.1 :reasoning :deep on :zai-coding"
-    (it "Coding Plan + format-retries + iteration-shaped spec round-trip succeeds"
-      (when (zai-coding-enabled?)
-        (let [r (zai-coding-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec iteration-shaped-spec
-                        :messages [(svar/user "Pick one word for 'hello'. Be brief.")]
-                        :reasoning :deep
-                        :format-retries 2})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :zai-coding (:routed/provider-id result)))
-          (expect (some? (get-in result [:result :answer])))
-          (expect (string? (get-in result [:result :thinking])))
-          (expect (#{:low :medium :high} (get-in result [:result :confidence])))
-          ;; If retries fired, every recorded attempt carries the FULL content
-          ;; verbatim (no truncation invariant).
-          (when-let [attempts (:format-attempts result)]
-            (doseq [att attempts]
-              (when-not (:ok? att)
-                (expect (string? (:content att)))
-                (expect (some? (or (:reason att) (:ex-type att)))))))))))
+            (it "Coding Plan + format-retries + iteration-shaped spec round-trip succeeds"
+                (when (zai-coding-enabled?)
+                  (let [r
+                        (zai-coding-router ["glm-5.1"])
 
+                        result
+                        (ask-glm! r
+                                  {:spec iteration-shaped-spec
+                                   :messages [(svar/user "Pick one word for 'hello'. Be brief.")]
+                                   :reasoning :deep
+                                   :format-retries 2})]
+
+                    (expect (= "glm-5.1" (:routed/model result)))
+                    (expect (= :zai-coding (:routed/provider-id result)))
+                    (expect (some? (get-in result [:result :answer])))
+                    (expect (string? (get-in result [:result :thinking])))
+                    (expect (#{:low :medium :high} (get-in result [:result :confidence])))
+                    ;; If retries fired, every recorded attempt carries the FULL content
+                    ;; verbatim (no truncation invariant).
+                    (when-let [attempts (:format-attempts result)]
+                      (doseq [att attempts]
+                        (when-not (:ok? att)
+                          (expect (string? (:content att)))
+                          (expect (some? (or (:reason att) (:ex-type att)))))))))))
   (describe ":format-retries 2 on glm-5.1 :reasoning :deep on :zai-coding"
-    (it "the historical prose-leak combo -- round-trip succeeds"
-      (when (zai-coding-enabled?)
-        (let [r (zai-coding-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec iteration-shaped-spec
-                        :messages [(svar/user "Pick one word for 'goodbye'. Be brief.")]
-                        :reasoning :deep
-                        :format-retries 2})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :zai-coding (:routed/provider-id result)))
-          (expect (some? (get-in result [:result :answer])))
-          (expect (string? (get-in result [:result :thinking])))
-          (expect (#{:low :medium :high} (get-in result [:result :confidence])))))))
+            (it "the historical prose-leak combo -- round-trip succeeds"
+                (when (zai-coding-enabled?)
+                  (let [r
+                        (zai-coding-router ["glm-5.1"])
 
+                        result
+                        (ask-glm! r
+                                  {:spec iteration-shaped-spec
+                                   :messages [(svar/user "Pick one word for 'goodbye'. Be brief.")]
+                                   :reasoning :deep
+                                   :format-retries 2})]
+
+                    (expect (= "glm-5.1" (:routed/model result)))
+                    (expect (= :zai-coding (:routed/provider-id result)))
+                    (expect (some? (get-in result [:result :answer])))
+                    (expect (string? (get-in result [:result :thinking])))
+                    (expect (#{:low :medium :high} (get-in result [:result :confidence])))))))
   (describe ":format-retries 0 on glm-5.1 :reasoning :low on :zai-coding"
-    (it "baseline: single attempt, simple spec, :format-attempts absent on success"
-      (when (zai-coding-enabled?)
-        (let [r (zai-coding-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'baseline'.")]
-                        :reasoning :low
-                        :format-retries 0})]
-          (expect (= :zai-coding (:routed/provider-id result)))
-          (expect (some? (get-in result [:result :answer])))
-          (expect (nil? (:format-attempts result))))))))
+            (it "baseline: single attempt, simple spec, :format-attempts absent on success"
+                (when (zai-coding-enabled?)
+                  (let [r
+                        (zai-coding-router ["glm-5.1"])
+
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'baseline'.")]
+                                   :reasoning :low
+                                   :format-retries 0})]
+
+                    (expect (= :zai-coding (:routed/provider-id result)))
+                    (expect (some? (get-in result [:result :answer])))
+                    (expect (nil? (:format-attempts result))))))))
 
 ;; =============================================================================
 ;; Live: Blockether proxy in front of GLM
@@ -279,123 +318,152 @@
 ;;   - The exact spec shape from the bug report (multi-field iteration-like
 ;;     map under `:reasoning :deep`) lands a parsed result.
 
-(defdescribe blockether-glm-json-object-mode-accepted-live-test
+(defdescribe
+  blockether-glm-json-object-mode-accepted-live-test
   (describe ":json-object-mode? auto-on for glm-5.1 via :blockether proxy"
-    (it "Blockether proxy forwards response_format json_object to GLM (no 400)"
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              ;; No explicit :json-object-mode? -- model metadata flips it on,
-              ;; svar injects, proxy forwards, GLM accepts.
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'proxied'.")]})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (string? (get-in result [:result :answer])))
-          (expect (pos? (:duration-ms result)))))))
+            (it "Blockether proxy forwards response_format json_object to GLM (no 400)"
+                (when (blockether-enabled?)
+                  (let [r
+                        (blockether-router ["glm-5.1"])
 
+                        ;; No explicit :json-object-mode? -- model metadata flips it on,
+                        ;; svar injects, proxy forwards, GLM accepts.
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'proxied'.")]})]
+
+                    (expect (= "glm-5.1" (:routed/model result)))
+                    (expect (= :blockether (:routed/provider-id result)))
+                    (expect (string? (get-in result [:result :answer])))
+                    (expect (pos? (:duration-ms result)))))))
   (describe ":json-object-mode? auto-on for glm-5.1 via :blockether proxy"
-    ;; Direct, standalone proof that glm-5.1 via :blockether accepts
-    ;; svar's auto-injected `response_format: {type: "json_object"}`.
-    ;; Simple answer-spec, no retries, no reasoning -- isolates the
-    ;; json-mode wire shape from everything else. If THIS fails on a future
-    ;; Blockether/LiteLLM deploy, the bigger combined tests below will fail
-    ;; too, so this is the cheapest signal that json-mode wiring still works
-    ;; for the model that historically leaks prose.
-    (it "glm-5.1 via Blockether accepts response_format json_object (no 400)"
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'jsonmode'.")]})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (string? (get-in result [:result :answer])))
-          (expect (pos? (:duration-ms result))))))
+            ;; Direct, standalone proof that glm-5.1 via :blockether accepts
+            ;; svar's auto-injected `response_format: {type: "json_object"}`.
+            ;; Simple answer-spec, no retries, no reasoning -- isolates the
+            ;; json-mode wire shape from everything else. If THIS fails on a future
+            ;; Blockether/LiteLLM deploy, the bigger combined tests below will fail
+            ;; too, so this is the cheapest signal that json-mode wiring still works
+            ;; for the model that historically leaks prose.
+            (it "glm-5.1 via Blockether accepts response_format json_object (no 400)"
+                (when (blockether-enabled?)
+                  (let [r
+                        (blockether-router ["glm-5.1"])
 
-    (it "glm-5.1 via Blockether + :reasoning :deep + json-mode (default) succeeds"
-      ;; Proves json-mode auto-injection survives under :deep reasoning
-      ;; specifically (the regime where the prose-leak quirk historically
-      ;; fires).
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'deepjson'.")]
-                        :reasoning :deep})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (string? (get-in result [:result :answer])))))))
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'jsonmode'.")]})]
 
+                    (expect (= "glm-5.1" (:routed/model result)))
+                    (expect (= :blockether (:routed/provider-id result)))
+                    (expect (string? (get-in result [:result :answer])))
+                    (expect (pos? (:duration-ms result))))))
+            (it "glm-5.1 via Blockether + :reasoning :deep + json-mode (default) succeeds"
+                ;; Proves json-mode auto-injection survives under :deep reasoning
+                ;; specifically (the regime where the prose-leak quirk historically
+                ;; fires).
+                (when (blockether-enabled?)
+                  (let [r
+                        (blockether-router ["glm-5.1"])
+
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'deepjson'.")]
+                                   :reasoning :deep})]
+
+                    (expect (= "glm-5.1" (:routed/model result)))
+                    (expect (= :blockether (:routed/provider-id result)))
+                    (expect (string? (get-in result [:result :answer])))))))
   (describe ":json-object-mode? false opt-out for glm-5.1 via :blockether proxy"
-    (it "explicit false suppresses auto-injection and still succeeds via proxy"
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'optout'.")]
-                        :json-object-mode? false})]
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (string? (get-in result [:result :answer])))))))
+            (it "explicit false suppresses auto-injection and still succeeds via proxy"
+                (when (blockether-enabled?)
+                  (let [r
+                        (blockether-router ["glm-5.1"])
 
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'optout'.")]
+                                   :json-object-mode? false})]
+
+                    (expect (= :blockether (:routed/provider-id result)))
+                    (expect (string? (get-in result [:result :answer])))))))
   (describe ":extra-body :response_format wins via :blockether proxy"
-    (it "caller's explicit response_format reaches the proxy verbatim"
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'wins'.")]
-                        :extra-body {:response_format {:type "json_object"}}})]
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (string? (get-in result [:result :answer]))))))))
+            (it "caller's explicit response_format reaches the proxy verbatim"
+                (when (blockether-enabled?)
+                  (let [r
+                        (blockether-router ["glm-5.1"])
 
-(defdescribe blockether-glm-format-retries-live-test
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'wins'.")]
+                                   :extra-body {:response_format {:type "json_object"}}})]
+
+                    (expect (= :blockether (:routed/provider-id result)))
+                    (expect (string? (get-in result [:result :answer]))))))))
+
+(defdescribe
+  blockether-glm-format-retries-live-test
   (describe ":format-retries 2 on glm-5.1 :reasoning :deep via :blockether proxy"
-    (it "prose-leak-prone shape -- multi-field spec round-trip succeeds"
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec iteration-shaped-spec
-                        :messages [(svar/user "Pick one word for 'hello'. Be brief.")]
-                        :reasoning :deep
-                        :format-retries 2})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (some? (get-in result [:result :answer])))
-          (expect (string? (get-in result [:result :thinking])))
-          (expect (#{:low :medium :high} (get-in result [:result :confidence])))
-          ;; If retries fired through the proxy, every recorded attempt
-          ;; carries the FULL content verbatim (no truncation).
-          (when-let [attempts (:format-attempts result)]
-            (doseq [att attempts]
-              (when-not (:ok? att)
-                (expect (string? (:content att)))
-                (expect (some? (or (:reason att) (:ex-type att)))))))))))
+            (it "prose-leak-prone shape -- multi-field spec round-trip succeeds"
+                (when (blockether-enabled?)
+                  (let [r
+                        (blockether-router ["glm-5.1"])
 
+                        result
+                        (ask-glm! r
+                                  {:spec iteration-shaped-spec
+                                   :messages [(svar/user "Pick one word for 'hello'. Be brief.")]
+                                   :reasoning :deep
+                                   :format-retries 2})]
+
+                    (expect (= "glm-5.1" (:routed/model result)))
+                    (expect (= :blockether (:routed/provider-id result)))
+                    (expect (some? (get-in result [:result :answer])))
+                    (expect (string? (get-in result [:result :thinking])))
+                    (expect (#{:low :medium :high} (get-in result [:result :confidence])))
+                    ;; If retries fired through the proxy, every recorded attempt
+                    ;; carries the FULL content verbatim (no truncation).
+                    (when-let [attempts (:format-attempts result)]
+                      (doseq [att attempts]
+                        (when-not (:ok? att)
+                          (expect (string? (:content att)))
+                          (expect (some? (or (:reason att) (:ex-type att)))))))))))
   (describe ":format-retries 2 on glm-5.1 :reasoning :deep via :blockether proxy"
-    (it "the exact historical-offender model+endpoint+reasoning combo -- round-trip succeeds"
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec iteration-shaped-spec
-                        :messages [(svar/user "Pick one word for 'goodbye'. Be brief.")]
-                        :reasoning :deep
-                        :format-retries 2})]
-          (expect (= "glm-5.1" (:routed/model result)))
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (some? (get-in result [:result :answer])))
-          (expect (string? (get-in result [:result :thinking])))
-          (expect (#{:low :medium :high} (get-in result [:result :confidence])))))))
+            (it
+              "the exact historical-offender model+endpoint+reasoning combo -- round-trip succeeds"
+              (when (blockether-enabled?)
+                (let [r
+                      (blockether-router ["glm-5.1"])
 
+                      result
+                      (ask-glm! r
+                                {:spec iteration-shaped-spec
+                                 :messages [(svar/user "Pick one word for 'goodbye'. Be brief.")]
+                                 :reasoning :deep
+                                 :format-retries 2})]
+
+                  (expect (= "glm-5.1" (:routed/model result)))
+                  (expect (= :blockether (:routed/provider-id result)))
+                  (expect (some? (get-in result [:result :answer])))
+                  (expect (string? (get-in result [:result :thinking])))
+                  (expect (#{:low :medium :high} (get-in result [:result :confidence])))))))
   (describe ":format-retries 0 on glm-5.1 :reasoning :low via :blockether proxy"
-    (it "baseline: single attempt, simple spec, :format-attempts absent on success"
-      (when (blockether-enabled?)
-        (let [r (blockether-router ["glm-5.1"])
-              result (ask-glm! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'baseline'.")]
-                        :reasoning :low
-                        :format-retries 0})]
-          (expect (= :blockether (:routed/provider-id result)))
-          (expect (some? (get-in result [:result :answer])))
-          (expect (nil? (:format-attempts result))))))))
+            (it "baseline: single attempt, simple spec, :format-attempts absent on success"
+                (when (blockether-enabled?)
+                  (let [r
+                        (blockether-router ["glm-5.1"])
+
+                        result
+                        (ask-glm! r
+                                  {:spec answer-spec
+                                   :messages [(svar/user "Reply with the word 'baseline'.")]
+                                   :reasoning :low
+                                   :format-retries 0})]
+
+                    (expect (= :blockether (:routed/provider-id result)))
+                    (expect (some? (get-in result [:result :answer])))
+                    (expect (nil? (:format-attempts result))))))))

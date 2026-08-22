@@ -16,11 +16,10 @@
      - `:reasoning :deep` reaches glm-5-turbo's thinking path and
        the response comes back parsed correctly (not an HTTP error).
      - `:routed/model` is the exact model name we picked (end-to-end wire)."
-  (:require
-   [lazytest.core :refer [defdescribe describe expect it]]
-   [com.blockether.svar.core :as svar]
-   [com.blockether.svar.internal.router :as router]
-   [com.blockether.svar.test-support :as ts]))
+  (:require [lazytest.core :refer [defdescribe describe expect it]]
+            [com.blockether.svar.core :as svar]
+            [com.blockether.svar.internal.router :as router]
+            [com.blockether.svar.test-support :as ts]))
 
 ;; =============================================================================
 ;; Env-var gating — matches `core_test.clj` `integration-tests-enabled?`
@@ -28,30 +27,37 @@
 ;; unlocks the tests. Blank env vars read as ABSENT (see `ts/env`).
 ;; =============================================================================
 
-(defn- blockether-key []
-  (ts/first-env "BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"))
+(defn- blockether-key [] (ts/first-env "BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY"))
 
-(defn- blockether-enabled? []
-  (some? (blockether-key)))
+(defn- blockether-enabled? [] (some? (blockether-key)))
 
-(defn- blockether-base-url []
+(defn- blockether-base-url
+  []
   (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL" "BLOCKETHER_OPENAI_BASE_URL")
-    "https://llm.blockether.com/v1"))
+      "https://llm.blockether.com/v1"))
 
 ;; `:blockether` is a user-supplied custom provider id (no built-in entry
 ;; in KNOWN_PROVIDERS anymore), so the test injects pricing + reasoning
 ;; metadata explicitly per model. Same shape any user-defined provider gets.
 (def ^:private MODEL_META
-  {"gpt-4o"     {:pricing {:input 2.50 :output 10.00} :context 128000}
-   "gpt-4.1"    {:pricing {:input 2.00 :output  8.00} :context 1000000}
-   "gpt-5"      {:pricing {:input 1.25 :output 10.00} :context 400000
-                 :reasoning? true :reasoning-style :openai-effort}
-   "glm-5-turbo" {:pricing {:input 1.20 :output  4.00} :context 200000
-                  :reasoning? true :reasoning-style :zai-thinking}
-   "glm-4.6v"   {:pricing {:input 0.30 :output  0.90} :context 128000
-                 :reasoning? true :reasoning-style :zai-thinking}
-   "glm-4.7"    {:pricing {:input 0.60 :output  2.20} :context 200000
-                 :reasoning? true :reasoning-style :zai-thinking}})
+  {"gpt-4o" {:pricing {:input 2.50 :output 10.00} :context 128000}
+   "gpt-4.1" {:pricing {:input 2.00 :output 8.00} :context 1000000}
+   "gpt-5" {:pricing {:input 1.25 :output 10.00}
+            :context 400000
+            :reasoning? true
+            :reasoning-style :openai-effort}
+   "glm-5-turbo" {:pricing {:input 1.20 :output 4.00}
+                  :context 200000
+                  :reasoning? true
+                  :reasoning-style :zai-thinking}
+   "glm-4.6v" {:pricing {:input 0.30 :output 0.90}
+               :context 128000
+               :reasoning? true
+               :reasoning-style :zai-thinking}
+   "glm-4.7" {:pricing {:input 0.60 :output 2.20}
+              :context 200000
+              :reasoning? true
+              :reasoning-style :zai-thinking}})
 
 (defn- router-with-models
   "One Blockether provider with the given model names. Pricing + reasoning
@@ -59,44 +65,54 @@
    built-in entry, so we pass through the same per-model config that any
    user-defined custom provider would use."
   [model-names]
-  (svar/make-router
-    [{:id :blockether
-      :api-key (blockether-key)
-      :base-url (blockether-base-url)
-      :models (mapv (fn [n] (merge {:name n} (MODEL_META n))) model-names)}]))
+  (svar/make-router [{:id :blockether
+                      :api-key (blockether-key)
+                      :base-url (blockether-base-url)
+                      :models (mapv (fn [n]
+                                      (merge {:name n} (MODEL_META n)))
+                                    model-names)}]))
 
 ;; Minimal spec — one string field. Cheap to generate.
 (def ^:private answer-spec
-  (svar/spec
-    (svar/field svar/NAME :answer
-      svar/TYPE svar/TYPE_STRING
-      svar/CARDINALITY svar/CARDINALITY_ONE
-      svar/DESCRIPTION "The single-word answer")))
+  (svar/spec (svar/field svar/NAME
+                         :answer
+                         svar/TYPE
+                         svar/TYPE_STRING
+                         svar/CARDINALITY
+                         svar/CARDINALITY_ONE
+                         svar/DESCRIPTION
+                         "The single-word answer")))
 
 ;; =============================================================================
 ;; Smoke test — does the live endpoint actually respond?
 ;; =============================================================================
 
 (defdescribe blockether-smoke-test
-  (describe "basic ask! against Blockether"
-    (it "returns a parsed structured response on glm-5-turbo"
-      (when (blockether-enabled?)
-        ;; glm-5-turbo is a reasoning model; without an explicit reasoning
-        ;; hint the proxy can burn the full output budget on internal
-        ;; reasoning and return empty content. `:reasoning :low` keeps
-        ;; the call deterministic without changing what the test verifies.
-        (let [r (router-with-models ["glm-5-turbo"])
-              result (svar/ask! r
-                       {:spec answer-spec
-                        :messages [(svar/user "What is 2+2? Reply with just the number.")]
-                        :model "glm-5-turbo"
-                        :reasoning :low})]
-          (expect (map? result))
-          (expect (map? (:result result)))
-          (expect (string? (get-in result [:result :answer])))
-          (expect (pos? (:duration-ms result)))
-          (expect (= "glm-5-turbo" (:routed/model result)))
-          (expect (= :blockether (:routed/provider-id result))))))))
+             (describe "basic ask! against Blockether"
+                       (it "returns a parsed structured response on glm-5-turbo"
+                           (when (blockether-enabled?)
+                             ;; glm-5-turbo is a reasoning model; without an explicit reasoning
+                             ;; hint the proxy can burn the full output budget on internal
+                             ;; reasoning and return empty content. `:reasoning :low` keeps
+                             ;; the call deterministic without changing what the test verifies.
+                             (let [r
+                                   (router-with-models ["glm-5-turbo"])
+
+                                   result
+                                   (svar/ask! r
+                                              {:spec answer-spec
+                                               :messages
+                                               [(svar/user
+                                                  "What is 2+2? Reply with just the number.")]
+                                               :model "glm-5-turbo"
+                                               :reasoning :low})]
+
+                               (expect (map? result))
+                               (expect (map? (:result result)))
+                               (expect (string? (get-in result [:result :answer])))
+                               (expect (pos? (:duration-ms result)))
+                               (expect (= "glm-5-turbo" (:routed/model result)))
+                               (expect (= :blockether (:routed/provider-id result))))))))
 
 ;; =============================================================================
 ;; `:optimize :cost` end-to-end — pricing-driven selection really reaches
@@ -104,23 +120,28 @@
 ;; =============================================================================
 
 (defdescribe blockether-optimize-cost-live-test
-  (describe ":optimize :cost picks the cheapest model in a multi-model fleet"
-    (it "routes to glm-5-turbo (cheap) over gpt-4o (expensive) with real pricing"
-      (when (blockether-enabled?)
-        ;; Blockether prices (per 1M, blended input+output):
-        ;;   gpt-4o      = 2.50 + 10.00 = $12.50
-        ;;   glm-5-turbo = 1.20 +  4.00 = $5.20  ← should win
-        (let [r (router-with-models ["gpt-4o" "glm-5-turbo"])
-              result (svar/ask! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'ok'.")]
-                        :routing {:optimize :cost}
-                        ;; Avoid reasoning-budget burn on glm-5-turbo.
-                        :reasoning :low})]
-          (expect (= "glm-5-turbo" (:routed/model result)))
-          (expect (some? (get-in result [:result :answer]))))))))
+             (describe ":optimize :cost picks the cheapest model in a multi-model fleet"
+                       (it "routes to glm-5-turbo (cheap) over gpt-4o (expensive) with real pricing"
+                           (when (blockether-enabled?)
+                             ;; Blockether prices (per 1M, blended input+output):
+                             ;;   gpt-4o      = 2.50 + 10.00 = $12.50
+                             ;;   glm-5-turbo = 1.20 +  4.00 = $5.20  ← should win
+                             (let [r
+                                   (router-with-models ["gpt-4o" "glm-5-turbo"])
 
-(defdescribe blockether-optimize-intelligence-decision-test
+                                   result
+                                   (svar/ask! r
+                                              {:spec answer-spec
+                                               :messages [(svar/user "Reply with the word 'ok'.")]
+                                               :routing {:optimize :cost}
+                                               ;; Avoid reasoning-budget burn on glm-5-turbo.
+                                               :reasoning :low})]
+
+                               (expect (= "glm-5-turbo" (:routed/model result)))
+                               (expect (some? (get-in result [:result :answer]))))))))
+
+(defdescribe
+  blockether-optimize-intelligence-decision-test
   ":optimize :intelligence cross-provider logic is exhaustively covered by
    unit tests. Here we only verify the DECISION against the Blockether fleet
    without making a live call — Blockether's LiteLLM proxy currently deploys
@@ -129,88 +150,105 @@
    test flaky. `select-provider` operates on `normalize-provider`'s attached
    metadata, so the decision is exercised even when the model isn't
    currently reachable on the proxy."
-
   (describe "select-provider picks the frontier-tier model"
-    (it "gpt-5 (:frontier) beats gpt-4o (:high) and glm-5-turbo (:high)"
-      (when (blockether-enabled?)
-        ;; Metadata tiers from KNOWN_MODEL_METADATA:
-        ;;   gpt-5       → :frontier (reasoning? true)
-        ;;   gpt-4o      → :high
-        ;;   glm-5-turbo → :high (reasoning? true)
-        (let [r (router-with-models ["glm-5-turbo" "gpt-4o" "gpt-5"])
-              [_ model] (router/select-provider r {:prefer :intelligence})]
-          (expect (= "gpt-5" (:name model))))))))
+            (it "gpt-5 (:frontier) beats gpt-4o (:high) and glm-5-turbo (:high)"
+                (when (blockether-enabled?)
+                  ;; Metadata tiers from KNOWN_MODEL_METADATA:
+                  ;;   gpt-5       → :frontier (reasoning? true)
+                  ;;   gpt-4o      → :high
+                  ;;   glm-5-turbo → :high (reasoning? true)
+                  (let [r
+                        (router-with-models ["glm-5-turbo" "gpt-4o" "gpt-5"])
+
+                        [_ model]
+                        (router/select-provider r {:prefer :intelligence})]
+
+                    (expect (= "gpt-5" (:name model))))))))
 
 ;; =============================================================================
 ;; `:reasoning :deep` end-to-end — abstract level is translated to
 ;; provider wire shape and accepted by the real endpoint.
 ;; =============================================================================
 
-(defdescribe blockether-reasoning-end-to-end-test
+(defdescribe
+  blockether-reasoning-end-to-end-test
   (describe ":reasoning :deep on a Z.ai-style thinking model (glm-5-turbo)"
-    (it "request succeeds with abstract :deep translated to thinking: {type:\"enabled\"}"
-      (when (blockether-enabled?)
-        (let [r (router-with-models ["glm-5-turbo"])
-              result (svar/ask! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'thought'.")]
-                        :reasoning :deep})]
-          ;; Wire went through OK — the server accepted the thinking
-          ;; param and returned structured JSON.
-          (expect (= "glm-5-turbo" (:routed/model result)))
-          (expect (some? (get-in result [:result :answer])))
-          ;; Some endpoints surface reasoning tokens in usage.
-          ;; Not all do, so this is a soft assertion via `some?` — if usage
-          ;; exposes reasoning tokens, they should be non-negative.
-          (when-let [usage (:tokens result)]
-            (expect (or (nil? (:reasoning_tokens usage))
-                      (>= (:reasoning_tokens usage) 0))))))))
+            (it "request succeeds with abstract :deep translated to thinking: {type:\"enabled\"}"
+                (when (blockether-enabled?)
+                  (let [r
+                        (router-with-models ["glm-5-turbo"])
 
+                        result
+                        (svar/ask! r
+                                   {:spec answer-spec
+                                    :messages [(svar/user "Reply with the word 'thought'.")]
+                                    :reasoning :deep})]
+
+                    ;; Wire went through OK — the server accepted the thinking
+                    ;; param and returned structured JSON.
+                    (expect (= "glm-5-turbo" (:routed/model result)))
+                    (expect (some? (get-in result [:result :answer])))
+                    ;; Some endpoints surface reasoning tokens in usage.
+                    ;; Not all do, so this is a soft assertion via `some?` — if usage
+                    ;; exposes reasoning tokens, they should be non-negative.
+                    (when-let [usage (:tokens result)]
+                      (expect (or (nil? (:reasoning_tokens usage))
+                                  (>= (:reasoning_tokens usage) 0))))))))
   (describe ":reasoning :deep on a Z.ai-style thinking model (glm-4.6v)"
-    (it "request succeeds with abstract :deep translated to thinking: {type:\"enabled\"}"
-      (when (blockether-enabled?)
-        (let [r (router-with-models ["glm-4.6v"])
-              result (svar/ask! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'thought'.")]
-                        :reasoning :deep})]
-          (expect (= "glm-4.6v" (:routed/model result)))
-          (expect (some? (get-in result [:result :answer])))))))
+            (it "request succeeds with abstract :deep translated to thinking: {type:\"enabled\"}"
+                (when (blockether-enabled?)
+                  (let [r
+                        (router-with-models ["glm-4.6v"])
 
+                        result
+                        (svar/ask! r
+                                   {:spec answer-spec
+                                    :messages [(svar/user "Reply with the word 'thought'.")]
+                                    :reasoning :deep})]
+
+                    (expect (= "glm-4.6v" (:routed/model result)))
+                    (expect (some? (get-in result [:result :answer])))))))
   (describe ":preserved-thinking? on glm-4.6v (clear_thinking: false)"
-    ;; Preserved Thinking (z.ai docs): the server retains reasoning_content
-    ;; across assistant turns. We can't meaningfully test cross-turn retention
-    ;; on a single-shot call, but we CAN verify the wire accepts the flag —
-    ;; Blockether's LiteLLM proxy forwards extra_body fields through, so
-    ;; a 400 here would indicate a client/proxy shape bug.
-    (it "single-shot call succeeds with clear_thinking:false in the body"
-      (when (blockether-enabled?)
-        (let [r (router-with-models ["glm-4.6v"])
-              result (svar/ask! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'preserved'.")]
-                        :reasoning :deep
-                        :preserved-thinking? true})]
-          (expect (= "glm-4.6v" (:routed/model result)))
-          (expect (some? (get-in result [:result :answer])))))))
+            ;; Preserved Thinking (z.ai docs): the server retains reasoning_content
+            ;; across assistant turns. We can't meaningfully test cross-turn retention
+            ;; on a single-shot call, but we CAN verify the wire accepts the flag —
+            ;; Blockether's LiteLLM proxy forwards extra_body fields through, so
+            ;; a 400 here would indicate a client/proxy shape bug.
+            (it "single-shot call succeeds with clear_thinking:false in the body"
+                (when (blockether-enabled?)
+                  (let [r
+                        (router-with-models ["glm-4.6v"])
 
+                        result
+                        (svar/ask! r
+                                   {:spec answer-spec
+                                    :messages [(svar/user "Reply with the word 'preserved'.")]
+                                    :reasoning :deep
+                                    :preserved-thinking? true})]
+
+                    (expect (= "glm-4.6v" (:routed/model result)))
+                    (expect (some? (get-in result [:result :answer])))))))
   (describe ":reasoning :deep combined with :optimize :cost"
-    (it "picks the cheapest REASONING-CAPABLE model, not the cheapest overall"
-      (when (blockether-enabled?)
-        ;; Fleet:
-        ;;   gpt-4o     = $12.50, not reasoning  → excluded by :reasoning filter
-        ;;   glm-5-turbo = $5.20,  reasoning      (zai-thinking)
-        ;;   glm-4.6v   = $1.20,  reasoning      (zai-thinking) ← cheapest reasoning
-        ;; Without :reasoning, glm-4.6v would still win on pure cost; with the
-        ;; filter, gpt-4o is OUT and glm-4.6v remains the cheapest reasoner.
-        (let [r (router-with-models ["gpt-4o" "glm-5-turbo" "glm-4.6v"])
-              result (svar/ask! r
-                       {:spec answer-spec
-                        :messages [(svar/user "Reply with the word 'ok'.")]
-                        :routing {:optimize :cost}
-                        :reasoning :deep})]
-          (expect (= "glm-4.6v" (:routed/model result)))
-          (expect (some? (get-in result [:result :answer]))))))))
+            (it "picks the cheapest REASONING-CAPABLE model, not the cheapest overall"
+                (when (blockether-enabled?)
+                  ;; Fleet:
+                  ;;   gpt-4o     = $12.50, not reasoning  → excluded by :reasoning filter
+                  ;;   glm-5-turbo = $5.20,  reasoning      (zai-thinking)
+                  ;;   glm-4.6v   = $1.20,  reasoning      (zai-thinking) ← cheapest reasoning
+                  ;; Without :reasoning, glm-4.6v would still win on pure cost; with the
+                  ;; filter, gpt-4o is OUT and glm-4.6v remains the cheapest reasoner.
+                  (let [r
+                        (router-with-models ["gpt-4o" "glm-5-turbo" "glm-4.6v"])
+
+                        result
+                        (svar/ask! r
+                                   {:spec answer-spec
+                                    :messages [(svar/user "Reply with the word 'ok'.")]
+                                    :routing {:optimize :cost}
+                                    :reasoning :deep})]
+
+                    (expect (= "glm-4.6v" (:routed/model result)))
+                    (expect (some? (get-in result [:result :answer]))))))))
 
 ;; =============================================================================
 ;; Filter rejects non-reasoning fleet — no network call needed, but we make
@@ -219,27 +257,38 @@
 ;; =============================================================================
 
 (defdescribe blockether-reasoning-filter-rejection-test
-  (describe ":reasoning on a fleet with zero reasoning-capable models"
-    ;; gpt-4o and gpt-4.1 are both NOT flagged :reasoning? in KNOWN_MODEL_METADATA.
-    (it "root path routes best-effort — reasoning is a hint, not a hard gate"
-      (when (blockether-enabled?)
-        ;; No :optimize → :strategy :root. The root model is honored even though
-        ;; it is non-reasoning; reasoning is simply not applied (it would be a
-        ;; no-op anyway). Previously this returned nil → "all providers
-        ;; exhausted" on single/local non-reasoning fleets.
-        (let [r (router-with-models ["gpt-4o" "gpt-4.1"])
-              {:keys [prefs]} (router/resolve-routing r {:reasoning :deep})
-              [_ model] (router/select-provider r prefs)]
-          (expect (= "gpt-4o" (:name model))))))
+             (describe ":reasoning on a fleet with zero reasoning-capable models"
+                       ;; gpt-4o and gpt-4.1 are both NOT flagged :reasoning? in KNOWN_MODEL_METADATA.
+                       (it "root path routes best-effort — reasoning is a hint, not a hard gate"
+                           (when (blockether-enabled?)
+                             ;; No :optimize → :strategy :root. The root model is honored even though
+                             ;; it is non-reasoning; reasoning is simply not applied (it would be a
+                             ;; no-op anyway). Previously this returned nil → "all providers
+                             ;; exhausted" on single/local non-reasoning fleets.
+                             (let [r
+                                   (router-with-models ["gpt-4o" "gpt-4.1"])
 
-    (it "optimize/prefer path still filters — depth is not silently dropped"
-      (when (blockether-enabled?)
-        ;; When svar chooses among models, the reasoning filter still applies;
-        ;; with nothing reasoning-capable there is nothing to pick.
-        (let [r (router-with-models ["gpt-4o" "gpt-4.1"])
-              {:keys [prefs]} (router/resolve-routing r {:optimize :cost :reasoning :deep})
-              selection (router/select-provider r prefs)]
-          (expect (nil? selection)))))))
+                                   {:keys [prefs]}
+                                   (router/resolve-routing r {:reasoning :deep})
+
+                                   [_ model]
+                                   (router/select-provider r prefs)]
+
+                               (expect (= "gpt-4o" (:name model))))))
+                       (it "optimize/prefer path still filters — depth is not silently dropped"
+                           (when (blockether-enabled?)
+                             ;; When svar chooses among models, the reasoning filter still applies;
+                             ;; with nothing reasoning-capable there is nothing to pick.
+                             (let [r
+                                   (router-with-models ["gpt-4o" "gpt-4.1"])
+
+                                   {:keys [prefs]}
+                                   (router/resolve-routing r {:optimize :cost :reasoning :deep})
+
+                                   selection
+                                   (router/select-provider r prefs)]
+
+                               (expect (nil? selection)))))))
 
 ;; =============================================================================
 ;; Metadata sanity — Blockether really attaches pricing to its models
@@ -247,18 +296,27 @@
 ;; correctly against the live provider id).
 ;; =============================================================================
 
-(defdescribe blockether-pricing-attached-test
-  (describe "normalize-provider attaches :pricing to Blockether models"
-    (it "every declared Blockether model has :pricing {:input N :output M}"
+(defdescribe
+  blockether-pricing-attached-test
+  (describe
+    "normalize-provider attaches :pricing to Blockether models"
+    (it
+      "every declared Blockether model has :pricing {:input N :output M}"
       (when (blockether-enabled?)
         ;; Covers one model from each reasoning-style in Blockether's catalogue:
         ;;   gpt-4o      — non-reasoning OpenAI
         ;;   glm-5-turbo — :zai-thinking reasoning
         ;;   glm-4.6v    — :zai-thinking reasoning (vision)
         ;;   glm-4.7     — :zai-thinking reasoning (text-only)
-        (let [names ["glm-5-turbo" "gpt-4o" "glm-4.6v" "glm-4.7"]
-              r (router-with-models names)
-              provider (first (:providers r))]
+        (let [names
+              ["glm-5-turbo" "gpt-4o" "glm-4.6v" "glm-4.7"]
+
+              r
+              (router-with-models names)
+
+              provider
+              (first (:providers r))]
+
           (doseq [m (:models provider)]
             (let [pricing (:pricing m)]
               (expect (map? pricing))
@@ -266,10 +324,18 @@
               (expect (number? (:output pricing)))
               (expect (pos? (+ (:input pricing) (:output pricing))))))
           ;; And reasoning-capable models retain `:reasoning?` after merge
-          (let [glm-5-turbo (first (filter #(= "glm-5-turbo" (:name %)) (:models provider)))
-                glm-4-6v   (first (filter #(= "glm-4.6v"   (:name %)) (:models provider)))
-                glm-4-7    (first (filter #(= "glm-4.7"    (:name %)) (:models provider)))
-                gpt-4o     (first (filter #(= "gpt-4o"     (:name %)) (:models provider)))]
+          (let [glm-5-turbo
+                (first (filter #(= "glm-5-turbo" (:name %)) (:models provider)))
+
+                glm-4-6v
+                (first (filter #(= "glm-4.6v" (:name %)) (:models provider)))
+
+                glm-4-7
+                (first (filter #(= "glm-4.7" (:name %)) (:models provider)))
+
+                gpt-4o
+                (first (filter #(= "gpt-4o" (:name %)) (:models provider)))]
+
             (expect (true? (:reasoning? glm-5-turbo)))
             (expect (= :zai-thinking (:reasoning-style glm-5-turbo)))
             (expect (true? (:reasoning? glm-4-6v)))

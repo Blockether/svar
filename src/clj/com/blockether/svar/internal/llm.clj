@@ -1,25 +1,23 @@
 (ns com.blockether.svar.internal.llm
   "LLM client layer: HTTP transport, message construction, and all LLM interaction
    functions (ask!, abstract!, eval!, refine!, models!, sample!)."
-  (:require
-   [babashka.http-client :as http]
-   [charred.api :as json]
-   [clojure.string :as str]
-   [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.internal.jsonish :as jsonish]
-   [com.blockether.svar.internal.failure :as failure]
-   [com.blockether.svar.internal.router :as router]
-   [com.blockether.svar.internal.ratelimit :as ratelimit]
-   [com.blockether.svar.internal.spec :as spec]
-   [com.blockether.svar.internal.util :as util]
-   [taoensso.trove :as trove]
-   [com.blockether.svar.internal.usage :as usage])
+  (:require [babashka.http-client :as http]
+            [charred.api :as json]
+            [clojure.string :as str]
+            [com.blockether.anomaly.core :as anomaly]
+            [com.blockether.svar.internal.jsonish :as jsonish]
+            [com.blockether.svar.internal.failure :as failure]
+            [com.blockether.svar.internal.router :as router]
+            [com.blockether.svar.internal.ratelimit :as ratelimit]
+            [com.blockether.svar.internal.spec :as spec]
+            [com.blockether.svar.internal.util :as util]
+            [taoensso.trove :as trove]
+            [com.blockether.svar.internal.usage :as usage])
   (:import
-   (java.io BufferedReader Closeable InputStreamReader)
-   (java.net URI)
-   (java.net.http HttpClient HttpResponse WebSocket WebSocket$Listener
-     WebSocketHandshakeException)
-   (java.util.concurrent CompletableFuture LinkedBlockingQueue TimeUnit TimeoutException)))
+    (java.io BufferedReader Closeable InputStreamReader)
+    (java.net URI)
+    (java.net.http HttpClient HttpResponse WebSocket WebSocket$Listener WebSocketHandshakeException)
+    (java.util.concurrent CompletableFuture LinkedBlockingQueue TimeUnit TimeoutException)))
 
 ;; =============================================================================
 ;; Correlation context
@@ -46,7 +44,8 @@
    server-side, (b) producing periodic pings only, or (c) producing
    real model deltas - the three cases the watchdogs treat
    differently."
-  (let [v (some-> (System/getProperty "svar.stream.trace") str/lower-case)]
+  (let [v (some-> (System/getProperty "svar.stream.trace")
+                  str/lower-case)]
     (contains? #{"true" "1" "yes" "on"} v)))
 
 (def ^:private ^:const STREAM_LINE_TRACE_EVERY_N
@@ -75,9 +74,7 @@
 ;; HTTP Utilities
 ;; =============================================================================
 
-(def ^:private connection-error?
-  "See `failure/connection-error?`."
-  failure/connection-error?)
+(def ^:private connection-error? "See `failure/connection-error?`." failure/connection-error?)
 
 (def ^:private connection-error->ex-info
   "See `failure/connection-error->ex-info`."
@@ -96,14 +93,17 @@
    plain cached thread pool with daemon threads keeps HTTP/1.1 streaming
    responsive and lets the JVM exit cleanly when `shutdown-http-client!`
    runs."
-  (delay
-    (let [counter (java.util.concurrent.atomic.AtomicInteger.)
-          factory (reify java.util.concurrent.ThreadFactory
-                    (newThread [_ r]
-                      (doto (Thread. ^Runnable r
-                              (str "svar-http-" (.incrementAndGet counter)))
-                        (.setDaemon true))))]
-      (java.util.concurrent.Executors/newCachedThreadPool factory))))
+  (delay (let [counter
+               (java.util.concurrent.atomic.AtomicInteger.)
+
+               factory
+               (reify
+                 java.util.concurrent.ThreadFactory
+                   (newThread [_ r]
+                     (doto (Thread. ^Runnable r (str "svar-http-" (.incrementAndGet counter)))
+                       (.setDaemon true))))]
+
+           (java.util.concurrent.Executors/newCachedThreadPool factory))))
 
 (defn- build-shared-http-client
   "Construct the shared JDK HttpClient. HTTP/1.1 PIN - some remote providers
@@ -131,7 +131,8 @@
   "The live shared HttpClient, built on first use."
   []
   (or @shared-http-client*
-    (swap! shared-http-client* (fn [c] (or c (build-shared-http-client))))))
+      (swap! shared-http-client* (fn [c]
+                                   (or c (build-shared-http-client))))))
 
 (defn- reset-shared-http-client!
   "Rebuild the shared HttpClient (its predecessor's SelectorManager died).
@@ -145,29 +146,28 @@
    manager closed') or its executor was shut down (RejectedExecutionException).
    The cure is rebuilding the client."
   [^Throwable t]
-  (boolean
-    (some (fn [e]
-            (or (instance? java.util.concurrent.RejectedExecutionException e)
-              (let [m (str/lower-case (or (ex-message e) ""))]
-                (or (str/includes? m "selector manager")
-                  (str/includes? m "httpclient is stopped")
-                  (str/includes? m "client is stopped")))))
-      (take-while some? (iterate ex-cause t)))))
+  (boolean (some (fn [e]
+                   (or (instance? java.util.concurrent.RejectedExecutionException e)
+                       (let [m (str/lower-case (or (ex-message e) ""))]
+                         (or (str/includes? m "selector manager")
+                             (str/includes? m "httpclient is stopped")
+                             (str/includes? m "client is stopped")))))
+                 (take-while some? (iterate ex-cause t)))))
 
 (defn- with-http-client-heal
   "Run `(f client)` with the live shared client. On a dead-client error,
    rebuild the client ONCE and retry. Happy path is a single try/catch."
   [f]
-  (try
-    (f (current-http-client))
-    (catch Throwable t
-      (if (dead-http-client-error? t)
-        (do
-          (trove/log! {:level :warn :id ::http-client-rebuilt
-                       :data {:error (ex-message t)}
-                       :msg "shared HttpClient was dead (selector manager closed) — rebuilt + retried"})
-          (f (reset-shared-http-client!)))
-        (throw t)))))
+  (try (f (current-http-client))
+       (catch Throwable t
+         (if (dead-http-client-error? t)
+           (do (trove/log!
+                 {:level :warn
+                  :id ::http-client-rebuilt
+                  :data {:error (ex-message t)}
+                  :msg "shared HttpClient was dead (selector manager closed) — rebuilt + retried"})
+               (f (reset-shared-http-client!)))
+           (throw t)))))
 
 (defn shutdown-http-client!
   "Closes the shared HTTP client's virtual-thread executor.
@@ -180,22 +180,21 @@
    RejectedExecutionException. Do not call during active request traffic."
   []
   (when (realized? shared-http-executor)
-    (try
-      (.shutdown ^java.util.concurrent.ExecutorService @shared-http-executor)
-      (catch Exception e
-        (trove/log! {:level :warn :id ::http-executor-shutdown-failed
-                     :data {:error (ex-message e)}
-                     :msg "Failed to shutdown shared HTTP executor"}))))
+    (try (.shutdown ^java.util.concurrent.ExecutorService @shared-http-executor)
+         (catch Exception e
+           (trove/log! {:level :warn
+                        :id ::http-executor-shutdown-failed
+                        :data {:error (ex-message e)}
+                        :msg "Failed to shutdown shared HTTP executor"}))))
   nil)
 
 ;; Register a JVM shutdown hook so the executor is always closed on normal exit.
 ;; Users don't need to call shutdown-http-client! manually in typical usage.
 #_{:clj-kondo/ignore [:unused-private-var]}
 (defonce ^:private http-shutdown-hook-registered?
-  (do
-    (.addShutdownHook (Runtime/getRuntime)
-      (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
-    true))
+  (do (.addShutdownHook (Runtime/getRuntime)
+                        (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
+      true))
 
 (defn- http-post!
   "Makes an HTTP POST request with JSON body. Reuses the shared HttpClient.
@@ -220,27 +219,30 @@
    only, partial JSON, undocumented fields) and vanilla `:message :content`
    extraction loses the evidence."
   [url body headers timeout-ms]
-  (let [response (try
-                   (with-http-client-heal
-                     (fn [client]
-                       (http/post url
-                         {:client client
-                          :headers headers
-                          :body (json/write-json-str body)
-                          :timeout timeout-ms})))
-                   (catch Exception e
-                     (if (connection-error? e)
-                       (throw (connection-error->ex-info e url))
-                       (throw e))))
-        _        (mark-connection-healthy! url)
-        raw-body (:body response)
-        parsed   (try (json/read-json raw-body :key-fn identity)
-                      (catch Exception _ nil))]
-    {:parsed   parsed
+  (let [response
+        (try (with-http-client-heal (fn [client]
+                                      (http/post url
+                                                 {:client client
+                                                  :headers headers
+                                                  :body (json/write-json-str body)
+                                                  :timeout timeout-ms})))
+             (catch Exception e
+               (if (connection-error? e) (throw (connection-error->ex-info e url)) (throw e))))
+
+        _
+        (mark-connection-healthy! url)
+
+        raw-body
+        (:body response)
+
+        parsed
+        (try (json/read-json raw-body :key-fn identity) (catch Exception _ nil))]
+
+    {:parsed parsed
      :raw-body raw-body
-     :url      url
-     :headers  (:headers response)
-     :status   (:status response)}))
+     :url url
+     :headers (:headers response)
+     :status (:status response)}))
 
 (declare make-llm-headers)
 
@@ -261,28 +263,41 @@
 
    The body is parsed with `:key-fn identity`: a response is DATA, and svar
    never interns provider-chosen key names. Callers read it with `get`."
-  ([url api-key]
-   (http-get! url api-key {}))
-  ([url api-key {:keys [api-style provider-id llm-headers query-params]
-                 :or   {api-style :openai-compatible-chat}}]
-   (let [headers   (cond-> (make-llm-headers api-style api-key provider-id)
-                     (seq llm-headers) (merge llm-headers))
-         req-opts  (cond-> {:headers headers
-                            :throw   false}
-                     (seq query-params) (assoc :query-params query-params))
-         response  (with-http-client-heal
-                     (fn [client] (http/get url (assoc req-opts :client client))))
-         _         (mark-connection-healthy! url)
-         status    (:status response)
-         raw-body  (:body response)]
+  ([url api-key] (http-get! url api-key {}))
+  ([url api-key
+    {:keys [api-style provider-id llm-headers query-params]
+     :or {api-style :openai-compatible-chat}}]
+   (let [headers
+         (cond-> (make-llm-headers api-style api-key provider-id)
+           (seq llm-headers)
+           (merge llm-headers))
+
+         req-opts
+         (cond-> {:headers headers :throw false}
+           (seq query-params)
+           (assoc :query-params query-params))
+
+         response
+         (with-http-client-heal (fn [client]
+                                  (http/get url (assoc req-opts :client client))))
+
+         _
+         (mark-connection-healthy! url)
+
+         status
+         (:status response)
+
+         raw-body
+         (:body response)]
+
      (when-not (and (integer? status) (<= 200 status 299))
        (throw (ex-info (str "GET " url " failed: HTTP " status)
-                {:type        :svar/http-error
-                 :status      status
-                 :body        raw-body
-                 :url         url
-                 :provider-id provider-id
-                 :api-style   api-style})))
+                       {:type :svar/http-error
+                        :status status
+                        :body raw-body
+                        :url url
+                        :provider-id provider-id
+                        :api-style api-style})))
      (json/read-json raw-body :key-fn identity))))
 
 ;; =============================================================================
@@ -336,62 +351,58 @@
    identical across plans AND api-styles, so they must apply to every Copilot
    id on every wire — not just the bare `:github-copilot` on chat-completions."
   [provider-id]
-  (boolean
-    (and provider-id
-      (str/starts-with? (name provider-id) "github-copilot"))))
+  (boolean (and provider-id (str/starts-with? (name provider-id) "github-copilot"))))
 
 (defn- make-llm-headers
   "Builds HTTP headers for the given API style."
-  ([api-style api-key]
-   (make-llm-headers api-style api-key nil))
+  ([api-style api-key] (make-llm-headers api-style api-key nil))
   ([api-style api-key provider-id]
    (case api-style
-     :anthropic (cond
-                  (copilot-provider-id? provider-id)
-                  {"Authorization" (str "Bearer " api-key)
-                   "anthropic-version" "2023-06-01"
-                   "Content-Type" "application/json"}
+     :anthropic
+     (cond (copilot-provider-id? provider-id) {"Authorization" (str "Bearer " api-key)
+                                               "anthropic-version" "2023-06-01"
+                                               "Content-Type" "application/json"}
+           (anthropic-oauth-token? api-key) (anthropic-oauth-headers api-key)
+           :else
+           {"x-api-key" api-key "anthropic-version" "2023-06-01" "Content-Type" "application/json"})
 
-                  (anthropic-oauth-token? api-key)
-                  (anthropic-oauth-headers api-key)
-
-                  :else
-                  {"x-api-key" api-key
-                   "anthropic-version" "2023-06-01"
-                   "Content-Type" "application/json"})
      ;; Gemini authenticates with the API key in a dedicated header.
-     :gemini {"x-goog-api-key" api-key
-              "Content-Type" "application/json"}
-     ;; :openai-compatible-chat and everything else - Bearer token
-     {"Authorization" (str "Bearer " api-key)
-      "Content-Type" "application/json"})))
+     :gemini
+     {"x-goog-api-key" api-key "Content-Type" "application/json"}
 
-(defn- message-has-image? [message]
+     ;; :openai-compatible-chat and everything else - Bearer token
+     {"Authorization" (str "Bearer " api-key) "Content-Type" "application/json"})))
+
+(defn- message-has-image?
+  [message]
   (some (fn [block]
           (= "image_url" (:type block)))
-    (when (sequential? (:content message)) (:content message))))
+        (when (sequential? (:content message)) (:content message))))
 
-(defn- copilot-agent-initiated? [messages]
+(defn- copilot-agent-initiated?
+  [messages]
   ;; Copilot classifies a request with prior assistant/tool context as agent
   ;; initiated. Last-role-only is wrong for multi-turn agent loops where the
   ;; final prompt is still a user-role continuation/journal message.
-  (boolean
-    (some (fn [message]
-            (contains? #{"assistant" "tool"} (:role message)))
-      messages)))
+  (boolean (some (fn [message]
+                   (contains? #{"assistant" "tool"} (:role message)))
+                 messages)))
 
-(defn- copilot-static-headers []
-  (get-in router/KNOWN_PROVIDERS [:github-copilot :llm-headers]))
+(defn- copilot-static-headers [] (get-in router/KNOWN_PROVIDERS [:github-copilot :llm-headers]))
 
-(defn- copilot-dynamic-headers [messages]
+(defn- copilot-dynamic-headers
+  [messages]
   (cond-> {"X-Initiator" (if (copilot-agent-initiated? messages) "agent" "user")
            "Openai-Intent" "conversation-edits"}
-    (some message-has-image? messages) (assoc "Copilot-Vision-Request" "true")))
+    (some message-has-image? messages)
+    (assoc "Copilot-Vision-Request" "true")))
 
-(defn- copilot-stream-required? [provider-id base-url]
+(defn- copilot-stream-required?
+  [provider-id base-url]
   (and (copilot-provider-id? provider-id)
-    (string? base-url)
-    (boolean (re-find #"(?i)(proxy|api)\.(individual|business|enterprise)\.githubcopilot\.com" base-url))))
+       (string? base-url)
+       (boolean (re-find #"(?i)(proxy|api)\.(individual|business|enterprise)\.githubcopilot\.com"
+                         base-url))))
 
 (declare messages-have-1h-cache?)
 
@@ -401,15 +412,15 @@
   [headers value]
   (if-let [existing (get headers "anthropic-beta")]
     (let [tokens (->> (str/split (str existing) #",\s*")
-                   (remove str/blank?)
-                   set)]
+                      (remove str/blank?)
+                      set)]
       (if (contains? tokens value)
         headers
-        (assoc headers "anthropic-beta"
-          (str/join "," (conj (vec (sort tokens)) value)))))
+        (assoc headers "anthropic-beta" (str/join "," (conj (vec (sort tokens)) value)))))
     (assoc headers "anthropic-beta" value)))
 
-(defn- request-headers [api-style api-key provider-id messages llm-headers extra-body]
+(defn- request-headers
+  [api-style api-key provider-id messages llm-headers extra-body]
   (cond-> (make-llm-headers api-style api-key provider-id)
     (copilot-provider-id? provider-id)
     (merge (copilot-static-headers))
@@ -446,15 +457,19 @@
   [base-url api-style]
   (when base-url
     (case api-style
-      :anthropic (if (str/ends-with? base-url "/messages")
-                   base-url
-                   (str base-url "/messages"))
+      :anthropic
+      (if (str/ends-with? base-url "/messages") base-url (str base-url "/messages"))
+
       ;; Responses transport builds its final endpoint from base-url +
       ;; :responses-path later; keep the provider root unchanged here.
-      :openai-compatible-responses base-url
+      :openai-compatible-responses
+      base-url
+
       ;; Gemini builds `{base}/models/{model}:generateContent` in
       ;; `gemini-completion` (needs the model + stream flag); root unchanged.
-      :gemini base-url
+      :gemini
+      base-url
+
       ;; :openai-compatible-chat default
       (if (str/ends-with? base-url "/chat/completions")
         base-url
@@ -475,19 +490,33 @@
 
    Does nothing when thinking is absent or already sized correctly."
   [body]
-  (let [thinking        (:thinking body)
-        enabled?        (and (map? thinking) (= "enabled" (:type thinking)))
-        budget          (long (if enabled? (or (:budget_tokens thinking) 0) 0))
-        current-max     (long (or (:max_tokens body) 0))
-        required-min    (+ budget (long ANTHROPIC_THINKING_OUTPUT_RESERVE))]
+  (let [thinking
+        (:thinking body)
+
+        enabled?
+        (and (map? thinking) (= "enabled" (:type thinking)))
+
+        budget
+        (long (if enabled? (or (:budget_tokens thinking) 0) 0))
+
+        current-max
+        (long (or (:max_tokens body) 0))
+
+        required-min
+        (+ budget (long ANTHROPIC_THINKING_OUTPUT_RESERVE))]
+
     (if (and enabled? (pos? budget) (< current-max required-min))
-      (do (trove/log! {:level :warn :id ::thinking-max-tokens-clamp
-                       :data {:budget-tokens budget
-                              :requested-max current-max
-                              :clamped-max required-min}
-                       :msg (str "Clamping :max_tokens to " required-min
-                              " (budget_tokens=" budget " + " ANTHROPIC_THINKING_OUTPUT_RESERVE
-                              " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
+      (do (trove/log!
+            {:level :warn
+             :id ::thinking-max-tokens-clamp
+             :data {:budget-tokens budget :requested-max current-max :clamped-max required-min}
+             :msg (str "Clamping :max_tokens to "
+                       required-min
+                       " (budget_tokens="
+                       budget
+                       " + "
+                       ANTHROPIC_THINKING_OUTPUT_RESERVE
+                       " response reserve). Anthropic API requires max_tokens > budget_tokens.")})
           (assoc body :max_tokens required-min))
       body)))
 
@@ -530,35 +559,24 @@
   "Coerces message :content into a vec of canonical content blocks.
    Also accepts JSON-restored canonical thinking maps with string keys."
   [content]
-  (cond
-    (nil? content) []
-    (string? content) [{:type "text" :text content}]
-    (map? content) (normalize-content [content])
-    (vector? content)
-    (mapv
-      (fn [block]
-        (cond
-          (string? block)
-          {:type "text" :text block}
-
-          (and (map? block) (string? (:type block)))
-          block
-
-          (and (map? block) (= "thinking" (get block "type")))
-          (cond-> {:type "thinking"
-                   :thinking (get block "thinking")
-                   :thinking-signature (get block "thinking_signature")}
-            (contains? block "is_redacted")
-            (assoc :redacted? (get block "is_redacted")))
-
-          :else
-          (throw (ex-info
-                   "Content block must be a string or {:type \"...\" ...}"
-                   {:type :svar.core/invalid-content-block :got block}))))
-      content)
-    :else
-    (throw (ex-info "Unsupported :content shape"
-             {:type :svar.core/invalid-content :got (type content)}))))
+  (cond (nil? content) []
+        (string? content) [{:type "text" :text content}]
+        (map? content) (normalize-content [content])
+        (vector? content)
+        (mapv (fn [block]
+                (cond (string? block) {:type "text" :text block}
+                      (and (map? block) (string? (:type block))) block
+                      (and (map? block) (= "thinking" (get block "type")))
+                      (cond-> {:type "thinking"
+                               :thinking (get block "thinking")
+                               :thinking-signature (get block "thinking_signature")}
+                        (contains? block "is_redacted")
+                        (assoc :redacted? (get block "is_redacted")))
+                      :else (throw (ex-info "Content block must be a string or {:type \"...\" ...}"
+                                            {:type :svar.core/invalid-content-block :got block}))))
+              content)
+        :else (throw (ex-info "Unsupported :content shape"
+                              {:type :svar.core/invalid-content :got (type content)}))))
 
 (defn- cache-control-for
   "Returns Anthropic `cache_control` map for a `:svar/cache true` block,
@@ -567,17 +585,26 @@
   (when (:svar/cache block)
     (let [ttl (:svar/cache-ttl block)]
       (case ttl
-        nil   {:type "ephemeral"}
-        :5min {:type "ephemeral"}
-        :1h   {:type "ephemeral" :ttl "1h"}
+        nil
+        {:type "ephemeral"}
+
+        :5min
+        {:type "ephemeral"}
+
+        :1h
+        {:type "ephemeral" :ttl "1h"}
+
         (throw (ex-info "Unknown :svar/cache-ttl. Expected :5min or :1h."
-                 {:type :svar.core/invalid-cache-ttl :got ttl}))))))
+                        {:type :svar.core/invalid-cache-ttl :got ttl}))))))
 
 (defn- strip-svar-keys
   "Drop svar-internal `:svar/*` markers from a content block - used for
    wire formats that don't speak our markers (OpenAI etc)."
   [block]
-  (into {} (remove (fn [[k _]] (and (keyword? k) (= "svar" (namespace k))))) block))
+  (into {}
+        (remove (fn [[k _]]
+                  (and (keyword? k) (= "svar" (namespace k)))))
+        block))
 
 ;; ====================================================================
 ;; Caller-opt → wire-body chokepoint (Phase 0 / svar 0.6.0).
@@ -605,9 +632,7 @@
   "Turn `:role :system` (keyword) into `:role \"system\"` (string) so
    downstream filters that string-compare match either input. Idempotent."
   [msg]
-  (if (keyword? (:role msg))
-    (update msg :role name)
-    msg))
+  (if (keyword? (:role msg)) (update msg :role name) msg))
 
 (defn- merge-top-level-system
   "Prepend the top-level `:system` opt (string OR vec-of-content-blocks)
@@ -615,8 +640,8 @@
    messages append after. Returns the (possibly augmented) messages vec."
   [messages system-arg]
   (if (or (nil? system-arg)
-        (and (string? system-arg) (str/blank? system-arg))
-        (and (sequential? system-arg) (empty? system-arg)))
+          (and (string? system-arg) (str/blank? system-arg))
+          (and (sequential? system-arg) (empty? system-arg)))
     messages
     (vec (cons {:role "system" :content system-arg} messages))))
 
@@ -626,24 +651,25 @@
    anthropic's 4-breakpoint budget shouldn't burn two slots on the
    same position."
   [messages]
-  (boolean
-    (some (fn [m]
-            (let [content (:content m)]
-              (cond
-                (vector? content)     (some :svar/cache content)
-                (sequential? content) (some :svar/cache content)
-                :else                 false)))
-      messages)))
+  (boolean (some (fn [m]
+                   (let [content (:content m)]
+                     (cond (vector? content) (some :svar/cache content)
+                           (sequential? content) (some :svar/cache content)
+                           :else false)))
+                 messages)))
 
 (defn- last-system-index
   "Return the index of the LAST `:role \"system\"` message in the vec,
    or nil if no system message is present."
   [messages]
   (->> messages
-    (map-indexed vector)
-    (filter (fn [[_ m]] (= "system" (some-> (:role m) name))))
-    last
-    first))
+       (map-indexed vector)
+       (filter (fn [[_ m]]
+                 (= "system"
+                    (some-> (:role m)
+                            name))))
+       last
+       first))
 
 (defn- auto-cache-last-system-block
   "Tag the LAST content block of the LAST system message with
@@ -659,13 +685,13 @@
     messages
     (if-let [idx (last-system-index messages)]
       (let [sys-msg (nth messages idx)
-            blocks  (vec (normalize-content (:content sys-msg)))
-            n       (count blocks)]
+            blocks (vec (normalize-content (:content sys-msg)))
+            n (count blocks)]
+
         (if (zero? n)
           messages
-          (assoc messages idx
-            (assoc sys-msg :content
-              (update blocks (dec n) assoc :svar/cache true)))))
+          (assoc messages
+            idx (assoc sys-msg :content (update blocks (dec n) assoc :svar/cache true)))))
       messages)))
 
 (defn- message-text
@@ -674,11 +700,10 @@
    (pure image / tool-result blocks)."
   [m]
   (let [c (:content m)]
-    (-> (cond
-          (string? c)     c
-          (sequential? c) (str/join "\n" (keep :text c))
-          :else           nil)
-      not-empty)))
+    (-> (cond (string? c) c
+              (sequential? c) (str/join "\n" (keep :text c))
+              :else nil)
+        not-empty)))
 
 (defn- sha1-hex
   "Lowercase hex SHA-1 of `s`, truncated to the first `n` BYTES of the digest
@@ -687,12 +712,16 @@
    tokens of the prompt. Stable across processes; idempotent for identical
    content."
   [^String s ^long n]
-  (let [bytes  (.getBytes ^String (subs s 0 (min 4096 (count s))) "UTF-8")
-        md     (doto (java.security.MessageDigest/getInstance "SHA-1")
-                 (.update bytes))
-        digest (.digest md)]
-    (apply str (take n (map #(format "%02x" (bit-and (long %) 0xff))
-                         (vec digest))))))
+  (let [bytes
+        (.getBytes ^String (subs s 0 (min 4096 (count s))) "UTF-8")
+
+        md
+        (doto (java.security.MessageDigest/getInstance "SHA-1") (.update bytes))
+
+        digest
+        (.digest md)]
+
+    (apply str (take n (map #(format "%02x" (bit-and (long %) 0xff)) (vec digest))))))
 
 (defn- stable-auto-cache-key
   "Deterministic fallback `:cache-key` for callers that did not pass one.
@@ -725,22 +754,28 @@
    rotates the key. Pass an explicit `:cache-key` — a session id — when the
    conversation identity must survive trimming; `vis` does exactly that."
   [messages]
-  (let [sys-text  (->> messages
-                    (filter #(= "system" (some-> (:role %) name)))
-                    (keep message-text)
-                    (str/join "\n")
-                    not-empty)
-        head-text (->> messages
-                    (remove #(= "system" (some-> (:role %) name)))
-                    (some message-text))]
-    (when sys-text
-      (str "svar-auto-"
-        (sha1-hex sys-text 16)
-        (when head-text (str "-" (sha1-hex head-text 8)))))))
+  (let [sys-text
+        (->> messages
+             (filter #(= "system"
+                         (some-> (:role %)
+                                 name)))
+             (keep message-text)
+             (str/join "\n")
+             not-empty)
 
-(defn- openai-style? [api-style]
-  (or (= api-style :openai-compatible-chat)
-    (= api-style :openai-compatible-responses)))
+        head-text
+        (->> messages
+             (remove #(= "system"
+                         (some-> (:role %)
+                                 name)))
+             (some message-text))]
+
+    (when sys-text
+      (str "svar-auto-" (sha1-hex sys-text 16) (when head-text (str "-" (sha1-hex head-text 8)))))))
+
+(defn- openai-style?
+  [api-style]
+  (or (= api-style :openai-compatible-chat) (= api-style :openai-compatible-responses)))
 
 (defn- apply-cache-key-opt
   "Forward the caller's `:cache-key` opt onto `:extra-body` as
@@ -760,14 +795,16 @@
    sticky routing + cache visibility for free."
   [messages opts]
   (let [k (or (:cache-key opts)
-            ;; Only auto-generate for openai-style. Anthropic doesn't
-            ;; need it (caching is marker-based) and the field is
-            ;; stripped from the wire anyway, so spending a hash on a
-            ;; doomed value is wasted work.
-            (when (openai-style? (:api-style opts))
-              (stable-auto-cache-key messages)))]
+              ;; Only auto-generate for openai-style. Anthropic doesn't
+              ;; need it (caching is marker-based) and the field is
+              ;; stripped from the wire anyway, so spending a hash on a
+              ;; doomed value is wasted work.
+              (when (openai-style? (:api-style opts)) (stable-auto-cache-key messages)))]
     (cond-> opts
-      k (update :extra-body (fn [eb] (assoc (or eb {}) :prompt_cache_key k))))))
+      k
+      (update :extra-body
+              (fn [eb]
+                (assoc (or eb {}) :prompt_cache_key k))))))
 
 (defn apply-llm-opts
   "Single chokepoint where caller opts that affect the WIRE BODY get
@@ -783,22 +820,30 @@
    cache-bisection debugging — read the log handler output instead
    of adding ad-hoc prints."
   [messages opts]
-  (let [msgs0 (-> messages
-                vec
-                (->> (mapv normalize-role))
-                (merge-top-level-system (:system opts)))
-        msgs  (auto-cache-last-system-block msgs0)
-        opts' (apply-cache-key-opt msgs opts)]
-    (trove/log!
-      {:level :debug
-       :id ::cache-decision
-       :data {:api-style                (:api-style opts')
-              :explicit-cache-key       (:cache-key opts)
-              :final-cache-key          (get-in opts' [:extra-body :prompt_cache_key])
-              :auto-key?                (and (nil? (:cache-key opts))
-                                          (some? (get-in opts' [:extra-body :prompt_cache_key])))
-              :auto-cache-marker-added? (not= msgs0 msgs)
-              :system-msg-count         (count (filter #(= "system" (some-> (:role %) name)) msgs))}})
+  (let [msgs0
+        (-> messages
+            vec
+            (->> (mapv normalize-role))
+            (merge-top-level-system (:system opts)))
+
+        msgs
+        (auto-cache-last-system-block msgs0)
+
+        opts'
+        (apply-cache-key-opt msgs opts)]
+
+    (trove/log! {:level :debug
+                 :id ::cache-decision
+                 :data {:api-style (:api-style opts')
+                        :explicit-cache-key (:cache-key opts)
+                        :final-cache-key (get-in opts' [:extra-body :prompt_cache_key])
+                        :auto-key? (and (nil? (:cache-key opts))
+                                        (some? (get-in opts' [:extra-body :prompt_cache_key])))
+                        :auto-cache-marker-added? (not= msgs0 msgs)
+                        :system-msg-count (count (filter #(= "system"
+                                                             (some-> (:role %)
+                                                                     name))
+                                                         msgs))}})
     [msgs opts']))
 
 (defn- log-cache-outcome!
@@ -816,21 +861,26 @@
    Returns the logged data map, or nil when the provider reported no usage or
    a zero input count (nothing to say)."
   [{:keys [api-style model provider-id cache-key api-usage duration-ms]}]
-  (let [input  (long (or (:input-tokens api-usage) 0))
-        cached (long (or (get-in api-usage [:input-tokens-details :cache-read]) 0))
-        write  (long (or (get-in api-usage [:input-tokens-details :cache-write]) 0))]
+  (let [input
+        (long (or (:input-tokens api-usage) 0))
+
+        cached
+        (long (or (get-in api-usage [:input-tokens-details :cache-read]) 0))
+
+        write
+        (long (or (get-in api-usage [:input-tokens-details :cache-write]) 0))]
+
     (when (pos? input)
-      (let [data {:api-style          api-style
-                  :model              model
-                  :provider-id        provider-id
-                  :cache-key          cache-key
-                  :input-tokens       input
-                  :cached-tokens      cached
+      (let [data {:api-style api-style
+                  :model model
+                  :provider-id provider-id
+                  :cache-key cache-key
+                  :input-tokens input
+                  :cached-tokens cached
                   :cache-write-tokens write
-                  :uncached-tokens    (- input cached)
-                  :cache-hit-ratio    (/ (Math/round (* 1000.0 (/ (double cached) input)))
-                                        1000.0)
-                  :duration-ms        duration-ms}]
+                  :uncached-tokens (- input cached)
+                  :cache-hit-ratio (/ (Math/round (* 1000.0 (/ (double cached) input))) 1000.0)
+                  :duration-ms duration-ms}]
         (trove/log! {:level :debug :id ::cache-outcome :data data})
         data))))
 
@@ -840,13 +890,11 @@
    beta header on Anthropic so the API actually honors the `ttl: \"1h\"`
    field instead of silently degrading to 5min."
   [messages]
-  (boolean
-    (some (fn [m]
-            (let [content (:content m)]
-              (cond
-                (sequential? content) (some #(= :1h (:svar/cache-ttl %)) content)
-                :else false)))
-      messages)))
+  (boolean (some (fn [m]
+                   (let [content (:content m)]
+                     (cond (sequential? content) (some #(= :1h (:svar/cache-ttl %)) content)
+                           :else false)))
+                 messages)))
 
 (defn- image-url-block->anthropic
   "Translate one canonical `image_url` block → Anthropic native `image`
@@ -868,13 +916,18 @@
    Canonical `image_url` blocks become native `image` blocks — Anthropic
    400s on the OpenAI-shaped type."
   [block]
-  (let [cc    (cache-control-for block)
-        clean (strip-svar-keys block)
-        clean (if (= "image_url" (:type clean))
-                (image-url-block->anthropic clean)
-                clean)]
+  (let [cc
+        (cache-control-for block)
+
+        clean
+        (strip-svar-keys block)
+
+        clean
+        (if (= "image_url" (:type clean)) (image-url-block->anthropic clean) clean)]
+
     (cond-> clean
-      cc (assoc :cache_control cc))))
+      cc
+      (assoc :cache_control cc))))
 
 (defn- openai-content
   "Walks canonical blocks → OpenAI wire content. Cache markers are
@@ -882,10 +935,11 @@
    without any client signal."
   [blocks]
   (let [wire (mapv strip-svar-keys blocks)]
-    (cond
-      (zero? (count wire))                              ""
-      (and (= 1 (count wire)) (text-block? (first wire))) (-> wire first :text)
-      :else                                             wire)))
+    (cond (zero? (count wire)) ""
+          (and (= 1 (count wire)) (text-block? (first wire))) (-> wire
+                                                                  first
+                                                                  :text)
+          :else wire)))
 
 (def ^:private MAX_HTTP_ERROR_BODY_CHARS
   "Cap on raw upstream response body chars carried in `:svar.core/http-error`
@@ -916,17 +970,35 @@
    saw `:com.blockether.anomaly.core/message nil` and could not even
    pattern-match on the failure to retry intelligently)."
   [^Throwable e]
-  (let [direct (some-> (ex-message e) (#(when-not (str/blank? %) %)))
-        cause  (some-> (ex-cause e) ex-message (#(when-not (str/blank? %) %)))
-        data   (ex-data e)
-        status (:status data)
-        url    (:url data)
-        klass  (-> e class .getName)
-        from-data (cond
-                    (and status url) (str "HTTP " status " at " url)
-                    status           (str "HTTP " status)
-                    url              (str "request to " url " failed")
-                    :else            nil)]
+  (let [direct
+        (some-> (ex-message e)
+                (#(when-not (str/blank? %) %)))
+
+        cause
+        (some-> (ex-cause e)
+                ex-message
+                (#(when-not (str/blank? %) %)))
+
+        data
+        (ex-data e)
+
+        status
+        (:status data)
+
+        url
+        (:url data)
+
+        klass
+        (-> e
+            class
+            .getName)
+
+        from-data
+        (cond (and status url) (str "HTTP " status " at " url)
+              status (str "HTTP " status)
+              url (str "request to " url " failed")
+              :else nil)]
+
     (or direct cause from-data klass "HTTP request failed")))
 
 (defn- truncate-error-body
@@ -948,46 +1020,40 @@
    the same truthful payload without each one re-implementing the
    trove WARN-log scrape."
   [body]
-  (cond
-    (nil? body)                  nil
-    (and (string? body)
-      (str/blank? body))         nil
-    (string? body)               (let [n (count body)
-                                       cap (long MAX_HTTP_ERROR_BODY_CHARS)]
-                                   (if (<= n cap)
-                                     body
-                                     (str (subs body 0 cap) "...<+" (- n cap) " more chars>")))
-    :else                        (recur (str body))))
+  (cond (nil? body) nil
+        (and (string? body) (str/blank? body)) nil
+        (string? body)
+        (let [n
+              (count body)
+
+              cap
+              (long MAX_HTTP_ERROR_BODY_CHARS)]
+
+          (if (<= n cap) body (str (subs body 0 cap) "...<+" (- n cap) " more chars>")))
+        :else (recur (str body))))
 
 (defn- canonical-thinking-block?
   "Recognizes canonical preserved thinking, including persisted Vis wire maps.
    String-key acceptance keeps replay robust across JSON storage boundaries."
   [block]
-  (and (map? block)
-    (= "thinking" (or (:type block) (get block "type")))))
+  (and (map? block) (= "thinking" (or (:type block) (get block "type")))))
 
 (defn- canonical-thinking->anthropic-block
   "Translates canonical or persisted-wire thinking to Anthropic wire shape."
   [block]
-  (let [thinking (or (:thinking block) (get block "thinking"))
-        thinking-signature (or (:thinking-signature block)
-                             (get block "thinking_signature"))
-        redacted? (if (contains? block :redacted?)
-                    (:redacted? block)
-                    (get block "is_redacted"))]
-    (cond
-      redacted?
-      {:type "redacted_thinking"
-       :data thinking-signature}
+  (let [thinking
+        (or (:thinking block) (get block "thinking"))
 
-      (and (string? thinking-signature) (not (str/blank? thinking-signature)))
-      {:type "thinking"
-       :thinking (or thinking "")
-       :signature thinking-signature}
+        thinking-signature
+        (or (:thinking-signature block) (get block "thinking_signature"))
 
-      :else
-      {:type "text"
-       :text (or thinking "")})))
+        redacted?
+        (if (contains? block :redacted?) (:redacted? block) (get block "is_redacted"))]
+
+    (cond redacted? {:type "redacted_thinking" :data thinking-signature}
+          (and (string? thinking-signature) (not (str/blank? thinking-signature)))
+          {:type "thinking" :thinking (or thinking "") :signature thinking-signature}
+          :else {:type "text" :text (or thinking "")})))
 
 (defn- demote-interior-thinking-blocks
   "Anthropic's contract: in any assistant message, all `thinking` /
@@ -1018,24 +1084,18 @@
    reordered or demoted (see `preserved-thinking-replay-messages` in
    Vis loop.clj). This is Anthropic-only."
   [blocks]
-  (let [{:keys [out _]}
-        (reduce (fn [{:keys [out seen-non-thinking?]} b]
-                  (cond
-                    (not (canonical-thinking-block? b))
-                    {:out (conj out b) :seen-non-thinking? true}
-
-                    seen-non-thinking?
-                    ;; Interior thinking - demote to text. Drops the
-                    ;; signature on purpose; Anthropic would reject it
-                    ;; anyway and the visible text round-trips fine.
-                    {:out (conj out {:type "text"
-                                     :text (or (:thinking b) "")})
-                     :seen-non-thinking? true}
-
-                    :else
-                    {:out (conj out b) :seen-non-thinking? false}))
-          {:out [] :seen-non-thinking? false}
-          blocks)]
+  (let [{:keys [out _]} (reduce (fn [{:keys [out seen-non-thinking?]} b]
+                                  (cond (not (canonical-thinking-block? b))
+                                        {:out (conj out b) :seen-non-thinking? true}
+                                        seen-non-thinking?
+                                        ;; Interior thinking - demote to text. Drops the
+                                        ;; signature on purpose; Anthropic would reject it
+                                        ;; anyway and the visible text round-trips fine.
+                                        {:out (conj out {:type "text" :text (or (:thinking b) "")})
+                                         :seen-non-thinking? true}
+                                        :else {:out (conj out b) :seen-non-thinking? false}))
+                                {:out [] :seen-non-thinking? false}
+                                blocks)]
     out))
 
 (defn- anthropic-message-content
@@ -1051,34 +1111,42 @@
    plain text block. See that fn's docstring for the full rationale
    (Anthropic 400 `Invalid signature in thinking block` on replay)."
   [{:keys [content]}]
-  (let [blocks        (-> content normalize-content demote-interior-thinking-blocks)
-        has-thinking? (some canonical-thinking-block? blocks)
-        wire          (into []
-                        ;; Drop empty text blocks at the point of
-                        ;; production. The demote / missing-signature
-                        ;; fallbacks (`demote-interior-thinking-blocks`,
-                        ;; `canonical-thinking->anthropic-block` :else)
-                        ;; emit `{:type "text" :text ""}` when a thinking
-                        ;; block carried no text, and Anthropic 400s on ANY
-                        ;; empty text block (`messages: text content blocks
-                        ;; must be non-empty`) — replaying such an assistant
-                        ;; message rejected the whole next request (Vis
-                        ;; session ac065988). Non-text blocks (thinking,
-                        ;; image, tool_use) always pass through.
-                        (keep (fn [b]
-                                (let [w (if (canonical-thinking-block? b)
-                                          (canonical-thinking->anthropic-block b)
-                                          (anthropic-block b))]
-                                  (when-not (and (text-block? w)
-                                              (str/blank? (:text w)))
-                                    w))))
-                        blocks)]
+  (let [blocks
+        (-> content
+            normalize-content
+            demote-interior-thinking-blocks)
+
+        has-thinking?
+        (some canonical-thinking-block? blocks)
+
+        wire
+        (into []
+              ;; Drop empty text blocks at the point of
+              ;; production. The demote / missing-signature
+              ;; fallbacks (`demote-interior-thinking-blocks`,
+              ;; `canonical-thinking->anthropic-block` :else)
+              ;; emit `{:type "text" :text ""}` when a thinking
+              ;; block carried no text, and Anthropic 400s on ANY
+              ;; empty text block (`messages: text content blocks
+              ;; must be non-empty`) — replaying such an assistant
+              ;; message rejected the whole next request (Vis
+              ;; session ac065988). Non-text blocks (thinking,
+              ;; image, tool_use) always pass through.
+              (keep (fn [b]
+                      (let [w (if (canonical-thinking-block? b)
+                                (canonical-thinking->anthropic-block b)
+                                (anthropic-block b))]
+                        (when-not (and (text-block? w) (str/blank? (:text w))) w))))
+              blocks)]
+
     (if (or has-thinking?
-          (not= 1 (count wire))
-          (not (text-block? (first wire)))
-          (some? (:cache_control (first wire))))
+            (not= 1 (count wire))
+            (not (text-block? (first wire)))
+            (some? (:cache_control (first wire))))
       wire
-      (-> wire first :text))))
+      (-> wire
+          first
+          :text))))
 
 ;; ---------------------------------------------------------------------------
 ;; Native tool calling — canonical tool defs shaped per wire
@@ -1097,15 +1165,15 @@
 (defn- strip-schema-fields
   "Recursively remove `fields` (lower-cased key names) from a JSON-Schema value."
   [x fields]
-  (cond
-    (map? x)        (reduce-kv (fn [m k v]
-                                 (if (contains? fields
-                                       (str/lower-case (if (keyword? k) (name k) (str k))))
-                                   m
-                                   (assoc m k (strip-schema-fields v fields))))
-                      (empty x) x)
-    (sequential? x) (mapv #(strip-schema-fields % fields) x)
-    :else           x))
+  (cond (map? x) (reduce-kv (fn [m k v]
+                              (if (contains? fields
+                                             (str/lower-case (if (keyword? k) (name k) (str k))))
+                                m
+                                (assoc m k (strip-schema-fields v fields))))
+                            (empty x)
+                            x)
+        (sequential? x) (mapv #(strip-schema-fields % fields) x)
+        :else x))
 
 (defn- tool-def->wire
   "Shape one canonical tool def `{:name :description :schema}` for `api-style`.
@@ -1118,18 +1186,20 @@
     (case api-style
       :anthropic
       (cond-> {:name name :input_schema schema}
-        description (assoc :description description))
+        description
+        (assoc :description description))
 
       :openai-compatible-responses
       (cond-> {:type "function" :name name :parameters schema}
-        description (assoc :description description))
+        description
+        (assoc :description description))
 
       {:type "function"
        :function (cond-> {:name name :parameters schema}
-                   description (assoc :description description))})))
+                   description
+                   (assoc :description description))})))
 
-(defn- tools->wire [api-style tools]
-  (mapv #(tool-def->wire api-style %) tools))
+(defn- tools->wire [api-style tools] (mapv #(tool-def->wire api-style %) tools))
 
 (def ^:private tool-schema-path-pattern
   "Provider path to the offending tool field, in either wire spelling: dotted
@@ -1137,10 +1207,7 @@
    (`tools[0].parameters` — the OpenAI/Codex `param` on a rejected schema)."
   #"(?i)tools(?:\.(\d+)|\[(\d+)\])(?:\.(?:custom|function))?\.(input_schema|parameters|strict|additionalProperties)")
 
-(defn- droppable-tool-field
-  "Return the provider-reported tool field."
-  [field _text _tool]
-  field)
+(defn- droppable-tool-field "Return the provider-reported tool field." [field _text _tool] field)
 
 (defn- enrich-tool-schema-rejection
   "Attach the canonical tool name to a provider schema error that only names
@@ -1149,15 +1216,16 @@
   (let [text (str (or (:body (ex-data e)) "") "\n" (or (ex-message e) ""))]
     (if-let [[path dotted bracketed field] (re-find tool-schema-path-pattern text)]
       (let [index (parse-long (or dotted bracketed))
-            tool  (when index (nth (vec tools) index nil))]
+            tool (when index (nth (vec tools) index nil))]
+
         (if tool
           (ex-info (ex-message e)
-            (assoc (ex-data e)
-              :tool-index index
-              :tool-name (str (:name tool))
-              :tool-schema-field (droppable-tool-field (str/lower-case field) text tool)
-              :tool-schema-path path)
-            e)
+                   (assoc (ex-data e)
+                     :tool-index index
+                     :tool-name (str (:name tool))
+                     :tool-schema-field (droppable-tool-field (str/lower-case field) text tool)
+                     :tool-schema-path path)
+                   e)
           e))
       e)))
 
@@ -1179,46 +1247,43 @@
   (when (seq tools)
     (let [sanitized (mapv (fn [tool]
                             (cond-> (strip-schema-fields (dissoc tool :schema)
-                                      gateway-injected-tool-fields)
+                                                         gateway-injected-tool-fields)
                               (:schema tool)
-                              (assoc :schema (strip-schema-fields (:schema tool)
-                                               gateway-injected-tool-fields))))
-                      tools)]
-      (when (not= (vec tools) sanitized)
-        sanitized))))
+                              (assoc :schema
+                                (strip-schema-fields (:schema tool) gateway-injected-tool-fields))))
+                          tools)]
+      (when (not= (vec tools) sanitized) sanitized))))
 
 (defonce ^:private gateway-tool-field-quirks
   ;; Models seen rejecting a gateway-injected tool field. Sanitising is a pure
   ;; subtraction, so remembering the model keeps later calls first-try clean.
   (atom #{}))
 
-(defn- tool-quirk-key [opts]
-  (str (:model opts)))
+(defn- tool-quirk-key [opts] (str (:model opts)))
 
 (defn- tool-choice->wire
   "Shape a canonical tool-choice for `api-style`.
    Canonical: :auto | :required | :none | {:name \"x\"} | \"x\" (force a tool)."
   [api-style choice]
-  (let [named (cond (map? choice) (:name choice) (string? choice) choice :else nil)]
+  (let [named (cond (map? choice) (:name choice)
+                    (string? choice) choice
+                    :else nil)]
     (if (= api-style :anthropic)
-      (cond
-        named                (cond-> {:type "tool" :name named})
-        (= :required choice) {:type "any"}
-        :else                {:type "auto"})   ; :none has no clean anthropic shape pre-tool — auto is safe
-      (cond
-        named                (if (= api-style :openai-compatible-responses)
-                               {:type "function" :name named}
-                               {:type "function" :function {:name named}})
-        (= :required choice) "required"
-        (= :none choice)     "none"
-        :else                "auto"))))
+      (cond named (cond-> {:type "tool" :name named})
+            (= :required choice) {:type "any"}
+            :else {:type "auto"}) ; :none has no clean anthropic shape pre-tool — auto is safe
+      (cond named (if (= api-style :openai-compatible-responses)
+                    {:type "function" :name named}
+                    {:type "function" :function {:name named}})
+            (= :required choice) "required"
+            (= :none choice) "none"
+            :else "auto"))))
 
 (defn- extra-body-tools
   "Pull canonical tools/tool-choice out of `extra-body`.
    Returns `[tools tool-choice extra-body-without-svar-keys]`."
   [extra-body]
-  [(:svar/tools extra-body)
-   (:svar/tool-choice extra-body)
+  [(:svar/tools extra-body) (:svar/tool-choice extra-body)
    (dissoc extra-body :svar/tools :svar/tool-choice)])
 
 (defn- decode-tool-arguments
@@ -1233,12 +1298,10 @@
    interns a provider response at all, so a caller reads plain strings and
    nothing has to be un-done."
   [args]
-  (cond
-    (map? args)                           args
-    (and (string? args) (not (str/blank? args)))
-    (try (json/read-json args :key-fn identity)
-         (catch Exception _ {}))
-    :else                                 {}))
+  (cond (map? args) args
+        (and (string? args) (not (str/blank? args))) (try (json/read-json args :key-fn identity)
+                                                          (catch Exception _ {}))
+        :else {}))
 
 ;; ── Replay hygiene (mirrors pi-ai transform-messages guards) ────────────────
 ;; Two defensive passes over the message array BEFORE a provider request body is
@@ -1264,7 +1327,7 @@
   "False when a caller-tagged assistant turn must not be replayed."
   [msg]
   (not (or (contains? non-replayable-statuses (:stop-reason msg))
-         (contains? non-replayable-statuses (:status msg)))))
+           (contains? non-replayable-statuses (:status msg)))))
 
 (defn- strip-foreign-thinking
   "Drop thinking blocks from an assistant `msg` whose stamped `:model` differs
@@ -1272,23 +1335,31 @@
    vector, or was produced by the same model."
   [msg target-model]
   (let [src (:model msg)]
-    (if (and (= "assistant" (some-> (:role msg) name))
-          src target-model (not= src target-model)
-          (sequential? (:content msg)))
-      (update msg :content (fn [blocks] (vec (remove canonical-thinking-block? blocks))))
+    (if (and (= "assistant"
+                (some-> (:role msg)
+                        name))
+             src
+             target-model
+             (not= src target-model)
+             (sequential? (:content msg)))
+      (update msg
+              :content
+              (fn [blocks]
+                (vec (remove canonical-thinking-block? blocks))))
       msg)))
 
 (defn- content-blocks-of-type
   "The values under `key` for every `type-str` block in `msg`'s content vector."
   [msg type-str key]
-  (when (sequential? (:content msg))
-    (keep key (filter #(= type-str (:type %)) (:content msg)))))
+  (when (sequential? (:content msg)) (keep key (filter #(= type-str (:type %)) (:content msg)))))
 
 (defn- result-turn?
   "A user message that already carries tool_result blocks (a results turn)."
   [m]
-  (and (= "user" (some-> (:role m) name))
-    (seq (content-blocks-of-type m "tool_result" :type))))
+  (and (= "user"
+          (some-> (:role m)
+                  name))
+       (seq (content-blocks-of-type m "tool_result" :type))))
 
 (defn- normalize-id-part
   "Sanitize ONE id segment to [A-Za-z0-9_-], at most 64 chars, no trailing
@@ -1298,8 +1369,12 @@
   (when id
     (let [s (str/replace (str id) #"[^a-zA-Z0-9_-]" "_")]
       (if (<= (count s) 64)
-        (let [s* (str/replace s #"_+$" "")] (if (str/blank? s*) (str id) s*))
-        (let [h (-> (str id) hash (Integer/toUnsignedString 36) (str "0000000000"))]
+        (let [s* (str/replace s #"_+$" "")]
+          (if (str/blank? s*) (str id) s*))
+        (let [h (-> (str id)
+                    hash
+                    (Integer/toUnsignedString 36)
+                    (str "0000000000"))]
           (str (str/replace (subs s 0 53) #"_+$" "") "_" (subs h 0 10)))))))
 
 (defn- normalize-tool-call-id
@@ -1319,7 +1394,8 @@
               ;; length 64"). normalize-id-part keeps a 53-char prefix, so the
               ;; "fc_" survives the clamp.
               raw-i (str (or i ""))
-              i*    (normalize-id-part (if (str/starts-with? raw-i "fc_") raw-i (str "fc_" raw-i)))]
+              i* (normalize-id-part (if (str/starts-with? raw-i "fc_") raw-i (str "fc_" raw-i)))]
+
           (str (normalize-id-part c) "|" i*))
         (normalize-id-part s)))))
 
@@ -1333,24 +1409,28 @@
    the Responses composite `call_id|item_id`. Mirrors pi-ai transformMessages."
   [messages openai?]
   (let [id-map (into {}
-                 (comp (filter #(= "assistant" (some-> (:role %) name)))
-                   (mapcat #(content-blocks-of-type % "tool_use" :id))
-                   (distinct)
-                   (keep (fn [id] (let [n (normalize-tool-call-id id openai?)]
-                                    (when (and n (not= n id)) [id n])))))
-                 messages)]
+                     (comp (filter #(= "assistant"
+                                       (some-> (:role %)
+                                               name)))
+                           (mapcat #(content-blocks-of-type % "tool_use" :id))
+                           (distinct)
+                           (keep (fn [id]
+                                   (let [n (normalize-tool-call-id id openai?)]
+                                     (when (and n (not= n id)) [id n])))))
+                     messages)]
     (if (empty? id-map)
       (vec messages)
-      (let [remap (fn [id] (get id-map id id))
-            fix   (fn [b]
-                    (cond
-                      (and (= "tool_use" (:type b)) (:id b))           (update b :id remap)
-                      (and (= "tool_result" (:type b)) (:tool_use_id b)) (update b :tool_use_id remap)
-                      :else b))]
-        (mapv (fn [m] (if (sequential? (:content m))
-                        (update m :content #(mapv fix %))
-                        m))
-          messages)))))
+      (let [remap (fn [id]
+                    (get id-map id id))
+            fix (fn [b]
+                  (cond (and (= "tool_use" (:type b)) (:id b)) (update b :id remap)
+                        (and (= "tool_result" (:type b)) (:tool_use_id b))
+                        (update b :tool_use_id remap)
+                        :else b))]
+
+        (mapv (fn [m]
+                (if (sequential? (:content m)) (update m :content #(mapv fix %)) m))
+              messages)))))
 
 (defn- synthesize-orphan-tool-results
   "Ensure every assistant `tool_use` has a matching `tool_result` somewhere in the
@@ -1364,27 +1444,41 @@
    results turn. Mirrors pi-ai's `insertSyntheticToolResults`. Ids already
    resolved ANYWHERE are left alone, so healthy turns are untouched."
   [messages]
-  (let [resolved (->> messages
-                   (mapcat #(when (= "user" (some-> (:role %) name))
-                              (content-blocks-of-type % "tool_result" :tool_use_id)))
-                   set)
-        synth    (fn [id] {:type "tool_result" :tool_use_id id
-                           ;; Flag it an ERROR (pi-ai parity) so the model treats
-                           ;; it as a failure, not an empty success. Anthropic
-                           ;; emits `is_error: true`; OpenAI has no structured
-                           ;; flag, so the text carries the signal there.
-                           :is_error true
-                           :content "No result: the tool call did not complete (failed or interrupted)."})]
-    (loop [out [] ms (vec messages)]
+  (let [resolved
+        (->> messages
+             (mapcat #(when (= "user"
+                               (some-> (:role %)
+                                       name))
+                        (content-blocks-of-type % "tool_result" :tool_use_id)))
+             set)
+
+        synth
+        (fn [id]
+          {:type "tool_result"
+           :tool_use_id id
+           ;; Flag it an ERROR (pi-ai parity) so the model treats
+           ;; it as a failure, not an empty success. Anthropic
+           ;; emits `is_error: true`; OpenAI has no structured
+           ;; flag, so the text carries the signal there.
+           :is_error true
+           :content "No result: the tool call did not complete (failed or interrupted)."})]
+
+    (loop [out
+           []
+
+           ms
+           (vec messages)]
+
       (if-let [m (first ms)]
-        (let [orphans (when (= "assistant" (some-> (:role m) name))
+        (let [orphans (when (= "assistant"
+                               (some-> (:role m)
+                                       name))
                         (vec (remove resolved (content-blocks-of-type m "tool_use" :id))))]
           (if (seq orphans)
             (if (result-turn? (second ms))
               (recur (conj out m (update (second ms) :content #(into (vec %) (map synth) orphans)))
-                (subvec ms 2))
-              (recur (conj out m {:role "user" :content (mapv synth orphans)})
-                (subvec ms 1)))
+                     (subvec ms 2))
+              (recur (conj out m {:role "user" :content (mapv synth orphans)}) (subvec ms 1)))
             (recur (conj out m) (subvec ms 1))))
         out))))
 
@@ -1398,11 +1492,14 @@
   ([messages target-model] (sanitize-replayed-messages messages target-model false))
   ([messages target-model openai?]
    (-> (->> messages
-         (filterv (fn [m] (or (not= "assistant" (some-> (:role m) name))
-                            (assistant-turn-replayable? m))))
-         (mapv #(strip-foreign-thinking % target-model)))
-     (normalize-tool-ids openai?)
-     synthesize-orphan-tool-results)))
+            (filterv (fn [m]
+                       (or (not= "assistant"
+                                 (some-> (:role m)
+                                         name))
+                           (assistant-turn-replayable? m))))
+            (mapv #(strip-foreign-thinking % target-model)))
+       (normalize-tool-ids openai?)
+       synthesize-orphan-tool-results)))
 
 (defn- stamp-assistant-model
   "Tag a completion result's canonical `:assistant-message` with the `model` that
@@ -1437,46 +1534,77 @@
    `:max_tokens` is always present (Anthropic requirement) and
    `clamp-anthropic-thinking-max-tokens` ensures visible output has
    room above `:thinking.budget_tokens` when extended thinking is on."
-  ([messages model extra-body]
-   (build-anthropic-request-body messages model extra-body nil))
+  ([messages model extra-body] (build-anthropic-request-body messages model extra-body nil))
   ([messages model extra-body {:keys [anthropic-oauth?]}]
    ;; S2 fix: accept both `:role :system` (keyword) and `:role "system"`
    ;; (string). Anthropic only accepts string role names; we normalise
    ;; here so callers can pass either.
-   (let [messages (sanitize-replayed-messages messages model)
-         [tools tool-choice extra-body] (extra-body-tools extra-body)
-         system-role? (fn [m] (= "system" (some-> (:role m) name)))
-         sys-blocks  (cond-> (vec (mapcat #(normalize-content (:content %))
-                                    (filter system-role? messages)))
-                       anthropic-oauth? (->> (into [{:type "text"
-                                                     :text "You are Claude Code, Anthropic's official CLI for Claude."
-                                                     :svar/cache true}])
-                                          vec))
-         any-cache?  (some :svar/cache sys-blocks)
-         system-wire (cond
-                       (empty? sys-blocks) nil
-                       any-cache?          (mapv anthropic-block sys-blocks)
-                       :else               (str/join "\n" (map :text sys-blocks)))
-         non-system  (->> messages
-                       (remove system-role?)
-                       (mapv (fn [{:keys [role] :as msg}]
-                               {:role (some-> role name)
-                                :content (anthropic-message-content msg)})))
-         max-tokens  (or (:max_tokens extra-body) 4096)
+   (let [messages
+         (sanitize-replayed-messages messages model)
+
+         [tools tool-choice extra-body]
+         (extra-body-tools extra-body)
+
+         system-role?
+         (fn [m]
+           (= "system"
+              (some-> (:role m)
+                      name)))
+
+         sys-blocks
+         (cond-> (vec (mapcat #(normalize-content (:content %)) (filter system-role? messages)))
+           anthropic-oauth?
+           (->> (into [{:type "text"
+                        :text "You are Claude Code, Anthropic's official CLI for Claude."
+                        :svar/cache true}])
+                vec))
+
+         any-cache?
+         (some :svar/cache sys-blocks)
+
+         system-wire
+         (cond (empty? sys-blocks) nil
+               any-cache? (mapv anthropic-block sys-blocks)
+               :else (str/join "\n" (map :text sys-blocks)))
+
+         non-system
+         (->> messages
+              (remove system-role?)
+              (mapv (fn [{:keys [role] :as msg}]
+                      {:role (some-> role
+                                     name)
+                       :content (anthropic-message-content msg)})))
+
+         max-tokens
+         (or (:max_tokens extra-body) 4096)
+
          ;; Drop fields Anthropic does NOT recognise (would 400 on
          ;; unknown). `:stream_options` is OpenAI-only;
          ;; `:prompt_cache_key` is OpenAI-only routing-stickiness key;
          ;; `:text` is the Responses API envelope for output verbosity.
-         anthropic-extra (dissoc extra-body :stream_options :prompt_cache_key :text)
-         body        (cond-> {:model model :messages non-system :max_tokens max-tokens}
-                       system-wire (assoc :system system-wire)
-                       (seq tools) (assoc :tools (tools->wire :anthropic tools))
-                       (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :anthropic tool-choice))
-                       (seq anthropic-extra) (merge anthropic-extra))]
-    ;; Re-assert system after merge so extra-body can't clobber it,
-    ;; then apply the thinking-aware max_tokens clamp.
-     (-> (cond-> body system-wire (assoc :system system-wire))
-       clamp-anthropic-thinking-max-tokens))))
+         anthropic-extra
+         (dissoc extra-body :stream_options :prompt_cache_key :text)
+
+         body
+         (cond-> {:model model :messages non-system :max_tokens max-tokens}
+           system-wire
+           (assoc :system system-wire)
+
+           (seq tools)
+           (assoc :tools (tools->wire :anthropic tools))
+
+           (and (seq tools) tool-choice)
+           (assoc :tool_choice (tool-choice->wire :anthropic tool-choice))
+
+           (seq anthropic-extra)
+           (merge anthropic-extra))]
+
+     ;; Re-assert system after merge so extra-body can't clobber it,
+     ;; then apply the thinking-aware max_tokens clamp.
+     (-> (cond-> body
+           system-wire
+           (assoc :system system-wire))
+         clamp-anthropic-thinking-max-tokens))))
 
 (def ^:private ^:const ANTHROPIC_COUNT_TOKENS_TIMEOUT_MS
   "Pre-flight count is a fast metadata call; cap it tight so a slow
@@ -1505,27 +1633,40 @@
    api-style."
   [messages model {:keys [api-key base-url provider-id llm-headers]}]
   (try
-    (let [body    (-> (build-anthropic-request-body messages model nil
-                        ;; Carry the SAME Claude Code identity (the "You are
-                        ;; Claude Code" system block) the real message call
-                        ;; sends on the OAuth path, so this preflight is
-                        ;; indistinguishable from a first-party request. pi
-                        ;; makes no count_tokens preflight at all; if we're
-                        ;; going to send one on an OAuth token, it must not
-                        ;; look like a bare third-party probe.
-                        {:anthropic-oauth? (anthropic-oauth-token? api-key)})
-                    ;; count_tokens takes the message-creation inputs minus
-                    ;; generation params. Drop max_tokens/stream so the
-                    ;; endpoint doesn't choke on fields it doesn't model.
-                    (dissoc :max_tokens :stream :stream_options))
-          headers (cond-> (make-llm-headers :anthropic api-key provider-id)
-                    (seq llm-headers) (merge llm-headers))
-          url     (str (str/replace base-url #"/+$" "") "/messages/count_tokens")
-          {:keys [parsed status]} (http-post! url body headers ANTHROPIC_COUNT_TOKENS_TIMEOUT_MS)]
+    (let [body
+          (-> (build-anthropic-request-body messages
+                                            model
+                                            nil
+                                            ;; Carry the SAME Claude Code identity (the "You are
+                                            ;; Claude Code" system block) the real message call
+                                            ;; sends on the OAuth path, so this preflight is
+                                            ;; indistinguishable from a first-party request. pi
+                                            ;; makes no count_tokens preflight at all; if we're
+                                            ;; going to send one on an OAuth token, it must not
+                                            ;; look like a bare third-party probe.
+                                            {:anthropic-oauth? (anthropic-oauth-token? api-key)})
+              ;; count_tokens takes the message-creation inputs minus
+              ;; generation params. Drop max_tokens/stream so the
+              ;; endpoint doesn't choke on fields it doesn't model.
+              (dissoc :max_tokens :stream :stream_options))
+
+          headers
+          (cond-> (make-llm-headers :anthropic api-key provider-id)
+            (seq llm-headers)
+            (merge llm-headers))
+
+          url
+          (str (str/replace base-url #"/+$" "") "/messages/count_tokens")
+
+          {:keys [parsed status]}
+          (http-post! url body headers ANTHROPIC_COUNT_TOKENS_TIMEOUT_MS)]
+
       (when (= 200 (long (or status 0)))
-        (some-> (get parsed "input_tokens") long)))
+        (some-> (get parsed "input_tokens")
+                long)))
     (catch Exception e
-      (trove/log! {:level :debug :id ::anthropic-count-tokens-failed
+      (trove/log! {:level :debug
+                   :id ::anthropic-count-tokens-failed
                    :data {:model model :error (ex-message e)}
                    :msg "count_tokens unavailable; offline estimate fallback"})
       nil)))
@@ -1538,9 +1679,11 @@
    transport. nil ⇒ pure offline estimate."
   [messages model {:keys [api-style api-key base-url provider-id llm-headers]}]
   (when (= api-style :anthropic)
-    (fn [] (anthropic-count-tokens messages model
-             {:api-key api-key :base-url base-url
-              :provider-id provider-id :llm-headers llm-headers}))))
+    (fn []
+      (anthropic-count-tokens
+        messages
+        model
+        {:api-key api-key :base-url base-url :provider-id provider-id :llm-headers llm-headers}))))
 
 (defn- anthropic-wire->canonical-block
   "Translates one Anthropic wire content block to svar's canonical
@@ -1563,10 +1706,7 @@
      :redacted? false}
 
     "redacted_thinking"
-    {:type "thinking"
-     :thinking ""
-     :thinking-signature (or (get block "data") "")
-     :redacted? true}
+    {:type "thinking" :thinking "" :thinking-signature (or (get block "data") "") :redacted? true}
 
     ;; Streaming accumulates a tool_use block's args under :partial_json (the
     ;; raw input_json_delta concat); non-streaming delivers a parsed :input.
@@ -1589,8 +1729,7 @@
   [content-blocks]
   (when (seq content-blocks)
     (let [canonical (mapv anthropic-wire->canonical-block content-blocks)]
-      {:role "assistant"
-       :content canonical})))
+      {:role "assistant" :content canonical})))
 
 (defn- extract-anthropic-response-data
   "Extracts content, reasoning, usage, and the canonical assistant
@@ -1607,33 +1746,54 @@
    to `:messages` on the next call to keep Claude's extended thinking
    session active."
   [envelope]
-  (let [response       (:parsed envelope)
-        content-blocks (get response "content")
-        text-parts     (->> content-blocks
-                         (filter #(= "text" (get % "type")))
-                         (map #(get % "text")))
-        thinking-parts (->> content-blocks
-                         (filter #(= "thinking" (get % "type")))
-                         (map #(get % "thinking")))
-        usage          (get response "usage")
-        visible        (when (seq text-parts) (str/join "\n" text-parts))
+  (let [response
+        (:parsed envelope)
+
+        content-blocks
+        (get response "content")
+
+        text-parts
+        (->> content-blocks
+             (filter #(= "text" (get % "type")))
+             (map #(get % "text")))
+
+        thinking-parts
+        (->> content-blocks
+             (filter #(= "thinking" (get % "type")))
+             (map #(get % "thinking")))
+
+        usage
+        (get response "usage")
+
+        visible
+        (when (seq text-parts) (str/join "\n" text-parts))
+
         ;; Native tool calls: `tool_use` blocks become canonical
         ;; `{:id :name :input}` — the anthropic wire delivers input as a parsed
-         ;; map whose keys are left exactly as the wire sent them, so it still
-         ;; goes through `decode-tool-arguments` for the JSON-string wires.
-        tool-calls     (->> content-blocks
-                         (filter #(= "tool_use" (get % "type")))
-                         (mapv (fn [b] {:id (get b "id") :name (get b "name")
-                                        :input (decode-tool-arguments (get b "input"))})))
-        canonical-msg  (anthropic-canonical-assistant-message content-blocks)]
-    (cond-> {:content       visible
-             :reasoning     (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
+        ;; map whose keys are left exactly as the wire sent them, so it still
+        ;; goes through `decode-tool-arguments` for the JSON-string wires.
+        tool-calls
+        (->> content-blocks
+             (filter #(= "tool_use" (get % "type")))
+             (mapv (fn [b]
+                     {:id (get b "id")
+                      :name (get b "name")
+                      :input (decode-tool-arguments (get b "input"))})))
+
+        canonical-msg
+        (anthropic-canonical-assistant-message content-blocks)]
+
+    (cond-> {:content visible
+             :reasoning (when (seq thinking-parts) (str/trimr (str/join "\n" thinking-parts)))
              ;; Phase A canonical usage shape — :input-tokens always
              ;; TOTAL (anthropic-additive raw values are summed here).
-             :api-usage     (usage/anthropic-canonical usage)
+             :api-usage (usage/anthropic-canonical usage)
              :http-response envelope}
-      (seq tool-calls) (assoc :tool-calls tool-calls)
-      canonical-msg (assoc :assistant-message canonical-msg))))
+      (seq tool-calls)
+      (assoc :tool-calls tool-calls)
+
+      canonical-msg
+      (assoc :assistant-message canonical-msg))))
 
 (defn- make-anthropic-stream-delta-fn
   "Builds a stateful one-arg delta-fn closure for Anthropic SSE streams.
@@ -1658,16 +1818,18 @@
     (fn [chunk]
       (case (get chunk "type")
         "content_block_start"
-        (let [idx   (get chunk "index")
+        (let [idx (get chunk "index")
               block (get chunk "content_block")]
+
           (swap! pending assoc idx (or block {}))
           (cond-> {:content-delta nil :reasoning-delta nil :api-usage nil}
             (= "tool_use" (get block "type"))
             (assoc :tool-call-preview {:id (get block "id") :name (get block "name")})))
 
         "content_block_delta"
-        (let [idx   (get chunk "index")
+        (let [idx (get chunk "index")
               delta (get chunk "delta")]
+
           (case (get delta "type")
             "text_delta"
             (do (swap! pending update-in [idx "text"] (fnil str "") (get delta "text"))
@@ -1689,15 +1851,21 @@
             ;; tool call's arguments being written live (the model's actual
             ;; work, not just its reasoning).
             "input_json_delta"
-            (do (swap! pending update-in [idx "partial_json"] (fnil str "") (get delta "partial_json"))
-                {:content-delta nil :reasoning-delta nil :api-usage nil
+            (do (swap! pending update-in
+                  [idx "partial_json"]
+                  (fnil str "")
+                  (get delta "partial_json"))
+                {:content-delta nil
+                 :reasoning-delta nil
+                 :api-usage nil
                  :tool-args-delta (get delta "partial_json")})
 
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
         "content_block_stop"
-        (let [idx        (get chunk "index")
+        (let [idx (get chunk "index")
               wire-block (get @pending idx)]
+
           (swap! pending dissoc idx)
           (if (seq wire-block)
             ;; Convert wire → canonical and flush. Text blocks are
@@ -1705,16 +1873,22 @@
             ;; canonical assistant message preserving block order;
             ;; thinking/redacted_thinking carry their signatures
             ;; verbatim for round-trip.
-            {:content-delta nil :reasoning-delta nil :api-usage nil
+            {:content-delta nil
+             :reasoning-delta nil
+             :api-usage nil
              :provider-state {:provider :anthropic
                               :blocks [(anthropic-wire->canonical-block wire-block)]}}
             {:content-delta nil :reasoning-delta nil :api-usage nil}))
 
         "message_delta"
-        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (get chunk "usage"))}
+        {:content-delta nil
+         :reasoning-delta nil
+         :api-usage (usage/anthropic-canonical (get chunk "usage"))}
 
         "message_start"
-        {:content-delta nil :reasoning-delta nil :api-usage (usage/anthropic-canonical (get-in chunk ["message" "usage"]))}
+        {:content-delta nil
+         :reasoning-delta nil
+         :api-usage (usage/anthropic-canonical (get-in chunk ["message" "usage"]))}
 
         "message_stop"
         {:content-delta nil :reasoning-delta nil :api-usage nil :terminal? true}
@@ -1735,15 +1909,16 @@
    caller has already rendered, so a stream that dies mid-answer is terminal by
    policy, not by transport."
   [{:keys [attempt declined classification error]}]
-  (trove/log! {:level :warn :id ::retry-declined
-               :data  (log-data {:attempt attempt
-                                 :declined declined
-                                 :category (:category classification)
-                                 :status (:status classification)
-                                 :reached-model? (:reached-model? classification)
-                                 :request-id (failure/request-id error)
-                                 :error (ex-message error)})
-               :msg   "not retrying provider failure"}))
+  (trove/log! {:level :warn
+               :id ::retry-declined
+               :data (log-data {:attempt attempt
+                                :declined declined
+                                :category (:category classification)
+                                :status (:status classification)
+                                :reached-model? (:reached-model? classification)
+                                :request-id (failure/request-id error)
+                                :error (ex-message error)})
+               :msg "not retrying provider failure"}))
 
 (defn- with-retry
   "Executes a function with exponential backoff retry for canonical transient failures.
@@ -1765,253 +1940,275 @@
    carrying `Retry-After: 60` costs a minute per attempt, and a cooldown the
    phase cannot outlast is the router's problem, not another guaranteed 429."
   ([f] (with-retry f {}))
-  ([f {:keys [max-retries initial-delay-ms max-delay-ms multiplier budget-ms
-              router-handles-rate-limit? on-retry provider-id model]
-       :or {max-retries failure/RETRY_MAX_ATTEMPTS
-            initial-delay-ms failure/RETRY_INITIAL_DELAY_MS
-            max-delay-ms failure/RETRY_MAX_DELAY_MS
-            multiplier failure/RETRY_MULTIPLIER}}]
+  ([f
+    {:keys [max-retries initial-delay-ms max-delay-ms multiplier budget-ms
+            router-handles-rate-limit? on-retry provider-id model]
+     :or {max-retries failure/RETRY_MAX_ATTEMPTS
+          initial-delay-ms failure/RETRY_INITIAL_DELAY_MS
+          max-delay-ms failure/RETRY_MAX_DELAY_MS
+          multiplier failure/RETRY_MULTIPLIER}}]
    (let [started-ms (System/currentTimeMillis)]
      (loop [attempt 1
             delay-ms initial-delay-ms]
-       (let [result (try
-                      {:success (f)}
-                      (catch Exception e
-                        (let [{:keys [retry? reason classification no-retry-reason]}
-                              (retry-decision e {:router-handles-rate-limit? router-handles-rate-limit?})]
-                          (if (and retry? (< attempt (long max-retries)))
-                            {:retry true :error e :reason reason
-                             :classification classification
-                             :status (:status classification)}
-                            {:error e
-                             :classification classification
-                             :declined (if retry? :max-retries-exhausted no-retry-reason)}))))]
-         (cond
-           (:success result) (:success result)
-           (:retry result)
-           (let [err  (:error result)
-                 plan (failure/retry-sleep-plan
-                        err
-                        {:fallback-ms (failure/backoff-ms delay-ms max-delay-ms)
-                         :elapsed-ms (- (System/currentTimeMillis) started-ms)
-                         :budget-ms budget-ms})]
-             ;; No plan: the phase is spent, or the server declared a cooldown
-             ;; longer than this phase may spend. Waking before the window the
-             ;; provider named only buys another refusal, so hand the request
-             ;; to the router's fallback instead of burning the ladder here.
-             (if (nil? plan)
-               (do (log-retry-declined! {:attempt attempt
-                                         :declined :retry-budget-exhausted
-                                         :classification (:classification result)
-                                         :error err})
-                   (throw err))
-               (let [sleep-ms       (long (:delay-ms plan))
-                     retry-after-ms (:retry-after-ms plan)]
-                 (trove/log! {:level :warn :id ::http-retry
-                              :data (log-data {:attempt attempt
-                                               :reason (:reason result)
-                                               :delay-ms sleep-ms
-                                               :retry-after-ms retry-after-ms
-                                               :status (:status result)
-                                               :request-id (failure/request-id err)
-                                               :error (ex-message err)})
-                              :msg "retrying transient HTTP failure"})
-                 (when on-retry
-                   (on-retry (cond-> {:event/type :llm.routing/provider-retry
-                                      :reason (or (:reason result) :http-status)
-                                      :attempt attempt
-                                      :max-retries (long max-retries)
-                                      :delay-ms sleep-ms
-                                      :error (ex-message err)}
-                               (some? retry-after-ms)
-                               (assoc :retry-after-ms (long retry-after-ms))
 
-                               (some? (:status result))
-                               (assoc :status (:status result))
+       (let [result (try {:success (f)}
+                         (catch Exception e
+                           (let [{:keys [retry? reason classification no-retry-reason]}
+                                 (retry-decision e
+                                                 {:router-handles-rate-limit?
+                                                  router-handles-rate-limit?})]
+                             (if (and retry? (< attempt (long max-retries)))
+                               {:retry true
+                                :error e
+                                :reason reason
+                                :classification classification
+                                :status (:status classification)}
+                               {:error e
+                                :classification classification
+                                :declined (if retry? :max-retries-exhausted no-retry-reason)}))))]
+         (cond (:success result) (:success result)
+               (:retry result)
+               (let [err (:error result)
+                     plan (failure/retry-sleep-plan
+                            err
+                            {:fallback-ms (failure/backoff-ms delay-ms max-delay-ms)
+                             :elapsed-ms (- (System/currentTimeMillis) started-ms)
+                             :budget-ms budget-ms})]
 
-                               (some? provider-id)
-                               (assoc :provider (name provider-id)
-                                 :from-provider (name provider-id))
+                 ;; No plan: the phase is spent, or the server declared a cooldown
+                 ;; longer than this phase may spend. Waking before the window the
+                 ;; provider named only buys another refusal, so hand the request
+                 ;; to the router's fallback instead of burning the ladder here.
+                 (if (nil? plan)
+                   (do (log-retry-declined! {:attempt attempt
+                                             :declined :retry-budget-exhausted
+                                             :classification (:classification result)
+                                             :error err})
+                       (throw err))
+                   (let [sleep-ms (long (:delay-ms plan))
+                         retry-after-ms (:retry-after-ms plan)]
 
-                               (some? model)
-                               (assoc :model (str model)
-                                 :from-model (str model)))))
-                 (Thread/sleep sleep-ms)
-                 (recur (inc attempt)
-                   (min (* (double delay-ms) (double multiplier)) (double max-delay-ms))))))
-           :else (let [err (:error result)]
-                   (log-retry-declined! {:attempt attempt
-                                         :declined (:declined result)
-                                         :classification (:classification result)
-                                         :error err})
-                   (throw err))))))))
+                     (trove/log! {:level :warn
+                                  :id ::http-retry
+                                  :data (log-data {:attempt attempt
+                                                   :reason (:reason result)
+                                                   :delay-ms sleep-ms
+                                                   :retry-after-ms retry-after-ms
+                                                   :status (:status result)
+                                                   :request-id (failure/request-id err)
+                                                   :error (ex-message err)})
+                                  :msg "retrying transient HTTP failure"})
+                     (when on-retry
+                       (on-retry
+                         (cond-> {:event/type :llm.routing/provider-retry
+                                  :reason (or (:reason result) :http-status)
+                                  :attempt attempt
+                                  :max-retries (long max-retries)
+                                  :delay-ms sleep-ms
+                                  :error (ex-message err)}
+                           (some? retry-after-ms)
+                           (assoc :retry-after-ms (long retry-after-ms))
 
-(def ^:private content-block-types
-  #{"text" "output_text"})
+                           (some? (:status result))
+                           (assoc :status (:status result))
+
+                           (some? provider-id)
+                           (assoc :provider
+                             (name provider-id) :from-provider
+                             (name provider-id))
+
+                           (some? model)
+                           (assoc :model
+                             (str model) :from-model
+                             (str model)))))
+                     (Thread/sleep sleep-ms)
+                     (recur (inc attempt)
+                            (min (* (double delay-ms) (double multiplier))
+                                 (double max-delay-ms))))))
+               :else (let [err (:error result)]
+                       (log-retry-declined! {:attempt attempt
+                                             :declined (:declined result)
+                                             :classification (:classification result)
+                                             :error err})
+                       (throw err))))))))
+
+(def ^:private content-block-types #{"text" "output_text"})
 
 (def ^:private reasoning-block-types
-  #{"thinking"
-    "reasoning"
-    "reasoning_text"
-    "reasoning_summary"
-    "reasoning_summary_text"
+  #{"thinking" "reasoning" "reasoning_text" "reasoning_summary" "reasoning_summary_text"
     "summary_text"})
 
-(defn- content-part-text [part]
+(defn- content-part-text
+  [part]
   (cond
     ;; Keep strings VERBATIM, including whitespace-only ones. Dropping blank
     ;; parts glues/loses source: a content array like
     ;; ["def f():" "\n    " "return 1"] must round-trip its newline + indent,
     ;; not collapse to "def f():return 1". Callers that need a presence check
     ;; still guard with `str/blank?` on the joined result.
-    (string? part)
-    part
-
-    (map? part)
-    (let [type (get part "type")]
-      (cond
-        (content-block-types type)
-        (some-> (or (get part "text") (get part "delta")) content-part-text)
-
-        (= "message" type)
-        (some-> (get part "content") content-part-text)
-
-        (nil? type)
-        (some-> (get part "text") content-part-text)
-
-        :else nil))
-
-    (sequential? part)
-    (let [s (->> part (keep content-part-text) (str/join ""))]
-      (when-not (str/blank? s) s))
-
+    (string? part) part
+    (map? part) (let [type (get part "type")]
+                  (cond (content-block-types type) (some-> (or (get part "text") (get part "delta"))
+                                                           content-part-text)
+                        (= "message" type) (some-> (get part "content")
+                                                   content-part-text)
+                        (nil? type) (some-> (get part "text")
+                                            content-part-text)
+                        :else nil))
+    (sequential? part) (let [s (->> part
+                                    (keep content-part-text)
+                                    (str/join ""))]
+                         (when-not (str/blank? s) s))
     :else nil))
 
-(defn- reasoning-part-text [part]
-  (cond
-    (string? part)
-    (when-not (str/blank? part) part)
-
-    (map? part)
-    (let [type (get part "type")]
-      (cond
-        (reasoning-block-types type)
-        (or (some-> (get part "thinking") reasoning-part-text)
-          (some-> (get part "summary") reasoning-part-text)
-          (some-> (get part "content") reasoning-part-text)
-          (some-> (or (get part "text") (get part "delta")) reasoning-part-text))
-
-        (= "message" type)
-        (some-> (get part "content") reasoning-part-text)
-
-        (nil? type)
-        (or (some-> (get part "thinking") reasoning-part-text)
-          (some-> (get part "summary") reasoning-part-text)
-          (some-> (or (get part "text") (get part "delta")) reasoning-part-text))
-
+(defn- reasoning-part-text
+  [part]
+  (cond (string? part) (when-not (str/blank? part) part)
+        (map? part) (let [type (get part "type")]
+                      (cond (reasoning-block-types type) (or (some-> (get part "thinking")
+                                                                     reasoning-part-text)
+                                                             (some-> (get part "summary")
+                                                                     reasoning-part-text)
+                                                             (some-> (get part "content")
+                                                                     reasoning-part-text)
+                                                             (some-> (or (get part "text")
+                                                                         (get part "delta"))
+                                                                     reasoning-part-text))
+                            (= "message" type) (some-> (get part "content")
+                                                       reasoning-part-text)
+                            (nil? type) (or (some-> (get part "thinking")
+                                                    reasoning-part-text)
+                                            (some-> (get part "summary")
+                                                    reasoning-part-text)
+                                            (some-> (or (get part "text") (get part "delta"))
+                                                    reasoning-part-text))
+                            :else nil))
+        (sequential? part) (let [s (->> part
+                                        (keep reasoning-part-text)
+                                        (remove str/blank?)
+                                        (str/join "\n\n"))]
+                             (when-not (str/blank? s) s))
         :else nil))
 
-    (sequential? part)
-    (let [s (->> part
-              (keep reasoning-part-text)
-              (remove str/blank?)
-              (str/join "\n\n"))]
-      (when-not (str/blank? s) s))
-
-    :else nil))
-
-(defn- nonblank-str [s]
-  (when-not (str/blank? (or s ""))
-    s))
+(defn- nonblank-str [s] (when-not (str/blank? (or s "")) s))
 
 (defn- streaming-reasoning-delta-text
   "Streaming reasoning delta. Keep exact strings, incl whitespace-only
    tokens; dropping them glues reasoning words (`pass2`, `passesI`)."
   [part]
-  (if (string? part)
-    part
-    (reasoning-part-text part)))
+  (if (string? part) part (reasoning-part-text part)))
 
-(defn- content-blocks-text [blocks]
+(defn- content-blocks-text
+  [blocks]
   ;; Concatenate the text parts of ONE assistant message VERBATIM. These are
   ;; provider-side chunks of a single message body, not separate lines - the
   ;; model's own newlines already live inside the parts. Joining with "\n"
   ;; corrupted multi-part bodies (notably lenient code mode), splitting every
   ;; part onto its own line, e.g. `foo = bar(baz)` -> `foo\n=\nbar(baz)`.
-  (let [s (->> blocks (keep content-part-text) (str/join ""))]
+  (let [s (->> blocks
+               (keep content-part-text)
+               (str/join ""))]
     (when-not (str/blank? s) s)))
 
-(defn- reasoning-blocks-text [blocks]
+(defn- reasoning-blocks-text
+  [blocks]
   (let [s (->> blocks
-            (filter #(reasoning-block-types (get % "type")))
-            (keep reasoning-part-text)
-            (str/join "\n"))]
+               (filter #(reasoning-block-types (get % "type")))
+               (keep reasoning-part-text)
+               (str/join "\n"))]
     (when-not (str/blank? s) (str/trimr s))))
 
-(defn- response-output-text [response]
+(defn- response-output-text
+  [response]
   (->> (get response "output")
-    (keep (fn [item]
-            (case (get item "type")
-              "message"     (content-blocks-text (get item "content"))
-              "output_text" (content-part-text item)
-              nil)))
-    (remove str/blank?)
-    (str/join "\n")))
+       (keep (fn [item]
+               (case (get item "type")
+                 "message"
+                 (content-blocks-text (get item "content"))
 
-(defn- response-output-reasoning [response]
+                 "output_text"
+                 (content-part-text item)
+
+                 nil)))
+       (remove str/blank?)
+       (str/join "\n")))
+
+(defn- response-output-reasoning
+  [response]
   (->> (get response "output")
-    (keep (fn [item]
-            (case (get item "type")
-              "reasoning" (or (some-> (get item "content") reasoning-part-text)
-                            (some-> (get item "summary") reasoning-part-text)
-                            (reasoning-part-text item))
-              "message"   (reasoning-blocks-text (get item "content"))
-              nil)))
-    (remove str/blank?)
-    (str/join "\n\n")))
+       (keep (fn [item]
+               (case (get item "type")
+                 "reasoning"
+                 (or (some-> (get item "content")
+                             reasoning-part-text)
+                     (some-> (get item "summary")
+                             reasoning-part-text)
+                     (reasoning-part-text item))
 
-(defn- reasoning-item-state [item]
+                 "message"
+                 (reasoning-blocks-text (get item "content"))
+
+                 nil)))
+       (remove str/blank?)
+       (str/join "\n\n")))
+
+(defn- reasoning-item-state
+  [item]
   (when (= "reasoning" (get item "type"))
-    (cond-> {:type "reasoning"
-             :raw-item item}
-      (get item "id") (assoc :id (get item "id"))
-      (get item "status") (assoc :status (get item "status"))
-      (seq (get item "summary")) (assoc :summary (get item "summary"))
+    (cond-> {:type "reasoning" :raw-item item}
+      (get item "id")
+      (assoc :id (get item "id"))
+
+      (get item "status")
+      (assoc :status (get item "status"))
+
+      (seq (get item "summary"))
+      (assoc :summary (get item "summary"))
+
       (not (str/blank? (or (reasoning-part-text (get item "summary")) "")))
       (assoc :summary-text (reasoning-part-text (get item "summary")))
-      (get item "content") (assoc :content (get item "content"))
+
+      (get item "content")
+      (assoc :content (get item "content"))
+
       (not (str/blank? (or (reasoning-part-text (get item "content")) "")))
       (assoc :content-text (reasoning-part-text (get item "content")))
-      (get item "encrypted_content") (assoc :encrypted-content (get item "encrypted_content")))))
 
-(defn- reasoning-item-state-key [item]
+      (get item "encrypted_content")
+      (assoc :encrypted-content (get item "encrypted_content")))))
+
+(defn- reasoning-item-state-key
+  [item]
   (or (:id item)
-    (:encrypted-content item)
-    (get-in item [:raw-item "id"])
-    (get-in item [:raw-item "encrypted_content"])
-    (:summary-text item)
-    (:content-text item)
-    (pr-str item)))
+      (:encrypted-content item)
+      (get-in item [:raw-item "id"])
+      (get-in item [:raw-item "encrypted_content"])
+      (:summary-text item)
+      (:content-text item)
+      (pr-str item)))
 
-(defn- merge-reasoning-item-state [a b]
-  (cond
-    (nil? a) b
-    (nil? b) a
-    :else
-    (let [raw (merge (:raw-item a) (:raw-item b))]
-      (cond-> (merge a b)
-        (seq raw) (assoc :raw-item raw)))))
+(defn- merge-reasoning-item-state
+  [a b]
+  (cond (nil? a) b
+        (nil? b) a
+        :else (let [raw (merge (:raw-item a) (:raw-item b))]
+                (cond-> (merge a b)
+                  (seq raw)
+                  (assoc :raw-item raw)))))
 
-(defn- dedupe-reasoning-items [items]
-  (let [{:keys [order by-key]}
-        (reduce (fn [{:keys [order by-key]} item]
-                  (if item
-                    (let [k (reasoning-item-state-key item)]
-                      {:order (cond-> order (not (contains? by-key k)) (conj k))
-                       :by-key (update by-key k merge-reasoning-item-state item)})
-                    {:order order :by-key by-key}))
-          {:order [] :by-key {}}
-          items)]
+(defn- dedupe-reasoning-items
+  [items]
+  (let [{:keys [order by-key]} (reduce (fn [{:keys [order by-key]} item]
+                                         (if item
+                                           (let [k (reasoning-item-state-key item)]
+                                             {:order (cond-> order
+                                                       (not (contains? by-key k))
+                                                       (conj k))
+                                              :by-key
+                                              (update by-key k merge-reasoning-item-state item)})
+                                           {:order order :by-key by-key}))
+                                       {:order [] :by-key {}}
+                                       items)]
     (mapv by-key order)))
 
 (declare dedupe-tool-calls)
@@ -2025,43 +2222,47 @@
    `content_block_stop` event); plain providers fall back to a flat
    merge."
   [a b]
-  (cond
-    (nil? a) b
-    (nil? b) a
-    :else
-    (let [provider (or (:provider b) (:provider a))]
-      (case provider
-        :openai-responses
-        (let [items (dedupe-reasoning-items
-                      (concat (:reasoning-items a) (:reasoning-items b)))
-              ;; Tool calls arrive one-per-`output_item.done`; concat across
-              ;; events (parallel calls) and dedupe vs the terminal
-              ;; `response.completed` output.
-              tcs   (dedupe-tool-calls (concat (:tool-calls a) (:tool-calls b)))]
-          (cond-> (merge a b)
-            (seq items) (assoc :reasoning-items items)
-            (seq tcs)   (assoc :tool-calls tcs)))
+  (cond (nil? a) b
+        (nil? b) a
+        :else (let [provider (or (:provider b) (:provider a))]
+                (case provider
+                  :openai-responses
+                  (let [items (dedupe-reasoning-items (concat (:reasoning-items a)
+                                                              (:reasoning-items b)))
+                        ;; Tool calls arrive one-per-`output_item.done`; concat across
+                        ;; events (parallel calls) and dedupe vs the terminal
+                        ;; `response.completed` output.
+                        tcs (dedupe-tool-calls (concat (:tool-calls a) (:tool-calls b)))]
 
-        :anthropic
-        (let [blocks (vec (concat (or (:blocks a) []) (or (:blocks b) [])))]
-          (cond-> (merge a b)
-            (seq blocks) (assoc :blocks blocks)))
+                    (cond-> (merge a b)
+                      (seq items)
+                      (assoc :reasoning-items items)
 
-        ;; OpenAI chat-completions streams native tool calls as
-        ;; `delta.tool_calls[]` fragments across many chunks (id/name on the
-        ;; first, arguments string in pieces, paired by :index). Accumulate the
-        ;; raw fragments; the finalizer assembles them into canonical calls.
-        :openai-chat
-        (let [frags (vec (concat (:tool-call-fragments a) (:tool-call-fragments b)))]
-          (cond-> (merge a b)
-            (seq frags) (assoc :tool-call-fragments frags)))
+                      (seq tcs)
+                      (assoc :tool-calls tcs)))
 
-        (merge a b)))))
+                  :anthropic
+                  (let [blocks (vec (concat (or (:blocks a) []) (or (:blocks b) [])))]
+                    (cond-> (merge a b)
+                      (seq blocks)
+                      (assoc :blocks blocks)))
 
-(defn- reasoning-item-provider-state [item]
+                  ;; OpenAI chat-completions streams native tool calls as
+                  ;; `delta.tool_calls[]` fragments across many chunks (id/name on the
+                  ;; first, arguments string in pieces, paired by :index). Accumulate the
+                  ;; raw fragments; the finalizer assembles them into canonical calls.
+                  :openai-chat
+                  (let [frags (vec (concat (:tool-call-fragments a) (:tool-call-fragments b)))]
+                    (cond-> (merge a b)
+                      (seq frags)
+                      (assoc :tool-call-fragments frags)))
+
+                  (merge a b)))))
+
+(defn- reasoning-item-provider-state
+  [item]
   (when-let [state (reasoning-item-state item)]
-    {:provider :openai-responses
-     :reasoning-items [state]}))
+    {:provider :openai-responses :reasoning-items [state]}))
 
 (declare response-output-tool-calls)
 
@@ -2076,13 +2277,19 @@
    provider-state) can surface them — the terminal `response.completed`
    event delivers the full output array with complete arguments."
   [response]
-  (let [items (dedupe-reasoning-items
-                (keep reasoning-item-state (get response "output")))
-        tool-calls (response-output-tool-calls response)]
+  (let [items
+        (dedupe-reasoning-items (keep reasoning-item-state (get response "output")))
+
+        tool-calls
+        (response-output-tool-calls response)]
+
     (when (or (seq items) (seq tool-calls))
       (cond-> {:provider :openai-responses}
-        (seq items)      (assoc :reasoning-items items)
-        (seq tool-calls) (assoc :tool-calls tool-calls)))))
+        (seq items)
+        (assoc :reasoning-items items)
+
+        (seq tool-calls)
+        (assoc :tool-calls tool-calls)))))
 
 (defn- normalize-openai-usage
   "Phase A: alias of `usage/openai-canonical`. Kept as a private name
@@ -2127,8 +2334,7 @@
     (let [id* (normalize-id-part id)]
       ;; Non-rs_ id => reject. Do not invent prefix; encrypted payload may be
       ;; id-bound. Copilot has minted such ids, then rejected replay.
-      (when (str/starts-with? id* "rs_")
-        id*))))
+      (when (str/starts-with? id* "rs_") id*))))
 
 (defn- canonical-thinking-block->responses-reasoning-item
   "Decodes a canonical thinking block's `:thinking-signature` back into
@@ -2154,9 +2360,8 @@
   (let [item (or (when (and (string? thinking-signature) (not (str/blank? thinking-signature)))
                    (try (json/read-json thinking-signature :key-fn keyword)
                         (catch Exception _ nil)))
-               (when (and (string? thinking) (not (str/blank? thinking)))
-                 {:type "reasoning"
-                  :summary [{:type "summary_text" :text thinking}]}))]
+                 (when (and (string? thinking) (not (str/blank? thinking)))
+                   {:type "reasoning" :summary [{:type "summary_text" :text thinking}]}))]
     (when item
       (if-let [id (:id item)]
         (when-let [id* (normalize-responses-reasoning-id id)]
@@ -2169,13 +2374,17 @@
    from both the streaming aggregator and any non-streaming Responses
    extract path so both surfaces produce the same canonical shape."
   [reasoning-items visible-text]
-  (let [thinking-blocks (mapv responses-reasoning-item->canonical-thinking-block
-                          (or reasoning-items []))
-        text-blocks     (when (and (string? visible-text) (not (str/blank? visible-text)))
-                          [{:type "text" :text visible-text}])
-        content         (vec (concat thinking-blocks text-blocks))]
-    (when (seq content)
-      {:role "assistant" :content content})))
+  (let [thinking-blocks
+        (mapv responses-reasoning-item->canonical-thinking-block (or reasoning-items []))
+
+        text-blocks
+        (when (and (string? visible-text) (not (str/blank? visible-text)))
+          [{:type "text" :text visible-text}])
+
+        content
+        (vec (concat thinking-blocks text-blocks))]
+
+    (when (seq content) {:role "assistant" :content content})))
 
 (defn- openai-chat-canonical-assistant-message
   "Builds the canonical `:assistant-message` for an OpenAI-compatible
@@ -2190,28 +2399,36 @@
    Returns nil when there is no usable assistant content - callers
    then skip the replay step."
   [{:keys [content reasoning-content]}]
-  (let [text? (and (string? content) (not (str/blank? content)))
-        rc?   (and (string? reasoning-content) (not (str/blank? reasoning-content)))]
+  (let [text?
+        (and (string? content) (not (str/blank? content)))
+
+        rc?
+        (and (string? reasoning-content) (not (str/blank? reasoning-content)))]
+
     (when (or text? rc?)
-      (let [thinking-block (when rc?
-                             {:type "thinking"
-                              :thinking reasoning-content
-                              :thinking-signature reasoning-content
-                              :redacted? false})
-            text-block     (when text?
-                             {:type "text" :text content})]
-        {:role "assistant"
-         :content (vec (keep identity [thinking-block text-block]))}))))
+      (let [thinking-block
+            (when rc?
+              {:type "thinking"
+               :thinking reasoning-content
+               :thinking-signature reasoning-content
+               :redacted? false})
+
+            text-block
+            (when text? {:type "text" :text content})]
+
+        {:role "assistant" :content (vec (keep identity [thinking-block text-block]))}))))
 
 (defn- openai-chat-tool-calls
   "Canonical tool calls from an OpenAI chat-completions `message.tool_calls`."
   [message]
   (->> (get message "tool_calls")
-    (keep (fn [tc]
-            (let [f (get tc "function")]
-              (when (get f "name")
-                {:id (get tc "id") :name (get f "name") :input (decode-tool-arguments (get f "arguments"))}))))
-    vec))
+       (keep (fn [tc]
+               (let [f (get tc "function")]
+                 (when (get f "name")
+                   {:id (get tc "id")
+                    :name (get f "name")
+                    :input (decode-tool-arguments (get f "arguments"))}))))
+       vec))
 
 (defn- responses-tool-call-id
   "Canonical id for a Responses `function_call`: the COMPOSITE `call_id|item_id`
@@ -2221,19 +2438,24 @@
    re-emit `responses-message-input-entries` splits this back into the two wire
    fields. Mirrors pi-ai (`${item.call_id}|${item.id}`)."
   [item]
-  (let [c (get item "call_id") i (get item "id")]
+  (let [c
+        (get item "call_id")
+
+        i
+        (get item "id")]
+
     (if (and c i) (str c "|" i) (or c i))))
 
 (defn- response-output-tool-calls
   "Canonical tool calls from an OpenAI Responses `:output` `function_call` items."
   [response]
   (->> (get response "output")
-    (keep (fn [item]
-            (when (= "function_call" (get item "type"))
-              {:id (responses-tool-call-id item)
-               :name (get item "name")
-               :input (decode-tool-arguments (get item "arguments"))})))
-    vec))
+       (keep (fn [item]
+               (when (= "function_call" (get item "type"))
+                 {:id (responses-tool-call-id item)
+                  :name (get item "name")
+                  :input (decode-tool-arguments (get item "arguments"))})))
+       vec))
 
 (defn- function-call-item->tool-call
   "Canonical tool call from one OpenAI Responses `function_call` output item
@@ -2250,10 +2472,10 @@
    `output_item.done` event AND the terminal `response.completed` output."
   [tool-calls]
   (->> tool-calls
-    (reduce (fn [acc tc]
-              (if (some #(= (:id tc) (:id %)) acc) acc (conj acc tc)))
-      [])
-    vec))
+       (reduce (fn [acc tc]
+                 (if (some #(= (:id tc) (:id %)) acc) acc (conj acc tc)))
+               [])
+       vec))
 
 (defn- assemble-chat-tool-call-fragments
   "Reassemble streamed OpenAI chat `delta.tool_calls[]` fragments into canonical
@@ -2261,17 +2483,28 @@
    first fragment, `:arguments` as a string concatenated across fragments."
   [fragments]
   (->> fragments
-    (reduce (fn [acc fragment]
-              (let [id  (get fragment "id")
-                    f   (get fragment "function")
-                    idx (or (get fragment "index") 0)]
-                (cond-> acc
-                  id             (assoc-in [idx :id] id)
-                  (get f "name") (assoc-in [idx :name] (get f "name"))
-                  true           (update-in [idx :arguments] (fnil str "") (or (get f "arguments") "")))))
-      (sorted-map))
-    (mapv (fn [[_ {:keys [id name arguments]}]]
-            {:id id :name name :input (decode-tool-arguments arguments)}))))
+       (reduce (fn [acc fragment]
+                 (let [id
+                       (get fragment "id")
+
+                       f
+                       (get fragment "function")
+
+                       idx
+                       (or (get fragment "index") 0)]
+
+                   (cond-> acc
+                     id
+                     (assoc-in [idx :id] id)
+
+                     (get f "name")
+                     (assoc-in [idx :name] (get f "name"))
+
+                     true
+                     (update-in [idx :arguments] (fnil str "") (or (get f "arguments") "")))))
+               (sorted-map))
+       (mapv (fn [[_ {:keys [id name arguments]}]]
+               {:id id :name name :input (decode-tool-arguments arguments)}))))
 
 (defn- with-tool-use-blocks
   "Append canonical `tool_use` content blocks (built from `tool-calls`) onto a
@@ -2280,8 +2513,11 @@
   [canonical-msg tool-calls]
   (if (seq tool-calls)
     (update (or canonical-msg {:role "assistant" :content []})
-      :content (fnil into [])
-      (mapv (fn [c] {:type "tool_use" :id (:id c) :name (:name c) :input (:input c)}) tool-calls))
+            :content
+            (fnil into [])
+            (mapv (fn [c]
+                    {:type "tool_use" :id (:id c) :name (:name c) :input (:input c)})
+                  tool-calls))
     canonical-msg))
 
 (defn- extract-response-data
@@ -2306,32 +2542,53 @@
    to `:messages` on the next call to keep the thinking session
    active."
   [envelope]
-  (let [response           (:parsed envelope)
-        message            (get-in response ["choices" 0 "message"])
-        raw-content        (get message "content")
-        message-reasoning-content (get message "reasoning_content")
-        raw-reasoning      (or message-reasoning-content
-                             (get message "reasoning")
-                             (get message "reasoning_text")
-                             (get message "reasoning_summary")
-                             (get response "reasoning")
-                             (get response "reasoning_text")
-                             (get response "reasoning_summary"))
-        block-content      (when (sequential? raw-content)
-                             (content-blocks-text raw-content))
-        block-reasoning    (when (sequential? raw-content)
-                             (reasoning-blocks-text raw-content))
-        fallback-content   (response-output-text response)
-        fallback-reasoning (response-output-reasoning response)
-        provider-state     (openai-responses-state response)
-        content            (cond
-                             (string? raw-content) raw-content
-                             (not (str/blank? (or block-content ""))) block-content
-                             (not (str/blank? (or fallback-content ""))) fallback-content
-                             :else nil)
-        reasoning          (or (reasoning-part-text raw-reasoning)
-                             block-reasoning
-                             (when-not (str/blank? fallback-reasoning) fallback-reasoning))
+  (let [response
+        (:parsed envelope)
+
+        message
+        (get-in response ["choices" 0 "message"])
+
+        raw-content
+        (get message "content")
+
+        message-reasoning-content
+        (get message "reasoning_content")
+
+        raw-reasoning
+        (or message-reasoning-content
+            (get message "reasoning")
+            (get message "reasoning_text")
+            (get message "reasoning_summary")
+            (get response "reasoning")
+            (get response "reasoning_text")
+            (get response "reasoning_summary"))
+
+        block-content
+        (when (sequential? raw-content) (content-blocks-text raw-content))
+
+        block-reasoning
+        (when (sequential? raw-content) (reasoning-blocks-text raw-content))
+
+        fallback-content
+        (response-output-text response)
+
+        fallback-reasoning
+        (response-output-reasoning response)
+
+        provider-state
+        (openai-responses-state response)
+
+        content
+        (cond (string? raw-content) raw-content
+              (not (str/blank? (or block-content ""))) block-content
+              (not (str/blank? (or fallback-content ""))) fallback-content
+              :else nil)
+
+        reasoning
+        (or (reasoning-part-text raw-reasoning)
+            block-reasoning
+            (when-not (str/blank? fallback-reasoning) fallback-reasoning))
+
         ;; Two extract paths share this fn: chat-completions (z.ai
         ;; GLM, OpenRouter, plain OpenAI Chat - use
         ;; `openai-chat-canonical-assistant-message`) and OpenAI
@@ -2342,45 +2599,46 @@
         ;; Native tool calls: chat puts them on `message.tool_calls`, Responses
         ;; emits `function_call` items in `:output`. Either is empty on the
         ;; other wire, so the concat is safe.
-        tool-calls         (vec (concat (openai-chat-tool-calls message)
-                                  (response-output-tool-calls response)))
-        canonical-msg      (or (when provider-state
-                                 (responses-extract-assistant-message
-                                   (:reasoning-items provider-state) content))
-                             (openai-chat-canonical-assistant-message
-                               {:content content
-                                :reasoning-content (when (string? message-reasoning-content)
-                                                     message-reasoning-content)}))
+        tool-calls
+        (vec (concat (openai-chat-tool-calls message) (response-output-tool-calls response)))
+
+        canonical-msg
+        (or (when provider-state
+              (responses-extract-assistant-message (:reasoning-items provider-state) content))
+            (openai-chat-canonical-assistant-message {:content content
+                                                      :reasoning-content
+                                                      (when (string? message-reasoning-content)
+                                                        message-reasoning-content)}))
+
         ;; tool_use blocks must ride the canonical assistant message so they
         ;; replay into the next request (chat → message.tool_calls;
         ;; responses → function_call input items).
-        canonical-msg      (with-tool-use-blocks canonical-msg tool-calls)]
-    (cond-> {:content        content
-             :reasoning      reasoning
+        canonical-msg
+        (with-tool-use-blocks canonical-msg tool-calls)]
+
+    (cond-> {:content content
+             :reasoning reasoning
              :provider-state provider-state
-             :api-usage      (normalize-openai-usage (get response "usage"))
-             :http-response  envelope}
-      (seq tool-calls) (assoc :tool-calls tool-calls)
-      canonical-msg (assoc :assistant-message canonical-msg))))
+             :api-usage (normalize-openai-usage (get response "usage"))
+             :http-response envelope}
+      (seq tool-calls)
+      (assoc :tool-calls tool-calls)
 
-(defn- responses-text-content [content]
-  (cond
-    (string? content)
-    content
+      canonical-msg
+      (assoc :assistant-message canonical-msg))))
 
-    (sequential? content)
-    (->> content
-      (keep (fn [block]
-              (cond
-                (string? block) block
-                (= "text" (:type block)) (:text block)
-                (= "input_text" (:type block)) (:text block)
-                (= "output_text" (:type block)) (:text block)
-                :else nil)))
-      (str/join "\n"))
-
-    :else
-    (str content)))
+(defn- responses-text-content
+  [content]
+  (cond (string? content) content
+        (sequential? content) (->> content
+                                   (keep (fn [block]
+                                           (cond (string? block) block
+                                                 (= "text" (:type block)) (:text block)
+                                                 (= "input_text" (:type block)) (:text block)
+                                                 (= "output_text" (:type block)) (:text block)
+                                                 :else nil)))
+                                   (str/join "\n"))
+        :else (str content)))
 
 (defn- gpt-5-6-or-later?
   "True for OpenAI GPT model names whose explicit prompt-cache breakpoint
@@ -2396,8 +2654,7 @@
    itself never sends the field - there `prompt_cache_key` plus the implicit
    prefix IS the whole cache contract. Public `api.openai.com` keeps the markers."
   [provider-id base-url]
-  (not (or (= :openai-codex provider-id)
-         (str/includes? (str base-url) "chatgpt.com/backend-api"))))
+  (not (or (= :openai-codex provider-id) (str/includes? (str base-url) "chatgpt.com/backend-api"))))
 
 (defn- responses-explicit-cache?
   "THE gate for explicit `prompt_cache_breakpoint` markers on a Responses call:
@@ -2406,7 +2663,7 @@
    through this, so the two never disagree about one turn's wire shape."
   [provider-id base-url]
   (and (responses-explicit-cache-endpoint? provider-id base-url)
-    (not (failure/explicit-cache-refused-host? base-url))))
+       (not (failure/explicit-cache-refused-host? base-url))))
 
 (def ^:private OPENAI_EXPLICIT_CACHE_BREAKPOINT {:mode "explicit"})
 
@@ -2414,19 +2671,20 @@
   "True when `block` can carry a Responses `prompt_cache_breakpoint`."
   [role block]
   (and (not= role "assistant")
-    (contains? #{"text" "input_text" "image_url" "input_image" "tool_result"}
-      (:type block))))
+       (contains? #{"text" "input_text" "image_url" "input_image" "tool_result"} (:type block))))
 
 (defn- tag-last-responses-cacheable-block
   "Tag the last cacheable input block in one canonical message."
   [{:keys [role content] :as message}]
-  (let [blocks (vec (normalize-content content))
-        idx    (last (keep-indexed (fn [i block]
-                                     (when (responses-cacheable-input-block? role block) i))
-                       blocks))]
-    (if (some? idx)
-      (assoc message :content (update blocks idx assoc :svar/cache true))
-      message)))
+  (let [blocks
+        (vec (normalize-content content))
+
+        idx
+        (last (keep-indexed (fn [i block]
+                              (when (responses-cacheable-input-block? role block) i))
+                            blocks))]
+
+    (if (some? idx) (assoc message :content (update blocks idx assoc :svar/cache true)) message)))
 
 (defn- add-rolling-responses-cache-breakpoint
   "Mark the input boundary immediately before the latest input boundary.
@@ -2437,69 +2695,78 @@
    eligible for an exact read while the new implicit boundary writes the
    growing conversation for the following request."
   [messages]
-  (let [eligible (keep-indexed
-                   (fn [i {:keys [role content]}]
-                     (when (some #(responses-cacheable-input-block? role %)
-                             (normalize-content content))
-                       i))
-                   messages)
-        previous (some-> eligible butlast last)]
+  (let [eligible
+        (keep-indexed
+          (fn [i {:keys [role content]}]
+            (when (some #(responses-cacheable-input-block? role %) (normalize-content content)) i))
+          messages)
+
+        previous
+        (some-> eligible
+                butlast
+                last)]
+
     (cond-> messages
-      (some? previous) (update previous tag-last-responses-cacheable-block))))
+      (some? previous)
+      (update previous tag-last-responses-cacheable-block))))
 
-(defn- responses-wire-cache-breakpoint [explicit-cache? block]
-  (when (and explicit-cache? (:svar/cache block))
-    OPENAI_EXPLICIT_CACHE_BREAKPOINT))
+(defn- responses-wire-cache-breakpoint
+  [explicit-cache? block]
+  (when (and explicit-cache? (:svar/cache block)) OPENAI_EXPLICIT_CACHE_BREAKPOINT))
 
-(defn- responses-content-blocks [role content explicit-cache?]
+(defn- responses-content-blocks
+  [role content explicit-cache?]
   (let [text-type (if (= role "assistant") "output_text" "input_text")]
-    (cond
-      (string? content)
-      [{:type text-type :text content}]
+    (cond (string? content) [{:type text-type :text content}]
+          (sequential? content)
+          (->> content
+               (keep (fn [block]
+                       (cond (string? block) {:type text-type :text block}
+                             (contains? #{"text" "input_text" "output_text"} (:type block))
+                             (cond-> {:type text-type :text (:text block)}
+                               (and (= text-type "input_text")
+                                    (responses-wire-cache-breakpoint explicit-cache? block))
+                               (assoc :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT))
+                             (= "image_url" (:type block))
+                             (when-let [url (get-in block [:image_url :url])]
+                               (cond-> {:type "input_image" :image_url url}
+                                 (responses-wire-cache-breakpoint explicit-cache? block)
+                                 (assoc :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT)))
+                             :else nil)))
+               vec)
+          :else [{:type text-type :text (str content)}])))
 
-      (sequential? content)
-      (->> content
-        (keep (fn [block]
-                (cond
-                  (string? block)
-                  {:type text-type :text block}
+(defn- normalize-text-verbosity
+  [v]
+  (let [raw
+        (cond (keyword? v) (name v)
+              (string? v) v
+              :else nil)
 
-                  (contains? #{"text" "input_text" "output_text"} (:type block))
-                  (cond-> {:type text-type :text (:text block)}
-                    (and (= text-type "input_text")
-                      (responses-wire-cache-breakpoint explicit-cache? block))
-                    (assoc :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT))
+        s
+        (some-> raw
+                str/trim
+                str/lower-case)]
 
-                  (= "image_url" (:type block))
-                  (when-let [url (get-in block [:image_url :url])]
-                    (cond-> {:type "input_image" :image_url url}
-                      (responses-wire-cache-breakpoint explicit-cache? block)
-                      (assoc :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT)))
-
-                  :else nil)))
-        vec)
-
-      :else
-      [{:type text-type :text (str content)}])))
-
-(defn- normalize-text-verbosity [v]
-  (let [raw (cond
-              (keyword? v) (name v)
-              (string? v)  v
-              :else        nil)
-        s   (some-> raw str/trim str/lower-case)]
     (case s
-      ("low" "medium" "high") s
+      ("low" "medium" "high")
+      s
+
       nil)))
 
-(defn- response-format->text-format [response-format]
+(defn- response-format->text-format
+  [response-format]
   (when response-format
     (case (:type response-format)
-      "json_object" {:type "json_object"}
-      "json_schema" {:type "json_schema"
-                     :name (:name response-format)
-                     :schema (:schema response-format)
-                     :strict (:strict response-format)}
+      "json_object"
+      {:type "json_object"}
+
+      "json_schema"
+      {:type "json_schema"
+       :name (:name response-format)
+       :schema (:schema response-format)
+       :strict (:strict response-format)}
+
       nil)))
 
 (defn- tool-result-text
@@ -2516,61 +2783,84 @@
      - user `tool_result` blocks → `function_call_output` items
      - remaining text/image blocks → the message entry
    System messages are filtered out upstream; user/assistant only."
-  ([message]
-   (responses-message-input-entries message false))
+  ([message] (responses-message-input-entries message false))
   ([{:keys [role content]} explicit-cache?]
-   (let [normalized   (normalize-content content)
-         assistant?   (= role "assistant")
-         tool-use?    #(= "tool_use" (:type %))
-         tool-result? #(= "tool_result" (:type %))
-         thinking-blocks (when assistant? (filterv canonical-thinking-block? normalized))
-         tool-use-blocks (filterv tool-use? normalized)
-         tool-result-blocks (filterv tool-result? normalized)
-         rest-blocks  (filterv #(not (or (canonical-thinking-block? %)
-                                       (tool-use? %) (tool-result? %)))
-                        normalized)
-         reasoning-items (when assistant?
-                           (vec (keep canonical-thinking-block->responses-reasoning-item thinking-blocks)))
-        ;; The canonical id is the COMPOSITE `call_id|item_id` (see
-        ;; `responses-tool-call-id`). Split it back into the two wire fields:
-        ;; the function_call carries BOTH `id` (the `fc_…` item id OpenAI pairs
-        ;; with the reasoning item) and `call_id`; the function_call_output and
-        ;; the reasoning↔call pairing both key on `call_id`.
-         fn-call-items   (mapv (fn [b]
-                                 (let [[call-id item-id] (str/split (str (:id b)) #"\|" 2)]
-                                   (cond-> {:type "function_call"
-                                            :call_id call-id
-                                            :name (:name b)
-                                            :arguments (json/write-json-str (or (:input b) {}))}
-                                    ;; every :input item id must be <=64 chars
-                                    ;; (Responses/Copilot reject longer, HTTP 400)
-                                     (not (str/blank? item-id)) (assoc :id (normalize-id-part item-id)))))
-                           tool-use-blocks)
-         fn-output-items (mapv (fn [b]
-                                 (let [text (tool-result-text (:content b))]
-                                   {:type "function_call_output"
-                                    :call_id (first (str/split (str (:tool_use_id b)) #"\|" 2))
-                                    :output (if (responses-wire-cache-breakpoint explicit-cache? b)
-                                              [{:type "input_text"
-                                                :text text
-                                                :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT}]
-                                              text)}))
-                           tool-result-blocks)
-        ;; `:type "message"` is REQUIRED on a Responses input message item.
-        ;; The public OpenAI `/v1/responses` API defaults a typeless item to
-        ;; "message", but the ChatGPT Codex backend
-        ;; (`chatgpt.com/backend-api/codex/responses`) validates strictly and
-        ;; rejects a typeless item with HTTP 400 `{"detail":"Unsupported
-        ;; content type"}`. function_call / function_call_output / reasoning
-        ;; items already carry their `:type`; the message entry must too.
-         message-entry (when (seq rest-blocks)
-                         {:type    "message"
-                          :role    (if assistant? "assistant" "user")
-                          :content (responses-content-blocks role rest-blocks explicit-cache?)})]
+   (let [normalized
+         (normalize-content content)
+
+         assistant?
+         (= role "assistant")
+
+         tool-use?
+         #(= "tool_use" (:type %))
+
+         tool-result?
+         #(= "tool_result" (:type %))
+
+         thinking-blocks
+         (when assistant? (filterv canonical-thinking-block? normalized))
+
+         tool-use-blocks
+         (filterv tool-use? normalized)
+
+         tool-result-blocks
+         (filterv tool-result? normalized)
+
+         rest-blocks
+         (filterv #(not (or (canonical-thinking-block? %) (tool-use? %) (tool-result? %)))
+           normalized)
+
+         reasoning-items
+         (when assistant?
+           (vec (keep canonical-thinking-block->responses-reasoning-item thinking-blocks)))
+
+         ;; The canonical id is the COMPOSITE `call_id|item_id` (see
+         ;; `responses-tool-call-id`). Split it back into the two wire fields:
+         ;; the function_call carries BOTH `id` (the `fc_…` item id OpenAI pairs
+         ;; with the reasoning item) and `call_id`; the function_call_output and
+         ;; the reasoning↔call pairing both key on `call_id`.
+         fn-call-items
+         (mapv (fn [b]
+                 (let [[call-id item-id] (str/split (str (:id b)) #"\|" 2)]
+                   (cond-> {:type "function_call"
+                            :call_id call-id
+                            :name (:name b)
+                            :arguments (json/write-json-str (or (:input b) {}))}
+                     ;; every :input item id must be <=64 chars
+                     ;; (Responses/Copilot reject longer, HTTP 400)
+                     (not (str/blank? item-id))
+                     (assoc :id (normalize-id-part item-id)))))
+               tool-use-blocks)
+
+         fn-output-items
+         (mapv (fn [b]
+                 (let [text (tool-result-text (:content b))]
+                   {:type "function_call_output"
+                    :call_id (first (str/split (str (:tool_use_id b)) #"\|" 2))
+                    :output (if (responses-wire-cache-breakpoint explicit-cache? b)
+                              [{:type "input_text"
+                                :text text
+                                :prompt_cache_breakpoint OPENAI_EXPLICIT_CACHE_BREAKPOINT}]
+                              text)}))
+               tool-result-blocks)
+
+         ;; `:type "message"` is REQUIRED on a Responses input message item.
+         ;; The public OpenAI `/v1/responses` API defaults a typeless item to
+         ;; "message", but the ChatGPT Codex backend
+         ;; (`chatgpt.com/backend-api/codex/responses`) validates strictly and
+         ;; rejects a typeless item with HTTP 400 `{"detail":"Unsupported
+         ;; content type"}`. function_call / function_call_output / reasoning
+         ;; items already carry their `:type`; the message entry must too.
+         message-entry
+         (when (seq rest-blocks)
+           {:type "message"
+            :role (if assistant? "assistant" "user")
+            :content (responses-content-blocks role rest-blocks explicit-cache?)})]
+
      (vec (concat reasoning-items
-            (when message-entry [message-entry])
-            fn-call-items
-            fn-output-items)))))
+                  (when message-entry [message-entry])
+                  fn-call-items
+                  fn-output-items)))))
 
 ;; ── Stateless replay (server-minted item ids) ──────────────────────────────
 ;; The OpenAI Responses wire lets the CLIENT replay items the SERVER minted:
@@ -2598,65 +2888,116 @@
    so it is dropped rather than sent empty."
   [input]
   (into []
-    (keep (fn [item]
-            (if (= "reasoning" (:type item))
-              (let [item* (dissoc item :id :encrypted_content)]
-                (when (or (seq (:summary item*)) (seq (:content item*)))
-                  item*))
-              (dissoc item :id))))
-    input))
+        (keep (fn [item]
+                (if (= "reasoning" (:type item))
+                  (let [item* (dissoc item :id :encrypted_content)]
+                    (when (or (seq (:summary item*)) (seq (:content item*))) item*))
+                  (dissoc item :id))))
+        input))
 
 (defn- build-openai-responses-request-body
-  ([messages model extra-body]
-   (build-openai-responses-request-body messages model extra-body nil))
-  ([messages model extra-body {:keys [stateless-items? explicit-cache?]
-                               :or   {explicit-cache? true}}]
-   (let [messages       (sanitize-replayed-messages messages model true)
+  ([messages model extra-body] (build-openai-responses-request-body messages model extra-body nil))
+  ([messages model extra-body {:keys [stateless-items? explicit-cache?] :or {explicit-cache? true}}]
+   (let [messages
+         (sanitize-replayed-messages messages model true)
+
          ;; A breakpoint is a property of the ENDPOINT as much as of the model,
          ;; so the caller can switch the markers off for a backend that refuses
          ;; the field even though the model name is GPT-5.6 or later.
-         explicit-cache? (and explicit-cache? (gpt-5-6-or-later? model))
-         messages       (cond-> messages
-                          explicit-cache? add-rolling-responses-cache-breakpoint)
-         [tools tool-choice extra-body] (extra-body-tools extra-body)
-         system-text (->> messages
-                       (filter #(= "system" (:role %)))
-                       (map (comp responses-text-content :content))
-                       (remove str/blank?)
-                       (str/join "\n\n"))
+         explicit-cache?
+         (and explicit-cache? (gpt-5-6-or-later? model))
+
+         messages
+         (cond-> messages
+           explicit-cache?
+           add-rolling-responses-cache-breakpoint)
+
+         [tools tool-choice extra-body]
+         (extra-body-tools extra-body)
+
+         system-text
+         (->> messages
+              (filter #(= "system" (:role %)))
+              (map (comp responses-text-content :content))
+              (remove str/blank?)
+              (str/join "\n\n"))
+
          ;; Canonical thinking blocks live inline on assistant messages.
          ;; Each one is hoisted out as a `reasoning` input entry placed
          ;; right before its parent message - the OpenAI Responses API
          ;; pairs reasoning items with the assistant turn that produced
          ;; them by ordering, not by id, so positional faithfulness here
          ;; is what keeps the thinking session valid.
-         input       (cond-> (->> messages
-                               (remove #(= "system" (:role %)))
-                               (mapcat #(responses-message-input-entries % explicit-cache?))
-                               vec)
-                       stateless-items? strip-server-item-ids)
-         effort      (:reasoning_effort extra-body)
-         text-format (or (get-in extra-body [:text :format])
-                       (response-format->text-format (:response_format extra-body)))
-         text-verbosity (or (normalize-text-verbosity (:verbosity extra-body))
-                          (normalize-text-verbosity (get-in extra-body [:text :verbosity])))
-         max-output-tokens (or (:max_output_tokens extra-body) (:max_tokens extra-body))
-         base-extra  (dissoc extra-body :reasoning_effort :response_format :verbosity :provider-state
-                       :max_tokens :max_output_tokens)
-         reasoning   (cond-> (:reasoning base-extra)
-                       effort (assoc :effort effort))
-         base-extra* (dissoc base-extra :reasoning)
-         base-text   (or (:text base-extra) {})
-         base-text   (cond-> base-text text-verbosity (assoc :verbosity text-verbosity))]
-     (cond-> {:model model
-              :input input}
-       (not (str/blank? system-text)) (assoc :instructions system-text)
-       max-output-tokens (assoc :max_output_tokens max-output-tokens)
-       (seq reasoning) (assoc :reasoning reasoning)
-       text-format (assoc :text (assoc base-text :format text-format))
-       (seq tools) (assoc :tools (tools->wire :openai-compatible-responses tools))
-       (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :openai-compatible-responses tool-choice))
-       (seq base-extra*) (merge (cond-> base-extra* text-format (dissoc :text)))))))
+         input
+         (cond-> (->> messages
+                      (remove #(= "system" (:role %)))
+                      (mapcat #(responses-message-input-entries % explicit-cache?))
+                      vec)
+           stateless-items?
+           strip-server-item-ids)
+
+         effort
+         (:reasoning_effort extra-body)
+
+         text-format
+         (or (get-in extra-body [:text :format])
+             (response-format->text-format (:response_format extra-body)))
+
+         text-verbosity
+         (or (normalize-text-verbosity (:verbosity extra-body))
+             (normalize-text-verbosity (get-in extra-body [:text :verbosity])))
+
+         max-output-tokens
+         (or (:max_output_tokens extra-body) (:max_tokens extra-body))
+
+         base-extra
+         (dissoc extra-body
+           :reasoning_effort
+           :response_format
+           :verbosity
+           :provider-state
+           :max_tokens
+           :max_output_tokens)
+
+         reasoning
+         (cond-> (:reasoning base-extra)
+           effort
+           (assoc :effort effort))
+
+         base-extra*
+         (dissoc base-extra :reasoning)
+
+         base-text
+         (or (:text base-extra) {})
+
+         base-text
+         (cond-> base-text
+           text-verbosity
+           (assoc :verbosity text-verbosity))]
+
+     (cond-> {:model model :input input}
+       (not (str/blank? system-text))
+       (assoc :instructions system-text)
+
+       max-output-tokens
+       (assoc :max_output_tokens max-output-tokens)
+
+       (seq reasoning)
+       (assoc :reasoning reasoning)
+
+       text-format
+       (assoc :text (assoc base-text :format text-format))
+
+       (seq tools)
+       (assoc :tools (tools->wire :openai-compatible-responses tools))
+
+       (and (seq tools) tool-choice)
+       (assoc :tool_choice (tool-choice->wire :openai-compatible-responses tool-choice))
+
+       (seq base-extra*)
+       (merge (cond-> base-extra*
+                text-format
+                (dissoc :text)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Google Gemini wire — generateContent / streamGenerateContent
@@ -2669,101 +3010,165 @@
 ;; NAME (there is no call-id on the wire), so the round-trip resolves each
 ;; canonical `tool_result`'s function name from the preceding `tool_use` by id.
 
-(defn- gemini-tool-decls [tools]
-  [{:functionDeclarations
-    (mapv (fn [{:keys [name description schema]}]
-            (cond-> {:name name :parameters (or schema EMPTY_TOOL_SCHEMA)}
-              description (assoc :description description)))
-      tools)}])
+(defn- gemini-tool-decls
+  [tools]
+  [{:functionDeclarations (mapv (fn [{:keys [name description schema]}]
+                                  (cond-> {:name name :parameters (or schema EMPTY_TOOL_SCHEMA)}
+                                    description
+                                    (assoc :description description)))
+                                tools)}])
 
-(defn- gemini-tool-config [tool-choice]
-  (let [named (cond (map? tool-choice) (:name tool-choice) (string? tool-choice) tool-choice :else nil)]
-    {:functionCallingConfig
-     (cond
-       named                     {:mode "ANY" :allowedFunctionNames [named]}
-       (= :required tool-choice) {:mode "ANY"}
-       (= :none tool-choice)     {:mode "NONE"}
-       :else                     {:mode "AUTO"})}))
+(defn- gemini-tool-config
+  [tool-choice]
+  (let [named (cond (map? tool-choice) (:name tool-choice)
+                    (string? tool-choice) tool-choice
+                    :else nil)]
+    {:functionCallingConfig (cond named {:mode "ANY" :allowedFunctionNames [named]}
+                                  (= :required tool-choice) {:mode "ANY"}
+                                  (= :none tool-choice) {:mode "NONE"}
+                                  :else {:mode "AUTO"})}))
 
 (defn- gemini-part-text
   "Text of one CANONICAL (request-side) part: svar-authored, keyword-keyed."
   [part]
-  (cond (string? part)          part
-        (string? (:text part))  (:text part)
-        :else                   nil))
+  (cond (string? part) part
+        (string? (:text part)) (:text part)
+        :else nil))
 
 (defn- gemini-wire-part-text
   "Text of one Gemini RESPONSE part. A response is model-authored JSON, so its
    keys stay the strings the wire delivered - svar never interns them."
   [part]
-  (cond (string? part)                  part
-        (string? (get part "text"))     (get part "text")
-        :else                           nil))
+  (cond (string? part) part
+        (string? (get part "text")) (get part "text")
+        :else nil))
 
 (defn- canonical->gemini-parts
   "One canonical content vec → Gemini `parts`. `id->name` resolves a
    tool_result's function name from the tool_use it answers."
   [blocks id->name]
   (->> blocks
-    (keep (fn [b]
-            (case (:type b)
-              "text"        (when-not (str/blank? (:text b)) {:text (:text b)})
-              ;; Thinking is NOT replayed to Gemini — no signed-echo contract.
-              "thinking"    nil
-              "tool_use"    {:functionCall {:name (:name b) :args (or (:input b) {})}}
-              ;; Gemini's functionResponse `:response` is a STRUCTURED error
-              ;; channel: newer models (Gemini 3) require `{:output v}` for
-              ;; success and `{:error v}` for failures, and REJECT the legacy
-              ;; `{:result v}` shape. Key on the canonical `:is_error` flag.
-              "tool_result" {:functionResponse
-                             {:name (or (id->name (:tool_use_id b)) (:tool_use_id b))
-                              :response (if (:is_error b)
-                                          {:error  (tool-result-text (:content b))}
-                                          {:output (tool-result-text (:content b))})}}
-              (when (:text b) {:text (:text b)}))))
-    vec))
+       (keep
+         (fn [b]
+           (case (:type b)
+             "text"
+             (when-not (str/blank? (:text b)) {:text (:text b)})
+
+             ;; Thinking is NOT replayed to Gemini — no signed-echo contract.
+             "thinking"
+             nil
+
+             "tool_use"
+             {:functionCall {:name (:name b) :args (or (:input b) {})}}
+
+             ;; Gemini's functionResponse `:response` is a STRUCTURED error
+             ;; channel: newer models (Gemini 3) require `{:output v}` for
+             ;; success and `{:error v}` for failures, and REJECT the legacy
+             ;; `{:result v}` shape. Key on the canonical `:is_error` flag.
+             "tool_result"
+             {:functionResponse {:name (or (id->name (:tool_use_id b)) (:tool_use_id b))
+                                 :response (if (:is_error b)
+                                             {:error (tool-result-text (:content b))}
+                                             {:output (tool-result-text (:content b))})}}
+
+             (when (:text b) {:text (:text b)}))))
+       vec))
 
 (defn- gemini-contents
   "Canonical messages → `[system-instruction contents]`. System messages fold
    into `systemInstruction`; assistant→\"model\", everything else→\"user\"."
   [messages]
-  (let [sys      (->> messages
-                   (filter #(= "system" (some-> (:role %) name)))
-                   (mapcat #(normalize-content (:content %)))
-                   (keep gemini-part-text) (remove str/blank?) (str/join "\n\n"))
-        id->name (into {} (for [m messages
-                                b (normalize-content (:content m))
-                                :when (= "tool_use" (:type b))]
-                            [(:id b) (:name b)]))
-        contents (->> messages
-                   (remove #(= "system" (some-> (:role %) name)))
-                   (keep (fn [{:keys [role content]}]
-                           (let [parts (canonical->gemini-parts (normalize-content content) id->name)]
-                             (when (seq parts)
-                               {:role (if (= "assistant" (some-> role name)) "model" "user")
-                                :parts parts}))))
-                   vec)]
+  (let [sys
+        (->> messages
+             (filter #(= "system"
+                         (some-> (:role %)
+                                 name)))
+             (mapcat #(normalize-content (:content %)))
+             (keep gemini-part-text)
+             (remove str/blank?)
+             (str/join "\n\n"))
+
+        id->name
+        (into {}
+              (for [m
+                    messages
+
+                    b
+                    (normalize-content (:content m))
+
+                    :when (= "tool_use" (:type b))]
+
+                [(:id b) (:name b)]))
+
+        contents
+        (->> messages
+             (remove #(= "system"
+                         (some-> (:role %)
+                                 name)))
+             (keep (fn [{:keys [role content]}]
+                     (let [parts (canonical->gemini-parts (normalize-content content) id->name)]
+                       (when (seq parts)
+                         {:role (if (= "assistant"
+                                       (some-> role
+                                               name))
+                                  "model"
+                                  "user")
+                          :parts parts}))))
+             vec)]
+
     [(when-not (str/blank? sys) {:parts [{:text sys}]}) contents]))
 
-(defn- build-gemini-request-body [messages _model extra-body]
-  (let [[tools tool-choice extra-body] (extra-body-tools extra-body)
-        [sys-instr contents] (gemini-contents messages)
-        max-out    (or (:max_output_tokens extra-body) (:max_tokens extra-body))
-        gen-config (cond-> {}
-                     max-out                   (assoc :maxOutputTokens max-out)
-                     (:temperature extra-body) (assoc :temperature (:temperature extra-body))
-                     (:thinkingConfig extra-body) (assoc :thinkingConfig (:thinkingConfig extra-body)))
-        base-extra (dissoc extra-body :max_tokens :max_output_tokens :temperature :thinkingConfig
-                     :reasoning_effort :reasoning :response_format :stream_options :prompt_cache_key)]
-    (cond-> {:contents contents}
-      sys-instr            (assoc :systemInstruction sys-instr)
-      (seq tools)          (assoc :tools (gemini-tool-decls tools))
-      (and (seq tools) tool-choice) (assoc :toolConfig (gemini-tool-config tool-choice))
-      (seq gen-config)     (assoc :generationConfig gen-config)
-      (seq base-extra)     (merge base-extra))))
+(defn- build-gemini-request-body
+  [messages _model extra-body]
+  (let [[tools tool-choice extra-body]
+        (extra-body-tools extra-body)
 
-(defn- gemini-candidate-parts [response]
-  (get-in response ["candidates" 0 "content" "parts"]))
+        [sys-instr contents]
+        (gemini-contents messages)
+
+        max-out
+        (or (:max_output_tokens extra-body) (:max_tokens extra-body))
+
+        gen-config
+        (cond-> {}
+          max-out
+          (assoc :maxOutputTokens max-out)
+
+          (:temperature extra-body)
+          (assoc :temperature (:temperature extra-body))
+
+          (:thinkingConfig extra-body)
+          (assoc :thinkingConfig (:thinkingConfig extra-body)))
+
+        base-extra
+        (dissoc extra-body
+          :max_tokens
+          :max_output_tokens
+          :temperature
+          :thinkingConfig
+          :reasoning_effort
+          :reasoning
+          :response_format
+          :stream_options
+          :prompt_cache_key)]
+
+    (cond-> {:contents contents}
+      sys-instr
+      (assoc :systemInstruction sys-instr)
+
+      (seq tools)
+      (assoc :tools (gemini-tool-decls tools))
+
+      (and (seq tools) tool-choice)
+      (assoc :toolConfig (gemini-tool-config tool-choice))
+
+      (seq gen-config)
+      (assoc :generationConfig gen-config)
+
+      (seq base-extra)
+      (merge base-extra))))
+
+(defn- gemini-candidate-parts [response] (get-in response ["candidates" 0 "content" "parts"]))
 
 (defn- gemini-tool-calls
   "Canonical tool calls from Gemini `functionCall` parts. Gemini emits no
@@ -2771,35 +3176,65 @@
    the wire round-trip matches by name/order, not id."
   [parts]
   (->> parts
-    (keep-indexed (fn [idx p]
-                    (when-let [fc (get p "functionCall")]
-                      {:id (str "gemini-" (get fc "name") "-" idx)
-                       :name (get fc "name")
-                       :input (decode-tool-arguments (get fc "args"))})))
-    vec))
+       (keep-indexed (fn [idx p]
+                       (when-let [fc (get p "functionCall")]
+                         {:id (str "gemini-" (get fc "name") "-" idx)
+                          :name (get fc "name")
+                          :input (decode-tool-arguments (get fc "args"))})))
+       vec))
 
-(defn- gemini-visible-text [parts]
-  (->> parts (remove #(get % "functionCall")) (remove #(get % "thought")) (keep gemini-wire-part-text)
-    (remove str/blank?) (str/join "")))
+(defn- gemini-visible-text
+  [parts]
+  (->> parts
+       (remove #(get % "functionCall"))
+       (remove #(get % "thought"))
+       (keep gemini-wire-part-text)
+       (remove str/blank?)
+       (str/join "")))
 
-(defn- gemini-canonical-assistant-message [parts tool-calls]
-  (let [text (gemini-visible-text parts)
-        msg  (when-not (str/blank? text) {:role "assistant" :content [{:type "text" :text text}]})]
+(defn- gemini-canonical-assistant-message
+  [parts tool-calls]
+  (let [text
+        (gemini-visible-text parts)
+
+        msg
+        (when-not (str/blank? text) {:role "assistant" :content [{:type "text" :text text}]})]
+
     (with-tool-use-blocks msg tool-calls)))
 
-(defn- extract-gemini-response-data [envelope]
-  (let [response   (:parsed envelope)
-        parts      (gemini-candidate-parts response)
-        text       (gemini-visible-text parts)
-        thoughts   (->> parts (filter #(get % "thought")) (keep gemini-wire-part-text) (remove str/blank?) (str/join "\n"))
-        tool-calls (gemini-tool-calls parts)
-        canonical-msg (gemini-canonical-assistant-message parts tool-calls)]
-    (cond-> {:content       (when-not (str/blank? text) text)
-             :reasoning     (when-not (str/blank? thoughts) thoughts)
-             :api-usage     (usage/gemini-canonical (get response "usageMetadata"))
+(defn- extract-gemini-response-data
+  [envelope]
+  (let [response
+        (:parsed envelope)
+
+        parts
+        (gemini-candidate-parts response)
+
+        text
+        (gemini-visible-text parts)
+
+        thoughts
+        (->> parts
+             (filter #(get % "thought"))
+             (keep gemini-wire-part-text)
+             (remove str/blank?)
+             (str/join "\n"))
+
+        tool-calls
+        (gemini-tool-calls parts)
+
+        canonical-msg
+        (gemini-canonical-assistant-message parts tool-calls)]
+
+    (cond-> {:content (when-not (str/blank? text) text)
+             :reasoning (when-not (str/blank? thoughts) thoughts)
+             :api-usage (usage/gemini-canonical (get response "usageMetadata"))
              :http-response envelope}
-      (seq tool-calls) (assoc :tool-calls tool-calls)
-      canonical-msg    (assoc :assistant-message canonical-msg))))
+      (seq tool-calls)
+      (assoc :tool-calls tool-calls)
+
+      canonical-msg
+      (assoc :assistant-message canonical-msg))))
 
 (defn- openai-chat-split-thinking
   "Splits a normalized canonical content vec into `[thinking-blocks
@@ -2831,15 +3266,13 @@
    are dropped."
   [thinking-blocks]
   (let [parts (->> thinking-blocks
-                (map (fn [{:keys [thinking-signature thinking redacted?]}]
-                       (cond
-                         redacted? nil
-                         (and (string? thinking-signature)
-                           (= thinking-signature thinking)) thinking-signature
-                         :else thinking)))
-                (remove str/blank?))]
-    (when (seq parts)
-      (str/join "\n" parts))))
+                   (map (fn [{:keys [thinking-signature thinking redacted?]}]
+                          (cond redacted? nil
+                                (and (string? thinking-signature) (= thinking-signature thinking))
+                                thinking-signature
+                                :else thinking)))
+                   (remove str/blank?))]
+    (when (seq parts) (str/join "\n" parts))))
 
 (defn- echo-reasoning-disabled?
   "Read once at request-build time. When `SVAR_DISABLE_REASONING_ECHO`
@@ -2865,9 +3298,8 @@
    iter, last-2 = 10 iter, last-3 = 8 iter, full = 6-8 iter). The
    knob was removed; do not reintroduce."
   []
-  (boolean
-    (when-let [v (System/getenv "SVAR_DISABLE_REASONING_ECHO")]
-      (contains? #{"1" "true" "yes" "on"} (str/lower-case v)))))
+  (boolean (when-let [v (System/getenv "SVAR_DISABLE_REASONING_ECHO")]
+             (contains? #{"1" "true" "yes" "on"} (str/lower-case v)))))
 
 (defn- build-request-body
   "Builds the request body for an OpenAI-compatible chat completion API.
@@ -2895,66 +3327,108 @@
    `model` - String. Model name.
    `extra-body` - Map, optional. Additional params to merge into the request body
                   (e.g. {:reasoning_effort \"medium\"} for reasoning-capable providers)."
-  ([messages model]
-   (build-request-body messages model nil))
+  ([messages model] (build-request-body messages model nil))
   ([messages model extra-body]
    ;; Issue #152: the chat/completions wire carries ONE id per call and caps it
    ;; at 64 chars — preserving the Responses composite `call_id|item_id` is
    ;; correct only on /v1/responses, so collapse it for this dialect.
-   (let [messages (sanitize-replayed-messages messages model false)
-         [tools tool-choice extra-body] (extra-body-tools extra-body)
-         echo-off? (echo-reasoning-disabled?)
-         tool-use?    #(= "tool_use" (:type %))
-         tool-result? #(= "tool_result" (:type %))
+   (let [messages
+         (sanitize-replayed-messages messages model false)
+
+         [tools tool-choice extra-body]
+         (extra-body-tools extra-body)
+
+         echo-off?
+         (echo-reasoning-disabled?)
+
+         tool-use?
+         #(= "tool_use" (:type %))
+
+         tool-result?
+         #(= "tool_result" (:type %))
+
          ;; One canonical message can expand to MULTIPLE wire messages: a user
          ;; message carrying `tool_result` blocks emits a `{:role "tool"}`
          ;; message per result (and is dropped entirely when it held nothing
          ;; else). Assistant `tool_use` blocks hoist to message-level
          ;; `:tool_calls`, mirroring the `reasoning_content` hoist.
-         processed (vec
-                     (mapcat
-                       (fn [{:keys [role content] :as m}]
-                         (let [normalized (normalize-content content)
-                               assistant? (= role "assistant")
-                               [thinking-blocks non-thinking]
-                               (if assistant?
-                                 (openai-chat-split-thinking normalized)
-                                 [nil normalized])
-                               tool-use-blocks    (filterv tool-use? non-thinking)
-                               tool-result-blocks (filterv tool-result? non-thinking)
-                               rest-blocks        (filterv #(not (or (tool-use? %) (tool-result? %)))
-                                                    non-thinking)
-                               reasoning-content
-                               (when (and (not echo-off?) (seq thinking-blocks))
-                                 (openai-chat-reasoning-content thinking-blocks))
-                               tool-calls
-                               (when (seq tool-use-blocks)
-                                 (mapv (fn [b] {:id (normalize-tool-call-id (:id b) false) :type "function"
-                                                :function {:name (:name b)
-                                                           :arguments (json/write-json-str (or (:input b) {}))}})
-                                   tool-use-blocks))
-                               base (-> m
-                                      (dissoc :content :model)
-                                      (assoc :content (openai-content rest-blocks))
-                                      (cond-> (= role "system") (assoc :role "system")))
-                               base (cond-> base
-                                      reasoning-content (assoc :reasoning_content reasoning-content)
-                                      (seq tool-calls)  (assoc :tool_calls tool-calls))
-                               ;; Keep the base message unless it's a pure
-                               ;; tool_result carrier (no text, no tool_calls,
-                               ;; no reasoning) — an empty user message is a
-                               ;; 400 on every OpenAI-compatible endpoint.
-                               keep-base? (or (seq rest-blocks) (seq tool-calls) reasoning-content)
-                               tool-msgs (mapv (fn [b] {:role "tool"
-                                                        :tool_call_id (normalize-tool-call-id (:tool_use_id b) false)
-                                                        :content (tool-result-text (:content b))})
-                                           tool-result-blocks)]
-                           (vec (concat (when keep-base? [base]) tool-msgs))))
-                       messages))]
+         processed
+         (vec
+           (mapcat
+             (fn [{:keys [role content] :as m}]
+               (let [normalized
+                     (normalize-content content)
+
+                     assistant?
+                     (= role "assistant")
+
+                     [thinking-blocks non-thinking]
+                     (if assistant? (openai-chat-split-thinking normalized) [nil normalized])
+
+                     tool-use-blocks
+                     (filterv tool-use? non-thinking)
+
+                     tool-result-blocks
+                     (filterv tool-result? non-thinking)
+
+                     rest-blocks
+                     (filterv #(not (or (tool-use? %) (tool-result? %))) non-thinking)
+
+                     reasoning-content
+                     (when (and (not echo-off?) (seq thinking-blocks))
+                       (openai-chat-reasoning-content thinking-blocks))
+
+                     tool-calls
+                     (when (seq tool-use-blocks)
+                       (mapv (fn [b]
+                               {:id (normalize-tool-call-id (:id b) false)
+                                :type "function"
+                                :function {:name (:name b)
+                                           :arguments (json/write-json-str (or (:input b) {}))}})
+                             tool-use-blocks))
+
+                     base
+                     (-> m
+                         (dissoc :content :model)
+                         (assoc :content (openai-content rest-blocks))
+                         (cond->
+                           (= role "system")
+                           (assoc :role "system")))
+
+                     base
+                     (cond-> base
+                       reasoning-content
+                       (assoc :reasoning_content reasoning-content)
+
+                       (seq tool-calls)
+                       (assoc :tool_calls tool-calls))
+
+                     ;; Keep the base message unless it's a pure
+                     ;; tool_result carrier (no text, no tool_calls,
+                     ;; no reasoning) — an empty user message is a
+                     ;; 400 on every OpenAI-compatible endpoint.
+                     keep-base?
+                     (or (seq rest-blocks) (seq tool-calls) reasoning-content)
+
+                     tool-msgs
+                     (mapv (fn [b]
+                             {:role "tool"
+                              :tool_call_id (normalize-tool-call-id (:tool_use_id b) false)
+                              :content (tool-result-text (:content b))})
+                           tool-result-blocks)]
+
+                 (vec (concat (when keep-base? [base]) tool-msgs))))
+             messages))]
+
      (cond-> {:model model :messages processed}
-       (seq tools) (assoc :tools (tools->wire :openai-compatible-chat tools))
-       (and (seq tools) tool-choice) (assoc :tool_choice (tool-choice->wire :openai-compatible-chat tool-choice))
-       (seq extra-body) (merge extra-body)))))
+       (seq tools)
+       (assoc :tools (tools->wire :openai-compatible-chat tools))
+
+       (and (seq tools) tool-choice)
+       (assoc :tool_choice (tool-choice->wire :openai-compatible-chat tool-choice))
+
+       (seq extra-body)
+       (merge extra-body)))))
 
 (defn- sanitize-messages-for-logging
   "Removes base64 image data from messages for safe logging.
@@ -2970,28 +3444,29 @@
   (mapv (fn [msg]
           (if (vector? (:content msg))
             ;; Multimodal content - filter out image data
-            (update msg :content
-              (fn [content-blocks]
-                (mapv (fn [block]
-                        (if (= "image_url" (:type block))
+            (update msg
+                    :content
+                    (fn [content-blocks]
+                      (mapv (fn [block]
+                              (if (= "image_url" (:type block))
                                 ;; Replace base64 data with placeholder
-                          (let [url (get-in block [:image_url :url] "")]
-                            (if (str/starts-with? url "data:")
-                              (assoc-in block [:image_url :url]
-                                (str (first (str/split url #",")) ",<BASE64_DATA_TRUNCATED>"))
-                              block))
-                          block))
-                  content-blocks)))
+                                (let [url (get-in block [:image_url :url] "")]
+                                  (if (str/starts-with? url "data:")
+                                    (assoc-in block
+                                      [:image_url :url]
+                                      (str (first (str/split url #",")) ",<BASE64_DATA_TRUNCATED>"))
+                                    block))
+                                block))
+                            content-blocks)))
             ;; Text-only content - pass through
             msg))
-    messages))
+        messages))
 
 (def ^:private API_KEY_ERROR_PATTERNS
   "Known error patterns that indicate API key configuration issues."
   [{:pattern #"(?i)no.connected.db"
     :message "API key is invalid or not configured. Check your API key."}
-   {:pattern #"(?i)invalid.api.key"
-    :message "API key is invalid. Check your API key."}
+   {:pattern #"(?i)invalid.api.key" :message "API key is invalid. Check your API key."}
    {:pattern #"(?i)authentication|unauthorized|api.key"
     :message "API authentication failed. Check your API key."}])
 
@@ -3000,9 +3475,8 @@
   [response-body]
   (when response-body
     (some (fn [{:keys [pattern message]}]
-            (when (re-find pattern response-body)
-              message))
-      API_KEY_ERROR_PATTERNS)))
+            (when (re-find pattern response-body) message))
+          API_KEY_ERROR_PATTERNS)))
 
 (declare extract-stream-delta http-post-stream!)
 
@@ -3013,22 +3487,32 @@
    root base URL OR a chat-completions URL that needs path translation."
   ([base-url] (responses-url base-url "/responses"))
   ([base-url responses-path]
-   (let [base       (or (some-> base-url str str/trim not-empty) "")
-         path       (str (when-not (str/starts-with? responses-path "/") "/")
-                      responses-path)
-         normalized (-> base
-                      (str/replace #"/+$" "")
-                      (str/replace #"/chat/completions$" ""))
-         parent     (when-let [[_ p] (re-matches #"(.+)/[^/]+" path)] p)]
-     (cond
-       (str/blank? normalized) path
-       (str/ends-with? normalized path) normalized
-       (and parent (not= parent "/") (str/ends-with? normalized parent))
-       (str normalized (subs path (count parent)))
-       :else (str normalized path)))))
+   (let [base
+         (or (some-> base-url
+                     str
+                     str/trim
+                     not-empty)
+             "")
 
-(def ^:dynamic *stream-semantic-timeout-ms*
-  router/DEFAULT_SEMANTIC_TIMEOUT_MS)
+         path
+         (str (when-not (str/starts-with? responses-path "/") "/") responses-path)
+
+         normalized
+         (-> base
+             (str/replace #"/+$" "")
+             (str/replace #"/chat/completions$" ""))
+
+         parent
+         (when-let [[_ p] (re-matches #"(.+)/[^/]+" path)]
+           p)]
+
+     (cond (str/blank? normalized) path
+           (str/ends-with? normalized path) normalized
+           (and parent (not= parent "/") (str/ends-with? normalized parent))
+           (str normalized (subs path (count parent)))
+           :else (str normalized path)))))
+
+(def ^:dynamic *stream-semantic-timeout-ms* router/DEFAULT_SEMANTIC_TIMEOUT_MS)
 
 (def ^:dynamic *stream-first-byte-timeout-ms*
   "Ceiling (ms) on the wait for the FIRST byte of a streaming response body,
@@ -3056,16 +3540,12 @@
    a TTFT abort then looked like an untyped failure whose message says \"timeout\"
    but not \"timed out\", so `failure/transient-error?` refused fallback and a
    request that never reached the model became a terminal turn failure."
-  #{:svar.core/stream-incomplete
-    :svar.core/stream-truncated
-    :svar.core/stream-ttft-timeout
-    :svar.core/stream-idle-timeout
-    :svar.core/stream-semantic-timeout
-    :svar.core/stream-cancelled
-    :svar.core/stream-failed
-    :svar.tokens/context-overflow})
+  #{:svar.core/stream-incomplete :svar.core/stream-truncated :svar.core/stream-ttft-timeout
+    :svar.core/stream-idle-timeout :svar.core/stream-semantic-timeout :svar.core/stream-cancelled
+    :svar.core/stream-failed :svar.tokens/context-overflow})
 
-(defn- stream-finalization-error? [e]
+(defn- stream-finalization-error?
+  [e]
   (contains? stream-finalization-error-types (:type (ex-data e))))
 
 (def ^:dynamic *responses-session-transport*
@@ -3073,12 +3553,12 @@
    session transport. Ordinary routed calls remain on HTTP/SSE."
   nil)
 
-(defn- responses-websocket-url [base-url responses-path]
+(defn- responses-websocket-url
+  [base-url responses-path]
   (let [http-url (responses-url base-url responses-path)]
-    (cond
-      (str/starts-with? http-url "https://") (str "wss://" (subs http-url 8))
-      (str/starts-with? http-url "http://")  (str "ws://" (subs http-url 7))
-      :else http-url)))
+    (cond (str/starts-with? http-url "https://") (str "wss://" (subs http-url 8))
+          (str/starts-with? http-url "http://") (str "ws://" (subs http-url 7))
+          :else http-url)))
 
 (defn- await-websocket-future!
   "Awaits one WebSocket future and cancels it when we stop waiting. `.get` wraps
@@ -3086,34 +3566,24 @@
    classifies a lost connection by exception type and must reconnect and replay
    rather than degrade the turn to the HTTP transport."
   [^CompletableFuture future timeout-ms]
-  (try
-    (.get future (long timeout-ms) TimeUnit/MILLISECONDS)
-    (catch InterruptedException e
-      (.cancel future true)
-      (.interrupt (Thread/currentThread))
-      (throw e))
-    (catch java.util.concurrent.ExecutionException e
-      (.cancel future true)
-      (throw (or (ex-cause e) e)))
-    (catch Throwable e
-      (.cancel future true)
-      (throw e))))
+  (try (.get future (long timeout-ms) TimeUnit/MILLISECONDS)
+       (catch InterruptedException e
+         (.cancel future true)
+         (.interrupt (Thread/currentThread))
+         (throw e))
+       (catch java.util.concurrent.ExecutionException e
+         (.cancel future true)
+         (throw (or (ex-cause e) e)))
+       (catch Throwable e (.cancel future true) (throw e))))
 
-(defn- abort-websocket! [^WebSocket socket]
-  (try
-    (.abort socket)
-    (catch Throwable _ nil)))
+(defn- abort-websocket! [^WebSocket socket] (try (.abort socket) (catch Throwable _ nil)))
 
 (defn- close-websocket!
-  ([socket]
-   (close-websocket! socket 1000))
+  ([socket] (close-websocket! socket 1000))
   ([^WebSocket socket timeout-ms]
-   (try
-     (await-websocket-future!
-       (.sendClose socket WebSocket/NORMAL_CLOSURE "session closed")
-       timeout-ms)
-     (catch Throwable _
-       (abort-websocket! socket)))))
+   (try (await-websocket-future! (.sendClose socket WebSocket/NORMAL_CLOSURE "session closed")
+                                 timeout-ms)
+        (catch Throwable _ (abort-websocket! socket)))))
 
 (defn open-responses-websocket!
   "Opens one Responses WebSocket and returns the small transport map used by
@@ -3122,50 +3592,71 @@
    public only as a deterministic transport seam for tests."
   [{:keys [base-url responses-path api-key headers timeout-ms]
     :or {responses-path "/responses" timeout-ms router/DEFAULT_TIMEOUT_MS}}]
-  (let [url       (responses-websocket-url base-url responses-path)
-        operation-timeout-ms (long (or timeout-ms Long/MAX_VALUE))
-        inbox     (LinkedBlockingQueue.)
-        fragments (StringBuilder.)
-        listener  (reify WebSocket$Listener
-                    (onOpen [_ socket]
-                      (.request ^WebSocket socket 1))
-                    (onText [_ socket data last?]
-                      (.append fragments ^CharSequence data)
-                      (when last?
-                        (.put inbox (str fragments))
-                        (.setLength fragments 0))
-                      (.request ^WebSocket socket 1)
-                      (CompletableFuture/completedFuture nil))
-                    (onError [_ _ error]
-                      (.put inbox error))
-                    (onClose [_ _ status reason]
-                      (.put inbox {:svar.websocket/closed true
-                                   :status status :reason reason})
-                      (CompletableFuture/completedFuture nil)))
-        client    ^HttpClient (:client (current-http-client))
-        builder   (.newWebSocketBuilder client)
-        all-headers (merge {"Authorization" (str "Bearer " api-key)
-                            "OpenAI-Beta" "responses_websockets=2026-02-06"}
-                      headers)
-        _         (doseq [[k v] all-headers :when (some? v)]
-                    (.header builder (name k) (str v)))
-        handshake (.buildAsync builder (URI/create url) listener)
-        socket    (await-websocket-future! handshake operation-timeout-ms)
-        closed?   (atom false)]
+  (let [url
+        (responses-websocket-url base-url responses-path)
+
+        operation-timeout-ms
+        (long (or timeout-ms Long/MAX_VALUE))
+
+        inbox
+        (LinkedBlockingQueue.)
+
+        fragments
+        (StringBuilder.)
+
+        listener
+        (reify
+          WebSocket$Listener
+            (onOpen [_ socket] (.request ^WebSocket socket 1))
+            (onText [_ socket data last?]
+              (.append fragments ^CharSequence data)
+              (when last? (.put inbox (str fragments)) (.setLength fragments 0))
+              (.request ^WebSocket socket 1)
+              (CompletableFuture/completedFuture nil))
+            (onError [_ _ error] (.put inbox error))
+            (onClose [_ _ status reason]
+              (.put inbox {:svar.websocket/closed true :status status :reason reason})
+              (CompletableFuture/completedFuture nil)))
+
+        client
+        ^HttpClient (:client (current-http-client))
+
+        builder
+        (.newWebSocketBuilder client)
+
+        all-headers
+        (merge {"Authorization" (str "Bearer " api-key)
+                "OpenAI-Beta" "responses_websockets=2026-02-06"}
+               headers)
+
+        _
+        (doseq [[k v]
+                all-headers
+
+                :when (some? v)]
+
+          (.header builder (name k) (str v)))
+
+        handshake
+        (.buildAsync builder (URI/create url) listener)
+
+        socket
+        (await-websocket-future! handshake operation-timeout-ms)
+
+        closed?
+        (atom false)]
+
     {:send! (fn [payload]
-              (await-websocket-future!
-                (.sendText ^WebSocket socket ^CharSequence payload true)
-                operation-timeout-ms))
+              (await-websocket-future! (.sendText ^WebSocket socket ^CharSequence payload true)
+                                       operation-timeout-ms))
      :receive! (fn [wait-ms]
                  (or (.poll inbox (long wait-ms) TimeUnit/MILLISECONDS)
-                   (throw (TimeoutException.
-                            (str "Responses WebSocket timed out after " wait-ms "ms.")))))
+                     (throw (TimeoutException.
+                              (str "Responses WebSocket timed out after " wait-ms "ms.")))))
      :close! (fn []
-               (when (compare-and-set! closed? false true)
-                 (close-websocket! socket)))
+               (when (compare-and-set! closed? false true) (close-websocket! socket)))
      :abort! (fn []
-               (when (compare-and-set! closed? false true)
-                 (abort-websocket! socket)))
+               (when (compare-and-set! closed? false true) (abort-websocket! socket)))
      :url url}))
 
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRIES
@@ -3190,8 +3681,8 @@
   (when e
     (or (when (instance? WebSocketHandshakeException e)
           (.statusCode ^HttpResponse (.getResponse ^WebSocketHandshakeException e)))
-      (:status (ex-data e))
-      (recur (ex-cause e)))))
+        (:status (ex-data e))
+        (recur (ex-cause e)))))
 
 (defn- close-session-socket!
   "Drops the socket AND the response chain that lives on it, so the next turn
@@ -3202,8 +3693,7 @@
    session itself."
   [transport-state mode]
   (when-let [socket (:socket @transport-state)]
-    (try ((if (= :abort mode) (:abort! socket) (:close! socket)))
-         (catch Throwable _ nil)))
+    (try ((if (= :abort mode) (:abort! socket) (:close! socket))) (catch Throwable _ nil)))
   (swap! transport-state dissoc :socket :cursor :stable :warmup-input))
 
 (defn- disable-session-websockets!
@@ -3230,61 +3720,68 @@
    cancellation is never masked - it is the caller asking to stop."
   [transport-state connect-opts]
   (or (:socket @transport-state)
-    (let [socket (try
-                   (open-responses-websocket! connect-opts)
-                   (catch InterruptedException e (throw e))
-                   (catch Throwable e
-                     (if (contains? failure/DELIBERATE_STREAM_ABORT_TYPES
-                           (:type (ex-data e)))
-                       (throw e)
-                       (let [status (websocket-handshake-status e)]
-                         (throw (ex-info (str "Responses WebSocket unavailable: " (ex-message e))
-                                  (cond-> {:type :svar.session/transport-unavailable
-                                           :cause-class (.getName (class e))}
-                                    status (assoc :status status))
-                                  e))))))]
-      (swap! transport-state assoc :socket socket)
-      socket)))
+      (let [socket (try (open-responses-websocket! connect-opts)
+                        (catch InterruptedException e (throw e))
+                        (catch Throwable e
+                          (if (contains? failure/DELIBERATE_STREAM_ABORT_TYPES (:type (ex-data e)))
+                            (throw e)
+                            (let [status (websocket-handshake-status e)]
+                              (throw (ex-info (str "Responses WebSocket unavailable: "
+                                                   (ex-message e))
+                                              (cond-> {:type :svar.session/transport-unavailable
+                                                       :cause-class (.getName (class e))}
+                                                status
+                                                (assoc :status status))
+                                              e))))))]
+        (swap! transport-state assoc :socket socket)
+        socket)))
 
 (def ^:private stream-failed-code->status
   "Best-effort HTTP-status equivalent for a streamed failure's provider error
    CODE (OpenAI `response.failed`) or error TYPE (Anthropic mid-stream `error`
    event), so the router's transient-status classification (429/5xx) applies to
    streamed failures exactly as it does to pre-stream HTTP errors."
-  {"rate_limit_exceeded" 429   ; OpenAI / Responses
-   "rate_limit_error"    429   ; Anthropic (also Copilot-Claude on /v1/messages)
-   "server_error"        500
-   "internal_error"      500
-   "api_error"           500   ; Anthropic transient server error
-   "overloaded"          529
-   "server_is_overloaded" 529  ; OpenAI Codex/ChatGPT backend mid-stream overload (opencode parseStreamError → retryable)
-   "overloaded_error"    529})
+  {"rate_limit_exceeded" 429  ; OpenAI / Responses
+   "rate_limit_error" 429     ; Anthropic (also Copilot-Claude on /v1/messages)
+   "server_error" 500
+   "internal_error" 500
+   "api_error" 500            ; Anthropic transient server error
+   "overloaded" 529
+   "server_is_overloaded" 529 ; OpenAI Codex/ChatGPT backend mid-stream overload (opencode parseStreamError → retryable)
+   "overloaded_error" 529})
 
 (def ^:private context-overflow-codes
   #{"context_length_exceeded" "context_window_exceeded" "prompt_too_long" "input_too_long"})
 
 (defn- context-overflow-failure?
   [code message]
-  (let [code (some-> code str/lower-case)
-        message (some-> message str/lower-case)]
+  (let [code
+        (some-> code
+                str/lower-case)
+
+        message
+        (some-> message
+                str/lower-case)]
+
     (or (contains? context-overflow-codes code)
-      (boolean
-        (some #(str/includes? (or message "") %)
-          ["context length exceeded" "context window exceeded"
-           "maximum context length" "prompt is too long" "input is too long"
-           "too many tokens"])))))
+        (boolean (some #(str/includes? (or message "") %)
+                       ["context length exceeded" "context window exceeded" "maximum context length"
+                        "prompt is too long" "input is too long" "too many tokens"])))))
 
 (defn- websocket-event-status
   "HTTP status for a Responses WebSocket failure event: the one the server wrapped
    into the event when it sent one (Codex reads both `status` and `status_code`),
    else the status its error CODE stands for."
   [event error code]
-  (let [raw (or (get event "status") (get event "status_code")
-              (get error "status") (get error "status_code"))]
-    (cond
-      (number? raw) (long raw)
-      (string? raw) (parse-long raw)
-      :else (get stream-failed-code->status (some-> code str/lower-case)))))
+  (let [raw (or (get event "status")
+                (get event "status_code")
+                (get error "status")
+                (get error "status_code"))]
+    (cond (number? raw) (long raw)
+          (string? raw) (parse-long raw)
+          :else (get stream-failed-code->status
+                     (some-> code
+                             str/lower-case)))))
 
 (defn- websocket-event-error
   "Types an `error` / `response.failed` event from the Responses WebSocket exactly
@@ -3295,143 +3792,220 @@
    same HTTP-status errors for that reason. `:code` stays: the session's own
    recovery (rejected cursor, connection limit) classifies on it."
   [event]
-  (let [error   (or (get event "error") event)
-        code    (some-> (or (get error "code") (get error "type") (get event "code")) str)
-        message (or (get error "message") (get event "message")
-                  "Responses WebSocket request failed.")
-        status  (websocket-event-status event error code)
-        overflow? (context-overflow-failure? code message)]
+  (let [error
+        (or (get event "error") event)
+
+        code
+        (some-> (or (get error "code") (get error "type") (get event "code"))
+                str)
+
+        message
+        (or (get error "message") (get event "message") "Responses WebSocket request failed.")
+
+        status
+        (websocket-event-status event error code)
+
+        overflow?
+        (context-overflow-failure? code message)]
+
     (ex-info message
-      (cond-> {:type (if overflow?
-                       :svar.tokens/context-overflow
-                       :svar.session/server-error)
-               :source :provider
-               :stream? true
-               :code code
-               :provider-error-code code
-               :provider-message message
-               :event event}
-        overflow? (assoc :status 400)
-        (and (not overflow?) status) (assoc :status status)))))
+             (cond-> {:type (if overflow? :svar.tokens/context-overflow :svar.session/server-error)
+                      :source :provider
+                      :stream? true
+                      :code code
+                      :provider-error-code code
+                      :provider-message message
+                      :event event}
+               overflow?
+               (assoc :status 400)
 
-(defn- previous-response-missing? [e]
-  (let [data (ex-data e)
-        code (some-> (:code data) str str/lower-case)
-        message (some-> (ex-message e) str/lower-case)]
+               (and (not overflow?) status)
+               (assoc :status status)))))
+
+(defn- previous-response-missing?
+  [e]
+  (let [data
+        (ex-data e)
+
+        code
+        (some-> (:code data)
+                str
+                str/lower-case)
+
+        message
+        (some-> (ex-message e)
+                str/lower-case)]
+
     (or (contains? #{"previous_response_not_found" "previous_response_id_not_found"} code)
-      (and (str/includes? (or message "") "previous_response")
-        (str/includes? (or message "") "not found")))))
+        (and (str/includes? (or message "") "previous_response")
+             (str/includes? (or message "") "not found")))))
 
-(defn- merge-response-output [response output-items]
-  (let [terminal-items (vec (or (get response "output") []))
-        item-key (fn [item] (or (get item "id") (get item "call_id") (pr-str item)))
-        seen (set (map item-key terminal-items))]
-    (assoc response "output"
-      (into terminal-items (remove #(contains? seen (item-key %))) output-items))))
+(defn- merge-response-output
+  [response output-items]
+  (let [terminal-items
+        (vec (or (get response "output") []))
 
-(defn- normalize-codex-limit-id [limit-id]
-  (some-> limit-id str str/trim not-empty (str/replace "_" "-") str/lower-case))
+        item-key
+        (fn [item]
+          (or (get item "id") (get item "call_id") (pr-str item)))
+
+        seen
+        (set (map item-key terminal-items))]
+
+    (assoc response
+      "output" (into terminal-items (remove #(contains? seen (item-key %))) output-items))))
+
+(defn- normalize-codex-limit-id
+  [limit-id]
+  (some-> limit-id
+          str
+          str/trim
+          not-empty
+          (str/replace "_" "-")
+          str/lower-case))
 
 (defn- codex-rate-limit-snapshot
   "Normalizes Codex's informational `codex.rate_limits` event. Missing sections
    stay absent: a snapshot may update windows, credits, or both."
   [event]
   (when (= "codex.rate_limits" (get event "type"))
-    (let [window (fn [value]
-                   (when (map? value)
-                     (cond-> {:used-percent (get value "used_percent")}
-                       (some? (get value "window_minutes"))
-                       (assoc :window-minutes (get value "window_minutes"))
-                       (some? (get value "reset_at"))
-                       (assoc :resets-at (get value "reset_at")))))
-          limits (get event "rate_limits")
-          credits (get event "credits")]
-      (cond-> {:limit-id (or (normalize-codex-limit-id
-                               (or (get event "metered_limit_name")
-                                 (get event "limit_name")))
-                           "codex")}
-        (some? (get event "plan_type")) (assoc :plan-type (get event "plan_type"))
-        (map? (get limits "primary")) (assoc :primary (window (get limits "primary")))
-        (map? (get limits "secondary")) (assoc :secondary (window (get limits "secondary")))
-        (map? credits) (assoc :credits
-                         (cond-> {:has-credits (boolean (get credits "has_credits"))
-                                  :unlimited (boolean (get credits "unlimited"))}
-                           (some? (get credits "balance"))
-                           (assoc :balance (get credits "balance"))))))))
+    (let [window
+          (fn [value]
+            (when (map? value)
+              (cond-> {:used-percent (get value "used_percent")}
+                (some? (get value "window_minutes"))
+                (assoc :window-minutes (get value "window_minutes"))
+
+                (some? (get value "reset_at"))
+                (assoc :resets-at (get value "reset_at")))))
+
+          limits
+          (get event "rate_limits")
+
+          credits
+          (get event "credits")]
+
+      (cond-> {:limit-id (or (normalize-codex-limit-id (or (get event "metered_limit_name")
+                                                           (get event "limit_name")))
+                             "codex")}
+        (some? (get event "plan_type"))
+        (assoc :plan-type (get event "plan_type"))
+
+        (map? (get limits "primary"))
+        (assoc :primary (window (get limits "primary")))
+
+        (map? (get limits "secondary"))
+        (assoc :secondary (window (get limits "secondary")))
+
+        (map? credits)
+        (assoc :credits
+          (cond-> {:has-credits (boolean (get credits "has_credits"))
+                   :unlimited (boolean (get credits "unlimited"))}
+            (some? (get credits "balance"))
+            (assoc :balance (get credits "balance"))))))))
 
 (defn- receive-websocket-response!
   [socket {:keys [timeout-ms on-chunk on-rate-limits url]}]
-  (let [content (StringBuilder.)
-        reasoning (StringBuilder.)
-        tool-args (StringBuilder.)]
-    (loop [output-items [] accumulated-provider-state nil accumulated-api-usage nil
-           latest-rate-limits nil]
+  (let [content
+        (StringBuilder.)
+
+        reasoning
+        (StringBuilder.)
+
+        tool-args
+        (StringBuilder.)]
+
+    (loop [output-items
+           []
+
+           accumulated-provider-state
+           nil
+
+           accumulated-api-usage
+           nil
+
+           latest-rate-limits
+           nil]
+
       (let [raw ((:receive! socket) timeout-ms)]
-        (cond
-          (instance? Throwable raw) (throw raw)
-          (:svar.websocket/closed raw)
-          (throw (ex-info "Responses WebSocket closed before a terminal response."
-                   {:type :svar.session/transport-closed :close raw}))
-          :else
-          (let [event (json/read-json raw)
-                event-type (get event "type")
-                rate-limits (codex-rate-limit-snapshot event)]
-            (when (contains? #{"error" "response.failed"} event-type)
-              (throw (websocket-event-error event)))
-            (when (and rate-limits on-rate-limits)
-              (on-rate-limits rate-limits))
-            (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
-                          tool-args-delta tool-call-preview] :as delta}
-                  (extract-stream-delta event)
-                  next-provider-state (merge-provider-state accumulated-provider-state
-                                        (:provider-state delta))
-                  next-api-usage (or (:api-usage delta) accumulated-api-usage)
-                  next-rate-limits (or rate-limits latest-rate-limits)
-                  item (when (= "response.output_item.done" event-type)
-                         (get event "item"))]
-              (when content-delta (.append content ^String content-delta))
-              (when reasoning-delta (.append reasoning ^String reasoning-delta))
-              (when tool-args-delta (.append tool-args ^String tool-args-delta))
-              (when (and (zero? (.length content)) content-fallback)
-                (.append content ^String content-fallback))
-              (when (and (zero? (.length reasoning)) reasoning-fallback)
-                (.append reasoning ^String reasoning-fallback))
-              (when (and on-chunk
-                      (or content-delta reasoning-delta tool-args-delta tool-call-preview))
-                (on-chunk {:content (str content)
-                           :reasoning (nonblank-str (str reasoning))
-                           :tool-input (nonblank-str (str tool-args))
-                           :tool-call-preview tool-call-preview
-                           :provider-state next-provider-state
-                           :api-usage next-api-usage
-                           :done? false}))
-              (if (contains? #{"response.completed" "response.incomplete"} event-type)
-                (cond-> (extract-response-data
-                          {:parsed (merge-response-output (get event "response")
-                                     (cond-> output-items item (conj item)))
-                           :raw-body raw
-                           :url url
-                           :status 200
-                           :streaming? true
-                           :transport :websocket})
-                  next-rate-limits (assoc :rate-limits next-rate-limits))
-                (recur (cond-> output-items item (conj item))
-                  next-provider-state next-api-usage next-rate-limits)))))))))
+        (cond (instance? Throwable raw) (throw raw)
+              (:svar.websocket/closed raw)
+              (throw (ex-info "Responses WebSocket closed before a terminal response."
+                              {:type :svar.session/transport-closed :close raw}))
+              :else
+              (let [event (json/read-json raw)
+                    event-type (get event "type")
+                    rate-limits (codex-rate-limit-snapshot event)]
 
-(defn- session-request-body [body input previous-response-id]
+                (when (contains? #{"error" "response.failed"} event-type)
+                  (throw (websocket-event-error event)))
+                (when (and rate-limits on-rate-limits) (on-rate-limits rate-limits))
+                (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
+                              tool-args-delta tool-call-preview]
+                       :as delta}
+                      (extract-stream-delta event)
+                      next-provider-state (merge-provider-state accumulated-provider-state
+                                                                (:provider-state delta))
+                      next-api-usage (or (:api-usage delta) accumulated-api-usage)
+                      next-rate-limits (or rate-limits latest-rate-limits)
+                      item (when (= "response.output_item.done" event-type) (get event "item"))]
+
+                  (when content-delta (.append content ^String content-delta))
+                  (when reasoning-delta (.append reasoning ^String reasoning-delta))
+                  (when tool-args-delta (.append tool-args ^String tool-args-delta))
+                  (when (and (zero? (.length content)) content-fallback)
+                    (.append content ^String content-fallback))
+                  (when (and (zero? (.length reasoning)) reasoning-fallback)
+                    (.append reasoning ^String reasoning-fallback))
+                  (when (and on-chunk
+                             (or content-delta reasoning-delta tool-args-delta tool-call-preview))
+                    (on-chunk {:content (str content)
+                               :reasoning (nonblank-str (str reasoning))
+                               :tool-input (nonblank-str (str tool-args))
+                               :tool-call-preview tool-call-preview
+                               :provider-state next-provider-state
+                               :api-usage next-api-usage
+                               :done? false}))
+                  (if (contains? #{"response.completed" "response.incomplete"} event-type)
+                    (cond-> (extract-response-data {:parsed (merge-response-output
+                                                              (get event "response")
+                                                              (cond-> output-items
+                                                                item
+                                                                (conj item)))
+                                                    :raw-body raw
+                                                    :url url
+                                                    :status 200
+                                                    :streaming? true
+                                                    :transport :websocket})
+                      next-rate-limits
+                      (assoc :rate-limits next-rate-limits))
+                    (recur (cond-> output-items
+                             item
+                             (conj item))
+                           next-provider-state
+                           next-api-usage
+                           next-rate-limits)))))))))
+
+(defn- session-request-body
+  [body input previous-response-id]
   (cond-> (-> body
-            (dissoc :previous_response_id :max_tokens :max_output_tokens :text)
-            (assoc :type "response.create" :stream true :input input))
-    previous-response-id (assoc :previous_response_id previous-response-id)))
+              (dissoc :previous_response_id :max_tokens :max_output_tokens :text)
+              (assoc :type "response.create"
+                     :stream true
+                     :input input))
+    previous-response-id
+    (assoc :previous_response_id previous-response-id)))
 
-(defn- websocket-transport-error? [error]
+(defn- websocket-transport-error?
+  [error]
   (or (instance? java.io.IOException error)
-    (instance? TimeoutException error)
-    (instance? java.util.concurrent.ExecutionException error)
-    (instance? java.util.concurrent.CompletionException error)
-    (= :svar.session/transport-closed (:type (ex-data error)))
-    (= :svar.session/transport-unavailable (:type (ex-data error)))
-    (some-> (ex-cause error) websocket-transport-error?)))
+      (instance? TimeoutException error)
+      (instance? java.util.concurrent.ExecutionException error)
+      (instance? java.util.concurrent.CompletionException error)
+      (= :svar.session/transport-closed (:type (ex-data error)))
+      (= :svar.session/transport-unavailable (:type (ex-data error)))
+      (some-> (ex-cause error)
+              websocket-transport-error?)))
 
 (defn- websocket-retryable-error?
   "True for a failure a RECONNECT can answer: the connection itself, or the
@@ -3439,7 +4013,7 @@
    here - that belongs to the caller and to the router's own retry ladder."
   [error]
   (or (= "websocket_connection_limit_reached" (:code (ex-data error)))
-    (websocket-transport-error? error)))
+      (websocket-transport-error? error)))
 
 (defn- websocket-upgrade-refused?
   "True when the handshake was refused with 426 Upgrade Required: this endpoint
@@ -3448,8 +4022,7 @@
    instead of retrying the upgrade."
   [error]
   (let [data (ex-data error)]
-    (and (= :svar.session/transport-unavailable (:type data))
-      (= 426 (:status data)))))
+    (and (= :svar.session/transport-unavailable (:type data)) (= 426 (:status data)))))
 
 (defn- session-retry-sleep!
   "Waits before reconnect `attempt` (1-based) with the full-jitter shape the HTTP
@@ -3457,9 +4030,8 @@
   [attempt opts]
   (let [base (long (or (:websocket-retry-delay-ms opts) SESSION_WEBSOCKET_RETRY_DELAY_MS))]
     (when (pos? base)
-      (Thread/sleep
-        (long (failure/backoff-ms (* base (bit-shift-left 1 (dec (long attempt))))
-                SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS))))))
+      (Thread/sleep (long (failure/backoff-ms (* base (bit-shift-left 1 (dec (long attempt))))
+                                              SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS))))))
 
 (defn- responses-websocket-session-completion!
   "Runs ONE turn on the session's socket, with Codex's stream-retry ladder.
@@ -3473,103 +4045,122 @@
    one ladder step too, but keeps the socket: nothing about the connection is
    wrong, only the chain the server no longer remembers."
   [transport-state request-body delta-input opts]
-  (let [stable (dissoc request-body :input :stream :previous_response_id)
-        prior @transport-state
-        full-input (:input request-body)
-        warmup-continuation? (and (:cursor prior)
-                               (= stable (:stable prior))
-                               (= full-input (:warmup-input prior)))
-        continue? (and (:cursor prior)
-                    (= stable (:stable prior))
-                    (nil? (:warmup-input prior)))
-        connect-opts (select-keys opts [:base-url :responses-path :api-key :headers :timeout-ms])
-        max-retries (long (or (:websocket-max-retries opts) SESSION_WEBSOCKET_MAX_RETRIES))
-        prewarm? (and (not= false (:websocket-prewarm? opts))
-                   (not (:prewarmed? prior))
-                   (not continue?))
-        restart! (or (:session-restart! opts) (fn [_] nil))
-        rate-limits! (fn [snapshot]
-                       (swap! transport-state assoc :rate-limits snapshot)
-                       (when-let [notify! (:session-on-rate-limits opts)]
-                         (notify! {:event/type :llm.session/rate-limits
-                                   :rate-limits snapshot
-                                   :content ""
-                                   :done? false})))
-        perform! (fn [socket input cursor warmup?]
-                   ((:send! socket)
-                    (json/write-json-str
-                      (cond-> (session-request-body request-body input cursor)
-                        warmup? (assoc :generate false))))
-                   (receive-websocket-response! socket
-                     {:timeout-ms (or (:idle-timeout-ms opts)
-                                    (:timeout-ms opts)
-                                    Long/MAX_VALUE)
-                      :on-chunk (when-not warmup? (:on-chunk opts))
-                      :on-rate-limits rate-limits!
-                      :url (:url socket)}))]
-    (loop [input (cond warmup-continuation? []
-                       continue? delta-input
-                       :else full-input)
-           cursor (when (or warmup-continuation? continue?) (:cursor prior))
-           retries 0
-           warmup? prewarm?]
-      (let [outcome (try
-                      {:result (perform! (session-socket! transport-state connect-opts)
-                                 input cursor warmup?)}
-                      (catch Throwable e {:error e}))]
+  (let [stable
+        (dissoc request-body :input :stream :previous_response_id)
+
+        prior
+        @transport-state
+
+        full-input
+        (:input request-body)
+
+        warmup-continuation?
+        (and (:cursor prior) (= stable (:stable prior)) (= full-input (:warmup-input prior)))
+
+        continue?
+        (and (:cursor prior) (= stable (:stable prior)) (nil? (:warmup-input prior)))
+
+        connect-opts
+        (select-keys opts [:base-url :responses-path :api-key :headers :timeout-ms])
+
+        max-retries
+        (long (or (:websocket-max-retries opts) SESSION_WEBSOCKET_MAX_RETRIES))
+
+        prewarm?
+        (and (not= false (:websocket-prewarm? opts)) (not (:prewarmed? prior)) (not continue?))
+
+        restart!
+        (or (:session-restart! opts)
+            (fn [_]
+              nil))
+
+        rate-limits!
+        (fn [snapshot]
+          (swap! transport-state assoc :rate-limits snapshot)
+          (when-let [notify! (:session-on-rate-limits opts)]
+            (notify! {:event/type :llm.session/rate-limits
+                      :rate-limits snapshot
+                      :content ""
+                      :done? false})))
+
+        perform!
+        (fn [socket input cursor warmup?]
+          ((:send! socket)
+            (json/write-json-str (cond-> (session-request-body request-body input cursor)
+                                   warmup?
+                                   (assoc :generate false))))
+          (receive-websocket-response!
+            socket
+            {:timeout-ms (or (:idle-timeout-ms opts) (:timeout-ms opts) Long/MAX_VALUE)
+             :on-chunk (when-not warmup? (:on-chunk opts))
+             :on-rate-limits rate-limits!
+             :url (:url socket)}))]
+
+    (loop [input
+           (cond warmup-continuation? []
+                 continue? delta-input
+                 :else full-input)
+
+           cursor
+           (when (or warmup-continuation? continue?) (:cursor prior))
+
+           retries
+           0
+
+           warmup?
+           prewarm?]
+
+      (let [outcome
+            (try {:result
+                  (perform! (session-socket! transport-state connect-opts) input cursor warmup?)}
+                 (catch Throwable e {:error e}))]
         (if-let [result (:result outcome)]
           (let [response-id (get-in result [:http-response :parsed "id"])]
             (if warmup?
-              (do
-                (swap! transport-state assoc
-                  :prewarmed? true :stable stable :cursor response-id
-                  :warmup-input full-input)
-                ;; The warmup already supplied the full first request. The inference
-                ;; continues that response with an empty input delta.
-                (recur (if response-id [] full-input) response-id retries false))
-              (do
-                (swap! transport-state
-                  #(-> %
-                     (assoc :stable stable :cursor response-id)
-                     (dissoc :warmup-input)))
-                (cond-> result
-                  (:rate-limits @transport-state)
-                  (assoc :rate-limits (:rate-limits @transport-state))))))
+              (do (swap! transport-state assoc
+                    :prewarmed? true
+                    :stable stable
+                    :cursor response-id
+                    :warmup-input full-input)
+                  ;; The warmup already supplied the full first request. The inference
+                  ;; continues that response with an empty input delta.
+                  (recur (if response-id [] full-input) response-id retries false))
+              (do (swap! transport-state #(-> %
+                                              (assoc :stable stable
+                                                     :cursor response-id)
+                                              (dissoc :warmup-input)))
+                  (cond-> result
+                    (:rate-limits @transport-state)
+                    (assoc :rate-limits (:rate-limits @transport-state))))))
           (let [error (:error outcome)
                 attempt (inc (long retries))
                 budget? (<= attempt max-retries)]
-            (cond
-              (websocket-upgrade-refused? error)
-              (do (disable-session-websockets! transport-state)
-                  (throw error))
 
-              (and cursor (previous-response-missing? error) budget?)
-              (do (restart! {:reason :cursor-rejected
-                             :attempt attempt
-                             :max-retries max-retries
-                             :error (ex-message error)})
-                  (recur full-input nil attempt false))
-
-              (and (websocket-retryable-error? error) budget?)
-              (do (close-session-socket! transport-state :abort)
-                  (session-retry-sleep! attempt opts)
-                  (restart! {:reason :reconnect
-                             :attempt attempt
-                             :max-retries max-retries
-                             :error (ex-message error)})
-                  (recur full-input nil attempt false))
-
-              (websocket-retryable-error? error)
-              (do (disable-session-websockets! transport-state)
-                  (throw error))
-
-              warmup?
-              ;; Prewarm is an optimization, never a prerequisite for inference.
-              ;; A provider verdict about `generate=false` must not suppress the
-              ;; real request on an otherwise healthy socket.
-              (do (swap! transport-state assoc :prewarmed? true)
-                  (recur full-input nil retries false))
-              :else (throw error))))))))
+            (cond (websocket-upgrade-refused? error)
+                  (do (disable-session-websockets! transport-state) (throw error))
+                  (and cursor (previous-response-missing? error) budget?)
+                  (do (restart! {:reason :cursor-rejected
+                                 :attempt attempt
+                                 :max-retries max-retries
+                                 :error (ex-message error)})
+                      (recur full-input nil attempt false))
+                  (and (websocket-retryable-error? error) budget?)
+                  (do (close-session-socket! transport-state :abort)
+                      (session-retry-sleep! attempt opts)
+                      (restart! {:reason :reconnect
+                                 :attempt attempt
+                                 :max-retries max-retries
+                                 :error (ex-message error)})
+                      (recur full-input nil attempt false))
+                  (websocket-retryable-error? error)
+                  (do (disable-session-websockets! transport-state) (throw error))
+                  warmup?
+                  ;; Prewarm is an optimization, never a prerequisite for inference.
+                  ;; A provider verdict about `generate=false` must not suppress the
+                  ;; real request on an otherwise healthy socket.
+                  (do (swap! transport-state assoc :prewarmed? true)
+                      (recur full-input nil retries false))
+                  :else (throw error))))))))
 
 (defn- responses-session-completion!
   "One turn of an explicit session: the socket owns it until the socket gives up,
@@ -3582,38 +4173,50 @@
    zero, so without that signal a consumer appending deltas would keep the text
    of an attempt the transport threw away."
   [transport-state request-body delta-input opts fallback!]
-  (let [progress (:session-progress opts)
-        notify! (:session-on-restart opts)
-        on-chunk (:on-chunk opts)
-        restart! (fn restart!
-                   ([] (restart! nil))
-                   ([event]
-                    (let [restarted? (and progress (compare-and-set! progress true false))]
-                      (when (and notify! (or event restarted?))
-                        (notify! (merge {:event/type :llm.session/stream-restarted
-                                         :restarted? true
-                                         :content ""
-                                         :reasoning nil
-                                         :tool-input nil
-                                         :done? false}
-                                   event))))))
-        opts (cond-> (assoc opts :session-restart! restart!)
-               (and on-chunk progress)
-               (assoc :on-chunk (fn [chunk] (reset! progress true) (on-chunk chunk))))]
+  (let [progress
+        (:session-progress opts)
+
+        notify!
+        (:session-on-restart opts)
+
+        on-chunk
+        (:on-chunk opts)
+
+        restart!
+        (fn restart! ([] (restart! nil)) ([event] (let [restarted? (and progress
+                                                                        (compare-and-set! progress
+                                                                                          true
+                                                                                          false))]
+                                                    (when (and notify! (or event restarted?))
+                                                      (notify! (merge {:event/type
+                                                                       :llm.session/stream-restarted
+                                                                       :restarted? true
+                                                                       :content ""
+                                                                       :reasoning nil
+                                                                       :tool-input nil
+                                                                       :done? false}
+                                                                      event))))))
+
+        opts
+        (cond-> (assoc opts :session-restart! restart!)
+          (and on-chunk progress)
+          (assoc :on-chunk
+            (fn [chunk]
+              (reset! progress true)
+              (on-chunk chunk))))]
+
     ;; The router may re-enter this turn after its own ladder slept; a stream it
     ;; already fed the caller starts over here too.
     (restart!)
     (if (:http-only? @transport-state)
       (fallback!)
-      (try
-        (responses-websocket-session-completion!
-          transport-state request-body delta-input opts)
-        (catch Throwable error
-          (if (websocket-retryable-error? error)
-            (do (close-session-socket! transport-state :abort)
-                (restart! {:reason :http-fallback :error (ex-message error)})
-                (fallback!))
-            (throw error)))))))
+      (try (responses-websocket-session-completion! transport-state request-body delta-input opts)
+           (catch Throwable error
+             (if (websocket-retryable-error? error)
+               (do (close-session-socket! transport-state :abort)
+                   (restart! {:reason :http-fallback :error (ex-message error)})
+                   (fallback!))
+               (throw error)))))))
 
 (defn openai-responses-completion
   "Low-level OpenAI Responses transport.
@@ -3639,28 +4242,45 @@
 
    Returns same normalized shape as `chat-completion`:
    {:content :reasoning :provider-state :api-usage :http-response}"
-  [request-body {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms
-                        idle-timeout-ms semantic-timeout-ms on-chunk]
-                 :or   {responses-path "/responses"
-                        timeout-ms router/DEFAULT_TIMEOUT_MS
-                        ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS
-                        idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS
-                        semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS}}]
-  (let [url           (responses-url base-url responses-path)
-        model         (:model request-body)
-        codex?        (= "/codex/responses" responses-path)
-        stream?       (or on-chunk codex?)
-        request-body  (cond-> request-body
-                        ;; ChatGPT's Codex backend rejects the public Responses
-                        ;; API `text` envelope with `text: Extra inputs are not
-                        ;; permitted`. It also owns output formatting itself.
-                        codex? (dissoc :max_tokens :max_output_tokens :text)
-                        stream? (assoc :stream true))
-        http-headers  (merge {"Authorization" (str "Bearer " api-key)
-                              "Content-Type"  "application/json"}
-                        (when stream? {"Accept" "text/event-stream"})
-                        headers)
-        llm-request   {:model model :base-url base-url :responses-path responses-path}]
+  [request-body
+   {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms idle-timeout-ms
+           semantic-timeout-ms on-chunk]
+    :or {responses-path "/responses"
+         timeout-ms router/DEFAULT_TIMEOUT_MS
+         ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS
+         idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS
+         semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS}}]
+  (let [url
+        (responses-url base-url responses-path)
+
+        model
+        (:model request-body)
+
+        codex?
+        (= "/codex/responses" responses-path)
+
+        stream?
+        (or on-chunk codex?)
+
+        request-body
+        (cond-> request-body
+          ;; ChatGPT's Codex backend rejects the public Responses
+          ;; API `text` envelope with `text: Extra inputs are not
+          ;; permitted`. It also owns output formatting itself.
+          codex?
+          (dissoc :max_tokens :max_output_tokens :text)
+
+          stream?
+          (assoc :stream true))
+
+        http-headers
+        (merge {"Authorization" (str "Bearer " api-key) "Content-Type" "application/json"}
+               (when stream? {"Accept" "text/event-stream"})
+               headers)
+
+        llm-request
+        {:model model :base-url base-url :responses-path responses-path}]
+
     (trove/log! {:level :info
                  :data (log-data {:model model
                                   :url url
@@ -3673,45 +4293,68 @@
     (try
       (if stream?
         (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
-          (http-post-stream! url request-body http-headers timeout-ms ttft-timeout-ms idle-timeout-ms extract-stream-delta
-            (when on-chunk
-              (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
-                           provider-state api-usage]}]
-                (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
-                           :tool-input (nonblank-str tool-args-acc)
-                           :tool-call-preview tool-call-preview
-                           :provider-state provider-state
-                           :api-usage api-usage :done? false})))))
+          (http-post-stream! url
+                             request-body
+                             http-headers
+                             timeout-ms
+                             ttft-timeout-ms
+                             idle-timeout-ms
+                             extract-stream-delta
+                             (when on-chunk
+                               (fn [{:keys [content-acc reasoning-acc tool-args-acc
+                                            tool-call-preview provider-state api-usage]}]
+                                 (on-chunk {:content content-acc
+                                            :reasoning (nonblank-str reasoning-acc)
+                                            :tool-input (nonblank-str tool-args-acc)
+                                            :tool-call-preview tool-call-preview
+                                            :provider-state provider-state
+                                            :api-usage api-usage
+                                            :done? false})))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
       (catch Exception e
         (if (stream-finalization-error? e)
           (throw e)
-          (let [ex-data-map   (ex-data e)
-                response-body (when (string? (:body ex-data-map)) (:body ex-data-map))
-                api-key-error (detect-api-key-error response-body)
-                base-message  (http-error-message e)
-                error-message (if api-key-error
-                                (str api-key-error " (Original: " base-message ")")
-                                base-message)]
+          (let [ex-data-map
+                (ex-data e)
+
+                response-body
+                (when (string? (:body ex-data-map)) (:body ex-data-map))
+
+                api-key-error
+                (detect-api-key-error response-body)
+
+                base-message
+                (http-error-message e)
+
+                error-message
+                (if api-key-error (str api-key-error " (Original: " base-message ")") base-message)]
+
             (when api-key-error
-              (trove/log! {:level :error :id ::api-key-error
+              (trove/log! {:level :error
+                           :id ::api-key-error
                            :data (log-data {:api-key-error api-key-error
                                             :api-key-length (count api-key)
-                                            :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))})
+                                            :api-key-prefix
+                                            (when api-key
+                                              (subs api-key 0 (min 8 (count api-key))))})
                            :msg "detected API key configuration failure"}))
             (anomaly/fault! error-message
-              (cond-> (merge (dissoc ex-data-map :body)
-                        {:type :svar.core/http-error
-                         :llm-request llm-request})
-                response-body (assoc :body (truncate-error-body response-body))
-                api-key-error (assoc :api-key-error api-key-error)))))))))
+                            (cond-> (merge (dissoc ex-data-map :body)
+                                           {:type :svar.core/http-error :llm-request llm-request})
+                              response-body
+                              (assoc :body (truncate-error-body response-body))
+
+                              api-key-error
+                              (assoc :api-key-error api-key-error)))))))))
 
 (defn- gemini-url
   "Gemini puts the model + method in the path:
    `{base}/models/{model}:generateContent` (or `:streamGenerateContent?alt=sse`)."
   [base-url model stream?]
-  (str (str/replace base-url #"/+$" "") "/models/" model
-    (if stream? ":streamGenerateContent?alt=sse" ":generateContent")))
+  (str (str/replace base-url #"/+$" "")
+       "/models/"
+       model
+       (if stream? ":streamGenerateContent?alt=sse" ":generateContent")))
 
 (defn gemini-completion
   "Low-level Google Gemini transport (native generateContent). Auth is the
@@ -3723,96 +4366,148 @@
    it still does a single non-streaming call and fires one terminal chunk so
    streaming callers keep working; true `streamGenerateContent` SSE is a
    follow-up."
-  [request-body {:keys [api-key base-url model headers timeout-ms on-chunk]
-                 :or   {timeout-ms router/DEFAULT_TIMEOUT_MS}}]
-  (let [url          (gemini-url base-url model false)
-        http-headers (merge {"x-goog-api-key" api-key "Content-Type" "application/json"}
-                       headers)
-        llm-request  {:model model :base-url base-url}]
+  [request-body
+   {:keys [api-key base-url model headers timeout-ms on-chunk]
+    :or {timeout-ms router/DEFAULT_TIMEOUT_MS}}]
+  (let [url
+        (gemini-url base-url model false)
+
+        http-headers
+        (merge {"x-goog-api-key" api-key "Content-Type" "application/json"} headers)
+
+        llm-request
+        {:model model :base-url base-url}]
+
     (trove/log! {:level :info
                  :data (log-data {:model model :url url :timeout-ms timeout-ms})
                  :msg "gemini request dispatched"})
-    (try
-      (let [result (extract-gemini-response-data (http-post! url request-body http-headers timeout-ms))]
-        (when on-chunk
-          (on-chunk {:content (:content result) :reasoning (:reasoning result)
-                     :provider-state nil :api-usage (:api-usage result) :done? false}))
-        result)
-      (catch Exception e
-        (let [ex-data-map   (ex-data e)
-              response-body (when (string? (:body ex-data-map)) (:body ex-data-map))
-              error-message (http-error-message e)]
-          (anomaly/fault! error-message
-            (cond-> (merge (dissoc ex-data-map :body)
-                      {:type :svar.core/http-error :llm-request llm-request})
-              response-body (assoc :body (truncate-error-body response-body)))))))))
+    (try (let [result (extract-gemini-response-data
+                        (http-post! url request-body http-headers timeout-ms))]
+           (when on-chunk
+             (on-chunk {:content (:content result)
+                        :reasoning (:reasoning result)
+                        :provider-state nil
+                        :api-usage (:api-usage result)
+                        :done? false}))
+           result)
+         (catch Exception e
+           (let [ex-data-map
+                 (ex-data e)
+
+                 response-body
+                 (when (string? (:body ex-data-map)) (:body ex-data-map))
+
+                 error-message
+                 (http-error-message e)]
+
+             (anomaly/fault! error-message
+                             (cond-> (merge (dissoc ex-data-map :body)
+                                            {:type :svar.core/http-error :llm-request llm-request})
+                               response-body
+                               (assoc :body (truncate-error-body response-body)))))))))
 
 (defn- chat-completion-with-retry
   "Calls the LLM API with exponential backoff retry for rate limits."
   [messages model api-key base-url retry-opts timeout-ms extra-body api-style]
-  (let [api-style    (or api-style :openai-compatible-chat)
-        provider-id  (:provider-id retry-opts)
-        llm-headers  (:llm-headers retry-opts)
-        anthropic-oauth? (and (= api-style :anthropic) (anthropic-oauth-token? api-key))
-        request-body (if (= api-style :anthropic)
-                       (build-anthropic-request-body messages model extra-body
-                         {:anthropic-oauth? anthropic-oauth?})
-                       (build-request-body messages model extra-body))
-        input-tokens (router/count-messages model messages)
-        chat-url     (make-chat-url base-url api-style)
-        headers      (request-headers api-style api-key provider-id messages llm-headers extra-body)
-        extract-fn   (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
-        _ (trove/log! {:level :info
-                       :data (log-data {:model model
-                                        :input-tokens input-tokens
-                                        :max-output-tokens (:max_tokens extra-body)
-                                        :timeout-ms timeout-ms})
-                       :msg "HTTP request dispatched"})]
+  (let [api-style
+        (or api-style :openai-compatible-chat)
+
+        provider-id
+        (:provider-id retry-opts)
+
+        llm-headers
+        (:llm-headers retry-opts)
+
+        anthropic-oauth?
+        (and (= api-style :anthropic) (anthropic-oauth-token? api-key))
+
+        request-body
+        (if (= api-style :anthropic)
+          (build-anthropic-request-body messages
+                                        model
+                                        extra-body
+                                        {:anthropic-oauth? anthropic-oauth?})
+          (build-request-body messages model extra-body))
+
+        input-tokens
+        (router/count-messages model messages)
+
+        chat-url
+        (make-chat-url base-url api-style)
+
+        headers
+        (request-headers api-style api-key provider-id messages llm-headers extra-body)
+
+        extract-fn
+        (if (= api-style :anthropic) extract-anthropic-response-data extract-response-data)
+
+        _
+        (trove/log! {:level :info
+                     :data (log-data {:model model
+                                      :input-tokens input-tokens
+                                      :max-output-tokens (:max_tokens extra-body)
+                                      :timeout-ms timeout-ms})
+                     :msg "HTTP request dispatched"})]
+
     (try
-      (with-retry
-        (fn []
-          (try
-            ;; `http-post!` returns a full envelope {:parsed :raw-body :url
-            ;; :status}. `extract-fn` knows how to unwrap it and, crucially,
-            ;; re-emit it under :http-response so callers higher up can
-            ;; attach the raw response to error ex-data (see `ask!*`).
-            (let [envelope (http-post! chat-url request-body headers timeout-ms)]
-              (extract-fn envelope))
-            (catch clojure.lang.ExceptionInfo e
-              (when-let [body (:body (ex-data e))]
-                (trove/log! {:level :warn :id ::llm-error-body
-                             :data (log-data {:status (:status (ex-data e))
-                                              :body-snippet (if (string? body)
-                                                              (subs body 0 (min 200 (count body)))
-                                                              (str body))})
-                             :msg "captured upstream error body snippet"}))
-              (throw e))))
-        retry-opts)
+      (with-retry (fn []
+                    (try
+                      ;; `http-post!` returns a full envelope {:parsed :raw-body :url
+                      ;; :status}. `extract-fn` knows how to unwrap it and, crucially,
+                      ;; re-emit it under :http-response so callers higher up can
+                      ;; attach the raw response to error ex-data (see `ask!*`).
+                      (let [envelope (http-post! chat-url request-body headers timeout-ms)]
+                        (extract-fn envelope))
+                      (catch clojure.lang.ExceptionInfo e
+                        (when-let [body (:body (ex-data e))]
+                          (trove/log! {:level :warn
+                                       :id ::llm-error-body
+                                       :data (log-data {:status (:status (ex-data e))
+                                                        :body-snippet
+                                                        (if (string? body)
+                                                          (subs body 0 (min 200 (count body)))
+                                                          (str body))})
+                                       :msg "captured upstream error body snippet"}))
+                        (throw e))))
+                  retry-opts)
       (catch Exception e
         ;; Check for API key configuration errors
-        (let [ex-data-map (ex-data e)
-              response-body (:body ex-data-map)
-              api-key-error (detect-api-key-error response-body)
-              sanitized-request {:model model
-                                 :base-url base-url
-                                 :timeout-ms timeout-ms
-                                 :api-key-length (count api-key)
-                                 :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))
-                                 :messages (sanitize-messages-for-logging messages)}
-              base-message  (http-error-message e)
-              error-message (if api-key-error
-                              (str api-key-error " (Original: " base-message ")")
-                              base-message)]
+        (let [ex-data-map
+              (ex-data e)
+
+              response-body
+              (:body ex-data-map)
+
+              api-key-error
+              (detect-api-key-error response-body)
+
+              sanitized-request
+              {:model model
+               :base-url base-url
+               :timeout-ms timeout-ms
+               :api-key-length (count api-key)
+               :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))
+               :messages (sanitize-messages-for-logging messages)}
+
+              base-message
+              (http-error-message e)
+
+              error-message
+              (if api-key-error (str api-key-error " (Original: " base-message ")") base-message)]
+
           (when api-key-error
-            (trove/log! {:level :error :id ::api-key-error
+            (trove/log! {:level :error
+                         :id ::api-key-error
                          :data (log-data {:api-key-error api-key-error
                                           :api-key-length (count api-key)
-                                          :api-key-prefix (when api-key (subs api-key 0 (min 8 (count api-key))))})
+                                          :api-key-prefix
+                                          (when api-key (subs api-key 0 (min 8 (count api-key))))})
                          :msg "detected API key configuration failure"}))
-          (anomaly/fault! error-message
-            (cond-> (merge (ex-data e) {:type :svar.core/http-error
-                                        :llm-request sanitized-request})
-              api-key-error (assoc :api-key-error api-key-error))))))))
+          (anomaly/fault!
+            error-message
+            (cond-> (merge (ex-data e) {:type :svar.core/http-error :llm-request sanitized-request})
+              api-key-error
+              (assoc :api-key-error api-key-error))))))))
 
 ;; =============================================================================
 ;; SSE Streaming
@@ -3826,13 +4521,9 @@
    a provider response."
   [^String data-str]
   (let [trimmed (str/trim data-str)]
-    (cond
-      (= trimmed "[DONE]") sse-done
-      (str/blank? trimmed) nil
-      :else
-      (try
-        (json/read-json trimmed :key-fn identity)
-        (catch Exception _ nil)))))
+    (cond (= trimmed "[DONE]") sse-done
+          (str/blank? trimmed) nil
+          :else (try (json/read-json trimmed :key-fn identity) (catch Exception _ nil)))))
 
 (defn- sse-field-line
   "Parses one SSE line into `{:field f :value v}`. Comments return nil.
@@ -3844,8 +4535,7 @@
       (if (neg? idx)
         {:field line :value ""}
         (let [raw (subs line (inc idx))]
-          {:field (subs line 0 idx)
-           :value (if (str/starts-with? raw " ") (subs raw 1) raw)})))))
+          {:field (subs line 0 idx) :value (if (str/starts-with? raw " ") (subs raw 1) raw)})))))
 
 (defn- parse-sse-event
   "Parses aggregated SSE event fields. Joins multi-line `data:` with LF
@@ -3853,31 +4543,27 @@
   [event-type data-lines]
   (when (seq data-lines)
     (let [parsed (parse-sse-data (str/join "\n" data-lines))]
-      (cond
-        (= sse-done parsed) sse-done
-        (and (map? parsed) (seq event-type))
-        (cond-> (assoc parsed :sse-event-type event-type)
-          (nil? (get parsed "type")) (assoc "type" event-type))
-        :else parsed))))
+      (cond (= sse-done parsed) sse-done
+            (and (map? parsed) (seq event-type)) (cond-> (assoc parsed :sse-event-type event-type)
+                                                   (nil? (get parsed "type"))
+                                                   (assoc "type" event-type))
+            :else parsed))))
 
-(defn- stream-event-type
-  [chunk]
-  (or (get chunk "type")
-    (get chunk "object")))
+(defn- stream-event-type [chunk] (or (get chunk "type") (get chunk "object")))
 
 (defn- stream-finish-reason
   [chunk]
   (or (get chunk "finish_reason")
-    (get chunk "finish-reason")
-    (get-in chunk ["choices" 0 "finish_reason"])
-    (get-in chunk ["choices" 0 "finish-reason"])
-    ;; Anthropic message_delta: {:delta {:stop_reason "end_turn"|"max_tokens"|…}}.
-    ;; Without it every Anthropic stream finalized with finish-reason nil —
-    ;; a max_tokens truncation was indistinguishable from a clean end_turn
-    ;; when diagnosing empty-content responses (vis session 372994ce).
-    (get-in chunk ["delta" "stop_reason"])
-    (get-in chunk ["response" "status"])
-    (get chunk "status")))
+      (get chunk "finish-reason")
+      (get-in chunk ["choices" 0 "finish_reason"])
+      (get-in chunk ["choices" 0 "finish-reason"])
+      ;; Anthropic message_delta: {:delta {:stop_reason "end_turn"|"max_tokens"|…}}.
+      ;; Without it every Anthropic stream finalized with finish-reason nil —
+      ;; a max_tokens truncation was indistinguishable from a clean end_turn
+      ;; when diagnosing empty-content responses (vis session 372994ce).
+      (get-in chunk ["delta" "stop_reason"])
+      (get-in chunk ["response" "status"])
+      (get chunk "status")))
 
 (defn- stream-stop-details
   "Anthropic `stop_details` object riding the terminal `message_delta`, else
@@ -3888,38 +4574,38 @@
    decline). Parsed with `:key-fn identity`, so keys are strings. Non-Anthropic
    wires never carry it and return nil."
   [chunk]
-  (or (get-in chunk ["delta" "stop_details"])
-    (get chunk "stop_details")))
+  (or (get-in chunk ["delta" "stop_details"]) (get chunk "stop_details")))
 
-(def ^:private nonterminal-stream-statuses
-  #{"in_progress" "queued" "running"})
+(def ^:private nonterminal-stream-statuses #{"in_progress" "queued" "running"})
 
 (def ^:private transport-only-stream-event-types
-  #{"heartbeat" "keepalive" "ping"
-    "response.created" "response.in_progress" "response.queued"})
+  #{"heartbeat" "keepalive" "ping" "response.created" "response.in_progress" "response.queued"})
 
 (defn- stream-semantic-event?
   "True when parsed stream event means model/progress, not transport keepalive."
   [parsed extracted content-piece reasoning-piece]
-  (let [event-type (stream-event-type parsed)
-        finish-reason (stream-finish-reason parsed)
-        terminal-finish? (and finish-reason
-                           (not (contains? nonterminal-stream-statuses finish-reason)))]
-    (boolean
-      (and
-        (not (contains? transport-only-stream-event-types event-type))
-        (or content-piece
-          reasoning-piece
-          terminal-finish?
-          (:provider-state extracted)
-          (:api-usage extracted)
-          (:terminal? extracted)
-          (:incomplete? extracted)
-          (and event-type
-            (or (str/starts-with? event-type "response.")
-              (str/includes? event-type ".delta")
-              (str/includes? event-type ".done")
-              (str/includes? event-type "message"))))))))
+  (let [event-type
+        (stream-event-type parsed)
+
+        finish-reason
+        (stream-finish-reason parsed)
+
+        terminal-finish?
+        (and finish-reason (not (contains? nonterminal-stream-statuses finish-reason)))]
+
+    (boolean (and (not (contains? transport-only-stream-event-types event-type))
+                  (or content-piece
+                      reasoning-piece
+                      terminal-finish?
+                      (:provider-state extracted)
+                      (:api-usage extracted)
+                      (:terminal? extracted)
+                      (:incomplete? extracted)
+                      (and event-type
+                           (or (str/starts-with? event-type "response.")
+                               (str/includes? event-type ".delta")
+                               (str/includes? event-type ".done")
+                               (str/includes? event-type "message"))))))))
 
 (defn- stream-failed-error
   "Provider-failure payload carried by an OpenAI Responses `response.failed`
@@ -3929,21 +4615,26 @@
    the turn was misread as an EMPTY REPLY — blind same-model resends hiding
    the provider's actual error (rate limit, upstream failure)."
   [parsed]
-  (let [event-type (stream-event-type parsed)
-        failed?    (or (= "response.failed" event-type)
-                     (= "error" event-type)
-                     (= "failed" (get-in parsed ["response" "status"])))]
+  (let [event-type
+        (stream-event-type parsed)
+
+        failed?
+        (or (= "response.failed" event-type)
+            (= "error" event-type)
+            (= "failed" (get-in parsed ["response" "status"])))]
+
     (when failed?
       (let [err (or (get-in parsed ["response" "error"])
-                  (get parsed "error")
-                  (when (= "error" event-type) parsed))]
-        {:code (some-> (or (get err "code") (get err "type")) str)
+                    (get parsed "error")
+                    (when (= "error" event-type) parsed))]
+        {:code (some-> (or (get err "code") (get err "type"))
+                       str)
          :message (or (get err "message") "provider reported stream failure")
          :event-type event-type}))))
 
 (defn- stream-finalization-summary
-  [{:keys [terminal incomplete last-event-type last-finish-reason stop-details
-           content-acc reasoning-acc response]}]
+  [{:keys [terminal incomplete last-event-type last-finish-reason stop-details content-acc
+           reasoning-acc response]}]
   (cond-> {:terminal? (boolean terminal)
            :terminal-kind (:kind terminal)
            :terminal-event-type (:event-type terminal)
@@ -3953,126 +4644,121 @@
            :incomplete-reason (:reason incomplete)
            :content-acc-len (.length ^StringBuilder content-acc)
            :reasoning-acc-len (.length ^StringBuilder reasoning-acc)}
-    stop-details (assoc :stop-details stop-details)
-    response (assoc :http-status (:status response))))
+    stop-details
+    (assoc :stop-details stop-details)
+
+    response
+    (assoc :http-status (:status response))))
 
 (defn- extract-stream-delta
   "Extracts content and reasoning deltas from a streaming SSE chunk."
   [chunk]
   (if-let [event-type (get chunk "type")]
-    (cond
-      (= "response.output_text.delta" event-type)
-      ;; Preserve exact stream deltas. A whitespace-only delta can be
-      ;; semantically required source, e.g. `:max-lines` + ` ` + `260`.
-      ;; Generic text extractors drop blank strings; streaming must not.
-      {:content-delta (get chunk "delta")
-       :reasoning-delta nil
-       :content-fallback nil
-       :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (get chunk "usage"))}
+    (cond (= "response.output_text.delta" event-type)
+          ;; Preserve exact stream deltas. A whitespace-only delta can be
+          ;; semantically required source, e.g. `:max-lines` + ` ` + `260`.
+          ;; Generic text extractors drop blank strings; streaming must not.
+          {:content-delta (get chunk "delta")
+           :reasoning-delta nil
+           :content-fallback nil
+           :reasoning-fallback nil
+           :api-usage (normalize-openai-usage (get chunk "usage"))}
+          (= "response.output_text.done" event-type) {:content-delta nil
+                                                      :reasoning-delta nil
+                                                      :content-fallback (some-> (get chunk "text")
+                                                                                content-part-text)
+                                                      :reasoning-fallback nil
+                                                      :api-usage (normalize-openai-usage
+                                                                   (get chunk "usage"))}
+          ;; Tool-call arguments stream as their own delta event (the function
+          ;; arguments, e.g. run_python's `{"code": …}`, arrive piecewise). Surface
+          ;; them as `:tool-args-delta` so callers can render the tool call being
+          ;; written live, mirroring the anthropic input_json_delta path. The
+          ;; finalized tool call still assembles via `output_item.done` below.
+          (= "response.function_call_arguments.delta" event-type)
+          {:content-delta nil
+           :reasoning-delta nil
+           :content-fallback nil
+           :reasoning-fallback nil
+           :tool-args-delta (get chunk "delta")
+           :api-usage (normalize-openai-usage (get chunk "usage"))}
+          (= "response.reasoning_summary_part.added" event-type)
+          {:content-delta nil
+           :reasoning-delta (when (:svar/reasoning-summary-part-boundary? chunk) "\n\n")
+           :content-fallback nil
+           :reasoning-fallback nil
+           :api-usage (normalize-openai-usage (get chunk "usage"))}
+          (contains? #{"response.reasoning.delta" "response.reasoning.done"
+                       "response.reasoning_text.delta" "response.reasoning_text.done"
+                       "response.reasoning_summary.delta" "response.reasoning_summary.done"
+                       "response.reasoning_summary_text.delta"
+                       "response.reasoning_summary_text.done"}
+                     event-type)
+          {:content-delta nil
+           :reasoning-delta (when (str/includes? event-type ".delta")
+                              (some-> (get chunk "delta")
+                                      streaming-reasoning-delta-text))
+           :content-fallback nil
+           :reasoning-fallback (when (str/includes? event-type ".done")
+                                 (some-> (get chunk "text")
+                                         reasoning-part-text))
+           :api-usage (normalize-openai-usage (get chunk "usage"))}
+          (contains? #{"response.output_item.added" "response.output_item.done"} event-type)
+          (let [item (get chunk "item")
+                done? (= "response.output_item.done" event-type)
+                function-call? (= "function_call" (get item "type"))
+                tool-call-preview (when function-call?
+                                    {:id (or (get item "call_id") (get item "id"))
+                                     :name (get item "name")})
+                ;; A completed `function_call` item carries its full arguments
+                ;; here — codex with `store:false` does NOT echo it on
+                ;; `response.completed`, so this is the only place to catch it.
+                tool-call (when done? (function-call-item->tool-call item))]
 
-      (= "response.output_text.done" event-type)
-      {:content-delta nil
-       :reasoning-delta nil
-       :content-fallback (some-> (get chunk "text") content-part-text)
-       :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (get chunk "usage"))}
-
-      ;; Tool-call arguments stream as their own delta event (the function
-      ;; arguments, e.g. run_python's `{"code": …}`, arrive piecewise). Surface
-      ;; them as `:tool-args-delta` so callers can render the tool call being
-      ;; written live, mirroring the anthropic input_json_delta path. The
-      ;; finalized tool call still assembles via `output_item.done` below.
-      (= "response.function_call_arguments.delta" event-type)
-      {:content-delta nil
-       :reasoning-delta nil
-       :content-fallback nil
-       :reasoning-fallback nil
-       :tool-args-delta (get chunk "delta")
-       :api-usage (normalize-openai-usage (get chunk "usage"))}
-
-      (= "response.reasoning_summary_part.added" event-type)
-      {:content-delta nil
-       :reasoning-delta (when (:svar/reasoning-summary-part-boundary? chunk) "\n\n")
-       :content-fallback nil
-       :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (get chunk "usage"))}
-
-      (contains? #{"response.reasoning.delta"
-                   "response.reasoning.done"
-                   "response.reasoning_text.delta"
-                   "response.reasoning_text.done"
-                   "response.reasoning_summary.delta"
-                   "response.reasoning_summary.done"
-                   "response.reasoning_summary_text.delta"
-                   "response.reasoning_summary_text.done"}
-        event-type)
-      {:content-delta nil
-       :reasoning-delta (when (str/includes? event-type ".delta")
-                          (some-> (get chunk "delta") streaming-reasoning-delta-text))
-       :content-fallback nil
-       :reasoning-fallback (when (str/includes? event-type ".done")
-                             (some-> (get chunk "text") reasoning-part-text))
-       :api-usage (normalize-openai-usage (get chunk "usage"))}
-
-      (contains? #{"response.output_item.added" "response.output_item.done"}
-        event-type)
-      (let [item (get chunk "item")
-            done? (= "response.output_item.done" event-type)
-            function-call? (= "function_call" (get item "type"))
-            tool-call-preview (when function-call?
-                                {:id (or (get item "call_id") (get item "id"))
-                                 :name (get item "name")})
-            ;; A completed `function_call` item carries its full arguments
-            ;; here — codex with `store:false` does NOT echo it on
-            ;; `response.completed`, so this is the only place to catch it.
-            tool-call (when done? (function-call-item->tool-call item))]
-        {:content-delta nil
-         :reasoning-delta nil
-         :content-fallback nil
-         :reasoning-fallback (when (and (= "reasoning" (get item "type")) done?)
-                               (reasoning-part-text item))
-         ;; `output_item.added` identifies the native call before argument
-         ;; deltas arrive. Preserve that identity separately from reasoning/text.
-         :tool-call-preview tool-call-preview
-         :provider-state (cond
-                           tool-call {:provider :openai-responses :tool-calls [tool-call]}
-                           done?     (reasoning-item-provider-state item))
-         :api-usage (normalize-openai-usage (get chunk "usage"))})
-
-      (contains? #{"response.completed" "response.done" "response.incomplete"}
-        event-type)
-      (let [response (get chunk "response")]
-        {:content-delta nil
-         :reasoning-delta nil
-         :content-fallback (response-output-text response)
-         :reasoning-fallback (response-output-reasoning response)
-         :provider-state (openai-responses-state response)
-         :api-usage (normalize-openai-usage (or (get response "usage") (get chunk "usage")))
-         :terminal? true
-         :incomplete? (= "response.incomplete" event-type)
-         :incomplete-reason (or (get-in response ["incomplete_details" "reason"])
-                              (get-in response ["incomplete-details" "reason"]))})
-
-      :else
-      {:content-delta nil
-       :reasoning-delta nil
-       :content-fallback nil
-       :reasoning-fallback nil
-       :api-usage (normalize-openai-usage (get chunk "usage"))})
-    (let [delta       (get-in chunk ["choices" 0 "delta"])
+            {:content-delta nil
+             :reasoning-delta nil
+             :content-fallback nil
+             :reasoning-fallback (when (and (= "reasoning" (get item "type")) done?)
+                                   (reasoning-part-text item))
+             ;; `output_item.added` identifies the native call before argument
+             ;; deltas arrive. Preserve that identity separately from reasoning/text.
+             :tool-call-preview tool-call-preview
+             :provider-state (cond tool-call {:provider :openai-responses :tool-calls [tool-call]}
+                                   done? (reasoning-item-provider-state item))
+             :api-usage (normalize-openai-usage (get chunk "usage"))})
+          (contains? #{"response.completed" "response.done" "response.incomplete"} event-type)
+          (let [response (get chunk "response")]
+            {:content-delta nil
+             :reasoning-delta nil
+             :content-fallback (response-output-text response)
+             :reasoning-fallback (response-output-reasoning response)
+             :provider-state (openai-responses-state response)
+             :api-usage (normalize-openai-usage (or (get response "usage") (get chunk "usage")))
+             :terminal? true
+             :incomplete? (= "response.incomplete" event-type)
+             :incomplete-reason (or (get-in response ["incomplete_details" "reason"])
+                                    (get-in response ["incomplete-details" "reason"]))})
+          :else {:content-delta nil
+                 :reasoning-delta nil
+                 :content-fallback nil
+                 :reasoning-fallback nil
+                 :api-usage (normalize-openai-usage (get chunk "usage"))})
+    (let [delta (get-in chunk ["choices" 0 "delta"])
           raw-content (get delta "content")
-          reasoning   (or (get delta "reasoning_content")
+          reasoning (or (get delta "reasoning_content")
                         (get delta "reasoning")
                         (get delta "reasoning_text")
                         (get delta "reasoning_summary"))
-          tool-frags  (get delta "tool_calls")
+          tool-frags (get delta "tool_calls")
           first-tool-frag (first tool-frags)
           tool-name (get-in first-tool-frag ["function" "name"])
-          tool-call-preview (not-empty
-                              (cond-> {}
-                                (get first-tool-frag "id") (assoc :id (get first-tool-frag "id"))
-                                tool-name (assoc :name tool-name)))]
+          tool-call-preview (not-empty (cond-> {}
+                                         (get first-tool-frag "id")
+                                         (assoc :id (get first-tool-frag "id"))
+
+                                         tool-name
+                                         (assoc :name tool-name)))]
+
       {:content-delta (cond
                         ;; Preserve exact string deltas, including a
                         ;; single-space token between adjacent code tokens.
@@ -4080,8 +4766,7 @@
                         (sequential? raw-content) (content-blocks-text raw-content)
                         :else nil)
        :reasoning-delta (or (streaming-reasoning-delta-text reasoning)
-                          (when (sequential? raw-content)
-                            (reasoning-blocks-text raw-content)))
+                            (when (sequential? raw-content) (reasoning-blocks-text raw-content)))
        :content-fallback nil
        :reasoning-fallback nil
        ;; Native tool-call fragments accumulate via provider-state; the
@@ -4093,19 +4778,24 @@
        ;; streaming loop can render the tool call's arguments live (the same
        ;; live-code affordance the anthropic input_json_delta path gives).
        :tool-args-delta (when (seq tool-frags)
-                          (not-empty
-                            (str/join (keep #(get-in % ["function" "arguments"]) tool-frags))))
+                          (not-empty (str/join (keep #(get-in % ["function" "arguments"])
+                                                     tool-frags))))
        :api-usage (normalize-openai-usage (get chunk "usage"))})))
 
-(defn- append-summary-text-to-last-part [item delta]
-  (let [summary (vec (or (get item "summary") []))
-        idx (dec (count summary))]
+(defn- append-summary-text-to-last-part
+  [item delta]
+  (let [summary
+        (vec (or (get item "summary") []))
+
+        idx
+        (dec (count summary))]
+
     (if (neg? idx)
       (assoc item "summary" [{"type" "summary_text" "text" (or delta "")}])
-      (assoc item "summary"
-        (update summary idx update "text" str (or delta ""))))))
+      (assoc item "summary" (update summary idx update "text" str (or delta ""))))))
 
-(defn- apply-reasoning-summary-part-done [item part]
+(defn- apply-reasoning-summary-part-done
+  [item part]
   (if part
     (let [summary (vec (or (get item "summary") []))]
       (if (seq summary)
@@ -4113,7 +4803,8 @@
         (assoc item "summary" [part])))
     (append-summary-text-to-last-part item "\n\n")))
 
-(defn- enrich-responses-reasoning-event [current-reasoning-item event]
+(defn- enrich-responses-reasoning-event
+  [current-reasoning-item event]
   (case (get event "type")
     "response.output_item.added"
     (let [item (get event "item")]
@@ -4122,29 +4813,25 @@
         ;; already produced summary text, the FIRST summary part of this new
         ;; item still needs its "\n\n" separator - without it two items' bold
         ;; headlines glue together as `...**` + `**...` (the `****` artifact).
-        (reset! current-reasoning-item
-          (cond-> item
-            (or (:svar/prior-summary? @current-reasoning-item)
-              (seq (get @current-reasoning-item "summary")))
-            (assoc :svar/prior-summary? true))))
+        (reset! current-reasoning-item (cond-> item
+                                         (or (:svar/prior-summary? @current-reasoning-item)
+                                             (seq (get @current-reasoning-item "summary")))
+                                         (assoc :svar/prior-summary? true))))
       event)
 
     "response.reasoning_summary_part.added"
     (let [boundary? (or (seq (get @current-reasoning-item "summary"))
-                      (:svar/prior-summary? @current-reasoning-item))]
+                        (:svar/prior-summary? @current-reasoning-item))]
       (swap! current-reasoning-item update "summary" (fnil conj []) (get event "part"))
       (cond-> event
-        boundary? (assoc :svar/reasoning-summary-part-boundary? true)))
+        boundary?
+        (assoc :svar/reasoning-summary-part-boundary? true)))
 
     "response.reasoning_summary_text.delta"
-    (do
-      (swap! current-reasoning-item append-summary-text-to-last-part (get event "delta"))
-      event)
+    (do (swap! current-reasoning-item append-summary-text-to-last-part (get event "delta")) event)
 
     "response.reasoning_summary_part.done"
-    (do
-      (swap! current-reasoning-item apply-reasoning-summary-part-done (get event "part"))
-      event)
+    (do (swap! current-reasoning-item apply-reasoning-summary-part-done (get event "part")) event)
 
     "response.output_item.done"
     (let [item (get event "item")]
@@ -4152,8 +4839,8 @@
         (let [merged (merge (dissoc @current-reasoning-item :svar/prior-summary?) item)]
           ;; Keep ONLY the boundary flag alive across the item gap so the next
           ;; reasoning item's first summary part still gets its separator.
-          (reset! current-reasoning-item
-            (when (seq (get merged "summary")) {:svar/prior-summary? true}))
+          (reset! current-reasoning-item (when (seq (get merged "summary"))
+                                           {:svar/prior-summary? true}))
           (assoc event "item" merged))
         event))
 
@@ -4179,9 +4866,11 @@
    (success/fired/dead) deregisters itself. Each call is isolated so one
    throwing task cannot starve the rest."
   []
-  (doseq [^java.util.Map$Entry e (into [] (.entrySet ^java.util.concurrent.ConcurrentHashMap watchdog-registry))]
+  (doseq [^java.util.Map$Entry e
+          (into [] (.entrySet ^java.util.concurrent.ConcurrentHashMap watchdog-registry))]
     (let [token (.getKey e)
-          f     (.getValue e)]
+          f (.getValue e)]
+
       (when-not (try (f) (catch Throwable _ false))
         (.remove ^java.util.concurrent.ConcurrentHashMap watchdog-registry token)))))
 
@@ -4190,16 +4879,21 @@
   ;; process that never streams pays nothing. Fixed 50ms tick over all
   ;; requests: one thread, wakeups flat in N (was ~20/s/request just for the
   ;; cancel poll -> 1000/s at 50 streams).
-  (delay
-    (let [tf   (reify java.util.concurrent.ThreadFactory
-                 (newThread [_ r]
-                   (doto (Thread. ^Runnable r "svar-stream-watchdog")
-                     (.setDaemon true))))
-          exec (java.util.concurrent.Executors/newSingleThreadScheduledExecutor tf)]
-      (.scheduleAtFixedRate exec ^Runnable watchdog-tick!
-        (long watchdog-tick-ms) (long watchdog-tick-ms)
-        java.util.concurrent.TimeUnit/MILLISECONDS)
-      exec)))
+  (delay (let [tf
+               (reify
+                 java.util.concurrent.ThreadFactory
+                   (newThread [_ r]
+                     (doto (Thread. ^Runnable r "svar-stream-watchdog") (.setDaemon true))))
+
+               exec
+               (java.util.concurrent.Executors/newSingleThreadScheduledExecutor tf)]
+
+           (.scheduleAtFixedRate exec
+                                 ^Runnable watchdog-tick!
+                                 (long watchdog-tick-ms)
+                                 (long watchdog-tick-ms)
+                                 java.util.concurrent.TimeUnit/MILLISECONDS)
+           exec)))
 
 (defn- register-watchdog!
   "Register `tick-fn` with the shared scheduler; returns a handle token.
@@ -4235,19 +4929,17 @@
    Returns a handle token; pass to `deregister-watchdog!` on success."
   [^Thread caller ttft-timeout-ms headers-received?-atom ttft-fired?-atom]
   (let [deadline-ns (+ (System/nanoTime) (* (long ttft-timeout-ms) 1000000))]
-    (register-watchdog!
-      (fn []
-        (cond
-          ;; Caller signalled success; disarm without interrupting.
-          @headers-received?-atom false
-          ;; Deadline crossed; recheck flag once more under race-window
-          ;; guard, then fire and disarm.
-          (>= (System/nanoTime) deadline-ns)
-          (do (when-not @headers-received?-atom
-                (reset! ttft-fired?-atom true)
-                (.interrupt caller))
-              false)
-          :else true)))))
+    (register-watchdog! (fn []
+                          (cond
+                            ;; Caller signalled success; disarm without interrupting.
+                            @headers-received?-atom false
+                            ;; Deadline crossed; recheck flag once more under race-window
+                            ;; guard, then fire and disarm.
+                            (>= (System/nanoTime) deadline-ns) (do (when-not @headers-received?-atom
+                                                                     (reset! ttft-fired?-atom true)
+                                                                     (.interrupt caller))
+                                                                   false)
+                            :else true)))))
 
 (defn- idle-timeout-message
   "The idle watchdog's message, naming the PHASE it fired in: waiting for the
@@ -4257,7 +4949,7 @@
   (str (if first-byte?
          (str "Stream first-byte timeout (" fired-ms "ms with no stream bytes)")
          (str "Stream idle timeout (" fired-ms "ms with no bytes)"))
-    suffix))
+       suffix))
 
 (defn- start-idle-stream-watchdog!
   "Arms an idle check on the shared scheduler: closes `stream` when
@@ -4293,13 +4985,19 @@
   (register-watchdog!
     (fn []
       (if @alive?-atom
-        (let [first-byte?  (and (not @bytes-seen?-atom)
-                             (number? first-byte-timeout-ms)
-                             (pos? (long first-byte-timeout-ms)))
-              threshold-ms (if first-byte?
-                             (min (long idle-timeout-ms) (long first-byte-timeout-ms))
-                             (long idle-timeout-ms))
-              elapsed-ms   (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
+        (let [first-byte?
+              (and (not @bytes-seen?-atom)
+                   (number? first-byte-timeout-ms)
+                   (pos? (long first-byte-timeout-ms)))
+
+              threshold-ms
+              (if first-byte?
+                (min (long idle-timeout-ms) (long first-byte-timeout-ms))
+                (long idle-timeout-ms))
+
+              elapsed-ms
+              (long (/ (- (System/nanoTime) (long @last-byte-ns-atom)) 1000000))]
+
           (if (>= elapsed-ms threshold-ms)
             (do (try (on-fire elapsed-ms threshold-ms first-byte?) (catch Throwable _ nil))
                 (try (.close stream) (catch Throwable _ nil))
@@ -4368,31 +5066,28 @@
 
    `cancel-fired?`/`ttft-fired?` are the watchdog atoms. Always throws."
   [^InterruptedException e cancel-fired? ttft-fired? url ttft-timeout-ms]
-  (cond
-    @cancel-fired?
-    (do (Thread/interrupted)
-        (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                 {:type :svar.core/stream-cancelled :stream? true :url url} e)))
-
-    @ttft-fired?
-    (do (Thread/interrupted)
-        (trove/log! {:level :warn :id ::stream-ttft-timeout
-                     :data (log-data {:url url
-                                      :ttft-timeout-ms ttft-timeout-ms})
-                     :msg "TTFT timeout, no headers received"})
-        (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                          "ms with no response headers): " (ex-message e))
-                 {:type :svar.core/stream-ttft-timeout
-                  :stream? true :url url
-                  :ttft-timeout-ms ttft-timeout-ms
-                  :cause-class (.getName (class e))}
-                 e)))
-
-    :else
-    ;; Not our watchdog — a real external interrupt. Restore the flag and
-    ;; propagate as-is (clean cancellation).
-    (do (.interrupt (Thread/currentThread))
-        (throw e))))
+  (cond @cancel-fired? (do (Thread/interrupted)
+                           (throw (ex-info
+                                    "Stream cancelled by caller (pre-headers)."
+                                    {:type :svar.core/stream-cancelled :stream? true :url url}
+                                    e)))
+        @ttft-fired? (do (Thread/interrupted)
+                         (trove/log! {:level :warn
+                                      :id ::stream-ttft-timeout
+                                      :data (log-data {:url url :ttft-timeout-ms ttft-timeout-ms})
+                                      :msg "TTFT timeout, no headers received"})
+                         (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                                              "ms with no response headers): " (ex-message e))
+                                         {:type :svar.core/stream-ttft-timeout
+                                          :stream? true
+                                          :url url
+                                          :ttft-timeout-ms ttft-timeout-ms
+                                          :cause-class (.getName (class e))}
+                                         e)))
+        :else
+        ;; Not our watchdog — a real external interrupt. Restore the flag and
+        ;; propagate as-is (clean cancellation).
+        (do (.interrupt (Thread/currentThread)) (throw e))))
 
 (defn- http-post-stream!
   "Makes a streaming HTTP POST request. Reads SSE events and fires on-delta
@@ -4410,141 +5105,194 @@
    streaming paths - the SSE chunks are consumed incrementally, so the
    accumulated `:content` / `:reasoning` are the closest analogues."
   [url body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn on-delta]
-  (let [_ (trove/log! {:level :info :id ::stream-started
-                       :data  (log-data {:url url
-                                         :timeout-ms timeout-ms
-                                         :ttft-timeout-ms ttft-timeout-ms
-                                         :idle-timeout-ms idle-timeout-ms
-                                         :semantic-timeout-ms *stream-semantic-timeout-ms*})
-                       :msg   "stream HTTP POST dispatched"})
-        request-start-ns  (System/nanoTime)
-        caller-thread     (Thread/currentThread)
-        headers-received? (atom false)
-        ttft-fired?       (atom false)
-        ttft-watchdog     (when (and (number? ttft-timeout-ms) (pos? (long ttft-timeout-ms)))
-                            (start-ttft-watchdog! caller-thread ttft-timeout-ms
-                              headers-received? ttft-fired?))
+  (let [_
+        (trove/log! {:level :info
+                     :id ::stream-started
+                     :data (log-data {:url url
+                                      :timeout-ms timeout-ms
+                                      :ttft-timeout-ms ttft-timeout-ms
+                                      :idle-timeout-ms idle-timeout-ms
+                                      :semantic-timeout-ms *stream-semantic-timeout-ms*})
+                     :msg "stream HTTP POST dispatched"})
+
+        request-start-ns
+        (System/nanoTime)
+
+        caller-thread
+        (Thread/currentThread)
+
+        headers-received?
+        (atom false)
+
+        ttft-fired?
+        (atom false)
+
+        ttft-watchdog
+        (when (and (number? ttft-timeout-ms) (pos? (long ttft-timeout-ms)))
+          (start-ttft-watchdog! caller-thread ttft-timeout-ms headers-received? ttft-fired?))
+
         ;; Caller-driven cancellation (bound `*cancel-fn*`). Captured on the
         ;; caller thread so the watchdog (different thread, no dynamic
         ;; binding) can read it. Zero cost when no cancel-fn is bound.
-        cancel-fn         *cancel-fn*
-        cancel-requested? (fn [] (boolean (and cancel-fn (try (cancel-fn) (catch Throwable _ false)))))
-        cancel-fired?     (atom false)
-        cancel-alive?     (atom true)
-        stream-ref        (atom nil)
-        cancel-watchdog   (when cancel-fn
-                            (start-cancel-watchdog! caller-thread cancel-requested?
-                              stream-ref cancel-fired? cancel-alive?))
-        response (try
-                   (with-http-client-heal
-                     (fn [client]
-                       (http/post url
-                         {:client client
-                          ;; STREAMING PIN - never let the transport compress an
-                          ;; SSE body. babashka.http-client's defaults advertise
-                          ;; `accept-encoding: gzip, deflate` and wrap the body in
-                          ;; a GZIPInputStream; a gzip stream cannot yield its
-                          ;; first line until a whole deflate block is buffered,
-                          ;; so upstreams that honour it (api.anthropic.com does)
-                          ;; turn a live token stream into one burst at the end.
-                          :headers (assoc headers "accept-encoding" "identity")
-                          :body (json/write-json-str body)
-                          :timeout timeout-ms
-                          :as :stream})))
-                   (catch clojure.lang.ExceptionInfo e
-                     ;; If the TTFT watchdog fired, the interrupt may
-                     ;; surface as ExceptionInfo wrapping IOException.
-                     ;; Reclassify before propagating; otherwise convert
-                     ;; InputStream body to string and re-throw as today.
-                     (when @cancel-fired?
-                       (Thread/interrupted)
-                       (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                                {:type :svar.core/stream-cancelled :stream? true :url url} e)))
-                     (if @ttft-fired?
-                       (do
-                         ;; Consume any leftover interrupt so we don't
-                         ;; poison unrelated code further up the stack.
-                         (Thread/interrupted)
-                         (trove/log! {:level :warn :id ::stream-ttft-timeout
-                                      :data (log-data {:url url
-                                                       :ttft-timeout-ms ttft-timeout-ms})
-                                      :msg "TTFT timeout, no headers received"})
-                         (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                                           "ms with no response headers): " (ex-message e))
+        cancel-fn
+        *cancel-fn*
+
+        cancel-requested?
+        (fn []
+          (boolean (and cancel-fn (try (cancel-fn) (catch Throwable _ false)))))
+
+        cancel-fired?
+        (atom false)
+
+        cancel-alive?
+        (atom true)
+
+        stream-ref
+        (atom nil)
+
+        cancel-watchdog
+        (when cancel-fn
+          (start-cancel-watchdog! caller-thread
+                                  cancel-requested?
+                                  stream-ref
+                                  cancel-fired?
+                                  cancel-alive?))
+
+        response
+        (try
+          (with-http-client-heal (fn [client]
+                                   (http/post url
+                                              {:client client
+                                               ;; STREAMING PIN - never let the transport compress an
+                                               ;; SSE body. babashka.http-client's defaults advertise
+                                               ;; `accept-encoding: gzip, deflate` and wrap the body in
+                                               ;; a GZIPInputStream; a gzip stream cannot yield its
+                                               ;; first line until a whole deflate block is buffered,
+                                               ;; so upstreams that honour it (api.anthropic.com does)
+                                               ;; turn a live token stream into one burst at the end.
+                                               :headers (assoc headers "accept-encoding" "identity")
+                                               :body (json/write-json-str body)
+                                               :timeout timeout-ms
+                                               :as :stream})))
+          (catch clojure.lang.ExceptionInfo e
+            ;; If the TTFT watchdog fired, the interrupt may
+            ;; surface as ExceptionInfo wrapping IOException.
+            ;; Reclassify before propagating; otherwise convert
+            ;; InputStream body to string and re-throw as today.
+            (when @cancel-fired?
+              (Thread/interrupted)
+              (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                              {:type :svar.core/stream-cancelled :stream? true :url url}
+                              e)))
+            (if @ttft-fired?
+              (do
+                ;; Consume any leftover interrupt so we don't
+                ;; poison unrelated code further up the stack.
+                (Thread/interrupted)
+                (trove/log! {:level :warn
+                             :id ::stream-ttft-timeout
+                             :data (log-data {:url url :ttft-timeout-ms ttft-timeout-ms})
+                             :msg "TTFT timeout, no headers received"})
+                (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                                     "ms with no response headers): " (ex-message e))
+                                {:type :svar.core/stream-ttft-timeout
+                                 :stream? true
+                                 :url url
+                                 :ttft-timeout-ms ttft-timeout-ms
+                                 :cause-class (.getName (class e))}
+                                e)))
+              (if (connection-error? e)
+                (throw (connection-error->ex-info e url))
+                (let [ed
+                      (ex-data e)
+
+                      body-str
+                      (when (instance? java.io.InputStream (:body ed))
+                        (slurp-input-stream (:body ed)))]
+
+                  (throw (ex-info (ex-message e)
+                                  (cond-> (dissoc ed :body)
+                                    body-str
+                                    (assoc :body body-str))
+                                  (ex-cause e)))))))
+          (catch java.io.IOException e
+            ;; Same reclassification for raw IOExceptions (the
+            ;; JDK may surface InterruptedIOException here).
+            (when @cancel-fired?
+              (Thread/interrupted)
+              (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                              {:type :svar.core/stream-cancelled :stream? true :url url}
+                              e)))
+            (if @ttft-fired?
+              (do (Thread/interrupted)
+                  (trove/log! {:level :warn
+                               :id ::stream-ttft-timeout
+                               :data (log-data {:url url :ttft-timeout-ms ttft-timeout-ms})
+                               :msg "TTFT timeout, no headers received"})
+                  (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                                       "ms with no response headers): " (ex-message e))
                                   {:type :svar.core/stream-ttft-timeout
-                                   :stream? true :url url
+                                   :stream? true
+                                   :url url
                                    :ttft-timeout-ms ttft-timeout-ms
                                    :cause-class (.getName (class e))}
                                   e)))
-                       (if (connection-error? e)
-                         (throw (connection-error->ex-info e url))
-                         (let [ed (ex-data e)
-                               body-str (when (instance? java.io.InputStream (:body ed))
-                                          (slurp-input-stream (:body ed)))]
-                           (throw (ex-info (ex-message e)
-                                    (cond-> (dissoc ed :body)
-                                      body-str (assoc :body body-str))
-                                    (ex-cause e)))))))
-                   (catch java.io.IOException e
-                     ;; Same reclassification for raw IOExceptions (the
-                     ;; JDK may surface InterruptedIOException here).
-                     (when @cancel-fired?
-                       (Thread/interrupted)
-                       (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                                {:type :svar.core/stream-cancelled :stream? true :url url} e)))
-                     (if @ttft-fired?
-                       (do
-                         (Thread/interrupted)
-                         (trove/log! {:level :warn :id ::stream-ttft-timeout
-                                      :data (log-data {:url url
-                                                       :ttft-timeout-ms ttft-timeout-ms})
-                                      :msg "TTFT timeout, no headers received"})
-                         (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                                           "ms with no response headers): " (ex-message e))
-                                  {:type :svar.core/stream-ttft-timeout
-                                   :stream? true :url url
-                                   :ttft-timeout-ms ttft-timeout-ms
-                                   :cause-class (.getName (class e))}
-                                  e)))
-                       (if (connection-error? e)
-                         (throw (connection-error->ex-info e url))
-                         (throw e))))
-                   (catch InterruptedException e
-                     ;; The JDK `HttpClient.send` is declared
-                     ;; `throws InterruptedException` and CAN surface the
-                     ;; caller interrupt RAW (unwrapped) — our TTFT/cancel
-                     ;; watchdog lever, or a genuinely external interrupt.
-                     ;; Neither the ExceptionInfo nor the IOException clause
-                     ;; above catches it, so without this it escapes as a BARE
-                     ;; `InterruptedException` — which downstream retry layers
-                     ;; mistake for a spurious blip and re-send, doubling the
-                     ;; effective stall. Reclassify OUR OWN watchdog fires into
-                     ;; the same typed errors as the wrapped paths; propagate a
-                     ;; genuinely external interrupt verbatim (flag restored).
-                     (reclassify-pre-headers-interrupt! e cancel-fired? ttft-fired? url ttft-timeout-ms))
-                   (finally
-                     ;; Order matters: flip the flag BEFORE deregistering so
-                     ;; a racing tick sees the success and never fires. Then
-                     ;; deregister so the shared scheduler drops this check.
-                     (reset! headers-received? true)
-                     (deregister-watchdog! ttft-watchdog)))
-        _ (mark-connection-healthy! url)
-        _ (trove/log! {:level :debug :id ::stream-headers
-                       :data (log-data {:url url
-                                        :status (:status response)
-                                        :headers-elapsed-ms (long (/ (- (System/nanoTime) request-start-ns) 1000000))})
-                       :msg "stream headers received"})
-        input-stream (:body response)
+              (if (connection-error? e) (throw (connection-error->ex-info e url)) (throw e))))
+          (catch InterruptedException e
+            ;; The JDK `HttpClient.send` is declared
+            ;; `throws InterruptedException` and CAN surface the
+            ;; caller interrupt RAW (unwrapped) — our TTFT/cancel
+            ;; watchdog lever, or a genuinely external interrupt.
+            ;; Neither the ExceptionInfo nor the IOException clause
+            ;; above catches it, so without this it escapes as a BARE
+            ;; `InterruptedException` — which downstream retry layers
+            ;; mistake for a spurious blip and re-send, doubling the
+            ;; effective stall. Reclassify OUR OWN watchdog fires into
+            ;; the same typed errors as the wrapped paths; propagate a
+            ;; genuinely external interrupt verbatim (flag restored).
+            (reclassify-pre-headers-interrupt! e cancel-fired? ttft-fired? url ttft-timeout-ms))
+          (finally
+            ;; Order matters: flip the flag BEFORE deregistering so
+            ;; a racing tick sees the success and never fires. Then
+            ;; deregister so the shared scheduler drops this check.
+            (reset! headers-received? true)
+            (deregister-watchdog! ttft-watchdog)))
+
+        _
+        (mark-connection-healthy! url)
+
+        _
+        (trove/log! {:level :debug
+                     :id ::stream-headers
+                     :data (log-data {:url url
+                                      :status (:status response)
+                                      :headers-elapsed-ms
+                                      (long (/ (- (System/nanoTime) request-start-ns) 1000000))})
+                     :msg "stream headers received"})
+
+        input-stream
+        (:body response)
+
         ;; Hand the body to the cancel watchdog so it can close it (the only
         ;; way to unblock a parked `.readLine` on a cancel mid-stream).
-        _ (reset! stream-ref input-stream)
-        content-acc (StringBuilder.)
-        reasoning-acc (StringBuilder.)
+        _
+        (reset! stream-ref input-stream)
+
+        content-acc
+        (StringBuilder.)
+
+        reasoning-acc
+        (StringBuilder.)
+
         ;; Accumulates streamed tool-call argument fragments and the identity
         ;; announced before them. Keeping this separate from content/reasoning
         ;; lets callers render a native-call preview without reclassifying text.
-        tool-args-acc (StringBuilder.)
-        tool-call-preview-atom (atom nil)
+        tool-args-acc
+        (StringBuilder.)
+
+        tool-call-preview-atom
+        (atom nil)
+
         ;; Diagnostics for a body that is NOT an SSE stream. Some gateways
         ;; (e.g. Z.ai) answer an error with HTTP 200 + a plain JSON body like
         ;; `{"code":500,"msg":"404 NOT_FOUND"}`. Read as a stream that yields
@@ -4552,140 +5300,186 @@
         ;; hides the real cause. We capture a bounded head of the raw body and
         ;; whether ANY `event:`/`data:` line was seen so finalization can
         ;; surface the actual payload instead.
-        raw-head (StringBuilder.)
-        saw-sse? (volatile! false)
-        usage-atom (atom nil)
-        provider-state-atom (atom nil)
-        current-reasoning-item (atom nil)
-        terminal-event (atom nil)
-        last-event-type (atom nil)
-        last-finish-reason (atom nil)
-        stop-details (atom nil)
-        incomplete-response (atom nil)
-        failed-response (atom nil)
-        last-byte-ns (atom (System/nanoTime))
-        bytes-seen? (atom false)
-        last-semantic-ns (atom (System/nanoTime))
-        idle-fired? (atom false)
-        idle-fired-ms (atom nil)
-        idle-first-byte? (atom false)
-        semantic-fired? (atom false)
-        watchdog-alive? (atom true)
-        semantic-timeout-ms *stream-semantic-timeout-ms*
-        first-byte-timeout-ms *stream-first-byte-timeout-ms*
-        watchdog (when (and (number? idle-timeout-ms) (pos? (long idle-timeout-ms)))
-                   (start-idle-stream-watchdog!
-                     input-stream
-                     idle-timeout-ms
-                     first-byte-timeout-ms
-                     last-byte-ns
-                     bytes-seen?
-                     watchdog-alive?
-                     (fn [elapsed-ms threshold-ms first-byte?]
-                       (reset! idle-fired? true)
-                       (reset! idle-fired-ms threshold-ms)
-                       (reset! idle-first-byte? first-byte?)
-                       (trove/log! {:level :warn
-                                    :id (if first-byte?
-                                          ::stream-first-byte-timeout
-                                          ::stream-idle-timeout)
-                                    :data (log-data {:url url
-                                                     :idle-timeout-ms idle-timeout-ms
-                                                     :first-byte-timeout-ms first-byte-timeout-ms
-                                                     :fired-timeout-ms threshold-ms
-                                                     :elapsed-ms elapsed-ms
-                                                     :content-acc-len (.length content-acc)
-                                                     :reasoning-acc-len (.length reasoning-acc)})
-                                    :msg (if first-byte?
-                                           "no first stream byte, closing"
-                                           "stream idle, closing")}))))
-        semantic-watchdog (when (and (number? semantic-timeout-ms) (pos? (long semantic-timeout-ms)))
-                            (start-semantic-stream-watchdog!
-                              input-stream
-                              semantic-timeout-ms
-                              last-semantic-ns
-                              watchdog-alive?
-                              (fn [elapsed-ms]
-                                (reset! semantic-fired? true)
-                                (trove/log! {:level :warn :id ::stream-semantic-timeout
-                                             :data (log-data {:url url
-                                                              :semantic-timeout-ms semantic-timeout-ms
-                                                              :elapsed-ms elapsed-ms
-                                                              :content-acc-len (.length content-acc)
-                                                              :reasoning-acc-len (.length reasoning-acc)})
-                                             :msg "stream semantic timeout, closing"}))))]
-    (try
-      (with-open [reader (BufferedReader. (InputStreamReader. ^java.io.InputStream input-stream "UTF-8"))]
-        (letfn [(handle-parsed! [parsed]
-                  (cond
-                    (= sse-done parsed)
-                    (do
-                      (reset! terminal-event {:kind :done-marker})
-                      (reset! last-semantic-ns (System/nanoTime)))
+        raw-head
+        (StringBuilder.)
 
-                    parsed
-                    (let [parsed (enrich-responses-reasoning-event current-reasoning-item parsed)
-                          {:keys [content-delta reasoning-delta content-fallback reasoning-fallback
-                                  tool-args-delta tool-call-preview
-                                  provider-state api-usage terminal? incomplete? incomplete-reason]
-                           :as extracted}
-                          (delta-fn parsed)
-                          content-piece   (or content-delta
-                                            (when (zero? (.length content-acc))
-                                              (some-> content-fallback content-part-text)))
-                          reasoning-piece (or reasoning-delta
-                                            (when (zero? (.length reasoning-acc))
-                                              (some-> reasoning-fallback reasoning-part-text)))]
-                      (when-let [event-type (stream-event-type parsed)]
-                        (reset! last-event-type event-type))
-                      (when-let [finish-reason (stream-finish-reason parsed)]
-                        (reset! last-finish-reason finish-reason)
-                        ;; Anthropic sends `stop_details` in the SAME terminal
-                        ;; `message_delta` as `stop_reason`; capture it so a
-                        ;; `refusal` carries its category + explanation into the
-                        ;; finalization the blank-reply classifier reads.
-                        (when-let [sd (stream-stop-details parsed)]
-                          (reset! stop-details sd))
-                        (when (and (not @terminal-event)
-                                (not (contains? nonterminal-stream-statuses finish-reason)))
-                          (reset! terminal-event {:kind :finish-reason
-                                                  :event-type (stream-event-type parsed)})))
-                      (when terminal?
-                        (reset! terminal-event {:kind :terminal-event
-                                                :event-type (stream-event-type parsed)}))
-                      (when incomplete?
-                        (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
-                      (when-let [err (stream-failed-error parsed)]
-                        (reset! failed-response err))
-                      (when (stream-semantic-event? parsed extracted content-piece reasoning-piece)
-                        (reset! last-semantic-ns (System/nanoTime)))
-                      (when content-piece (.append content-acc content-piece))
-                      (when reasoning-piece (.append reasoning-acc reasoning-piece))
-                      (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
-                      (when tool-call-preview
-                        (swap! tool-call-preview-atom merge tool-call-preview))
-                      (when provider-state
-                        (swap! provider-state-atom merge-provider-state provider-state))
-                      (when api-usage (reset! usage-atom api-usage))
-                      (when on-delta
-                        (on-delta {:content-delta content-piece
-                                   :reasoning-delta reasoning-piece
-                                   :content-acc (str content-acc)
-                                   :reasoning-acc (str reasoning-acc)
-                                   :tool-args-acc (str tool-args-acc)
-                                   :tool-call-preview @tool-call-preview-atom
-                                   :provider-state @provider-state-atom
-                                   :api-usage api-usage})))))
-                (dispatch-event! [event-type data-lines]
-                  (when-let [parsed (parse-sse-event event-type data-lines)]
-                    (handle-parsed! parsed)))]
+        saw-sse?
+        (volatile! false)
+
+        usage-atom
+        (atom nil)
+
+        provider-state-atom
+        (atom nil)
+
+        current-reasoning-item
+        (atom nil)
+
+        terminal-event
+        (atom nil)
+
+        last-event-type
+        (atom nil)
+
+        last-finish-reason
+        (atom nil)
+
+        stop-details
+        (atom nil)
+
+        incomplete-response
+        (atom nil)
+
+        failed-response
+        (atom nil)
+
+        last-byte-ns
+        (atom (System/nanoTime))
+
+        bytes-seen?
+        (atom false)
+
+        last-semantic-ns
+        (atom (System/nanoTime))
+
+        idle-fired?
+        (atom false)
+
+        idle-fired-ms
+        (atom nil)
+
+        idle-first-byte?
+        (atom false)
+
+        semantic-fired?
+        (atom false)
+
+        watchdog-alive?
+        (atom true)
+
+        semantic-timeout-ms
+        *stream-semantic-timeout-ms*
+
+        first-byte-timeout-ms
+        *stream-first-byte-timeout-ms*
+
+        watchdog
+        (when (and (number? idle-timeout-ms) (pos? (long idle-timeout-ms)))
+          (start-idle-stream-watchdog!
+            input-stream
+            idle-timeout-ms
+            first-byte-timeout-ms
+            last-byte-ns
+            bytes-seen?
+            watchdog-alive?
+            (fn [elapsed-ms threshold-ms first-byte?]
+              (reset! idle-fired? true)
+              (reset! idle-fired-ms threshold-ms)
+              (reset! idle-first-byte? first-byte?)
+              (trove/log!
+                {:level :warn
+                 :id (if first-byte? ::stream-first-byte-timeout ::stream-idle-timeout)
+                 :data (log-data {:url url
+                                  :idle-timeout-ms idle-timeout-ms
+                                  :first-byte-timeout-ms first-byte-timeout-ms
+                                  :fired-timeout-ms threshold-ms
+                                  :elapsed-ms elapsed-ms
+                                  :content-acc-len (.length content-acc)
+                                  :reasoning-acc-len (.length reasoning-acc)})
+                 :msg (if first-byte? "no first stream byte, closing" "stream idle, closing")}))))
+
+        semantic-watchdog
+        (when (and (number? semantic-timeout-ms) (pos? (long semantic-timeout-ms)))
+          (start-semantic-stream-watchdog!
+            input-stream
+            semantic-timeout-ms
+            last-semantic-ns
+            watchdog-alive?
+            (fn [elapsed-ms]
+              (reset! semantic-fired? true)
+              (trove/log! {:level :warn
+                           :id ::stream-semantic-timeout
+                           :data (log-data {:url url
+                                            :semantic-timeout-ms semantic-timeout-ms
+                                            :elapsed-ms elapsed-ms
+                                            :content-acc-len (.length content-acc)
+                                            :reasoning-acc-len (.length reasoning-acc)})
+                           :msg "stream semantic timeout, closing"}))))]
+
+    (try
+      (with-open [reader (BufferedReader. (InputStreamReader. ^java.io.InputStream input-stream
+                                                              "UTF-8"))]
+        (letfn
+          [(handle-parsed! [parsed]
+             (cond (= sse-done parsed) (do (reset! terminal-event {:kind :done-marker})
+                                           (reset! last-semantic-ns (System/nanoTime)))
+                   parsed
+                   (let [parsed (enrich-responses-reasoning-event current-reasoning-item parsed)
+                         {:keys [content-delta reasoning-delta content-fallback reasoning-fallback
+                                 tool-args-delta tool-call-preview provider-state api-usage
+                                 terminal? incomplete? incomplete-reason]
+                          :as extracted}
+                         (delta-fn parsed)
+                         content-piece (or content-delta
+                                           (when (zero? (.length content-acc))
+                                             (some-> content-fallback
+                                                     content-part-text)))
+                         reasoning-piece (or reasoning-delta
+                                             (when (zero? (.length reasoning-acc))
+                                               (some-> reasoning-fallback
+                                                       reasoning-part-text)))]
+
+                     (when-let [event-type (stream-event-type parsed)]
+                       (reset! last-event-type event-type))
+                     (when-let [finish-reason (stream-finish-reason parsed)]
+                       (reset! last-finish-reason finish-reason)
+                       ;; Anthropic sends `stop_details` in the SAME terminal
+                       ;; `message_delta` as `stop_reason`; capture it so a
+                       ;; `refusal` carries its category + explanation into the
+                       ;; finalization the blank-reply classifier reads.
+                       (when-let [sd (stream-stop-details parsed)]
+                         (reset! stop-details sd))
+                       (when (and (not @terminal-event)
+                                  (not (contains? nonterminal-stream-statuses finish-reason)))
+                         (reset! terminal-event {:kind :finish-reason
+                                                 :event-type (stream-event-type parsed)})))
+                     (when terminal?
+                       (reset! terminal-event {:kind :terminal-event
+                                               :event-type (stream-event-type parsed)}))
+                     (when incomplete?
+                       (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
+                     (when-let [err (stream-failed-error parsed)]
+                       (reset! failed-response err))
+                     (when (stream-semantic-event? parsed extracted content-piece reasoning-piece)
+                       (reset! last-semantic-ns (System/nanoTime)))
+                     (when content-piece (.append content-acc content-piece))
+                     (when reasoning-piece (.append reasoning-acc reasoning-piece))
+                     (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
+                     (when tool-call-preview (swap! tool-call-preview-atom merge tool-call-preview))
+                     (when provider-state
+                       (swap! provider-state-atom merge-provider-state provider-state))
+                     (when api-usage (reset! usage-atom api-usage))
+                     (when on-delta
+                       (on-delta {:content-delta content-piece
+                                  :reasoning-delta reasoning-piece
+                                  :content-acc (str content-acc)
+                                  :reasoning-acc (str reasoning-acc)
+                                  :tool-args-acc (str tool-args-acc)
+                                  :tool-call-preview @tool-call-preview-atom
+                                  :provider-state @provider-state-atom
+                                  :api-usage api-usage})))))
+           (dispatch-event! [event-type data-lines]
+             (when-let [parsed (parse-sse-event event-type data-lines)]
+               (handle-parsed! parsed)))]
           (loop [event-type nil
                  data-lines []
                  line-count (long 0)
                  last-line-ns (System/nanoTime)]
+
             (let [line (.readLine reader)
                   now-ns (System/nanoTime)
                   gap-ms (long (/ (- now-ns last-line-ns) 1000000))]
+
               ;; Reset idle on every observed line: comments, blank
               ;; separators, and data all prove transport liveness.
               (reset! last-byte-ns now-ns)
@@ -4698,79 +5492,87 @@
               ;; volatile read — set by the cancel watchdog.
               (when @cancel-fired?
                 (throw (ex-info "Stream cancelled by caller."
-                         {:type :svar.core/stream-cancelled :stream? true :url url})))
+                                {:type :svar.core/stream-cancelled :stream? true :url url})))
               ;; Optional per-line trace. Gated on the cached boolean
               ;; so the disabled path is a single branch with zero
               ;; allocations - measurable improvement at high event
               ;; rates (anthropic delta storms peak >2000 lines/s).
               (when (and stream-line-trace-enabled?
-                      (or (>= gap-ms STREAM_LINE_TRACE_GAP_MS)
-                        (== 0 (Math/floorMod line-count (long STREAM_LINE_TRACE_EVERY_N)))))
-                (trove/log! {:level :info :id ::stream-line-trace
-                             :data (log-data
-                                     {:url url
-                                      :line-count line-count
-                                      :gap-ms gap-ms
-                                      :line-len (when line (count line))
-                                      :line-preview (when line
-                                                      (subs line 0
-                                                        (min STREAM_LINE_TRACE_PREVIEW_CHARS
-                                                          (count line))))
-                                      :line-eof? (nil? line)
-                                      :pending-event-type event-type
-                                      :last-event-type @last-event-type
-                                      :content-acc-len (.length content-acc)
-                                      :reasoning-acc-len (.length reasoning-acc)})
-                             :msg "sse line"}))
+                         (or (>= gap-ms STREAM_LINE_TRACE_GAP_MS)
+                             (== 0 (Math/floorMod line-count (long STREAM_LINE_TRACE_EVERY_N)))))
+                (trove/log!
+                  {:level :info
+                   :id ::stream-line-trace
+                   :data (log-data
+                           {:url url
+                            :line-count line-count
+                            :gap-ms gap-ms
+                            :line-len (when line (count line))
+                            :line-preview
+                            (when line
+                              (subs line 0 (min STREAM_LINE_TRACE_PREVIEW_CHARS (count line))))
+                            :line-eof? (nil? line)
+                            :pending-event-type event-type
+                            :last-event-type @last-event-type
+                            :content-acc-len (.length content-acc)
+                            :reasoning-acc-len (.length reasoning-acc)})
+                   :msg "sse line"}))
               (when (some? line)
                 ;; Capture a bounded head of the raw body for the not-an-SSE
                 ;; diagnostic (see `raw-head` binding). Cheap: a single length
                 ;; guard, only the first ~600 chars are kept.
                 (when (and (not (str/blank? line)) (< (.length raw-head) 600))
-                  (.append raw-head line) (.append raw-head "\n"))
+                  (.append raw-head line)
+                  (.append raw-head "\n"))
                 (if (str/blank? line)
-                  (do
-                    (dispatch-event! event-type data-lines)
-                    (recur nil [] (unchecked-inc line-count) now-ns))
+                  (do (dispatch-event! event-type data-lines)
+                      (recur nil [] (unchecked-inc line-count) now-ns))
                   (let [{:keys [field value]} (sse-field-line line)]
                     (case field
-                      "event" (do (vreset! saw-sse? true)
-                                  (recur value data-lines (unchecked-inc line-count) now-ns))
-                      "data"  (do (vreset! saw-sse? true)
-                                  (recur event-type (conj data-lines value) (unchecked-inc line-count) now-ns))
+                      "event"
+                      (do (vreset! saw-sse? true)
+                          (recur value data-lines (unchecked-inc line-count) now-ns))
+
+                      "data"
+                      (do (vreset! saw-sse? true)
+                          (recur event-type
+                                 (conj data-lines value)
+                                 (unchecked-inc line-count)
+                                 now-ns))
+
                       (recur event-type data-lines (unchecked-inc line-count) now-ns)))))))))
       (when @semantic-fired?
-        (let [stream-finalization (stream-finalization-summary
-                                    {:terminal @terminal-event
-                                     :incomplete @incomplete-response
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})]
-          (throw (ex-info (str "Stream semantic timeout (" semantic-timeout-ms
-                            "ms without model/progress event).")
-                   {:type :svar.core/stream-semantic-timeout
-                    :stream? true
-                    :url url
-                    :semantic-timeout-ms semantic-timeout-ms
-                    :stream-finalization stream-finalization
-                    :content-acc-len (.length content-acc)
-                    :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
+        (let [stream-finalization (stream-finalization-summary {:terminal @terminal-event
+                                                                :incomplete @incomplete-response
+                                                                :last-event-type @last-event-type
+                                                                :last-finish-reason
+                                                                @last-finish-reason
+                                                                :content-acc content-acc
+                                                                :reasoning-acc reasoning-acc
+                                                                :response response})]
+          (throw (ex-info (str "Stream semantic timeout ("
+                               semantic-timeout-ms
+                               "ms without model/progress event).")
+                          {:type :svar.core/stream-semantic-timeout
+                           :stream? true
+                           :url url
+                           :semantic-timeout-ms semantic-timeout-ms
+                           :stream-finalization stream-finalization
+                           :content-acc-len (.length content-acc)
+                           :reasoning-acc-len (.length reasoning-acc)
+                           :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                           :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when @idle-fired?
-        (let [stream-finalization (stream-finalization-summary
-                                    {:terminal @terminal-event
-                                     :incomplete @incomplete-response
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})]
-          (throw (ex-info (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
-                            @idle-first-byte?
-                            ".")
+        (let [stream-finalization (stream-finalization-summary {:terminal @terminal-event
+                                                                :incomplete @incomplete-response
+                                                                :last-event-type @last-event-type
+                                                                :last-finish-reason
+                                                                @last-finish-reason
+                                                                :content-acc content-acc
+                                                                :reasoning-acc reasoning-acc
+                                                                :response response})]
+          (throw (ex-info
+                   (idle-timeout-message (or @idle-fired-ms idle-timeout-ms) @idle-first-byte? ".")
                    {:type :svar.core/stream-idle-timeout
                     :stream? true
                     :url url
@@ -4791,35 +5593,38 @@
       ;; into a typed rate-limit-aware error. Checked BEFORE `incomplete`:
       ;; failed is strictly more specific.
       (when-let [{:keys [code message]} @failed-response]
-        (let [stream-finalization (stream-finalization-summary
-                                    {:terminal @terminal-event
-                                     :incomplete @incomplete-response
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})
+        (let [stream-finalization (stream-finalization-summary {:terminal @terminal-event
+                                                                :incomplete @incomplete-response
+                                                                :last-event-type @last-event-type
+                                                                :last-finish-reason
+                                                                @last-finish-reason
+                                                                :content-acc content-acc
+                                                                :reasoning-acc reasoning-acc
+                                                                :response response})
               context-overflow? (context-overflow-failure? code message)
               status (if context-overflow?
                        400
-                       (get stream-failed-code->status (some-> code str/lower-case)))]
-          (throw (ex-info (str "Provider stream failed"
-                            (when code (str " (" code ")"))
-                            ": " message)
-                   (cond-> {:type (if context-overflow?
-                                    :svar.tokens/context-overflow
-                                    :svar.core/stream-failed)
-                            :source :provider
-                            :stream? true
-                            :output-started? (or (pos? (.length content-acc))
-                                               (pos? (.length reasoning-acc)))
-                            :url url
-                            :provider-error-code code
-                            :provider-message message
-                            :stream-finalization stream-finalization
-                            :content-acc-len (.length content-acc)
-                            :reasoning-acc-len (.length reasoning-acc)}
-                     status (assoc :status status))))))
+                       (get stream-failed-code->status
+                            (some-> code
+                                    str/lower-case)))]
+
+          (throw
+            (ex-info (str "Provider stream failed" (when code (str " (" code ")")) ": " message)
+                     (cond-> {:type (if context-overflow?
+                                      :svar.tokens/context-overflow
+                                      :svar.core/stream-failed)
+                              :source :provider
+                              :stream? true
+                              :output-started? (or (pos? (.length content-acc))
+                                                   (pos? (.length reasoning-acc)))
+                              :url url
+                              :provider-error-code code
+                              :provider-message message
+                              :stream-finalization stream-finalization
+                              :content-acc-len (.length content-acc)
+                              :reasoning-acc-len (.length reasoning-acc)}
+                       status
+                       (assoc :status status))))))
       (when-let [incomplete @incomplete-response]
         ;; A Responses stream that ends `incomplete` (reason max_output_tokens /
         ;; content_filter / — on some proxies, notably GitHub Copilot — NULL) is
@@ -4831,34 +5636,34 @@
         ;; transient (see router.clj) so the call is re-attempted rather than
         ;; failing the turn outright — early-close/incomplete usually succeeds
         ;; on retry.
-        (let [stream-finalization (stream-finalization-summary
-                                    {:terminal @terminal-event
-                                     :incomplete incomplete
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})]
+        (let [stream-finalization (stream-finalization-summary {:terminal @terminal-event
+                                                                :incomplete incomplete
+                                                                :last-event-type @last-event-type
+                                                                :last-finish-reason
+                                                                @last-finish-reason
+                                                                :content-acc content-acc
+                                                                :reasoning-acc reasoning-acc
+                                                                :response response})]
           (throw (ex-info (str "Stream ended with incomplete response, reason: "
-                            (or (:reason incomplete) "unknown"))
-                   {:type :svar.core/stream-incomplete
-                    :stream? true
-                    :url url
-                    :reason (or (:reason incomplete) "unknown")
-                    :stream-finalization stream-finalization
-                    :content-acc-len (.length content-acc)
-                    :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
+                               (or (:reason incomplete) "unknown"))
+                          {:type :svar.core/stream-incomplete
+                           :stream? true
+                           :url url
+                           :reason (or (:reason incomplete) "unknown")
+                           :stream-finalization stream-finalization
+                           :content-acc-len (.length content-acc)
+                           :reasoning-acc-len (.length reasoning-acc)
+                           :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                           :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when-not @terminal-event
-        (let [stream-finalization (stream-finalization-summary
-                                    {:terminal nil
-                                     :incomplete nil
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})]
+        (let [stream-finalization (stream-finalization-summary {:terminal nil
+                                                                :incomplete nil
+                                                                :last-event-type @last-event-type
+                                                                :last-finish-reason
+                                                                @last-finish-reason
+                                                                :content-acc content-acc
+                                                                :reasoning-acc reasoning-acc
+                                                                :response response})]
           (if-not @saw-sse?
             ;; The body was NEVER an SSE stream — no `event:`/`data:` line was
             ;; seen. Almost always a gateway error answered as HTTP 200 + a
@@ -4868,60 +5673,68 @@
             ;; truncation message.
             (let [body (str/trim (str raw-head))]
               (throw (ex-info (str "Non-SSE response body (no stream events). "
-                                "The endpoint returned a non-streaming payload "
-                                "(often an error answered with HTTP 200): "
-                                (subs body 0 (min 400 (count body))))
-                       {:type :svar.core/non-sse-response
-                        :stream? true
-                        :url url
-                        :response-body body
-                        :stream-finalization stream-finalization})))
+                                   "The endpoint returned a non-streaming payload "
+                                   "(often an error answered with HTTP 200): "
+                                   (subs body 0 (min 400 (count body))))
+                              {:type :svar.core/non-sse-response
+                               :stream? true
+                               :url url
+                               :response-body body
+                               :stream-finalization stream-finalization})))
             ;; The throw used to be SILENT while its success twin logs
             ;; `::stream-finalized` with the same summary, so a truncated stream
             ;; left nothing behind: which SSE event arrived last, whether a
             ;; finish reason was seen and how much had already accumulated all
             ;; died with the exception unless a caller printed its ex-data.
-            (do
-              (trove/log! {:level :warn :id ::stream-truncated
-                           :data  (log-data (assoc stream-finalization :url url))
-                           :msg   "stream ended before terminal marker"})
-              (throw (ex-info "Stream ended before terminal marker."
-                       {:type :svar.core/stream-truncated
-                        :stream? true
-                        :url url
-                        :stream-finalization stream-finalization
-                        :content-acc-len (.length content-acc)
-                        :reasoning-acc-len (.length reasoning-acc)
-                        :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                        :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))))
-      (let [final-content   (let [s (str content-acc)] (when-not (str/blank? s) s))
-            final-reasoning (let [s (str reasoning-acc)] (when-not (str/blank? s) s))
-            ps              @provider-state-atom
-              ;; Each provider has a dedicated extract-assistant-message
-              ;; helper that maps its accumulated provider-state shape
-              ;; to svar's canonical assistant message. Anthropic
-              ;; flushes already-canonical blocks in arrival order;
-              ;; OpenAI Responses surfaces reasoning items that we lift
-              ;; into thinking blocks (signed wire shape JSON-encoded
-              ;; under :thinking-signature for byte-perfect replay).
-              ;; Plain chat completions (z.ai GLM, OpenRouter, etc.)
-              ;; arrive without a populated provider-state; build the
-              ;; canonical message from the streamed visible text plus
-              ;; the accumulated reasoning_content channel so callers
-              ;; round-trip through the same shape as non-streaming.
-            assistant-msg   (case (:provider ps)
-                              :anthropic
-                              (when (seq (:blocks ps))
-                                {:role "assistant"
-                                 :content (vec (:blocks ps))})
+            (do (trove/log! {:level :warn
+                             :id ::stream-truncated
+                             :data (log-data (assoc stream-finalization :url url))
+                             :msg "stream ended before terminal marker"})
+                (throw (ex-info "Stream ended before terminal marker."
+                                {:type :svar.core/stream-truncated
+                                 :stream? true
+                                 :url url
+                                 :stream-finalization stream-finalization
+                                 :content-acc-len (.length content-acc)
+                                 :reasoning-acc-len (.length reasoning-acc)
+                                 :partial-content (when (pos? (.length content-acc))
+                                                    (str content-acc))
+                                 :reasoning (when (pos? (.length reasoning-acc))
+                                              (str reasoning-acc))}))))))
+      (let [final-content
+            (let [s (str content-acc)]
+              (when-not (str/blank? s) s))
 
-                              :openai-responses
-                              (responses-extract-assistant-message
-                                (:reasoning-items ps) final-content)
+            final-reasoning
+            (let [s (str reasoning-acc)]
+              (when-not (str/blank? s) s))
 
-                              (openai-chat-canonical-assistant-message
-                                {:content final-content
-                                 :reasoning-content final-reasoning}))
+            ps
+            @provider-state-atom
+
+            ;; Each provider has a dedicated extract-assistant-message
+            ;; helper that maps its accumulated provider-state shape
+            ;; to svar's canonical assistant message. Anthropic
+            ;; flushes already-canonical blocks in arrival order;
+            ;; OpenAI Responses surfaces reasoning items that we lift
+            ;; into thinking blocks (signed wire shape JSON-encoded
+            ;; under :thinking-signature for byte-perfect replay).
+            ;; Plain chat completions (z.ai GLM, OpenRouter, etc.)
+            ;; arrive without a populated provider-state; build the
+            ;; canonical message from the streamed visible text plus
+            ;; the accumulated reasoning_content channel so callers
+            ;; round-trip through the same shape as non-streaming.
+            assistant-msg
+            (case (:provider ps)
+              :anthropic
+              (when (seq (:blocks ps)) {:role "assistant" :content (vec (:blocks ps))})
+
+              :openai-responses
+              (responses-extract-assistant-message (:reasoning-items ps) final-content)
+
+              (openai-chat-canonical-assistant-message {:content final-content
+                                                        :reasoning-content final-reasoning}))
+
             ;; Native tool calls, per wire:
             ;;   anthropic — tool_use blocks already in provider-state :blocks
             ;;               (→ assistant-msg content).
@@ -4929,73 +5742,138 @@
             ;;               items into provider-state :tool-calls.
             ;;   chat      — delta.tool_calls fragments accumulated in
             ;;               provider-state :tool-call-fragments; assemble now.
-            msg-tool-calls  (->> (:content assistant-msg)
-                              (filter #(= "tool_use" (:type %)))
-                              (mapv (fn [b] {:id (:id b) :name (:name b)
-                                             :input (decode-tool-arguments (:input b))})))
-            ps-tool-calls   (or (not-empty (:tool-calls ps))
-                              (when (seq (:tool-call-fragments ps))
-                                (assemble-chat-tool-call-fragments (:tool-call-fragments ps))))
-            tool-calls      (vec (or (not-empty msg-tool-calls) ps-tool-calls))
+            msg-tool-calls
+            (->> (:content assistant-msg)
+                 (filter #(= "tool_use" (:type %)))
+                 (mapv (fn [b]
+                         {:id (:id b) :name (:name b) :input (decode-tool-arguments (:input b))})))
+
+            ps-tool-calls
+            (or (not-empty (:tool-calls ps))
+                (when (seq (:tool-call-fragments ps))
+                  (assemble-chat-tool-call-fragments (:tool-call-fragments ps))))
+
+            tool-calls
+            (vec (or (not-empty msg-tool-calls) ps-tool-calls))
+
             ;; responses/chat assistant-msg has no tool_use blocks yet — graft
             ;; them on so the calls round-trip into the next request.
-            assistant-msg   (if (and (seq ps-tool-calls) (empty? msg-tool-calls))
-                              (with-tool-use-blocks assistant-msg ps-tool-calls)
-                              assistant-msg)
-            stream-finalization (stream-finalization-summary
-                                  {:terminal @terminal-event
-                                   :incomplete nil
-                                   :last-event-type @last-event-type
-                                   :last-finish-reason @last-finish-reason
-                                   :stop-details @stop-details
-                                   :content-acc content-acc
-                                   :reasoning-acc reasoning-acc
-                                   :response response})]
-        (trove/log! {:level :debug :id ::stream-finalized
-                     :data  (log-data (assoc stream-finalization :url url))
-                     :msg   "stream finalized"})
-        (cond-> {:content        final-content
-                 :reasoning      final-reasoning
+            assistant-msg
+            (if (and (seq ps-tool-calls) (empty? msg-tool-calls))
+              (with-tool-use-blocks assistant-msg ps-tool-calls)
+              assistant-msg)
+
+            stream-finalization
+            (stream-finalization-summary {:terminal @terminal-event
+                                          :incomplete nil
+                                          :last-event-type @last-event-type
+                                          :last-finish-reason @last-finish-reason
+                                          :stop-details @stop-details
+                                          :content-acc content-acc
+                                          :reasoning-acc reasoning-acc
+                                          :response response})]
+
+        (trove/log! {:level :debug
+                     :id ::stream-finalized
+                     :data (log-data (assoc stream-finalization :url url))
+                     :msg "stream finalized"})
+        (cond-> {:content final-content
+                 :reasoning final-reasoning
                  :provider-state ps
-                 :api-usage      @usage-atom
+                 :api-usage @usage-atom
                  :stream-finalization stream-finalization
-                 :http-response  {:url        url
-                                  :streaming? true
-                                  :status     (:status response)
-                                  :headers    (:headers response)
-                                  :stream-finalization stream-finalization}}
-          (seq tool-calls) (assoc :tool-calls tool-calls)
-          assistant-msg (assoc :assistant-message assistant-msg)))
+                 :http-response {:url url
+                                 :streaming? true
+                                 :status (:status response)
+                                 :headers (:headers response)
+                                 :stream-finalization stream-finalization}}
+          (seq tool-calls)
+          (assoc :tool-calls tool-calls)
+
+          assistant-msg
+          (assoc :assistant-message assistant-msg)))
       (catch clojure.lang.ExceptionInfo e
         ;; Cancellation wins over idle/semantic reclassification — the
         ;; watchdog closed the stream / interrupted us on purpose.
         (when @cancel-fired?
           (Thread/interrupted)
           (throw (ex-info "Stream cancelled by caller."
-                   {:type :svar.core/stream-cancelled :stream? true :url url} e)))
+                          {:type :svar.core/stream-cancelled :stream? true :url url}
+                          e)))
         (if (stream-finalization-error? e)
           (throw e)
-          (let [stream-finalization (stream-finalization-summary
-                                      {:terminal @terminal-event
-                                       :incomplete @incomplete-response
-                                       :last-event-type @last-event-type
-                                       :last-finish-reason @last-finish-reason
-                                       :content-acc content-acc
-                                       :reasoning-acc reasoning-acc
-                                       :response response})
-                idle?               @idle-fired?
-                semantic?           @semantic-fired?]
-            (throw (ex-info (cond
-                              semantic? (str "Stream semantic timeout (" semantic-timeout-ms
+          (let [stream-finalization
+                (stream-finalization-summary {:terminal @terminal-event
+                                              :incomplete @incomplete-response
+                                              :last-event-type @last-event-type
+                                              :last-finish-reason @last-finish-reason
+                                              :content-acc content-acc
+                                              :reasoning-acc reasoning-acc
+                                              :response response})
+
+                idle?
+                @idle-fired?
+
+                semantic?
+                @semantic-fired?]
+
+            (throw
+              (ex-info (cond semantic? (str "Stream semantic timeout (" semantic-timeout-ms
+                                            "ms without model/progress event): " (ex-message e))
+                             idle? (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
+                                                         @idle-first-byte?
+                                                         (str ": " (ex-message e)))
+                             :else (str "Stream connection error: " (ex-message e)))
+                       {:type (cond semantic? :svar.core/stream-semantic-timeout
+                                    idle? :svar.core/stream-idle-timeout
+                                    :else :svar.core/http-error)
+                        :stream? true
+                        :url url
+                        :idle-timeout-ms (when idle? (or @idle-fired-ms idle-timeout-ms))
+                        :first-byte? (boolean (and idle? @idle-first-byte?))
+                        :semantic-timeout-ms (when semantic? semantic-timeout-ms)
+                        :cause-class (.getName (class e))
+                        :stream-finalization stream-finalization
+                        :content-acc-len (.length content-acc)
+                        :reasoning-acc-len (.length reasoning-acc)
+                        :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                        :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
+                       e)))))
+      (catch Exception e
+        ;; A watchdog-closed stream surfaces here as a plain IOException —
+        ;; reclassify as cancellation before the idle/connection branches.
+        (when @cancel-fired?
+          (Thread/interrupted)
+          (throw (ex-info "Stream cancelled by caller."
+                          {:type :svar.core/stream-cancelled :stream? true :url url}
+                          e)))
+        (let [stream-finalization
+              (stream-finalization-summary {:terminal @terminal-event
+                                            :incomplete @incomplete-response
+                                            :last-event-type @last-event-type
+                                            :last-finish-reason @last-finish-reason
+                                            :content-acc content-acc
+                                            :reasoning-acc reasoning-acc
+                                            :response response})
+
+              idle?
+              @idle-fired?
+
+              semantic?
+              @semantic-fired?]
+
+          (throw
+            (ex-info (cond semantic? (str "Stream semantic timeout (" semantic-timeout-ms
                                           "ms without model/progress event): " (ex-message e))
-                              idle?     (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
-                                          @idle-first-byte?
-                                          (str ": " (ex-message e)))
-                              :else     (str "Stream connection error: " (ex-message e)))
+                           idle? (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
+                                                       @idle-first-byte?
+                                                       (str ": " (ex-message e)))
+                           :else (str "Stream connection error: " (ex-message e)))
                      {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                  idle?     :svar.core/stream-idle-timeout
-                                  :else     :svar.core/http-error)
-                      :stream? true :url url
+                                  idle? :svar.core/stream-idle-timeout
+                                  :else :svar.core/http-error)
+                      :stream? true
+                      :url url
                       :idle-timeout-ms (when idle? (or @idle-fired-ms idle-timeout-ms))
                       :first-byte? (boolean (and idle? @idle-first-byte?))
                       :semantic-timeout-ms (when semantic? semantic-timeout-ms)
@@ -5005,45 +5883,7 @@
                       :reasoning-acc-len (.length reasoning-acc)
                       :partial-content (when (pos? (.length content-acc)) (str content-acc))
                       :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
-                     e)))))
-      (catch Exception e
-        ;; A watchdog-closed stream surfaces here as a plain IOException —
-        ;; reclassify as cancellation before the idle/connection branches.
-        (when @cancel-fired?
-          (Thread/interrupted)
-          (throw (ex-info "Stream cancelled by caller."
-                   {:type :svar.core/stream-cancelled :stream? true :url url} e)))
-        (let [stream-finalization (stream-finalization-summary
-                                    {:terminal @terminal-event
-                                     :incomplete @incomplete-response
-                                     :last-event-type @last-event-type
-                                     :last-finish-reason @last-finish-reason
-                                     :content-acc content-acc
-                                     :reasoning-acc reasoning-acc
-                                     :response response})
-              idle?               @idle-fired?
-              semantic?           @semantic-fired?]
-          (throw (ex-info (cond
-                            semantic? (str "Stream semantic timeout (" semantic-timeout-ms
-                                        "ms without model/progress event): " (ex-message e))
-                            idle?     (idle-timeout-message (or @idle-fired-ms idle-timeout-ms)
-                                        @idle-first-byte?
-                                        (str ": " (ex-message e)))
-                            :else     (str "Stream connection error: " (ex-message e)))
-                   {:type (cond semantic? :svar.core/stream-semantic-timeout
-                                idle?     :svar.core/stream-idle-timeout
-                                :else     :svar.core/http-error)
-                    :stream? true :url url
-                    :idle-timeout-ms (when idle? (or @idle-fired-ms idle-timeout-ms))
-                    :first-byte? (boolean (and idle? @idle-first-byte?))
-                    :semantic-timeout-ms (when semantic? semantic-timeout-ms)
-                    :cause-class (.getName (class e))
-                    :stream-finalization stream-finalization
-                    :content-acc-len (.length content-acc)
-                    :reasoning-acc-len (.length reasoning-acc)
-                    :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                    :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
-                   e))))
+                     e))))
       (finally
         ;; Always stop the watchdog — reset alive? first so a racing
         ;; check sees the flag, then interrupt the sleep loop. Idempotent
@@ -5061,56 +5901,106 @@
 (defn- chat-completion-streaming
   "Streaming variant of chat-completion. Sends stream:true, reads SSE events,
    fires on-chunk with accumulated text. Returns same shape as non-streaming."
-  [messages model api-key base-url retry-opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style]
-  (let [api-style    (or api-style :openai-compatible-chat)
-        provider-id  (:provider-id retry-opts)
-        llm-headers  (:llm-headers retry-opts)
-        anthropic?   (= api-style :anthropic)
-        anthropic-oauth? (and anthropic? (anthropic-oauth-token? api-key))
-        base-body    (if anthropic?
-                       (build-anthropic-request-body messages model extra-body
-                         {:anthropic-oauth? anthropic-oauth?})
-                       (build-request-body messages model extra-body))
-        request-body (cond-> (assoc base-body :stream true)
-                       (not anthropic?) (assoc :stream_options {:include_usage true}))
-        chat-url     (make-chat-url base-url api-style)
-        headers      (merge (request-headers api-style api-key provider-id messages llm-headers extra-body)
-                       {"Accept" "text/event-stream"})
+  [messages model api-key base-url retry-opts timeout-ms ttft-timeout-ms idle-timeout-ms
+   semantic-timeout-ms extra-body on-chunk api-style]
+  (let [api-style
+        (or api-style :openai-compatible-chat)
+
+        provider-id
+        (:provider-id retry-opts)
+
+        llm-headers
+        (:llm-headers retry-opts)
+
+        anthropic?
+        (= api-style :anthropic)
+
+        anthropic-oauth?
+        (and anthropic? (anthropic-oauth-token? api-key))
+
+        base-body
+        (if anthropic?
+          (build-anthropic-request-body messages
+                                        model
+                                        extra-body
+                                        {:anthropic-oauth? anthropic-oauth?})
+          (build-request-body messages model extra-body))
+
+        request-body
+        (cond-> (assoc base-body :stream true)
+          (not anthropic?)
+          (assoc :stream_options {:include_usage true}))
+
+        chat-url
+        (make-chat-url base-url api-style)
+
+        headers
+        (merge (request-headers api-style api-key provider-id messages llm-headers extra-body)
+               {"Accept" "text/event-stream"})
+
         ;; Anthropic uses a stateful closure so per-block
         ;; signature/text accumulation survives the SSE event boundary.
         ;; Other providers stay on the stateless extractor.
-        delta-fn     (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
+        delta-fn
+        (if anthropic? (make-anthropic-stream-delta-fn) extract-stream-delta)]
+
     (try
-      (with-retry
-        (fn []
-          (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
-            (http-post-stream! chat-url request-body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn
-              (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
-                           provider-state api-usage]}]
-                (on-chunk {:content content-acc :reasoning (nonblank-str reasoning-acc)
-                           :tool-input (nonblank-str tool-args-acc)
-                           :tool-call-preview tool-call-preview
-                           :provider-state provider-state
-                           :api-usage api-usage :done? false})))))
-        retry-opts)
+      (with-retry (fn []
+                    (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
+                      (http-post-stream! chat-url
+                                         request-body
+                                         headers
+                                         timeout-ms
+                                         ttft-timeout-ms
+                                         idle-timeout-ms
+                                         delta-fn
+                                         (fn [{:keys [content-acc reasoning-acc tool-args-acc
+                                                      tool-call-preview provider-state api-usage]}]
+                                           (on-chunk {:content content-acc
+                                                      :reasoning (nonblank-str reasoning-acc)
+                                                      :tool-input (nonblank-str tool-args-acc)
+                                                      :tool-call-preview tool-call-preview
+                                                      :provider-state provider-state
+                                                      :api-usage api-usage
+                                                      :done? false})))))
+                  retry-opts)
       (catch Exception e
         (if (stream-finalization-error? e)
           (throw e)
-          (let [ex-data-map (ex-data e)
-                response-body (let [b (:body ex-data-map)]
-                                (when (string? b) b))
-                api-key-error (detect-api-key-error response-body)
-                base-message  (http-error-message e)
-                error-message (if api-key-error
-                                (str api-key-error " (Original: " base-message ")")
-                                base-message)]
+          (let [ex-data-map
+                (ex-data e)
+
+                response-body
+                (let [b (:body ex-data-map)]
+                  (when (string? b) b))
+
+                api-key-error
+                (detect-api-key-error response-body)
+
+                base-message
+                (http-error-message e)
+
+                error-message
+                (if api-key-error (str api-key-error " (Original: " base-message ")") base-message)]
+
             (anomaly/fault! error-message
-              (cond-> (merge (dissoc (ex-data e) :body) {:type :svar.core/http-error
-                                                         :llm-request {:model model :base-url base-url}})
-                response-body (assoc :body (truncate-error-body response-body))
-                api-key-error (assoc :api-key-error api-key-error)
-                true          (assoc :cause-class (some-> (ex-cause e) class .getName)
-                                :original-message (some-> (ex-cause e) ex-message))))))))))
+                            (cond-> (merge (dissoc (ex-data e) :body)
+                                           {:type :svar.core/http-error
+                                            :llm-request {:model model :base-url base-url}})
+                              response-body
+                              (assoc :body (truncate-error-body response-body))
+
+                              api-key-error
+                              (assoc :api-key-error api-key-error)
+
+                              true
+                              (assoc :cause-class
+                                (some-> (ex-cause e)
+                                        class
+                                        .getName)
+                                :original-message
+                                (some-> (ex-cause e)
+                                        ex-message))))))))))
 
 (defn chat-completion
   "Calls the LLM API (OpenAI compatible) with the given messages.
@@ -5146,71 +6036,92 @@
 
    Returns:
    Map with :content, :reasoning (may be nil), :api-usage."
-  ([messages model api-key base-url]
-   (chat-completion messages model api-key base-url {}))
+  ([messages model api-key base-url] (chat-completion messages model api-key base-url {}))
   ([messages model api-key base-url opts]
-   (let [timeout-ms      (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
+   (let [timeout-ms
+         (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
+
          ;; `contains?` (not `get` with default) so a caller can pass
          ;; `:ttft-timeout-ms nil` / `:idle-timeout-ms nil` to explicitly
          ;; disable each watchdog without falling through to the default.
-         ttft-timeout-ms (if (contains? opts :ttft-timeout-ms)
-                           (:ttft-timeout-ms opts)
-                           router/DEFAULT_TTFT_TIMEOUT_MS)
-         idle-timeout-ms (if (contains? opts :idle-timeout-ms)
-                           (:idle-timeout-ms opts)
-                           router/DEFAULT_IDLE_TIMEOUT_MS)
-         semantic-timeout-ms (if (contains? opts :semantic-timeout-ms)
-                               (:semantic-timeout-ms opts)
-                               router/DEFAULT_SEMANTIC_TIMEOUT_MS)
-         extra-body     (:extra-body opts)
-         on-chunk       (or (:on-chunk opts)
-                          (when (copilot-stream-required? (:provider-id opts) base-url)
-                            (constantly nil)))
-         api-style      (:api-style opts)
-         responses-path (:responses-path opts)
-         llm-headers    (:llm-headers opts)
-         provider-id     (:provider-id opts)
-         headers         (merge (when (copilot-provider-id? provider-id)
-                                  (copilot-static-headers))
-                           (when (copilot-provider-id? provider-id)
-                             (copilot-dynamic-headers messages))
-                           ;; Caller headers win. Mirrors request-headers for
-                           ;; Responses transport.
-                           llm-headers)]
+         ttft-timeout-ms
+         (if (contains? opts :ttft-timeout-ms)
+           (:ttft-timeout-ms opts)
+           router/DEFAULT_TTFT_TIMEOUT_MS)
+
+         idle-timeout-ms
+         (if (contains? opts :idle-timeout-ms)
+           (:idle-timeout-ms opts)
+           router/DEFAULT_IDLE_TIMEOUT_MS)
+
+         semantic-timeout-ms
+         (if (contains? opts :semantic-timeout-ms)
+           (:semantic-timeout-ms opts)
+           router/DEFAULT_SEMANTIC_TIMEOUT_MS)
+
+         extra-body
+         (:extra-body opts)
+
+         on-chunk
+         (or (:on-chunk opts)
+             (when (copilot-stream-required? (:provider-id opts) base-url) (constantly nil)))
+
+         api-style
+         (:api-style opts)
+
+         responses-path
+         (:responses-path opts)
+
+         llm-headers
+         (:llm-headers opts)
+
+         provider-id
+         (:provider-id opts)
+
+         headers
+         (merge (when (copilot-provider-id? provider-id) (copilot-static-headers))
+                (when (copilot-provider-id? provider-id) (copilot-dynamic-headers messages))
+                ;; Caller headers win. Mirrors request-headers for
+                ;; Responses transport.
+                llm-headers)]
+
      ;; Stamp the producing model onto the canonical :assistant-message at the
      ;; single dispatch funnel (every wire + every caller flows through here), so
      ;; a later turn can drop this reasoning if a DIFFERENT model is called next.
      (stamp-assistant-model
        (cond
-         (= api-style :gemini)
-         (gemini-completion
-           (build-gemini-request-body messages model extra-body)
-           {:api-key    api-key
-            :base-url   base-url
-            :model      model
-            :headers    llm-headers
-            :timeout-ms timeout-ms
-            :on-chunk   on-chunk})
-
+         (= api-style :gemini) (gemini-completion
+                                 (build-gemini-request-body messages model extra-body)
+                                 {:api-key api-key
+                                  :base-url base-url
+                                  :model model
+                                  :headers llm-headers
+                                  :timeout-ms timeout-ms
+                                  :on-chunk on-chunk})
          (= api-style :openai-compatible-responses)
          (let [responses-call
                (fn [build-opts]
-                 (let [request-body (build-openai-responses-request-body messages model extra-body build-opts)
-                       completion-opts {:api-key         api-key
-                                        :base-url        base-url
-                                        :responses-path  (or responses-path "/responses")
-                                        :headers         headers
-                                        :timeout-ms      timeout-ms
-                                        :ttft-timeout-ms ttft-timeout-ms
-                                        :idle-timeout-ms idle-timeout-ms
-                                        :semantic-timeout-ms semantic-timeout-ms
-                                        :on-chunk        on-chunk}]
-                   (if (and *responses-session-transport*
-                         (= :openai-codex provider-id))
-                     (*responses-session-transport*
-                       request-body completion-opts
-                       #(openai-responses-completion request-body completion-opts))
+                 (let [request-body
+                       (build-openai-responses-request-body messages model extra-body build-opts)
+
+                       completion-opts
+                       {:api-key api-key
+                        :base-url base-url
+                        :responses-path (or responses-path "/responses")
+                        :headers headers
+                        :timeout-ms timeout-ms
+                        :ttft-timeout-ms ttft-timeout-ms
+                        :idle-timeout-ms idle-timeout-ms
+                        :semantic-timeout-ms semantic-timeout-ms
+                        :on-chunk on-chunk}]
+
+                   (if (and *responses-session-transport* (= :openai-codex provider-id))
+                     (*responses-session-transport* request-body
+                                                    completion-opts
+                                                    #(openai-responses-completion request-body
+                                                                                  completion-opts))
                      (openai-responses-completion request-body completion-opts))))
+
                ;; Two payload capabilities are sticky per host. Stateless replay:
                ;; an explicit provider opt, or a host that already rejected a
                ;; replayed server item id. Explicit cache breakpoints: an endpoint
@@ -5220,31 +6131,42 @@
                ;; resend would duplicate.
                attempt
                (fn attempt [build-opts]
-                 (try
-                   (responses-call build-opts)
-                   (catch Exception e
-                     (cond
-                       (and (not (:stateless-items? build-opts))
-                         (failure/retry-without-server-item-ids? e))
-                       (do (failure/mark-stateless-items! base-url)
-                           (attempt (assoc build-opts :stateless-items? true)))
+                 (try (responses-call build-opts)
+                      (catch Exception e
+                        (cond (and (not (:stateless-items? build-opts))
+                                   (failure/retry-without-server-item-ids? e))
+                              (do (failure/mark-stateless-items! base-url)
+                                  (attempt (assoc build-opts :stateless-items? true)))
+                              (and (:explicit-cache? build-opts)
+                                   (failure/retry-without-explicit-cache? e))
+                              (do (failure/mark-explicit-cache-refused! base-url)
+                                  (attempt (assoc build-opts :explicit-cache? false)))
+                              :else (throw e)))))]
 
-                       (and (:explicit-cache? build-opts)
-                         (failure/retry-without-explicit-cache? e))
-                       (do (failure/mark-explicit-cache-refused! base-url)
-                           (attempt (assoc build-opts :explicit-cache? false)))
-
-                       :else (throw e)))))]
            (attempt {:stateless-items? (boolean (or (:stateless-items? opts)
-                                                  (failure/stateless-items-host? base-url)))
-                     :explicit-cache?  (responses-explicit-cache? provider-id base-url)}))
-
-         :else
-         (if on-chunk
-           (chat-completion-streaming
-             messages model api-key base-url opts timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms extra-body on-chunk api-style)
-           (chat-completion-with-retry
-             messages model api-key base-url opts timeout-ms extra-body api-style)))
+                                                    (failure/stateless-items-host? base-url)))
+                     :explicit-cache? (responses-explicit-cache? provider-id base-url)}))
+         :else (if on-chunk
+                 (chat-completion-streaming messages
+                                            model
+                                            api-key
+                                            base-url
+                                            opts
+                                            timeout-ms
+                                            ttft-timeout-ms
+                                            idle-timeout-ms
+                                            semantic-timeout-ms
+                                            extra-body
+                                            on-chunk
+                                            api-style)
+                 (chat-completion-with-retry messages
+                                             model
+                                             api-key
+                                             base-url
+                                             opts
+                                             timeout-ms
+                                             extra-body
+                                             api-style)))
        model))))
 
 (defn- url? [s] (or (str/starts-with? s "http://") (str/starts-with? s "https://")))
@@ -5256,13 +6178,15 @@
     ;; Text-only: return plain string
     text
     ;; Multimodal: build content array with images first, then text
-    (let [image-blocks (mapv (fn [{:keys [url base64 media-type] :or {media-type "image/png"}}]
-                               {:type "image_url"
-                                :image_url {:url (if url
-                                                   url
-                                                   (str "data:" media-type ";base64," base64))}})
-                         images)
-          text-block {:type "text" :text text}]
+    (let [image-blocks
+          (mapv (fn [{:keys [url base64 media-type] :or {media-type "image/png"}}]
+                  {:type "image_url"
+                   :image_url {:url (if url url (str "data:" media-type ";base64," base64))}})
+                images)
+
+          text-block
+          {:type "text" :text text}]
+
       (conj image-blocks text-block))))
 
 ;; =============================================================================
@@ -5285,8 +6209,7 @@
    Map marker that `user` recognizes and converts to multimodal content.
    When source is a URL, returns {:svar/type :image :url \"...\"}.
    When source is base64, returns {:svar/type :image :base64 \"...\" :media-type \"...\"}."
-  ([source]
-   (image source "image/png"))
+  ([source] (image source "image/png"))
   ([source media-type]
    (if (url? source)
      {:svar/type :image :url source}
@@ -5325,7 +6248,8 @@
   ([text] (cached text {}))
   ([text {:keys [ttl]}]
    (cond-> {:type "text" :text text :svar/cache true}
-     ttl (assoc :svar/cache-ttl ttl))))
+     ttl
+     (assoc :svar/cache-ttl ttl))))
 
 (defn system
   "Creates a system message.
@@ -5350,7 +6274,8 @@
   [content & images]
   (if (seq images)
     {:role "user"
-     :content (build-user-content content (mapv #(select-keys % [:url :base64 :media-type]) images))}
+     :content (build-user-content content
+                                  (mapv #(select-keys % [:url :base64 :media-type]) images))}
     {:role "user" :content content}))
 
 (defn assistant
@@ -5375,44 +6300,58 @@
 
    Returns a map carrying the resolved network/pricing/context values plus
    the per-call LLM tuning options."
-  [router {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve api-key
-                  base-url provider-id api-style extra-body provider-state cache-system?
-                  format-retries format-retry-on on-format-error
-                  responses-path llm-headers verbosity context stateless-items?]
-           :as opts}]
-  (let [{:keys [network tokens]} router
-        default-pricing (or (:pricing tokens) router/MODEL_PRICING)
-        default-context-limits (or (:context-limits tokens) router/MODEL_CONTEXT_LIMITS)
-        pricing (if provider-id
-                  (assoc default-pricing model (router/provider-model-pricing provider-id model))
-                  default-pricing)
+  [router
+   {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context?
+           output-reserve api-key base-url provider-id api-style extra-body provider-state
+           cache-system? format-retries format-retry-on on-format-error responses-path llm-headers
+           verbosity context stateless-items?]
+    :as opts}]
+  (let [{:keys [network tokens]}
+        router
+
+        default-pricing
+        (or (:pricing tokens) router/MODEL_PRICING)
+
+        default-context-limits
+        (or (:context-limits tokens) router/MODEL_CONTEXT_LIMITS)
+
+        pricing
+        (if provider-id
+          (assoc default-pricing model (router/provider-model-pricing provider-id model))
+          default-pricing)
+
         ;; Prefer the routed model's explicit `:context` (set on the runtime
         ;; provider — e.g. LM Studio detection or a user override) over the
         ;; static catalog lookup, which knows nothing about runtime-configured
         ;; local models and would fall back to DEFAULT_CONTEXT_LIMIT.
-        model-context (or context
-                        (when provider-id (router/provider-model-context provider-id model)))
-        context-limits (cond-> default-context-limits
-                         model-context (assoc model (long model-context)))]
+        model-context
+        (or context (when provider-id (router/provider-model-context provider-id model)))
+
+        context-limits
+        (cond-> default-context-limits
+          model-context
+          (assoc model (long model-context)))]
+
     (cond-> {:model model
              :timeout-ms (or timeout-ms (:timeout-ms network) router/DEFAULT_TIMEOUT_MS)
              ;; TTFT + idle timeouts: caller > router > package default.
              ;; `contains?` (not `or`) at each step so an explicit nil
              ;; disables the corresponding watchdog without falling
              ;; through.
-             :ttft-timeout-ms (cond
-                                (contains? opts :ttft-timeout-ms)    ttft-timeout-ms
-                                (contains? network :ttft-timeout-ms) (:ttft-timeout-ms network)
-                                :else                                router/DEFAULT_TTFT_TIMEOUT_MS)
-             :idle-timeout-ms (cond
-                                (contains? opts :idle-timeout-ms)    idle-timeout-ms
-                                (contains? network :idle-timeout-ms) (:idle-timeout-ms network)
-                                :else                                router/DEFAULT_IDLE_TIMEOUT_MS)
-             :semantic-timeout-ms (cond
-                                    (contains? opts :semantic-timeout-ms)    semantic-timeout-ms
-                                    (contains? network :semantic-timeout-ms) (:semantic-timeout-ms network)
-                                    :else                                    router/DEFAULT_SEMANTIC_TIMEOUT_MS)
-             :check-context? (if (some? check-context?) check-context? (if (contains? tokens :check-context?) (:check-context? tokens) true))
+             :ttft-timeout-ms (cond (contains? opts :ttft-timeout-ms) ttft-timeout-ms
+                                    (contains? network :ttft-timeout-ms) (:ttft-timeout-ms network)
+                                    :else router/DEFAULT_TTFT_TIMEOUT_MS)
+             :idle-timeout-ms (cond (contains? opts :idle-timeout-ms) idle-timeout-ms
+                                    (contains? network :idle-timeout-ms) (:idle-timeout-ms network)
+                                    :else router/DEFAULT_IDLE_TIMEOUT_MS)
+             :semantic-timeout-ms (cond (contains? opts :semantic-timeout-ms) semantic-timeout-ms
+                                        (contains? network :semantic-timeout-ms)
+                                        (:semantic-timeout-ms network)
+                                        :else router/DEFAULT_SEMANTIC_TIMEOUT_MS)
+             :check-context?
+             (if (some? check-context?)
+               check-context?
+               (if (contains? tokens :check-context?) (:check-context? tokens) true))
              :output-reserve (or output-reserve (:output-reserve tokens))
              :api-key api-key
              :base-url base-url
@@ -5426,17 +6365,38 @@
       ;; set them. For `:json-object-mode?` we use `contains?` because an
       ;; explicit `false` opts out a model that's flagged in metadata, and
       ;; we must distinguish it from "missing" (which inherits the flag).
-      (some? extra-body)                     (assoc :extra-body extra-body)
-      (some? provider-state)                 (assoc :provider-state provider-state)
-      (some? cache-system?)                  (assoc :cache-system? cache-system?)
-      (some? format-retries)                 (assoc :format-retries format-retries)
-      (some? format-retry-on)                (assoc :format-retry-on format-retry-on)
-      (contains? opts :json-object-mode?)    (assoc :json-object-mode? (:json-object-mode? opts))
-      (some? on-format-error)                (assoc :on-format-error on-format-error)
-      (some? responses-path)                 (assoc :responses-path responses-path)
-      (some? llm-headers)                    (assoc :llm-headers llm-headers)
-      (some? verbosity)                      (assoc :verbosity verbosity)
-      (some? stateless-items?)               (assoc :stateless-items? stateless-items?))))
+      (some? extra-body)
+      (assoc :extra-body extra-body)
+
+      (some? provider-state)
+      (assoc :provider-state provider-state)
+
+      (some? cache-system?)
+      (assoc :cache-system? cache-system?)
+
+      (some? format-retries)
+      (assoc :format-retries format-retries)
+
+      (some? format-retry-on)
+      (assoc :format-retry-on format-retry-on)
+
+      (contains? opts :json-object-mode?)
+      (assoc :json-object-mode? (:json-object-mode? opts))
+
+      (some? on-format-error)
+      (assoc :on-format-error on-format-error)
+
+      (some? responses-path)
+      (assoc :responses-path responses-path)
+
+      (some? llm-headers)
+      (assoc :llm-headers llm-headers)
+
+      (some? verbosity)
+      (assoc :verbosity verbosity)
+
+      (some? stateless-items?)
+      (assoc :stateless-items? stateless-items?))))
 
 ;; =============================================================================
 ;; Provider Router (fallback, rate limiting, provider selection)
@@ -5487,11 +6447,20 @@
    before `resolve-routing`."
   [opts]
   (cond-> (or (:routing opts) {})
-    (:reasoning opts)            (assoc :reasoning (:reasoning opts))
-    (:reasoning-effort opts)     (assoc :reasoning-effort (:reasoning-effort opts))
-    (:on-format-error opts)      (assoc :on-format-error (:on-format-error opts))
-    (:format-retry-on opts)      (assoc :format-retry-on (:format-retry-on opts))
-    (contains? opts :on-chunk)   (assoc :on-chunk (:on-chunk opts))))
+    (:reasoning opts)
+    (assoc :reasoning (:reasoning opts))
+
+    (:reasoning-effort opts)
+    (assoc :reasoning-effort (:reasoning-effort opts))
+
+    (:on-format-error opts)
+    (assoc :on-format-error (:on-format-error opts))
+
+    (:format-retry-on opts)
+    (assoc :format-retry-on (:format-retry-on opts))
+
+    (contains? opts :on-chunk)
+    (assoc :on-chunk (:on-chunk opts))))
 
 (defn- inject-routed-params
   "Injects router-chosen `[provider model-map]` + caller opts into the opts map
@@ -5514,7 +6483,9 @@
      `content` under `:deep` reasoning).
    - `:llm-headers` merges provider defaults with caller headers; caller wins."
   [opts provider model-map]
-  (let [ctx (long (or (:context model-map) router/DEFAULT_CONTEXT_LIMIT))
+  (let [ctx
+        (long (or (:context model-map) router/DEFAULT_CONTEXT_LIMIT))
+
         ;; Quarter of the input context is a reasonable headroom for a
         ;; single response; the rest stays for the prompt + tool
         ;; outputs. But some providers cap output independently of
@@ -5526,51 +6497,78 @@
         ;; failure mode behind the empty-content / comment-only loop
         ;; in session 52983a42 once `auto-params` started producing
         ;; >output-cap budgets.
-        output-cap (some-> (:output-limit model-map) long)
-        quarter (long (* 0.25 ctx))
-        auto-params {:max_tokens (if output-cap (min quarter (long output-cap)) quarter)}
-        api-style (or (:api-style model-map) (:api-style provider))
-        effort-resolution (when (some? (:reasoning-effort opts))
-                            (router/resolve-reasoning-effort
-                              api-style model-map (:reasoning-effort opts)))
-        reasoning-params (if effort-resolution
-                           (:extra-body effort-resolution)
-                           (router/reasoning-extra-body
-                             api-style model-map (:reasoning opts)
-                             {:preserved-thinking? (:preserved-thinking? opts)}))
-        merged-body (cond-> (merge (:extra-body provider) (:extra-body model-map) auto-params reasoning-params (:extra-body opts))
-                      (:verbosity opts) (assoc :verbosity (:verbosity opts)))
-        merged-headers (not-empty (merge (:llm-headers provider) (:llm-headers opts)))
+        output-cap
+        (some-> (:output-limit model-map)
+                long)
+
+        quarter
+        (long (* 0.25 ctx))
+
+        auto-params
+        {:max_tokens (if output-cap (min quarter (long output-cap)) quarter)}
+
+        api-style
+        (or (:api-style model-map) (:api-style provider))
+
+        effort-resolution
+        (when (some? (:reasoning-effort opts))
+          (router/resolve-reasoning-effort api-style model-map (:reasoning-effort opts)))
+
+        reasoning-params
+        (if effort-resolution
+          (:extra-body effort-resolution)
+          (router/reasoning-extra-body api-style
+                                       model-map
+                                       (:reasoning opts)
+                                       {:preserved-thinking? (:preserved-thinking? opts)}))
+
+        merged-body
+        (cond-> (merge (:extra-body provider)
+                       (:extra-body model-map)
+                       auto-params
+                       reasoning-params
+                       (:extra-body opts))
+          (:verbosity opts)
+          (assoc :verbosity (:verbosity opts)))
+
+        merged-headers
+        (not-empty (merge (:llm-headers provider) (:llm-headers opts)))
+
         ;; Caller's explicit :json-object-mode? (true OR false) wins; otherwise
         ;; inherit the routed model's metadata flag. `contains?` so explicit
         ;; `false` opts out of auto-injection even when the model is flagged.
-        json-object-mode? (if (contains? opts :json-object-mode?)
-                            (:json-object-mode? opts)
-                            (:json-object-mode? model-map))]
+        json-object-mode?
+        (if (contains? opts :json-object-mode?)
+          (:json-object-mode? opts)
+          (:json-object-mode? model-map))]
+
     (-> opts
-      (dissoc :reasoning :reasoning-effort :preserved-thinking?)
-      (assoc
-        :model (:name model-map)
-        :api-key (:api-key provider)
-        :base-url (:base-url provider)
-        :api-style (or (:api-style model-map) (:api-style provider))
-        :provider-id (:id provider)
-        :router-handles-rate-limit? true
-        :json-object-mode? json-object-mode?
-        :extra-body merged-body)
-      ;; Forward the routed model's real context window so `resolve-opts`'
-      ;; pre-flight `check-context-limit` uses it instead of re-deriving from
-      ;; the static catalog (which has nothing for runtime-configured local
-      ;; models → DEFAULT_CONTEXT_LIMIT). This is what carries LM Studio's
-      ;; detected window into the overflow check.
-      (cond-> (:context model-map)
-        (assoc :context (:context model-map)))
-      (cond-> (some? (:responses-path provider))
-        (assoc :responses-path (:responses-path provider)))
-      (cond-> (some? (:stateless-items? provider))
-        (assoc :stateless-items? (:stateless-items? provider)))
-      (cond-> merged-headers
-        (assoc :llm-headers merged-headers)))))
+        (dissoc :reasoning :reasoning-effort :preserved-thinking?)
+        (assoc :model (:name model-map)
+               :api-key (:api-key provider)
+               :base-url (:base-url provider)
+               :api-style (or (:api-style model-map) (:api-style provider))
+               :provider-id (:id provider)
+               :router-handles-rate-limit? true
+               :json-object-mode? json-object-mode?
+               :extra-body merged-body)
+        ;; Forward the routed model's real context window so `resolve-opts`'
+        ;; pre-flight `check-context-limit` uses it instead of re-deriving from
+        ;; the static catalog (which has nothing for runtime-configured local
+        ;; models → DEFAULT_CONTEXT_LIMIT). This is what carries LM Studio's
+        ;; detected window into the overflow check.
+        (cond->
+          (:context model-map)
+          (assoc :context (:context model-map)))
+        (cond->
+          (some? (:responses-path provider))
+          (assoc :responses-path (:responses-path provider)))
+        (cond->
+          (some? (:stateless-items? provider))
+          (assoc :stateless-items? (:stateless-items? provider)))
+        (cond->
+          merged-headers
+          (assoc :llm-headers merged-headers)))))
 
 (defn- resolved-network-timeout
   "Single point of truth for the streaming-timeout precedence chain:
@@ -5585,10 +6583,9 @@
    `ask!`, `ask-code!`, `abstract!`, `eval!`, `refine!`, `sample!`)
    resolves the same way."
   [opts router-network k default]
-  (cond
-    (contains? opts k)           (get opts k)
-    (contains? router-network k) (get router-network k)
-    :else                        default))
+  (cond (contains? opts k) (get opts k)
+        (contains? router-network k) (get router-network k)
+        :else default))
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
@@ -5611,29 +6608,54 @@
    Precedence per key: caller `opts` > router `:network` > package
    default. Pass an explicit `nil` to disable the corresponding watchdog."
   [router messages opts]
-  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))
-        network  (:network router)
-        timeout-ms      (resolved-network-timeout opts network :timeout-ms      router/DEFAULT_TIMEOUT_MS)
-        ttft-timeout-ms (resolved-network-timeout opts network :ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS)
-        idle-timeout-ms (resolved-network-timeout opts network :idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS)
-        semantic-timeout-ms (resolved-network-timeout opts network :semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS)]
-    (router/with-provider-fallback router (:prefs resolved)
-      (fn [provider model-map]
-        (let [{:keys [extra-body api-style responses-path llm-headers]}
-              (inject-routed-params opts provider model-map)]
-          (chat-completion messages (:name model-map)
-            (:api-key provider)
-            (:base-url provider)
-            (cond-> {:extra-body      extra-body
-                     :api-style       api-style
-                     :timeout-ms      timeout-ms
-                     :ttft-timeout-ms ttft-timeout-ms
-                     :idle-timeout-ms idle-timeout-ms
-                     :semantic-timeout-ms semantic-timeout-ms}
-              (:id provider)     (assoc :provider-id (:id provider))
-              (:on-chunk opts)   (assoc :on-chunk (:on-chunk opts))
-              responses-path     (assoc :responses-path responses-path)
-              llm-headers        (assoc :llm-headers llm-headers))))))))
+  (let [resolved
+        (router/resolve-routing router (routing-opts-with-reasoning opts))
+
+        network
+        (:network router)
+
+        timeout-ms
+        (resolved-network-timeout opts network :timeout-ms router/DEFAULT_TIMEOUT_MS)
+
+        ttft-timeout-ms
+        (resolved-network-timeout opts network :ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS)
+
+        idle-timeout-ms
+        (resolved-network-timeout opts network :idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS)
+
+        semantic-timeout-ms
+        (resolved-network-timeout opts
+                                  network
+                                  :semantic-timeout-ms
+                                  router/DEFAULT_SEMANTIC_TIMEOUT_MS)]
+
+    (router/with-provider-fallback router
+                                   (:prefs resolved)
+                                   (fn [provider model-map]
+                                     (let [{:keys [extra-body api-style responses-path llm-headers]}
+                                           (inject-routed-params opts provider model-map)]
+                                       (chat-completion messages
+                                                        (:name model-map)
+                                                        (:api-key provider)
+                                                        (:base-url provider)
+                                                        (cond-> {:extra-body extra-body
+                                                                 :api-style api-style
+                                                                 :timeout-ms timeout-ms
+                                                                 :ttft-timeout-ms ttft-timeout-ms
+                                                                 :idle-timeout-ms idle-timeout-ms
+                                                                 :semantic-timeout-ms
+                                                                 semantic-timeout-ms}
+                                                          (:id provider)
+                                                          (assoc :provider-id (:id provider))
+
+                                                          (:on-chunk opts)
+                                                          (assoc :on-chunk (:on-chunk opts))
+
+                                                          responses-path
+                                                          (assoc :responses-path responses-path)
+
+                                                          llm-headers
+                                                          (assoc :llm-headers llm-headers))))))))
 
 ;; =============================================================================
 ;; Explicit session protocol
@@ -5748,7 +6770,8 @@
     (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
       (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
         (router/with-provider-fallback
-          router (:prefs resolved)
+          router
+          (:prefs resolved)
           (fn [provider model-map]
             (ask!* router (inject-routed-params opts provider model-map))))))))
 ;; =============================================================================
@@ -5778,8 +6801,7 @@
   "Exception `:type`s that trigger an in-process format retry. Default set
    covers schema-shape failures (bare prose, wrong top-level type, missing
    required fields). Callers can extend via `:format-retry-on`."
-  #{:svar.spec/schema-rejected
-    :svar.spec/required-field-missing})
+  #{:svar.spec/schema-rejected :svar.spec/required-field-missing})
 
 ;; =============================================================================
 ;; Schema tail pointer - recency anchor past the cache breakpoint
@@ -5810,8 +6832,8 @@
    schema in the system message. Sits past the cache breakpoint, so it is
    billed but never cached, never burns a breakpoint slot."
   (str "Reply with one JSON object matching the schema in the system message.\n"
-    "First non-whitespace character MUST be `{`. "
-    "No prose. No markdown commentary. No explanation."))
+       "First non-whitespace character MUST be `{`. "
+       "No prose. No markdown commentary. No explanation."))
 
 (defn- append-schema-tail-pointer
   "Appends `SCHEMA_TAIL_POINTER` as a trailing text block on the LAST user
@@ -5821,20 +6843,25 @@
    Multimodal content is preserved: the pointer is added as one extra text
    block alongside any existing text/image blocks in the user content vec."
   [messages]
-  (let [v (vec messages)
-        last-user-idx (->> v
-                        (map-indexed vector)
-                        (filter (fn [[_ m]] (= "user" (:role m))))
-                        last
-                        first)]
+  (let [v
+        (vec messages)
+
+        last-user-idx
+        (->> v
+             (map-indexed vector)
+             (filter (fn [[_ m]]
+                       (= "user" (:role m))))
+             last
+             first)]
+
     (if last-user-idx
-      (update v last-user-idx
-        (fn [{:keys [content] :as m}]
-          (assoc m :content
-            (conj (normalize-content content)
-              {:type "text" :text SCHEMA_TAIL_POINTER}))))
-      (conj v {:role "user"
-               :content [{:type "text" :text SCHEMA_TAIL_POINTER}]}))))
+      (update v
+              last-user-idx
+              (fn [{:keys [content] :as m}]
+                (assoc m
+                  :content (conj (normalize-content content)
+                                 {:type "text" :text SCHEMA_TAIL_POINTER}))))
+      (conj v {:role "user" :content [{:type "text" :text SCHEMA_TAIL_POINTER}]}))))
 
 (defn- format-retry-prompt
   "Tiny re-prompt appended after the model's failed assistant response. Kept
@@ -5842,13 +6869,19 @@
    instruction. Echoes the parser's exact reason verbatim so the model sees
    which contract clause it violated."
   [attempt total reason received-type]
-  (str "FORMAT RETRY (" attempt "/" total ").\n"
-    "Previous response violated the structured-output contract:\n"
-    "  reason: " (name (or reason :unknown)) "\n"
-    "  received-type: " (or received-type "?") "\n\n"
-    "Return ONLY one JSON object matching the schema in the system message.\n"
-    "First non-whitespace character MUST be `{`.\n"
-    "No prose. No markdown commentary. No explanation."))
+  (str "FORMAT RETRY ("
+       attempt
+       "/"
+       total
+       ").\n"
+       "Previous response violated the structured-output contract:\n"
+       "  reason: "
+       (name (or reason :unknown))
+       "\n"
+       "  received-type: " (or received-type "?")
+       "\n\n" "Return ONLY one JSON object matching the schema in the system message.\n"
+       "First non-whitespace character MUST be `{`.\n"
+       "No prose. No markdown commentary. No explanation."))
 
 (defn- append-format-retry-turn
   "Appends [assistant<previous-bad-content>, user<retry-prompt>] to messages
@@ -5857,28 +6890,28 @@
    what it produced."
   [messages prev-content attempt total reason received-type]
   (conj (vec messages)
-    {:role "assistant" :content [{:type "text" :text (or prev-content "")}]}
-    {:role "user"      :content [{:type "text"
-                                  :text (format-retry-prompt
-                                          attempt total reason received-type)}]}))
+        {:role "assistant" :content [{:type "text" :text (or prev-content "")}]}
+        {:role "user"
+         :content [{:type "text" :text (format-retry-prompt attempt total reason received-type)}]}))
 
 (defn- envelope-data
   "Forensic envelope merged into every error ex-data thrown from `ask!*`. No
    truncation - callers (Vis triage, post-mortem tooling) need the full raw
    value to reproduce / persist / display. If a consumer wants a preview, it
    can substr `:content` itself; svar must not destroy forensic data here."
-  [{:keys [model api-style chat-url duration-ms api-usage
-           reasoning content provider-state http-response provider-id]}]
-  (cond-> {:model         model
-           :api-style     api-style
-           :chat-url      chat-url
-           :duration-ms   duration-ms
-           :api-usage     api-usage
-           :reasoning     reasoning
-           :content       content
+  [{:keys [model api-style chat-url duration-ms api-usage reasoning content provider-state
+           http-response provider-id]}]
+  (cond-> {:model model
+           :api-style api-style
+           :chat-url chat-url
+           :duration-ms duration-ms
+           :api-usage api-usage
+           :reasoning reasoning
+           :content content
            :provider-state provider-state
            :http-response http-response}
-    provider-id (assoc :provider-id provider-id)))
+    provider-id
+    (assoc :provider-id provider-id)))
 
 (defn- api-usage->tokens
   "Project canonical api-usage shape (Phase A) onto the flat caller-facing
@@ -5904,14 +6937,21 @@
 
 (defn- token-stats->tokens
   [token-stats]
-  (let [cached (:cached-tokens token-stats)
-        cache-created (:cache-creation-tokens token-stats)]
-    (cond-> {:input     (:input-tokens token-stats)
-             :output    (:output-tokens token-stats)
+  (let [cached
+        (:cached-tokens token-stats)
+
+        cache-created
+        (:cache-creation-tokens token-stats)]
+
+    (cond-> {:input (:input-tokens token-stats)
+             :output (:output-tokens token-stats)
              :reasoning (:reasoning-tokens token-stats)
-             :total     (:total-tokens token-stats)}
-      (some? cached) (assoc :cached cached)
-      (some? cache-created) (assoc :cache-created cache-created))))
+             :total (:total-tokens token-stats)}
+      (some? cached)
+      (assoc :cached cached)
+
+      (some? cache-created)
+      (assoc :cache-created cache-created))))
 
 (declare empty-reply-anomaly-type refusal-message call-with-empty-reply-resend sum-api-usage)
 
@@ -5980,212 +7020,307 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
   [router opts0]
-  (let [{:keys [spec schema-tail-pointer?] :as opts0} opts0
-        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing context-limits responses-path llm-headers]} (resolve-opts router opts0)
-        provider-id (:provider-id opts0)
-        chat-url (make-chat-url base-url api-style)
-        schema-prompt (spec/spec->prompt spec)
-        ;; Schema placement: full schema body is inlined into the SYSTEM
-        ;; message (head, cache-friendly) AND a tiny tail pointer is
-        ;; appended to the LAST user message (recency-friendly). The
-        ;; pointer does not repeat the schema body - it just points back
-        ;; to the cached schema in system. Trade-off rationale:
-        ;;  - Schema body is the most stable thing in the payload; head
-        ;;    placement lets a single cache_control breakpoint (or OpenAI
-        ;;    implicit caching) cache caller-system + schema together.
-        ;;  - Tail pointer sits past the breakpoint, so it is billed per
-        ;;    call but never cached and never burns a breakpoint slot.
-        ;;  - Recency-bias on schema adherence is restored without losing
-        ;;    cache wins. Pre-v0.4.0 (schema as the only tail content)
-        ;;    had recency but no caching. v0.4.0 (head-only) had caching
-        ;;    but degraded adherence. This is both.
-        ;;  - `:schema-tail-pointer? false` opts out (head-only mode) for
-        ;;    quirky models that double-emit on reminders.
-        ;; Step 1: schema injection FIRST so that auto-cache can tag
-        ;; the actual last block (schema-prompt) after we've added it.
-        ;; Running apply-llm-opts before schema injection would tag the
-        ;; ORIGINAL last block, but then schema-injection appends a new
-        ;; block past the marker — cache breakpoint lands on the
-        ;; pre-schema block, schema body falls outside the cache prefix.
-        in-msgs   (vec (:messages opts0))
-        sys-idx   (->> in-msgs
-                    (map-indexed vector)
-                    (some (fn [[i m]] (when (= "system" (some-> (:role m) name)) i))))
-        with-spec (if sys-idx
-                    (update in-msgs sys-idx
-                      (fn [{:keys [content] :as m}]
-                        (assoc m :content
-                          (conj (normalize-content content)
-                            {:type "text" :text schema-prompt}))))
-                    (into [{:role "system"
-                            :content [{:type "text" :text schema-prompt}]}]
-                      in-msgs))
-        ;; Step 2: caller-opt → wire-body chokepoint. Runs ONCE per call
-        ;; so role normalisation / top-level :system / auto-cache /
-        ;; :cache-key forwarding all land in one place. With schema
-        ;; already injected, auto-cache tags the last block which is
-        ;; the schema prompt itself — exactly what we want.
-        ;; Wrappers (abstract!*, eval!*, refine!*, sample!*) inherit by
-        ;; merging caller opts into their inner ask!* call.
-        [with-cache opts] (apply-llm-opts with-spec opts0)
-        ;; Tail pointer ON by default - only skipped when caller passes
-        ;; an explicit `false`. `nil`/missing → ON.
-        with-tail (if (false? schema-tail-pointer?)
-                    with-cache
-                    (append-schema-tail-pointer with-cache))
-        base-messages with-tail
-          ;; Pre-flight context check (also counts input tokens for reuse)
-        check-opts (cond-> {:context-limits context-limits
-                            :exact-count-fn (anthropic-exact-count-fn base-messages model
-                                              {:api-style api-style :api-key api-key
-                                               :base-url base-url :provider-id provider-id
-                                               :llm-headers llm-headers})}
-                     output-reserve (assoc :output-reserve output-reserve))
-        context-check (when check-context?
-                        (let [check (router/check-context-limit model base-messages check-opts)]
-                          (when-not (:ok? check)
-                            (anomaly/incorrect! (:error check)
-                              {:type :svar.core/context-overflow
-                               :model model
-                               :input-tokens (:input-tokens check)
-                               :max-input-tokens (:max-input-tokens check)
-                               :overflow (:overflow check)
-                               :utilization (:utilization check)
-                               :suggestion (str "Reduce task content by ~"
-                                             (int (* (double (:overflow check)) 0.75)) " words, "
-                                             "or use a larger context model.")}))
-                          check))
-          ;; API call - streaming if :on-chunk provided
-        on-chunk (:on-chunk opts)
-        streaming-on-chunk (when on-chunk
-                             (fn [{:keys [content reasoning provider-state api-usage]}]
-                               (let [tokens (api-usage->tokens api-usage)
-                                     cost (when api-usage
-                                            (router/estimate-cost model
-                                              (or (:input-tokens api-usage) 0)
-                                              (or (:output-tokens api-usage) 0)
-                                              pricing
-                                              {:api-usage api-usage
-                                               :api-style api-style}))
-                                     partial-map (jsonish/parse-partial content)
-                                     coerced (when partial-map
-                                               (try (spec/str->data-with-spec
-                                                      (json/write-json-str partial-map) spec)
-                                                    (catch Exception _ partial-map)))]
-                                 ;; Fire callback when reasoning OR content is available.
-                                 ;; Reasoning streams before content - don't gate on content.
-                                 (when (or coerced (some? reasoning))
-                                   (on-chunk {:result coerced
-                                              :reasoning reasoning
-                                              :provider-state provider-state
-                                              :tokens tokens
-                                              :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
-                                              :done? false})))))
-        ;; `:json-object-mode?` auto-injection - caller's `:extra-body
-        ;; :response_format` always wins. OpenAI chat-completions and
-        ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
-        ;; `:json-object-mode?` auto-injection - caller's `:extra-body
-        ;; :response_format` always wins. OpenAI chat-completions and
-        ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
-        caller-extra-body (or (:extra-body opts) {})
-        extra-body (cond-> caller-extra-body
-                     (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
-                       (:json-object-mode? opts)
-                       (not (contains? caller-extra-body :response_format)))
-                     (assoc :response_format {:type "json_object"}))
-        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
-                                           ;; See `ask-code!*`: carry resolved streaming
-                                           ;; timeouts verbatim so explicit nil disables any.
-                                           :ttft-timeout-ms ttft-timeout-ms
-                                           :idle-timeout-ms idle-timeout-ms
-                                           :semantic-timeout-ms semantic-timeout-ms})
-                     provider-id (assoc :provider-id provider-id)
-                     ;; The low-level HTTP ladder heals inside ONE call; route its
-                     ;; retries to the caller's RAW `on-chunk` (the same seam the
-                     ;; router emits routing events on) so a provider overload is
-                     ;; visible progress instead of a frozen bubble.
-                     on-chunk (assoc :on-retry on-chunk :model model)
-                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
-                     (seq extra-body) (assoc :extra-body extra-body)
-                     responses-path (assoc :responses-path responses-path)
-                     llm-headers (assoc :llm-headers llm-headers))
-        ;; Format-retry config. Streaming + retries don't compose (per-attempt
-        ;; partial-parse callbacks would confuse consumers about which attempt
-        ;; the stream belongs to), so retries are forced to 0 in streaming.
-        format-retries (long (or (:format-retries opts) 0))
-        retry-types (or (:format-retry-on opts) DEFAULT_FORMAT_RETRY_TYPES)
-        effective-retries (if streaming-on-chunk 0 format-retries)
-        do-attempt
-        (fn do-attempt [msgs attempt-n]
-          (let [[{:keys [content reasoning provider-state api-usage http-response stream-finalization]} attempt-duration-ms]
-                (util/with-elapsed
-                  (chat-completion msgs model api-key chat-url retry-opts))
-                stream-finalization (or stream-finalization (:stream-finalization http-response))]
-            (trove/log! {:level :info
-                         :data (log-data {:model model
-                                          :duration-ms attempt-duration-ms
-                                          :input-tokens (:input-tokens api-usage)
-                                          :output-tokens (:output-tokens api-usage)
-                                          ;; nil distinguishes "no field in response" from
-                                          ;; "field present but empty" - crucial for triaging
-                                          ;; provider quirks where content is omitted entirely
-                                          ;; versus returned as an empty string.
-                                          :reasoning-length (when reasoning (count reasoning))
-                                          :content-length   (when content (count content))
-                                          :content-preview  (when content
-                                                              (subs content 0 (min 200 (count content))))
-                                          :attempt          attempt-n})
-                         :msg "HTTP response received"})
-            ;; Structured output REQUIRES content, so ANY blank reply throws -
-            ;; but the finish reason (same classifier as `ask-code!*`) decides
-            ;; WHICH type and whether a transparent re-send can help:
-            ;;   - token cap         -> :svar.llm/max-tokens-exceeded (a
-            ;;     re-send cannot fix it; propagates immediately)
-            ;;   - clean stop        -> :svar.llm/empty-content marked NOT
-            ;;     resend-eligible: the model DELIBERATELY emitted nothing, a
-            ;;     prompt-quality problem for `:format-retry-on`, not a stall
-            ;;   - unknown/truncated -> :svar.llm/empty-content, resend-eligible
-            ;;     (emission stall on an accepted request; healed by
-            ;;     `call-with-empty-reply-resend` before callers ever see it)
-            (when (str/blank? content)
-              (let [anomaly-type (empty-reply-anomaly-type
-                                   (some-> stream-finalization :finish-reason str))
-                    throw-type   (or anomaly-type :svar.llm/empty-content)
-                    stop-details (:stop-details stream-finalization)
-                    refusal?     (= :svar.llm/refusal throw-type)]
-                (throw (ex-info
-                         (cond
-                           (= :svar.llm/max-tokens-exceeded throw-type)
-                           "Stream truncated at max_tokens before any structured output. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
-                           refusal? (refusal-message stop-details)
-                           :else
-                           (str "The model produced reasoning but no structured JSON output. "
-                             "This usually means the response budget was consumed by reasoning, "
-                             "the spec could not be satisfied for the given input, or the task "
-                             "is ambiguous. Retry by emitting a minimal valid JSON matching the "
-                             "iteration spec; if the task is ambiguous, clarify intent or shrink "
-                             "context."))
-                         (cond-> (assoc (envelope-data
-                                          {:model model :api-style api-style :chat-url chat-url
-                                           :duration-ms attempt-duration-ms :api-usage api-usage
-                                           :reasoning reasoning :content content
-                                           :provider-state provider-state
-                                           :http-response http-response
-                                           :stream-finalization stream-finalization
-                                           :provider-id provider-id})
-                                   :type throw-type
-                                   :attempt attempt-n)
-                           (nil? anomaly-type) (assoc :empty-reply-resend-eligible? false)
-                           stop-details        (assoc :stop-details stop-details))))))
-            {:content        content
-             :reasoning      reasoning
-             :provider-state provider-state
-             :api-usage      api-usage
-             :http-response  http-response
-             :duration-ms    attempt-duration-ms}))]
-    (loop [msgs base-messages
-           attempt 0
-           prior-attempts []]
+  (let
+    [{:keys [spec schema-tail-pointer?] :as opts0}
+     opts0
+
+     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms
+             semantic-timeout-ms check-context? output-reserve network pricing context-limits
+             responses-path llm-headers]}
+     (resolve-opts router opts0)
+
+     provider-id
+     (:provider-id opts0)
+
+     chat-url
+     (make-chat-url base-url api-style)
+
+     schema-prompt
+     (spec/spec->prompt spec)
+
+     ;; Schema placement: full schema body is inlined into the SYSTEM
+     ;; message (head, cache-friendly) AND a tiny tail pointer is
+     ;; appended to the LAST user message (recency-friendly). The
+     ;; pointer does not repeat the schema body - it just points back
+     ;; to the cached schema in system. Trade-off rationale:
+     ;;  - Schema body is the most stable thing in the payload; head
+     ;;    placement lets a single cache_control breakpoint (or OpenAI
+     ;;    implicit caching) cache caller-system + schema together.
+     ;;  - Tail pointer sits past the breakpoint, so it is billed per
+     ;;    call but never cached and never burns a breakpoint slot.
+     ;;  - Recency-bias on schema adherence is restored without losing
+     ;;    cache wins. Pre-v0.4.0 (schema as the only tail content)
+     ;;    had recency but no caching. v0.4.0 (head-only) had caching
+     ;;    but degraded adherence. This is both.
+     ;;  - `:schema-tail-pointer? false` opts out (head-only mode) for
+     ;;    quirky models that double-emit on reminders.
+     ;; Step 1: schema injection FIRST so that auto-cache can tag
+     ;; the actual last block (schema-prompt) after we've added it.
+     ;; Running apply-llm-opts before schema injection would tag the
+     ;; ORIGINAL last block, but then schema-injection appends a new
+     ;; block past the marker — cache breakpoint lands on the
+     ;; pre-schema block, schema body falls outside the cache prefix.
+     in-msgs
+     (vec (:messages opts0))
+
+     sys-idx
+     (->> in-msgs
+          (map-indexed vector)
+          (some (fn [[i m]]
+                  (when (= "system"
+                           (some-> (:role m)
+                                   name))
+                    i))))
+
+     with-spec
+     (if sys-idx
+       (update in-msgs
+               sys-idx
+               (fn [{:keys [content] :as m}]
+                 (assoc m
+                   :content (conj (normalize-content content) {:type "text" :text schema-prompt}))))
+       (into [{:role "system" :content [{:type "text" :text schema-prompt}]}] in-msgs))
+
+     ;; Step 2: caller-opt → wire-body chokepoint. Runs ONCE per call
+     ;; so role normalisation / top-level :system / auto-cache /
+     ;; :cache-key forwarding all land in one place. With schema
+     ;; already injected, auto-cache tags the last block which is
+     ;; the schema prompt itself — exactly what we want.
+     ;; Wrappers (abstract!*, eval!*, refine!*, sample!*) inherit by
+     ;; merging caller opts into their inner ask!* call.
+     [with-cache opts]
+     (apply-llm-opts with-spec opts0)
+
+     ;; Tail pointer ON by default - only skipped when caller passes
+     ;; an explicit `false`. `nil`/missing → ON.
+     with-tail
+     (if (false? schema-tail-pointer?) with-cache (append-schema-tail-pointer with-cache))
+
+     base-messages
+     with-tail
+
+     ;; Pre-flight context check (also counts input tokens for reuse)
+     check-opts
+     (cond-> {:context-limits context-limits
+              :exact-count-fn (anthropic-exact-count-fn base-messages
+                                                        model
+                                                        {:api-style api-style
+                                                         :api-key api-key
+                                                         :base-url base-url
+                                                         :provider-id provider-id
+                                                         :llm-headers llm-headers})}
+       output-reserve
+       (assoc :output-reserve output-reserve))
+
+     context-check
+     (when check-context?
+       (let [check (router/check-context-limit model base-messages check-opts)]
+         (when-not (:ok? check)
+           (anomaly/incorrect! (:error check)
+                               {:type :svar.core/context-overflow
+                                :model model
+                                :input-tokens (:input-tokens check)
+                                :max-input-tokens (:max-input-tokens check)
+                                :overflow (:overflow check)
+                                :utilization (:utilization check)
+                                :suggestion (str "Reduce task content by ~"
+                                                 (int (* (double (:overflow check)) 0.75))
+                                                 " words, " "or use a larger context model.")}))
+         check))
+
+     ;; API call - streaming if :on-chunk provided
+     on-chunk
+     (:on-chunk opts)
+
+     streaming-on-chunk
+     (when on-chunk
+       (fn [{:keys [content reasoning provider-state api-usage]}]
+         (let [tokens
+               (api-usage->tokens api-usage)
+
+               cost
+               (when api-usage
+                 (router/estimate-cost model
+                                       (or (:input-tokens api-usage) 0)
+                                       (or (:output-tokens api-usage) 0)
+                                       pricing
+                                       {:api-usage api-usage :api-style api-style}))
+
+               partial-map
+               (jsonish/parse-partial content)
+
+               coerced
+               (when partial-map
+                 (try (spec/str->data-with-spec (json/write-json-str partial-map) spec)
+                      (catch Exception _ partial-map)))]
+
+           ;; Fire callback when reasoning OR content is available.
+           ;; Reasoning streams before content - don't gate on content.
+           (when (or coerced (some? reasoning))
+             (on-chunk {:result coerced
+                        :reasoning reasoning
+                        :provider-state provider-state
+                        :tokens tokens
+                        :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
+                        :done? false})))))
+
+     ;; `:json-object-mode?` auto-injection - caller's `:extra-body
+     ;; :response_format` always wins. OpenAI chat-completions and
+     ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
+     ;; `:json-object-mode?` auto-injection - caller's `:extra-body
+     ;; :response_format` always wins. OpenAI chat-completions and
+     ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
+     caller-extra-body
+     (or (:extra-body opts) {})
+
+     extra-body
+     (cond-> caller-extra-body
+       (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
+            (:json-object-mode? opts)
+            (not (contains? caller-extra-body :response_format)))
+       (assoc :response_format {:type "json_object"}))
+
+     retry-opts
+     (cond-> (merge network
+                    {:timeout-ms timeout-ms
+                     :api-style api-style
+                     ;; See `ask-code!*`: carry resolved streaming
+                     ;; timeouts verbatim so explicit nil disables any.
+                     :ttft-timeout-ms ttft-timeout-ms
+                     :idle-timeout-ms idle-timeout-ms
+                     :semantic-timeout-ms semantic-timeout-ms})
+       provider-id
+       (assoc :provider-id provider-id)
+
+       ;; The low-level HTTP ladder heals inside ONE call; route its
+       ;; retries to the caller's RAW `on-chunk` (the same seam the
+       ;; router emits routing events on) so a provider overload is
+       ;; visible progress instead of a frozen bubble.
+       on-chunk
+       (assoc :on-retry
+         on-chunk :model
+         model)
+
+       streaming-on-chunk
+       (assoc :on-chunk streaming-on-chunk)
+
+       (seq extra-body)
+       (assoc :extra-body extra-body)
+
+       responses-path
+       (assoc :responses-path responses-path)
+
+       llm-headers
+       (assoc :llm-headers llm-headers))
+
+     ;; Format-retry config. Streaming + retries don't compose (per-attempt
+     ;; partial-parse callbacks would confuse consumers about which attempt
+     ;; the stream belongs to), so retries are forced to 0 in streaming.
+     format-retries
+     (long (or (:format-retries opts) 0))
+
+     retry-types
+     (or (:format-retry-on opts) DEFAULT_FORMAT_RETRY_TYPES)
+
+     effective-retries
+     (if streaming-on-chunk 0 format-retries)
+
+     do-attempt
+     (fn do-attempt [msgs attempt-n]
+       (let [[{:keys [content reasoning provider-state api-usage http-response stream-finalization]}
+              attempt-duration-ms]
+             (util/with-elapsed (chat-completion msgs model api-key chat-url retry-opts))
+
+             stream-finalization
+             (or stream-finalization (:stream-finalization http-response))]
+
+         (trove/log! {:level :info
+                      :data (log-data {:model model
+                                       :duration-ms attempt-duration-ms
+                                       :input-tokens (:input-tokens api-usage)
+                                       :output-tokens (:output-tokens api-usage)
+                                       ;; nil distinguishes "no field in response" from
+                                       ;; "field present but empty" - crucial for triaging
+                                       ;; provider quirks where content is omitted entirely
+                                       ;; versus returned as an empty string.
+                                       :reasoning-length (when reasoning (count reasoning))
+                                       :content-length (when content (count content))
+                                       :content-preview
+                                       (when content (subs content 0 (min 200 (count content))))
+                                       :attempt attempt-n})
+                      :msg "HTTP response received"})
+         ;; Structured output REQUIRES content, so ANY blank reply throws -
+         ;; but the finish reason (same classifier as `ask-code!*`) decides
+         ;; WHICH type and whether a transparent re-send can help:
+         ;;   - token cap         -> :svar.llm/max-tokens-exceeded (a
+         ;;     re-send cannot fix it; propagates immediately)
+         ;;   - clean stop        -> :svar.llm/empty-content marked NOT
+         ;;     resend-eligible: the model DELIBERATELY emitted nothing, a
+         ;;     prompt-quality problem for `:format-retry-on`, not a stall
+         ;;   - unknown/truncated -> :svar.llm/empty-content, resend-eligible
+         ;;     (emission stall on an accepted request; healed by
+         ;;     `call-with-empty-reply-resend` before callers ever see it)
+         (when (str/blank? content)
+           (let [anomaly-type
+                 (empty-reply-anomaly-type (some-> stream-finalization
+                                                   :finish-reason
+                                                   str))
+
+                 throw-type
+                 (or anomaly-type :svar.llm/empty-content)
+
+                 stop-details
+                 (:stop-details stream-finalization)
+
+                 refusal?
+                 (= :svar.llm/refusal throw-type)]
+
+             (throw
+               (ex-info
+                 (cond
+                   (= :svar.llm/max-tokens-exceeded throw-type)
+                   "Stream truncated at max_tokens before any structured output. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
+                   refusal? (refusal-message stop-details)
+                   :else (str "The model produced reasoning but no structured JSON output. "
+                              "This usually means the response budget was consumed by reasoning, "
+                              "the spec could not be satisfied for the given input, or the task "
+                              "is ambiguous. Retry by emitting a minimal valid JSON matching the "
+                              "iteration spec; if the task is ambiguous, clarify intent or shrink "
+                              "context."))
+                 (cond-> (assoc (envelope-data {:model model
+                                                :api-style api-style
+                                                :chat-url chat-url
+                                                :duration-ms attempt-duration-ms
+                                                :api-usage api-usage
+                                                :reasoning reasoning
+                                                :content content
+                                                :provider-state provider-state
+                                                :http-response http-response
+                                                :stream-finalization stream-finalization
+                                                :provider-id provider-id})
+                           :type throw-type
+                           :attempt attempt-n)
+                   (nil? anomaly-type)
+                   (assoc :empty-reply-resend-eligible? false)
+
+                   stop-details
+                   (assoc :stop-details stop-details))))))
+         {:content content
+          :reasoning reasoning
+          :provider-state provider-state
+          :api-usage api-usage
+          :http-response http-response
+          :duration-ms attempt-duration-ms}))]
+
+    (loop [msgs
+           base-messages
+
+           attempt
+           0
+
+           prior-attempts
+           []]
+
       ;; Two-step outcome: HTTP first (which may throw `:svar.llm/empty-content`
       ;; with the envelope ALREADY in ex-data because `do-attempt` populated
       ;; it), then parse (which throws `:svar.spec/schema-rejected` /
@@ -6195,186 +7330,246 @@
       ;; both branches and merges into the terminal throw regardless of which
       ;; step failed.
       (let [http-outcome
-            (try
-              (-> (call-with-empty-reply-resend
-                    {:model model :provider-id provider-id
-                     :on-resend (:on-empty-reply-resend opts)}
-                    #(do-attempt msgs attempt))
-                (assoc :ok? true))
-              (catch clojure.lang.ExceptionInfo e
-                (let [data (ex-data e)
-                      ex-type (:type data)]
-                  {:ok?           false
-                   :ex            e
-                   :ex-type       ex-type
-                   :reason        (:reason data)
-                   :received-type (:received-type data)
-                   :retryable?    (contains? retry-types ex-type)
-                   :content       (:content data)
-                   :reasoning     (:reasoning data)
-                   :provider-state (:provider-state data)
-                   :api-usage     (:api-usage data)
-                   :http-response (:http-response data)
-                   :duration-ms   (:duration-ms data)})))
+            (try (-> (call-with-empty-reply-resend {:model model
+                                                    :provider-id provider-id
+                                                    :on-resend (:on-empty-reply-resend opts)}
+                                                   #(do-attempt msgs attempt))
+                     (assoc :ok? true))
+                 (catch clojure.lang.ExceptionInfo e
+                   (let [data
+                         (ex-data e)
+
+                         ex-type
+                         (:type data)]
+
+                     {:ok? false
+                      :ex e
+                      :ex-type ex-type
+                      :reason (:reason data)
+                      :received-type (:received-type data)
+                      :retryable? (contains? retry-types ex-type)
+                      :content (:content data)
+                      :reasoning (:reasoning data)
+                      :provider-state (:provider-state data)
+                      :api-usage (:api-usage data)
+                      :http-response (:http-response data)
+                      :duration-ms (:duration-ms data)})))
+
             ;; If HTTP succeeded, attempt the parse. Bind envelope first so
             ;; it's in scope for both success and parse-failure branches.
-            {:keys [content reasoning provider-state api-usage http-response duration-ms]} http-outcome
+            {:keys [content reasoning provider-state api-usage http-response duration-ms]}
+            http-outcome
+
             parse-outcome
             (when (:ok? http-outcome)
-              (try
-                (let [token-stats (router/count-and-estimate model msgs content
-                                    (cond-> {:pricing pricing
-                                             :api-usage api-usage
-                                             :api-style api-style}
-                                      context-check (assoc :input-tokens (:input-tokens context-check))))]
-                  {:ok? true
-                   :result (spec/str->data-with-spec content spec)
-                   :token-stats token-stats})
-                (catch clojure.lang.ExceptionInfo e
-                  (let [data (ex-data e)
-                        ex-type (:type data)]
-                    {:ok?           false
-                     :ex            e
-                     :ex-type       ex-type
-                     :reason        (:reason data)
-                     :received-type (:received-type data)
-                     :retryable?    (contains? retry-types ex-type)}))))
+              (try (let [token-stats
+                         (router/count-and-estimate
+                           model
+                           msgs
+                           content
+                           (cond-> {:pricing pricing :api-usage api-usage :api-style api-style}
+                             context-check
+                             (assoc :input-tokens (:input-tokens context-check))))]
+                     {:ok? true
+                      :result (spec/str->data-with-spec content spec)
+                      :token-stats token-stats})
+                   (catch clojure.lang.ExceptionInfo e
+                     (let [data
+                           (ex-data e)
+
+                           ex-type
+                           (:type data)]
+
+                       {:ok? false
+                        :ex e
+                        :ex-type ex-type
+                        :reason (:reason data)
+                        :received-type (:received-type data)
+                        :retryable? (contains? retry-types ex-type)}))))
+
             ;; Unify outcome:
             ;;   - HTTP failed       -> http-outcome
             ;;   - HTTP ok + parse ok-> parse-outcome merged with envelope
             ;;   - HTTP ok + parse !ok -> parse-outcome merged with envelope
-            outcome (cond
-                      (not (:ok? http-outcome)) http-outcome
-                      (:ok? parse-outcome)
-                      (assoc parse-outcome
-                        :content content :reasoning reasoning
-                        :provider-state provider-state
-                        :api-usage api-usage :http-response http-response
-                        :duration-ms duration-ms)
-                      :else
-                      (assoc parse-outcome
-                        :content content :reasoning reasoning
-                        :provider-state provider-state
-                        :api-usage api-usage :http-response http-response
-                        :duration-ms duration-ms))]
+            outcome
+            (cond (not (:ok? http-outcome)) http-outcome
+                  (:ok? parse-outcome) (assoc parse-outcome
+                                         :content content
+                                         :reasoning reasoning
+                                         :provider-state provider-state
+                                         :api-usage api-usage
+                                         :http-response http-response
+                                         :duration-ms duration-ms)
+                  :else (assoc parse-outcome
+                          :content content
+                          :reasoning reasoning
+                          :provider-state provider-state
+                          :api-usage api-usage
+                          :http-response http-response
+                          :duration-ms duration-ms))]
+
         (cond
           ;; SUCCESS - parse worked; fire done callback, return.
           (:ok? outcome)
-          (let [{:keys [result token-stats http-response]} outcome
-                {:keys [empty-reply-resends empty-reply-resend-usage]} http-outcome
-                rate-limit     (ratelimit/parse api-style (:headers http-response))
+          (let [{:keys [result token-stats http-response]}
+                outcome
+
+                {:keys [empty-reply-resends empty-reply-resend-usage]}
+                http-outcome
+
+                rate-limit
+                (ratelimit/parse api-style (:headers http-response))
+
                 ;; Burned empty-reply re-sends are billed by the provider -
                 ;; cost is recomputed over the SUMMED usage so :cost stays
                 ;; honest, while :tokens stays last-attempt (context-accurate).
-                cost-stats     (if empty-reply-resend-usage
-                                 (router/count-and-estimate model msgs content
-                                   {:pricing pricing
-                                    :api-usage (sum-api-usage [api-usage empty-reply-resend-usage])
-                                    :api-style api-style})
-                                 token-stats)
-                final-result result
-                attempt-record {:attempt     attempt
-                                :ok?         true
-                                :duration-ms duration-ms
-                                :api-usage   api-usage
-                                :content     content
-                                :reasoning   reasoning
-                                :provider-state provider-state}
-                all-attempts (conj prior-attempts attempt-record)]
-            (log-cache-outcome! {:api-style   api-style
-                                 :model       model
+                cost-stats
+                (if empty-reply-resend-usage
+                  (router/count-and-estimate model
+                                             msgs
+                                             content
+                                             {:pricing pricing
+                                              :api-usage (sum-api-usage [api-usage
+                                                                         empty-reply-resend-usage])
+                                              :api-style api-style})
+                  token-stats)
+
+                final-result
+                result
+
+                attempt-record
+                {:attempt attempt
+                 :ok? true
+                 :duration-ms duration-ms
+                 :api-usage api-usage
+                 :content content
+                 :reasoning reasoning
+                 :provider-state provider-state}
+
+                all-attempts
+                (conj prior-attempts attempt-record)]
+
+            (log-cache-outcome! {:api-style api-style
+                                 :model model
                                  :provider-id provider-id
-                                 :cache-key   (get-in opts [:extra-body :prompt_cache_key])
-                                 :api-usage   api-usage
+                                 :cache-key (get-in opts [:extra-body :prompt_cache_key])
+                                 :api-usage api-usage
                                  :duration-ms duration-ms})
             (when on-chunk
               (on-chunk {:result final-result
                          :reasoning reasoning
                          :provider-state provider-state
                          :tokens (token-stats->tokens token-stats)
-                         :cost (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
+                         :cost (select-keys (:cost cost-stats)
+                                            [:input-cost :output-cost :total-cost])
                          :done? true}))
             (cond-> {:result final-result
                      :tokens (token-stats->tokens token-stats)
                      :cost (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
                      :duration-ms duration-ms}
-              reasoning              (assoc :reasoning reasoning)
-              rate-limit             (assoc :rate-limit rate-limit)
-              provider-state         (assoc :provider-state provider-state)
-              empty-reply-resends      (assoc :empty-reply-resends empty-reply-resends)
-              empty-reply-resend-usage (assoc :empty-reply-resend-usage empty-reply-resend-usage)
+              reasoning
+              (assoc :reasoning reasoning)
+
+              rate-limit
+              (assoc :rate-limit rate-limit)
+
+              provider-state
+              (assoc :provider-state provider-state)
+
+              empty-reply-resends
+              (assoc :empty-reply-resends empty-reply-resends)
+
+              empty-reply-resend-usage
+              (assoc :empty-reply-resend-usage empty-reply-resend-usage)
+
               ;; Only surface :format-attempts when retries actually happened.
               ;; Empty / single-element vec is noise on the happy path.
-              (> (count all-attempts) 1) (assoc :format-attempts all-attempts)))
-
+              (> (count all-attempts) 1)
+              (assoc :format-attempts all-attempts)))
           ;; RETRYABLE FAILURE with budget remaining - append format-retry turn
           ;; and recur. Token cost of the bad attempt is already sunk (provider
           ;; produced + billed it); we record it for forensic accounting.
-          (and (:retryable? outcome)
-            (< attempt effective-retries))
-          (let [{:keys [reason received-type ex-type content reasoning provider-state
-                        api-usage http-response duration-ms]} outcome
+          (and (:retryable? outcome) (< attempt effective-retries))
+          (let [{:keys [reason received-type ex-type content reasoning provider-state api-usage
+                        http-response duration-ms]}
+                outcome
+
                 ;; For empty-content the model produced no `content` to echo
                 ;; back. Synthesize a placeholder so the assistant turn isn't
                 ;; literally empty (some providers reject empty assistant
                 ;; messages on the next call).
-                echo-content (if (str/blank? content)
-                               "<no content; reasoning-only response>"
-                               content)
-                attempt-record {:attempt       attempt
-                                :ok?           false
-                                :ex-type       ex-type
-                                :reason        reason
-                                :received-type received-type
-                                :duration-ms   duration-ms
-                                :api-usage     api-usage
-                                :content       content
-                                :reasoning     reasoning
-                                :provider-state provider-state
-                                :http-response http-response}]
-            (trove/log! {:level :warn :id ::format-retry
-                         :data (log-data {:model model :attempt attempt
+                echo-content
+                (if (str/blank? content) "<no content; reasoning-only response>" content)
+
+                attempt-record
+                {:attempt attempt
+                 :ok? false
+                 :ex-type ex-type
+                 :reason reason
+                 :received-type received-type
+                 :duration-ms duration-ms
+                 :api-usage api-usage
+                 :content content
+                 :reasoning reasoning
+                 :provider-state provider-state
+                 :http-response http-response}]
+
+            (trove/log! {:level :warn
+                         :id ::format-retry
+                         :data (log-data {:model model
+                                          :attempt attempt
                                           :max-retries effective-retries
                                           :reason reason
                                           :received-type received-type
                                           :ex-type ex-type
                                           :content-length (when content (count content))})
                          :msg "format-retry: parse failed; re-prompting"})
-            (recur (append-format-retry-turn msgs echo-content
-                     (inc attempt) effective-retries
-                     (or reason ex-type) received-type)
-              (inc attempt)
-              (conj prior-attempts attempt-record)))
-
+            (recur (append-format-retry-turn msgs
+                                             echo-content
+                                             (inc attempt)
+                                             effective-retries
+                                             (or reason ex-type)
+                                             received-type)
+                   (inc attempt)
+                   (conj prior-attempts attempt-record)))
           ;; TERMINAL FAILURE - either non-retryable type or retries exhausted.
           ;; Re-throw with full forensic envelope merged into ex-data.
-          :else
-          (let [{:keys [ex ex-type reason received-type content reasoning provider-state
-                        api-usage http-response duration-ms]} outcome
-                attempt-record {:attempt       attempt
-                                :ok?           false
-                                :ex-type       ex-type
-                                :reason        reason
-                                :received-type received-type
-                                :duration-ms   duration-ms
-                                :api-usage     api-usage
-                                :content       content
-                                :reasoning     reasoning
-                                :provider-state provider-state
-                                :http-response http-response}
-                all-attempts (conj prior-attempts attempt-record)]
-            (throw (ex-info (ex-message ex)
-                     (merge (ex-data ex)
-                       (envelope-data
-                         {:model model :api-style api-style :chat-url chat-url
-                          :duration-ms duration-ms :api-usage api-usage
-                          :reasoning reasoning :content content
-                          :provider-state provider-state
-                          :http-response http-response :provider-id provider-id})
-                       {:format-attempts          all-attempts
-                        :format-retries-attempted attempt
-                        :format-retries-allowed   effective-retries})
-                     ex))))))))
+          :else (let [{:keys [ex ex-type reason received-type content reasoning provider-state
+                              api-usage http-response duration-ms]}
+                      outcome
+
+                      attempt-record
+                      {:attempt attempt
+                       :ok? false
+                       :ex-type ex-type
+                       :reason reason
+                       :received-type received-type
+                       :duration-ms duration-ms
+                       :api-usage api-usage
+                       :content content
+                       :reasoning reasoning
+                       :provider-state provider-state
+                       :http-response http-response}
+
+                      all-attempts
+                      (conj prior-attempts attempt-record)]
+
+                  (throw (ex-info (ex-message ex)
+                                  (merge (ex-data ex)
+                                         (envelope-data {:model model
+                                                         :api-style api-style
+                                                         :chat-url chat-url
+                                                         :duration-ms duration-ms
+                                                         :api-usage api-usage
+                                                         :reasoning reasoning
+                                                         :content content
+                                                         :provider-state provider-state
+                                                         :http-response http-response
+                                                         :provider-id provider-id})
+                                         {:format-attempts all-attempts
+                                          :format-retries-attempted attempt
+                                          :format-retries-allowed effective-retries})
+                                  ex))))))))
 
 ;; =============================================================================
 ;; ask-code!* / ask-code! — native tool-calling completion (no spec)
@@ -6425,12 +7620,13 @@
        blind resend.
      - anything else (nil / mid-stream truncation)   -> :empty-content (retry)"
   [finish-reason]
-  (let [fr (some-> finish-reason str)]
-    (cond
-      (contains? #{"length" "max_tokens" "model_context_window_exceeded"} fr) :svar.llm/max-tokens-exceeded
-      (= "refusal" fr)                                                         :svar.llm/refusal
-      (contains? #{"stop" "end_turn" "stop_sequence" "completed" "pause_turn"} fr) nil
-      :else                                                                    :svar.llm/empty-content)))
+  (let [fr (some-> finish-reason
+                   str)]
+    (cond (contains? #{"length" "max_tokens" "model_context_window_exceeded"} fr)
+          :svar.llm/max-tokens-exceeded
+          (= "refusal" fr) :svar.llm/refusal
+          (contains? #{"stop" "end_turn" "stop_sequence" "completed" "pause_turn"} fr) nil
+          :else :svar.llm/empty-content)))
 
 (defn- refusal-message
   "Human-facing message for an Anthropic safety refusal. Surfaces the
@@ -6439,15 +7635,19 @@
    null on an uncategorised refusal, so each is optional. `stop-details` keys
    are strings (parsed with `:key-fn identity`)."
   [stop-details]
-  (let [category    (get stop-details "category")
-        explanation (get stop-details "explanation")]
+  (let [category
+        (get stop-details "category")
+
+        explanation
+        (get stop-details "explanation")]
+
     (str "The model declined this request"
-      (when category (str " (category: " category ")"))
-      "."
-      (when explanation (str " " explanation))
-      " Retrying the same request on the same model usually earns the same"
-      " refusal; a different model (server-side or client-side fallback) is the"
-      " documented recovery.")))
+         (when category (str " (category: " category ")"))
+         "."
+         (when explanation (str " " explanation))
+         " Retrying the same request on the same model usually earns the same"
+         " refusal; a different model (server-side or client-side fallback) is the"
+         " documented recovery.")))
 
 (defn- refusal-ex?
   "True when `e` carries svar's typed `:svar.llm/refusal`."
@@ -6499,7 +7699,7 @@
   [e]
   (let [data (ex-data e)]
     (and (= :svar.llm/empty-content (:type data))
-      (not (false? (:empty-reply-resend-eligible? data))))))
+         (not (false? (:empty-reply-resend-eligible? data))))))
 
 (defn- annotate-empty-reply-ex
   "Rebuilds an empty-reply exception with the resend bookkeeping merged into
@@ -6507,9 +7707,10 @@
    were discarded, `:empty-reply-resend-usage` (their summed api-usage)."
   [e resends burned-usage]
   (ex-info (ex-message e)
-    (cond-> (assoc (ex-data e) :empty-reply-resends resends)
-      burned-usage (assoc :empty-reply-resend-usage burned-usage))
-    e))
+           (cond-> (assoc (ex-data e) :empty-reply-resends resends)
+             burned-usage
+             (assoc :empty-reply-resend-usage burned-usage))
+           e))
 
 (defn- call-with-empty-reply-resend
   "Runs `send!` (ONE full provider call), transparently re-sending the SAME
@@ -6533,52 +7734,75 @@
    re-send with {:model :provider-id :attempt :max-resends :delay-ms :error};
    hook exceptions are logged and swallowed."
   [{:keys [model provider-id on-resend]} send!]
-  (let [cancel-fn  *cancel-fn*
-        cancelled? (fn [] (boolean (and cancel-fn (try (cancel-fn) (catch Throwable _ false)))))]
-    (loop [attempt 0
-           burned  []]
-      (let [burned-usage (sum-api-usage burned)
-            outcome (try
-                      {:ok? true :value (send!)}
-                      (catch clojure.lang.ExceptionInfo e
-                        (if (and (empty-reply-resend-eligible? e)
-                              (< attempt EMPTY_REPLY_RESEND_LIMIT)
-                              (not (cancelled?)))
-                          {:ok? false :error e}
-                          (throw (if (= :svar.llm/empty-content (:type (ex-data e)))
-                                   (annotate-empty-reply-ex e attempt burned-usage)
-                                   e)))))]
+  (let [cancel-fn
+        *cancel-fn*
+
+        cancelled?
+        (fn []
+          (boolean (and cancel-fn (try (cancel-fn) (catch Throwable _ false)))))]
+
+    (loop [attempt
+           0
+
+           burned
+           []]
+
+      (let [burned-usage
+            (sum-api-usage burned)
+
+            outcome
+            (try {:ok? true :value (send!)}
+                 (catch clojure.lang.ExceptionInfo e
+                   (if (and (empty-reply-resend-eligible? e)
+                            (< attempt EMPTY_REPLY_RESEND_LIMIT)
+                            (not (cancelled?)))
+                     {:ok? false :error e}
+                     (throw (if (= :svar.llm/empty-content (:type (ex-data e)))
+                              (annotate-empty-reply-ex e attempt burned-usage)
+                              e)))))]
+
         (if (:ok? outcome)
           (let [value (:value outcome)]
             (if (pos? attempt)
               (cond-> (assoc value :empty-reply-resends attempt)
-                burned-usage (assoc :empty-reply-resend-usage burned-usage))
+                burned-usage
+                (assoc :empty-reply-resend-usage burned-usage))
               value))
-          (let [error        (:error outcome)
-                next-attempt (inc attempt)
-                delay-ms     (empty-reply-resend-delay-ms next-attempt)]
-            (trove/log! {:level :warn :id ::empty-reply-resend
-                         :data (log-data {:model model :provider-id provider-id
-                                          :attempt next-attempt
-                                          :max-resends EMPTY_REPLY_RESEND_LIMIT
-                                          :delay-ms delay-ms})
-                         :msg "empty reply (no text, no tool call) -> re-sending identical request to same model after backoff"})
+          (let [error
+                (:error outcome)
+
+                next-attempt
+                (inc attempt)
+
+                delay-ms
+                (empty-reply-resend-delay-ms next-attempt)]
+
+            (trove/log!
+              {:level :warn
+               :id ::empty-reply-resend
+               :data (log-data {:model model
+                                :provider-id provider-id
+                                :attempt next-attempt
+                                :max-resends EMPTY_REPLY_RESEND_LIMIT
+                                :delay-ms delay-ms})
+               :msg
+               "empty reply (no text, no tool call) -> re-sending identical request to same model after backoff"})
             (when on-resend
-              (try
-                (on-resend {:model model :provider-id provider-id
-                            :attempt next-attempt
-                            :max-resends EMPTY_REPLY_RESEND_LIMIT
-                            :delay-ms delay-ms
-                            :error error})
-                (catch Throwable t
-                  (trove/log! {:level :debug :id ::empty-reply-resend-hook-failed
-                               :data (log-data {:model model :error (ex-message t)})
-                               :msg "empty-reply :on-resend hook threw; ignored"}))))
-            (try
-              (Thread/sleep (long delay-ms))
-              (catch InterruptedException _
-                (.interrupt (Thread/currentThread))
-                (throw (annotate-empty-reply-ex error attempt burned-usage))))
+              (try (on-resend {:model model
+                               :provider-id provider-id
+                               :attempt next-attempt
+                               :max-resends EMPTY_REPLY_RESEND_LIMIT
+                               :delay-ms delay-ms
+                               :error error})
+                   (catch Throwable t
+                     (trove/log! {:level :debug
+                                  :id ::empty-reply-resend-hook-failed
+                                  :data (log-data {:model model :error (ex-message t)})
+                                  :msg "empty-reply :on-resend hook threw; ignored"}))))
+            (try (Thread/sleep (long delay-ms))
+                 (catch InterruptedException _
+                   (.interrupt (Thread/currentThread))
+                   (throw (annotate-empty-reply-ex error attempt burned-usage))))
             (recur next-attempt (conj burned (:api-usage (ex-data error))))))))))
 
 (defn ask-code!*
@@ -6606,25 +7830,47 @@
    `:assistant-message` MUST be appended to `:messages` on the next call so the
    tool_use blocks round-trip; append matching `tool_result` user blocks too."
   [router opts0]
-  (let [[messages opts1] (apply-llm-opts (:messages opts0) opts0)
-        opts             (assoc opts1 :messages messages)
-        {:keys [on-chunk tools tool-choice]} opts
-        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms output-reserve
-                check-context? network pricing context-limits responses-path llm-headers]}
-        (resolve-opts router opts)
-        provider-id (:provider-id opts)
-        chat-url (make-chat-url base-url api-style)
-        in-msgs (vec messages)
-        check-opts (cond-> {:context-limits context-limits
-                            :exact-count-fn (anthropic-exact-count-fn in-msgs model
-                                              {:api-style api-style :api-key api-key
-                                               :base-url base-url :provider-id provider-id
-                                               :llm-headers llm-headers})}
-                     output-reserve (assoc :output-reserve output-reserve))
-        _context-check (when check-context?
-                         (let [check (router/check-context-limit model in-msgs check-opts)]
-                           (when-not (:ok? check)
-                             (anomaly/incorrect! (:error check)
+  (let
+    [[messages opts1]
+     (apply-llm-opts (:messages opts0) opts0)
+
+     opts
+     (assoc opts1 :messages messages)
+
+     {:keys [on-chunk tools tool-choice]}
+     opts
+
+     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms
+             semantic-timeout-ms output-reserve check-context? network pricing context-limits
+             responses-path llm-headers]}
+     (resolve-opts router opts)
+
+     provider-id
+     (:provider-id opts)
+
+     chat-url
+     (make-chat-url base-url api-style)
+
+     in-msgs
+     (vec messages)
+
+     check-opts
+     (cond-> {:context-limits context-limits
+              :exact-count-fn (anthropic-exact-count-fn in-msgs
+                                                        model
+                                                        {:api-style api-style
+                                                         :api-key api-key
+                                                         :base-url base-url
+                                                         :provider-id provider-id
+                                                         :llm-headers llm-headers})}
+       output-reserve
+       (assoc :output-reserve output-reserve))
+
+     _context-check
+     (when check-context?
+       (let [check (router/check-context-limit model in-msgs check-opts)]
+         (when-not (:ok? check)
+           (anomaly/incorrect! (:error check)
                                {:type :svar.core/context-overflow
                                 :model model
                                 :input-tokens (:input-tokens check)
@@ -6632,153 +7878,239 @@
                                 :overflow (:overflow check)
                                 :utilization (:utilization check)
                                 :suggestion (str "Reduce task content by ~"
-                                              (int (* (double (:overflow check)) 0.75)) " words, "
-                                              "or use a larger context model.")}))
-                           check))
-        streaming-on-chunk (when on-chunk
-                             (fn [{:keys [content reasoning tool-input tool-call-preview
-                                          provider-state api-usage]}]
-                               (let [tokens (api-usage->tokens api-usage)
-                                     cost (when api-usage
-                                            (router/estimate-cost model
-                                              (or (:input-tokens api-usage) 0)
-                                              (or (:output-tokens api-usage) 0)
-                                              pricing
-                                              {:api-usage api-usage :api-style api-style}))]
-                                 ;; Native tool calling: the model's work arrives as
-                                 ;; the tool call's arguments (`:tool-input`), often
-                                 ;; with NO text content at all — fire on that too so
-                                 ;; callers can render the call being written live.
-                                 (when (or (not (str/blank? (or reasoning "")))
-                                         (not (str/blank? (or content "")))
-                                         (not (str/blank? (or tool-input "")))
-                                         (some? tool-call-preview))
-                                   (on-chunk {:content   content
-                                              :reasoning reasoning
-                                              :tool-input tool-input
-                                              :tool-call-preview tool-call-preview
-                                              :provider-state provider-state
-                                              :tokens    tokens
-                                              :cost      (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
-                                              :done?     false})))))
-        caller-extra-body (or (:extra-body opts) {})
-        ;; Tools ride in extra-body under :svar/* (the universal passthrough);
-        ;; each request-body builder strips + shapes them per wire.
-        extra-body (cond-> caller-extra-body
-                     (seq tools)  (assoc :svar/tools (vec tools))
-                     tool-choice  (assoc :svar/tool-choice tool-choice))
-        retry-opts (cond-> (merge network {:timeout-ms timeout-ms :api-style api-style
-                                           :ttft-timeout-ms ttft-timeout-ms
-                                           :idle-timeout-ms idle-timeout-ms
-                                           :semantic-timeout-ms semantic-timeout-ms})
-                     provider-id (assoc :provider-id provider-id)
-                     ;; The low-level HTTP ladder heals inside ONE call; route its
-                     ;; retries to the caller's RAW `on-chunk` (the same seam the
-                     ;; router emits routing events on) so a provider overload is
-                     ;; visible progress instead of a frozen bubble.
-                     on-chunk (assoc :on-retry on-chunk :model model)
-                     streaming-on-chunk (assoc :on-chunk streaming-on-chunk)
-                     (seq extra-body) (assoc :extra-body extra-body)
-                     responses-path (assoc :responses-path responses-path)
-                     llm-headers (assoc :llm-headers llm-headers))
-        send-once!
-        (fn []
-          (let [[{:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
-                         stream-finalization] :as response} duration-ms]
-                (util/with-elapsed
-                  (chat-completion in-msgs model api-key chat-url retry-opts))
-                stream-finalization (or stream-finalization (:stream-finalization http-response))]
-            (trove/log! {:level :info
-                         :data (log-data {:model model :duration-ms duration-ms
-                                          :input-tokens (:input-tokens api-usage)
-                                          :output-tokens (:output-tokens api-usage)
-                                          :tool-call-count (count tool-calls)
-                                          :content-length (when content (count content))})
-                         :msg "chat! HTTP response received"})
-            ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
-            ;; blank content is normal and terminates as :tool-calls. A blank reply with a
-            ;; CLEAN stop reason is a legitimate empty completion (see
-            ;; `empty-reply-anomaly-type`) and falls through to return normally; only a
-            ;; token cap or a truncated/unknown finish reason is thrown. The
-            ;; `:svar.llm/empty-content` throw is caught by
-            ;; `call-with-empty-reply-resend` below and re-sent bounded times before
-            ;; it ever reaches the caller.
-            (when (and (empty? tool-calls) (str/blank? content))
-              (when-let [anomaly-type (empty-reply-anomaly-type
-                                        (some-> stream-finalization :finish-reason str))]
-                (let [stop-details (:stop-details stream-finalization)
-                      refusal?     (= :svar.llm/refusal anomaly-type)
-                      base-envelope (envelope-data
-                                      {:model model :api-style api-style :chat-url chat-url
-                                       :duration-ms duration-ms :api-usage api-usage
-                                       :reasoning reasoning :content content
-                                       :provider-state provider-state
-                                       :assistant-message assistant-message
-                                       :http-response http-response
-                                       :stream-finalization stream-finalization
-                                       :provider-id provider-id})]
-                  (throw (ex-info
-                           (cond
-                             (= :svar.llm/max-tokens-exceeded anomaly-type)
-                             "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
-                             refusal? (refusal-message stop-details)
-                             :else    "The model produced neither text nor a tool call.")
-                           ;; Hoist stop_details to top-level ex-data so callers
-                           ;; read category/explanation without digging into
-                           ;; `:stream-finalization`.
-                           (cond-> (assoc base-envelope :type anomaly-type)
-                             stop-details (assoc :stop-details stop-details)))))))
-            (assoc response
-              :duration-ms duration-ms
-              :stream-finalization stream-finalization)))
-        {:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
-                rate-limits stream-finalization duration-ms empty-reply-resends empty-reply-resend-usage]}
-        (call-with-empty-reply-resend
-          {:model model :provider-id provider-id
-           :on-resend (:on-empty-reply-resend opts)}
-          send-once!)]
-    (let [tool-calls        (vec (or tool-calls []))
-          token-stats   (router/count-and-estimate model in-msgs (or content "")
-                          {:pricing pricing :api-usage api-usage :api-style api-style})
+                                                 (int (* (double (:overflow check)) 0.75))
+                                                 " words, " "or use a larger context model.")}))
+         check))
+
+     streaming-on-chunk
+     (when on-chunk
+       (fn [{:keys [content reasoning tool-input tool-call-preview provider-state api-usage]}]
+         (let [tokens
+               (api-usage->tokens api-usage)
+
+               cost
+               (when api-usage
+                 (router/estimate-cost model
+                                       (or (:input-tokens api-usage) 0)
+                                       (or (:output-tokens api-usage) 0)
+                                       pricing
+                                       {:api-usage api-usage :api-style api-style}))]
+
+           ;; Native tool calling: the model's work arrives as
+           ;; the tool call's arguments (`:tool-input`), often
+           ;; with NO text content at all — fire on that too so
+           ;; callers can render the call being written live.
+           (when (or (not (str/blank? (or reasoning "")))
+                     (not (str/blank? (or content "")))
+                     (not (str/blank? (or tool-input "")))
+                     (some? tool-call-preview))
+             (on-chunk {:content content
+                        :reasoning reasoning
+                        :tool-input tool-input
+                        :tool-call-preview tool-call-preview
+                        :provider-state provider-state
+                        :tokens tokens
+                        :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
+                        :done? false})))))
+
+     caller-extra-body
+     (or (:extra-body opts) {})
+
+     ;; Tools ride in extra-body under :svar/* (the universal passthrough);
+     ;; each request-body builder strips + shapes them per wire.
+     extra-body
+     (cond-> caller-extra-body
+       (seq tools)
+       (assoc :svar/tools (vec tools))
+
+       tool-choice
+       (assoc :svar/tool-choice tool-choice))
+
+     retry-opts
+     (cond-> (merge network
+                    {:timeout-ms timeout-ms
+                     :api-style api-style
+                     :ttft-timeout-ms ttft-timeout-ms
+                     :idle-timeout-ms idle-timeout-ms
+                     :semantic-timeout-ms semantic-timeout-ms})
+       provider-id
+       (assoc :provider-id provider-id)
+
+       ;; The low-level HTTP ladder heals inside ONE call; route its
+       ;; retries to the caller's RAW `on-chunk` (the same seam the
+       ;; router emits routing events on) so a provider overload is
+       ;; visible progress instead of a frozen bubble.
+       on-chunk
+       (assoc :on-retry
+         on-chunk :model
+         model)
+
+       streaming-on-chunk
+       (assoc :on-chunk streaming-on-chunk)
+
+       (seq extra-body)
+       (assoc :extra-body extra-body)
+
+       responses-path
+       (assoc :responses-path responses-path)
+
+       llm-headers
+       (assoc :llm-headers llm-headers))
+
+     send-once!
+     (fn []
+       (let [[{:keys [content reasoning provider-state assistant-message tool-calls api-usage
+                      http-response stream-finalization]
+               :as response} duration-ms]
+             (util/with-elapsed (chat-completion in-msgs model api-key chat-url retry-opts))
+
+             stream-finalization
+             (or stream-finalization (:stream-finalization http-response))]
+
+         (trove/log! {:level :info
+                      :data (log-data {:model model
+                                       :duration-ms duration-ms
+                                       :input-tokens (:input-tokens api-usage)
+                                       :output-tokens (:output-tokens api-usage)
+                                       :tool-call-count (count tool-calls)
+                                       :content-length (when content (count content))})
+                      :msg "chat! HTTP response received"})
+         ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
+         ;; blank content is normal and terminates as :tool-calls. A blank reply with a
+         ;; CLEAN stop reason is a legitimate empty completion (see
+         ;; `empty-reply-anomaly-type`) and falls through to return normally; only a
+         ;; token cap or a truncated/unknown finish reason is thrown. The
+         ;; `:svar.llm/empty-content` throw is caught by
+         ;; `call-with-empty-reply-resend` below and re-sent bounded times before
+         ;; it ever reaches the caller.
+         (when (and (empty? tool-calls) (str/blank? content))
+           (when-let [anomaly-type (empty-reply-anomaly-type (some-> stream-finalization
+                                                                     :finish-reason
+                                                                     str))]
+             (let [stop-details (:stop-details stream-finalization)
+                   refusal? (= :svar.llm/refusal anomaly-type)
+                   base-envelope (envelope-data {:model model
+                                                 :api-style api-style
+                                                 :chat-url chat-url
+                                                 :duration-ms duration-ms
+                                                 :api-usage api-usage
+                                                 :reasoning reasoning
+                                                 :content content
+                                                 :provider-state provider-state
+                                                 :assistant-message assistant-message
+                                                 :http-response http-response
+                                                 :stream-finalization stream-finalization
+                                                 :provider-id provider-id})]
+
+               (throw
+                 (ex-info
+                   (cond
+                     (= :svar.llm/max-tokens-exceeded anomaly-type)
+                     "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
+                     refusal? (refusal-message stop-details)
+                     :else "The model produced neither text nor a tool call.")
+                   ;; Hoist stop_details to top-level ex-data so callers
+                   ;; read category/explanation without digging into
+                   ;; `:stream-finalization`.
+                   (cond-> (assoc base-envelope :type anomaly-type)
+                     stop-details
+                     (assoc :stop-details stop-details)))))))
+         (assoc response
+           :duration-ms duration-ms
+           :stream-finalization stream-finalization)))
+
+     {:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
+             rate-limits stream-finalization duration-ms empty-reply-resends
+             empty-reply-resend-usage]}
+     (call-with-empty-reply-resend
+       {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
+       send-once!)]
+
+    (let [tool-calls
+          (vec (or tool-calls []))
+
+          token-stats
+          (router/count-and-estimate model
+                                     in-msgs
+                                     (or content "")
+                                     {:pricing pricing :api-usage api-usage :api-style api-style})
+
           ;; Burned empty-reply re-sends are billed by the provider - cost is
           ;; recomputed over the SUMMED usage so :cost stays honest, while
           ;; :tokens / :api-usage stay last-attempt (context-accurate).
-          cost-stats    (if empty-reply-resend-usage
-                          (router/count-and-estimate model in-msgs (or content "")
-                            {:pricing pricing
-                             :api-usage (sum-api-usage [api-usage empty-reply-resend-usage])
-                             :api-style api-style})
-                          token-stats)
-          tokens        (token-stats->tokens token-stats)
-          cost          (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
-          stop-reason   (if (seq tool-calls) :tool-calls :end)
-          rate-limit    (ratelimit/parse api-style (:headers http-response))]
-      (log-cache-outcome! {:api-style   api-style
-                           :model       model
+          cost-stats
+          (if empty-reply-resend-usage
+            (router/count-and-estimate model
+                                       in-msgs
+                                       (or content "")
+                                       {:pricing pricing
+                                        :api-usage (sum-api-usage [api-usage
+                                                                   empty-reply-resend-usage])
+                                        :api-style api-style})
+            token-stats)
+
+          tokens
+          (token-stats->tokens token-stats)
+
+          cost
+          (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
+
+          stop-reason
+          (if (seq tool-calls) :tool-calls :end)
+
+          rate-limit
+          (ratelimit/parse api-style (:headers http-response))]
+
+      (log-cache-outcome! {:api-style api-style
+                           :model model
                            :provider-id provider-id
-                           :cache-key   (get-in opts [:extra-body :prompt_cache_key])
-                           :api-usage   api-usage
+                           :cache-key (get-in opts [:extra-body :prompt_cache_key])
+                           :api-usage api-usage
                            :duration-ms duration-ms})
       (when on-chunk
-        (on-chunk {:content content :reasoning reasoning :tool-calls tool-calls
-                   :stop-reason stop-reason :provider-state provider-state
-                   :tokens tokens :cost cost :done? true}))
+        (on-chunk {:content content
+                   :reasoning reasoning
+                   :tool-calls tool-calls
+                   :stop-reason stop-reason
+                   :provider-state provider-state
+                   :tokens tokens
+                   :cost cost
+                   :done? true}))
       (cond-> {:stop-reason stop-reason
-               :tool-calls  tool-calls
-               :content     content
-               :tokens      tokens
-               :cost        cost
+               :tool-calls tool-calls
+               :content content
+               :tokens tokens
+               :cost cost
                :duration-ms duration-ms}
-        reasoning           (assoc :reasoning reasoning)
-        provider-state      (assoc :provider-state provider-state)
-        assistant-message   (assoc :assistant-message assistant-message)
-        api-usage           (assoc :api-usage api-usage)
-        http-response       (assoc :http-response http-response)
-        rate-limit          (assoc :rate-limit rate-limit)
-        rate-limits         (assoc :rate-limits rate-limits)
-        stream-finalization (assoc :stream-finalization stream-finalization)
-        empty-reply-resends      (assoc :empty-reply-resends empty-reply-resends)
-        empty-reply-resend-usage (assoc :empty-reply-resend-usage empty-reply-resend-usage)))))
+        reasoning
+        (assoc :reasoning reasoning)
+
+        provider-state
+        (assoc :provider-state provider-state)
+
+        assistant-message
+        (assoc :assistant-message assistant-message)
+
+        api-usage
+        (assoc :api-usage api-usage)
+
+        http-response
+        (assoc :http-response http-response)
+
+        rate-limit
+        (assoc :rate-limit rate-limit)
+
+        rate-limits
+        (assoc :rate-limits rate-limits)
+
+        stream-finalization
+        (assoc :stream-finalization stream-finalization)
+
+        empty-reply-resends
+        (assoc :empty-reply-resends empty-reply-resends)
+
+        empty-reply-resend-usage
+        (assoc :empty-reply-resend-usage empty-reply-resend-usage)))))
 
 (defn ask-code!
   "Native tool-calling completion. Routed sibling of `ask!` (which is for
@@ -6842,46 +8174,57 @@
   ;; provider-fallback attempt (and its backoff sleeps) honours it. See
   ;; `*cancel-fn*`. `or` preserves an outer binding when opts omits it.
   (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
-    (let [run   (fn [opts]
-                  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
-                    (router/with-provider-fallback
-                      router (:prefs resolved)
-                      (fn [provider model-map]
-                        (ask-code!* router (inject-routed-params opts provider model-map))))))
-          ;; ONE routed attempt on `opts`, with the gateway-tool-field self-heal
-          ;; (drop a gateway-grafted field and re-send once) folded in. The
-          ;; refusal-fallback loop below drives this per model, so the quirk
-          ;; check runs fresh for whichever model is being tried.
-          run-healed
-          (fn [opts]
-            (let [quirk (tool-quirk-key opts)
-                  opts  (if-let [tools (and (contains? @gateway-tool-field-quirks quirk)
-                                         (sanitize-tools-for-gateway (:tools opts)))]
-                          (assoc opts :tools tools)
-                          opts)]
-              (try
-                (run opts)
-                (catch Exception e
-                  (let [enriched (enrich-tool-schema-rejection e (:tools opts))
-                        field    (:tool-schema-field (ex-data enriched))
-                        healable (contains? gateway-injected-tool-fields field)
-                        tools    (when healable (sanitize-tools-for-gateway (:tools opts)))]
-                    (cond
-                      ;; The upstream model rejects a field the gateway forwarded FROM our
-                      ;; tools — drop it and re-send once instead of failing the turn.
-                      tools    (do (trove/log! {:level :warn :id ::gateway-tool-field-sanitized
-                                                :data {:model (:model opts)
-                                                       :tool-name (:tool-name (ex-data enriched))
-                                                       :tool-schema-field field}
-                                                :msg "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
-                                   (swap! gateway-tool-field-quirks conj quirk)
-                                   (run (assoc opts :tools tools)))
-                      ;; Same field, but our tools never carried it: the gateway invented
-                      ;; it, so only a gateway/model change can fix this. Say so.
-                      healable (throw (ex-info (ex-message enriched)
-                                        (assoc (ex-data enriched) :tool-schema-field-source :gateway)
-                                        enriched))
-                      :else    (throw enriched)))))))]
+    (let
+      [run (fn [opts]
+             (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+               (router/with-provider-fallback
+                 router
+                 (:prefs resolved)
+                 (fn [provider model-map]
+                   (ask-code!* router (inject-routed-params opts provider model-map))))))
+       ;; ONE routed attempt on `opts`, with the gateway-tool-field self-heal
+       ;; (drop a gateway-grafted field and re-send once) folded in. The
+       ;; refusal-fallback loop below drives this per model, so the quirk
+       ;; check runs fresh for whichever model is being tried.
+       run-healed
+       (fn [opts]
+         (let [quirk (tool-quirk-key opts)
+               opts (if-let [tools (and (contains? @gateway-tool-field-quirks quirk)
+                                        (sanitize-tools-for-gateway (:tools opts)))]
+                      (assoc opts :tools tools)
+                      opts)]
+
+           (try
+             (run opts)
+             (catch Exception e
+               (let [enriched (enrich-tool-schema-rejection e (:tools opts))
+                     field (:tool-schema-field (ex-data enriched))
+                     healable (contains? gateway-injected-tool-fields field)
+                     tools (when healable (sanitize-tools-for-gateway (:tools opts)))]
+
+                 (cond
+                   ;; The upstream model rejects a field the gateway forwarded FROM our
+                   ;; tools — drop it and re-send once instead of failing the turn.
+                   tools
+                   (do
+                     (trove/log!
+                       {:level :warn
+                        :id ::gateway-tool-field-sanitized
+                        :data {:model (:model opts)
+                               :tool-name (:tool-name (ex-data enriched))
+                               :tool-schema-field field}
+                        :msg
+                        "provider rejected a gateway-forwarded tool field — re-sent with it stripped"})
+                     (swap! gateway-tool-field-quirks conj quirk)
+                     (run (assoc opts :tools tools)))
+                   ;; Same field, but our tools never carried it: the gateway invented
+                   ;; it, so only a gateway/model change can fix this. Say so.
+                   healable (throw (ex-info (ex-message enriched)
+                                            (assoc (ex-data enriched)
+                                              :tool-schema-field-source :gateway)
+                                            enriched))
+                   :else (throw enriched)))))))]
+
       ;; AUTOMATIC REFUSAL FALLBACK (client-side). Anthropic's Fable 5 / Opus 5
       ;; safety classifier can DECLINE a request (`stop_reason: refusal`, typed
       ;; `:svar.llm/refusal`). A same-model retry earns the same refusal, so the
@@ -6895,175 +8238,213 @@
       ;; Anthropic's server-side fallback (the `fallbacks` body field +
       ;; `server-side-fallback` beta header, wired in `request-headers`); use
       ;; whichever the provider path supports.
-      (let [on-fallback   (:on-refusal-fallback opts)
-            fallbacks     (vec (:refusal-fallbacks opts))
-            base-opts     (dissoc opts :refusal-fallbacks :on-refusal-fallback)]
-        (loop [opts      base-opts
+      (let [on-fallback (:on-refusal-fallback opts)
+            fallbacks (vec (:refusal-fallbacks opts))
+            base-opts (dissoc opts :refusal-fallbacks :on-refusal-fallback)]
+
+        (loop [opts base-opts
                remaining fallbacks
-               tried     []]
-          (let [outcome (try
-                          {:ok (run-healed opts)}
-                          (catch clojure.lang.ExceptionInfo e
-                            (if (and (refusal-ex? e) (seq remaining))
-                              {:refusal e}
-                              (throw (cond-> e
-                                       (and (refusal-ex? e) (seq tried))
-                                       (as-> e (ex-info (ex-message e)
-                                                 (assoc (ex-data e) :refusal-fallbacks-tried tried)
-                                                 e)))))))]
+               tried []]
+
+          (let [outcome (try {:ok (run-healed opts)}
+                             (catch clojure.lang.ExceptionInfo e
+                               (if (and (refusal-ex? e) (seq remaining))
+                                 {:refusal e}
+                                 (throw (cond-> e
+                                          (and (refusal-ex? e) (seq tried))
+                                          (as-> e (ex-info (ex-message e)
+                                                           (assoc (ex-data e)
+                                                             :refusal-fallbacks-tried tried)
+                                                           e)))))))]
             (if-let [result (:ok outcome)]
               (cond-> result
                 (seq tried)
-                (assoc :refusal-recovered {:from (:model (first tried))
-                                           :to (get-in opts [:routing :model])
-                                           :fallbacks-tried tried}))
-              (let [e            (:refusal outcome)
-                    details      (:stop-details (ex-data e))
+                (assoc :refusal-recovered
+                  {:from (:model (first tried))
+                   :to (get-in opts [:routing :model])
+                   :fallbacks-tried tried}))
+              (let [e (:refusal outcome)
+                    details (:stop-details (ex-data e))
                     ;; the model that actually refused, straight from the typed
                     ;; error's envelope — not opts, which only carries a routing
                     ;; PREFERENCE the router may resolve differently.
-                    from-model   (:model (ex-data e))
-                    next-model   (first remaining)]
-                (trove/log! {:level :warn :id ::refusal-fallback
+                    from-model (:model (ex-data e))
+                    next-model (first remaining)]
+
+                (trove/log! {:level :warn
+                             :id ::refusal-fallback
                              :data (log-data {:from-model from-model
                                               :to-model next-model
                                               :category (get details "category")})
                              :msg "model refused — switching to fallback model"})
                 (when on-fallback
-                  (try
-                    (on-fallback {:from-model from-model
-                                  :to-model next-model
-                                  :category (get details "category")
-                                  :explanation (get details "explanation")
-                                  :attempt (inc (count tried))})
-                    (catch Throwable t
-                      (trove/log! {:level :debug :id ::refusal-fallback-hook-failed
-                                   :data (log-data {:error (ex-message t)})
-                                   :msg ":on-refusal-fallback hook threw; ignored"}))))
+                  (try (on-fallback {:from-model from-model
+                                     :to-model next-model
+                                     :category (get details "category")
+                                     :explanation (get details "explanation")
+                                     :attempt (inc (count tried))})
+                       (catch Throwable t
+                         (trove/log! {:level :debug
+                                      :id ::refusal-fallback-hook-failed
+                                      :data (log-data {:error (ex-message t)})
+                                      :msg ":on-refusal-fallback hook threw; ignored"}))))
                 ;; Switch the ROUTED model via `:routing {:model …}` (the pref
                 ;; `resolve-routing` reads and turns into `:force-model`), NOT
                 ;; top-level `:model` (which routing ignores). Also drop any
                 ;; server-side `:fallbacks` so the two fallback mechanisms never
                 ;; stack on the retry.
                 (recur (-> opts
-                         (assoc :routing (assoc (or (:routing opts) {}) :model next-model))
-                         (update :extra-body dissoc :fallbacks))
-                  (vec (rest remaining))
-                  (conj tried {:model from-model
-                               :category (get details "category")}))))))))))
+                           (assoc :routing (assoc (or (:routing opts) {}) :model next-model))
+                           (update :extra-body dissoc :fallbacks))
+                       (vec (rest remaining))
+                       (conj tried {:model from-model :category (get details "category")}))))))))))
 
 ;; =============================================================================
 ;; Explicit stateful sessions
 ;; =============================================================================
 
-(defn- session-turn [input]
-  (cond
-    (string? input) {:messages [(user input)] :opts {}}
-    (and (map? input) (:role input)) {:messages [input] :opts {}}
-    (sequential? input) {:messages (vec input) :opts {}}
-    (map? input) (let [turn-input (or (:input input) (:messages input))]
-                   (when-not turn-input
-                     (throw (ex-info "A session turn requires :input or :messages."
-                              {:type :svar.session/invalid-input})))
-                   {:messages (cond
-                                (string? turn-input) [(user turn-input)]
-                                (and (map? turn-input) (:role turn-input)) [turn-input]
-                                (sequential? turn-input) (vec turn-input)
-                                :else (throw (ex-info "Session input must be text or canonical messages."
-                                               {:type :svar.session/invalid-input})))
-                    :opts (dissoc input :input :messages)})
-    :else (throw (ex-info "Session input must be text, a canonical message, or turn options."
-                   {:type :svar.session/invalid-input}))))
+(defn- session-turn
+  [input]
+  (cond (string? input) {:messages [(user input)] :opts {}}
+        (and (map? input) (:role input)) {:messages [input] :opts {}}
+        (sequential? input) {:messages (vec input) :opts {}}
+        (map? input)
+        (let [turn-input (or (:input input) (:messages input))]
+          (when-not turn-input
+            (throw (ex-info "A session turn requires :input or :messages."
+                            {:type :svar.session/invalid-input})))
+          {:messages (cond (string? turn-input) [(user turn-input)]
+                           (and (map? turn-input) (:role turn-input)) [turn-input]
+                           (sequential? turn-input) (vec turn-input)
+                           :else (throw (ex-info "Session input must be text or canonical messages."
+                                                 {:type :svar.session/invalid-input})))
+           :opts (dissoc input :input :messages)})
+        :else (throw (ex-info "Session input must be text, a canonical message, or turn options."
+                              {:type :svar.session/invalid-input}))))
 
 (defn- messages->responses-input
   "The input entries a session sends for `messages`. `explicit-cache?` is the
    endpoint's own answer, never a guess from the model name: a delta must carry
    exactly what the full request body for that same turn would have carried."
   [messages model explicit-cache?]
-  (let [messages (sanitize-replayed-messages messages model true)
-        explicit-cache? (and explicit-cache? (gpt-5-6-or-later? model))]
+  (let [messages
+        (sanitize-replayed-messages messages model true)
+
+        explicit-cache?
+        (and explicit-cache? (gpt-5-6-or-later? model))]
+
     (->> messages
-      (remove #(= "system" (:role %)))
-      (mapcat #(responses-message-input-entries % explicit-cache?))
-      vec)))
+         (remove #(= "system" (:role %)))
+         (mapcat #(responses-message-input-entries % explicit-cache?))
+         vec)))
 
 (defn- session-call-route
   [router base-opts turn-opts provider-id]
-  (let [turn-routing (:routing turn-opts)
-        requested-provider (:provider turn-routing)]
+  (let [turn-routing
+        (:routing turn-opts)
+
+        requested-provider
+        (:provider turn-routing)]
+
     (when (and requested-provider (not= provider-id requested-provider))
       (throw (ex-info "An explicit session cannot switch providers."
-               {:type :svar.session/provider-switch
-                :provider provider-id
-                :requested-provider requested-provider})))
-    (let [routing (assoc (merge (:routing base-opts) turn-routing)
-                    :provider provider-id)
-          call-opts (-> base-opts
-                      (merge turn-opts)
-                      (assoc :routing routing))
-          resolved (router/resolve-routing router (routing-opts-with-reasoning call-opts))
-          [provider model-map] (or (router/select-provider router (:prefs resolved))
-                                 (throw (ex-info "No provider is available for this session turn."
-                                          {:type :svar.session/no-provider
-                                           :provider provider-id})))
-          selected-provider (:id provider)
-          api-style (or (:api-style model-map) (:api-style provider))]
-      (when-not (and (= provider-id selected-provider)
-                  (= :openai-compatible-responses api-style))
+                      {:type :svar.session/provider-switch
+                       :provider provider-id
+                       :requested-provider requested-provider})))
+    (let [routing
+          (assoc (merge (:routing base-opts) turn-routing) :provider provider-id)
+
+          call-opts
+          (-> base-opts
+              (merge turn-opts)
+              (assoc :routing routing))
+
+          resolved
+          (router/resolve-routing router (routing-opts-with-reasoning call-opts))
+
+          [provider model-map]
+          (or (router/select-provider router (:prefs resolved))
+              (throw (ex-info "No provider is available for this session turn."
+                              {:type :svar.session/no-provider :provider provider-id})))
+
+          selected-provider
+          (:id provider)
+
+          api-style
+          (or (:api-style model-map) (:api-style provider))]
+
+      (when-not (and (= provider-id selected-provider) (= :openai-compatible-responses api-style))
         (throw (ex-info "A session turn must remain on its Codex Responses provider."
-                 {:type :svar.session/provider-switch
-                  :provider provider-id
-                  :requested-provider selected-provider
-                  :api-style api-style})))
-      [(:name model-map)
-       (assoc call-opts :routing (assoc routing :model (:name model-map)))])))
+                        {:type :svar.session/provider-switch
+                         :provider provider-id
+                         :requested-provider selected-provider
+                         :api-style api-style})))
+      [(:name model-map) (assoc call-opts :routing (assoc routing :model (:name model-map)))])))
 
 (defrecord ResponsesSession [router base-opts provider-id history transport-state closed? lock]
   StatefulSession
-  (-ask-session! [_ input]
-    (locking lock
-      (when @closed?
-        (throw (ex-info "The LLM session is closed."
-                 {:type :svar.session/closed})))
-      (let [{new-messages :messages turn-opts :opts} (session-turn input)
-            [active-model call-opts] (session-call-route router base-opts turn-opts provider-id)
-            full-messages (into @history new-messages)
-            call-opts (assoc call-opts :messages full-messages)
-             ;; ONE progress flag per turn: every attempt inside it - a socket
-             ;; reconnect, the degradation to HTTP, the router's own ladder -
-             ;; tells the caller its stream restarted before re-emitting from zero.
-            progress (atom false)
-            session-opts (assoc (select-keys call-opts [:websocket-max-retries
-                                                        :websocket-retry-delay-ms
-                                                        :websocket-prewarm?])
-                           :session-progress progress
-                           ;; Control events go to the caller's OWN callback, not the
-                           ;; accumulating text wrapper built by the streaming path.
-                           :session-on-restart (:on-chunk call-opts)
-                           :session-on-rate-limits (:on-chunk call-opts))
-            result (binding [*responses-session-transport*
-                             (fn [request-body completion-opts fallback!]
-                               (responses-session-completion!
-                                 transport-state request-body
-                                 ;; The endpoint this body was just built for
-                                 ;; decides the delta's cache markers too, and a
-                                 ;; self-heal retry rebuilds the delta with it.
-                                 (messages->responses-input new-messages active-model
-                                   (responses-explicit-cache? provider-id (:base-url completion-opts)))
-                                 (merge completion-opts session-opts) fallback!))]
-                     (ask-code! router call-opts))
-            assistant-message (or (:assistant-message result)
-                                (when-not (str/blank? (or (:content result) ""))
-                                  (assistant (:content result))))]
-        (reset! history (cond-> full-messages assistant-message (conj assistant-message)))
-        result)))
-  (-close-session! [_]
-    (when (compare-and-set! closed? false true)
-      (close-session-socket! transport-state :graceful))
-    nil)
-  (-session-history [_] @history)
+    (-ask-session! [_ input]
+      (locking lock
+        (when @closed? (throw (ex-info "The LLM session is closed." {:type :svar.session/closed})))
+        (let [{new-messages :messages turn-opts :opts}
+              (session-turn input)
+
+              [active-model call-opts]
+              (session-call-route router base-opts turn-opts provider-id)
+
+              full-messages
+              (into @history new-messages)
+
+              call-opts
+              (assoc call-opts :messages full-messages)
+
+              ;; ONE progress flag per turn: every attempt inside it - a socket
+              ;; reconnect, the degradation to HTTP, the router's own ladder -
+              ;; tells the caller its stream restarted before re-emitting from zero.
+              progress
+              (atom false)
+
+              session-opts
+              (assoc (select-keys call-opts
+                                  [:websocket-max-retries :websocket-retry-delay-ms
+                                   :websocket-prewarm?])
+                :session-progress progress
+                ;; Control events go to the caller's OWN callback, not the
+                ;; accumulating text wrapper built by the streaming path.
+                :session-on-restart (:on-chunk call-opts)
+                :session-on-rate-limits (:on-chunk call-opts))
+
+              result
+              (binding [*responses-session-transport*
+                        (fn [request-body completion-opts fallback!]
+                          (responses-session-completion!
+                            transport-state
+                            request-body
+                            ;; The endpoint this body was just built for
+                            ;; decides the delta's cache markers too, and a
+                            ;; self-heal retry rebuilds the delta with it.
+                            (messages->responses-input
+                              new-messages
+                              active-model
+                              (responses-explicit-cache? provider-id (:base-url completion-opts)))
+                            (merge completion-opts session-opts)
+                            fallback!))]
+                (ask-code! router call-opts))
+
+              assistant-message
+              (or (:assistant-message result)
+                  (when-not (str/blank? (or (:content result) "")) (assistant (:content result))))]
+
+          (reset! history (cond-> full-messages
+                            assistant-message
+                            (conj assistant-message)))
+          result)))
+    (-close-session! [_]
+      (when (compare-and-set! closed? false true) (close-session-socket! transport-state :graceful))
+      nil)
+    (-session-history [_] @history)
   Closeable
-  (close [this] (-close-session! this)))
+    (close [this] (-close-session! this)))
 
 (defn open-session
   "Opens an explicit, sequential LLM session. The public contract is provider
@@ -7082,25 +8463,37 @@
    provider socket. A turn cannot change providers. The returned value implements
    `Closeable`."
   [router opts]
-  (let [resolved (router/resolve-routing router (routing-opts-with-reasoning opts))
-        [provider model-map] (or (router/select-provider router (:prefs resolved))
-                               (throw (ex-info "No provider is available for this session."
-                                        {:type :svar.session/no-provider})))
-        provider-id (:id provider)
-        api-style (or (:api-style model-map) (:api-style provider))
-        base-opts (cond-> (dissoc opts :messages)
-                    (nil? (:cache-key opts))
-                    (assoc :cache-key (str "svar-session-" (java.util.UUID/randomUUID))))]
-    (when-not (and (= :openai-codex provider-id)
-                (= :openai-compatible-responses api-style))
+  (let [resolved
+        (router/resolve-routing router (routing-opts-with-reasoning opts))
+
+        [provider model-map]
+        (or (router/select-provider router (:prefs resolved))
+            (throw (ex-info "No provider is available for this session."
+                            {:type :svar.session/no-provider})))
+
+        provider-id
+        (:id provider)
+
+        api-style
+        (or (:api-style model-map) (:api-style provider))
+
+        base-opts
+        (cond-> (dissoc opts :messages)
+          (nil? (:cache-key opts))
+          (assoc :cache-key (str "svar-session-" (java.util.UUID/randomUUID))))]
+
+    (when-not (and (= :openai-codex provider-id) (= :openai-compatible-responses api-style))
       (throw (ex-info "Stateful sessions currently require the OpenAI Codex Responses provider."
-               {:type :svar.session/unsupported-provider
-                :provider provider-id :api-style api-style})))
+                      {:type :svar.session/unsupported-provider
+                       :provider provider-id
+                       :api-style api-style})))
     (->ResponsesSession router
-      base-opts
-      provider-id
-      (atom (vec (:messages opts)))
-      (atom {}) (atom false) (Object.))))
+                        base-opts
+                        provider-id
+                        (atom (vec (:messages opts)))
+                        (atom {})
+                        (atom false)
+                        (Object.))))
 
 (defn close-session!
   "Closes an explicit session and its transport. Idempotent."
@@ -7120,13 +8513,14 @@
 ;; models! - Fetch available models
 ;; =============================================================================
 
-(defn- provider-model-id [model]
-  (cond
-    (string? model) model
-    (map? model)    (or (:id model) (:name model) (get model "id") (get model "name"))
-    :else           (str model)))
+(defn- provider-model-id
+  [model]
+  (cond (string? model) model
+        (map? model) (or (:id model) (:name model) (get model "id") (get model "name"))
+        :else (str model)))
 
-(defn- filter-provider-models [provider-id models]
+(defn- filter-provider-models
+  [provider-id models]
   (if provider-id
     (filterv #(router/provider-model-visible? provider-id (provider-model-id %)) models)
     (vec models)))
@@ -7137,19 +8531,16 @@
    chat base path (LM Studio: `/api/v0/...`). Returns base-url unchanged when
    it can't be parsed."
   [base-url]
-  (try
-    (let [u (URI. base-url)]
-      (str (.getScheme u) "://" (.getAuthority u)))
-    (catch Exception _ base-url)))
+  (try (let [u (URI. base-url)]
+         (str (.getScheme u) "://" (.getAuthority u)))
+       (catch Exception _ base-url)))
 
 (defn- models-endpoint-url
   "Build the models-listing URL for a provider. With `:models-base :host` the
    `:models-path` hangs off the host root (LM Studio's native REST); otherwise
    it appends to the chat base-url (OpenAI/Anthropic/Codex convention)."
   [base-url models-base models-path]
-  (if (= :host models-base)
-    (str (host-root base-url) models-path)
-    (str base-url models-path)))
+  (if (= :host models-base) (str (host-root base-url) models-path) (str base-url models-path)))
 
 (defn- enrich-lmstudio-model
   "Map LM Studio native `/api/v0/models` fields onto svar model keys.
@@ -7166,10 +8557,17 @@
   [m]
   (let [ctx (or (get m "loaded_context_length") (get m "max_context_length"))]
     (cond-> m
-      ctx (assoc :context (long ctx))
-      (some #{"tool_use"} (get m "capabilities")) (assoc :tool-call? true)
-      (some #{"vision"} (get m "capabilities")) (assoc :vision? true)
-      (some? (get m "state")) (assoc :loaded? (= "loaded" (get m "state"))))))
+      ctx
+      (assoc :context (long ctx))
+
+      (some #{"tool_use"} (get m "capabilities"))
+      (assoc :tool-call? true)
+
+      (some #{"vision"} (get m "capabilities"))
+      (assoc :vision? true)
+
+      (some? (get m "state"))
+      (assoc :loaded? (= "loaded" (get m "state"))))))
 
 (def ^:private GATEWAY_CAPABILITY_KEYS
   "LiteLLM `model_info` capability flags -> svar model keys.
@@ -7179,13 +8577,13 @@
    output cap, tool support, vision, reasoning. Reading it means a user config
    needs nothing but base-url + api-key + model name. The wire flags are
    strings because a `/models` body is never interned."
-  {"supports_function_calling"          :tool-call?
-   "supports_tool_choice"               :tool-choice?
+  {"supports_function_calling" :tool-call?
+   "supports_tool_choice" :tool-choice?
    "supports_parallel_function_calling" :parallel-tool-calls?
-   "supports_vision"                    :vision?
-   "supports_reasoning"                 :reasoning?
-   "supports_response_schema"           :structured-output?
-   "supports_prompt_caching"            :prompt-caching?})
+   "supports_vision" :vision?
+   "supports_reasoning" :reasoning?
+   "supports_response_schema" :structured-output?
+   "supports_prompt_caching" :prompt-caching?})
 
 (defn- enrich-gateway-model
   "Map an OpenAI-compatible gateway's model entry onto svar model keys.
@@ -7198,33 +8596,43 @@
   [m]
   (if-not (map? m)
     m
-    (let [info (merge m (when (map? (get m "model_info")) (get m "model_info")))
-          ctx  (or (get info "max_input_tokens") (get info "context_window"))
-          out  (or (get info "max_output_tokens") (get info "max_tokens"))
-          caps (reduce-kv (fn [acc wire-k svar-k]
-                            (if (contains? info wire-k)
-                              (assoc acc svar-k (boolean (get info wire-k)))
-                              acc))
-                 {} GATEWAY_CAPABILITY_KEYS)]
+    (let [info
+          (merge m (when (map? (get m "model_info")) (get m "model_info")))
+
+          ctx
+          (or (get info "max_input_tokens") (get info "context_window"))
+
+          out
+          (or (get info "max_output_tokens") (get info "max_tokens"))
+
+          caps
+          (reduce-kv
+            (fn [acc wire-k svar-k]
+              (if (contains? info wire-k) (assoc acc svar-k (boolean (get info wire-k))) acc))
+            {}
+            GATEWAY_CAPABILITY_KEYS)]
+
       (merge caps
-        (cond-> m
-          (and (not (:context m)) (number? ctx))
-          (assoc :context (long ctx))
+             (cond-> m
+               (and (not (:context m)) (number? ctx))
+               (assoc :context (long ctx))
 
-          (and (not (:max-output-tokens m)) (number? out))
-          (assoc :max-output-tokens (long out))
+               (and (not (:max-output-tokens m)) (number? out))
+               (assoc :max-output-tokens (long out))
 
-          (string? (get info "litellm_provider"))
-          (assoc :upstream-provider (get info "litellm_provider")))))))
+               (string? (get info "litellm_provider"))
+               (assoc :upstream-provider (get info "litellm_provider")))))))
 
 (defn- shape-models
   "Apply provider-specific model normalization keyed by `:models-shape`, then the
    provider-agnostic gateway enrichment."
   [models-shape models]
   (mapv enrich-gateway-model
-    (case models-shape
-      :lmstudio (mapv enrich-lmstudio-model models)
-      models)))
+        (case models-shape
+          :lmstudio
+          (mapv enrich-lmstudio-model models)
+
+          models)))
 
 (defn- wire-model->svar
   "Lifts a raw `/models` entry's identity fields onto svar's model keys.
@@ -7237,11 +8645,18 @@
   [m]
   (if-not (map? m)
     m
-    (let [id    (or (get m "id") (get m "slug"))
-          title (or (get m "name") (get m "display_name"))]
+    (let [id
+          (or (get m "id") (get m "slug"))
+
+          title
+          (or (get m "name") (get m "display_name"))]
+
       (cond-> m
-        (string? id)    (assoc :id id)
-        (string? title) (assoc :name title)))))
+        (string? id)
+        (assoc :id id)
+
+        (string? title)
+        (assoc :name title)))))
 
 (defn- normalize-models-response
   "Normalize a `/models` response body to a vector of model maps with
@@ -7256,16 +8671,10 @@
    without special-casing. The original wire keys are preserved as strings."
   [body]
   (mapv wire-model->svar
-    (cond
-      (sequential? body) (vec body)
-
-      (and (map? body) (sequential? (get body "data")))
-      (vec (get body "data"))
-
-      (and (map? body) (sequential? (get body "models")))
-      (vec (get body "models"))
-
-      :else [])))
+        (cond (sequential? body) (vec body)
+              (and (map? body) (sequential? (get body "data"))) (vec (get body "data"))
+              (and (map? body) (sequential? (get body "models"))) (vec (get body "models"))
+              :else [])))
 
 (def ^:private MODELS_CACHE_TTL_MS
   "How long a successful `/models` catalog is reused before re-fetching. The
@@ -7308,72 +8717,103 @@
    ;; can't trust `(:api-style resolved)` to detect "unset". Fall back
    ;; to the selected provider whenever the caller didn't explicitly
    ;; pin `:api-style` / `:provider-id` / `:llm-headers` in opts.
-   (let [resolved              (resolve-opts router opts)
-         [selected-provider _] (when-not (:base-url resolved)
-                                 (router/select-provider router {:strategy :root}))
-         api-key               (or (:api-key resolved) (:api-key selected-provider))
-         base-url              (or (:base-url resolved) (:base-url selected-provider))
-         provider-id           (or (:provider-id opts) (:id selected-provider))
-         api-style             (or (:api-style opts)
-                                 (:api-style selected-provider)
-                                 :openai-compatible-chat)
-         llm-headers           (or (:llm-headers opts)
-                                 (:llm-headers selected-provider))
+   (let [resolved
+         (resolve-opts router opts)
+
+         [selected-provider _]
+         (when-not (:base-url resolved) (router/select-provider router {:strategy :root}))
+
+         api-key
+         (or (:api-key resolved) (:api-key selected-provider))
+
+         base-url
+         (or (:base-url resolved) (:base-url selected-provider))
+
+         provider-id
+         (or (:provider-id opts) (:id selected-provider))
+
+         api-style
+         (or (:api-style opts) (:api-style selected-provider) :openai-compatible-chat)
+
+         llm-headers
+         (or (:llm-headers opts) (:llm-headers selected-provider))
+
          ;; Per-provider hooks live in svar's `KNOWN_PROVIDERS` so the
          ;; whole stack stays platform-agnostic: callers pass a
          ;; provider-id and svar knows which endpoint, query params,
          ;; and response shape to expect (Anthropic `/v1/models`,
          ;; OpenAI `/models`, Codex `/codex/models?client_version=...`,
          ;; Z.ai `/models`, ...). Caller-supplied opts override.
-         known-provider        (when provider-id
-                                 (get router/KNOWN_PROVIDERS provider-id))
-         models-path           (or (:models-path opts)
-                                 (:models-path known-provider)
-                                 "/models")
-         models-query-params   (or (:models-query-params opts)
-                                 (:models-query-params known-provider))
-         models-base           (or (:models-base opts) (:models-base known-provider))
-         models-shape          (or (:models-shape opts) (:models-shape known-provider))
-         models-url            (models-endpoint-url base-url models-base models-path)
-         strict?               (boolean (:strict? opts))
-         http-opts             (cond-> {:api-style   api-style
-                                        :provider-id provider-id
-                                        :llm-headers llm-headers}
-                                 (seq models-query-params)
-                                 (assoc :query-params models-query-params))
+         known-provider
+         (when provider-id (get router/KNOWN_PROVIDERS provider-id))
+
+         models-path
+         (or (:models-path opts) (:models-path known-provider) "/models")
+
+         models-query-params
+         (or (:models-query-params opts) (:models-query-params known-provider))
+
+         models-base
+         (or (:models-base opts) (:models-base known-provider))
+
+         models-shape
+         (or (:models-shape opts) (:models-shape known-provider))
+
+         models-url
+         (models-endpoint-url base-url models-base models-path)
+
+         strict?
+         (boolean (:strict? opts))
+
+         http-opts
+         (cond-> {:api-style api-style :provider-id provider-id :llm-headers llm-headers}
+           (seq models-query-params)
+           (assoc :query-params models-query-params))
+
          ;; The api-key is part of the identity: a LiteLLM virtual key sees
          ;; only the models its team is entitled to, so two keys against the
          ;; SAME url legitimately return different catalogs. Hashed, never
          ;; stored raw.
-         cache-key             [models-url provider-id api-style
-                                (some-> api-key hash)]
-         cached                (get @models-cache cache-key)
-         fresh?                (and (some? cached)
-                                 (< (- (System/currentTimeMillis) (long (:at cached)))
-                                   (long MODELS_CACHE_TTL_MS)))
-         body                  (when-not fresh?
-                                 (try
-                                   ;; Retried: a shared gateway's 502/timeout must not be
-                                   ;; reported to the caller as \"this endpoint has no models\".
-                                   (with-retry #(http-get! models-url api-key http-opts)
-                                     {:max-retries 3 :initial-delay-ms 500 :max-delay-ms 5000})
-                                   (catch clojure.lang.ExceptionInfo ex
-                                     (when strict? (throw ex))
-                                     (trove/log! {:level :warn :id ::models-fetch-failed
-                                                  :data (log-data {:url    models-url
-                                                                   :status (:status (ex-data ex))
-                                                                   :stale? (some? cached)
-                                                                   :error  (ex-message ex)})
-                                                  :msg  "models fetch failed; serving cached catalog"})
-                                     nil)))
-         models                (if fresh?
-                                 (:models cached)
-                                 (let [fetched (shape-models models-shape
-                                                 (normalize-models-response body))]
-                                   (if (seq fetched)
-                                     (do (swap! models-cache assoc cache-key
-                                           {:at (System/currentTimeMillis) :models fetched})
-                                         fetched)
-                                     ;; Empty = the fetch failed or the gateway hiccuped.
-                                     (or (:models cached) fetched))))]
+         cache-key
+         [models-url provider-id api-style
+          (some-> api-key
+                  hash)]
+
+         cached
+         (get @models-cache cache-key)
+
+         fresh?
+         (and (some? cached)
+              (< (- (System/currentTimeMillis) (long (:at cached))) (long MODELS_CACHE_TTL_MS)))
+
+         body
+         (when-not fresh?
+           (try
+             ;; Retried: a shared gateway's 502/timeout must not be
+             ;; reported to the caller as \"this endpoint has no models\".
+             (with-retry #(http-get! models-url api-key http-opts)
+                         {:max-retries 3 :initial-delay-ms 500 :max-delay-ms 5000})
+             (catch clojure.lang.ExceptionInfo ex
+               (when strict? (throw ex))
+               (trove/log! {:level :warn
+                            :id ::models-fetch-failed
+                            :data (log-data {:url models-url
+                                             :status (:status (ex-data ex))
+                                             :stale? (some? cached)
+                                             :error (ex-message ex)})
+                            :msg "models fetch failed; serving cached catalog"})
+               nil)))
+
+         models
+         (if fresh?
+           (:models cached)
+           (let [fetched (shape-models models-shape (normalize-models-response body))]
+             (if (seq fetched)
+               (do (swap! models-cache assoc
+                     cache-key
+                     {:at (System/currentTimeMillis) :models fetched})
+                   fetched)
+               ;; Empty = the fetch failed or the gateway hiccuped.
+               (or (:models cached) fetched))))]
+
      (filter-provider-models provider-id models))))

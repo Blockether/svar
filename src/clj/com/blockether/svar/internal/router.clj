@@ -4,82 +4,87 @@
 
    Extracted from defaults.clj (provider/model metadata) and llm.clj (routing logic)
    to provide a single cohesive namespace for all routing concerns."
-  (:require
-   [clojure.string :as str]
-   [com.blockether.anomaly.core :as anomaly]
-   [com.blockether.svar.internal.failure :as failure]
-   [com.blockether.svar.internal.modelsdev :as modelsdev]
-   [taoensso.trove :as trove])
-  (:import
-   (com.blockether.svar ImageHeader)
-   (com.knuddels.jtokkit Encodings)
-   (com.knuddels.jtokkit.api
-     Encoding
-     EncodingRegistry
-     EncodingType
-     IntArrayList
-     ModelType)
-   (java.net HttpURLConnection URI)
-   (java.util Base64 Locale UUID)))
+  (:require [clojure.string :as str]
+            [com.blockether.anomaly.core :as anomaly]
+            [com.blockether.svar.internal.failure :as failure]
+            [com.blockether.svar.internal.modelsdev :as modelsdev]
+            [taoensso.trove :as trove])
+  (:import (com.blockether.svar ImageHeader)
+           (com.knuddels.jtokkit Encodings)
+           (com.knuddels.jtokkit.api Encoding EncodingRegistry EncodingType IntArrayList ModelType)
+           (java.net HttpURLConnection URI)
+           (java.util Base64 Locale UUID)))
 
 ;; =============================================================================
 ;; Known Providers
 ;; =============================================================================
 
 (def KNOWN_PROVIDERS
-  {:openai      {:base-url "https://api.openai.com/v1"
-                 :env-keys ["OPENAI_API_KEY"]
-                 :default-models [{:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"} {:name "gpt-4o-mini"} {:name "o3-mini"}]}
-   :anthropic   {:base-url "https://api.anthropic.com/v1"
-                 :env-keys ["ANTHROPIC_API_KEY"] :api-style :anthropic
-                 :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
-   :anthropic-coding-plan
-   {:base-url "https://api.anthropic.com/v1"
-    :env-keys [] :api-style :anthropic
-    :provider-model-source :anthropic
-    ;; OAuth coding plan: use retail Anthropic pricing for honest metering
-    ;; once the included quota is exhausted (see internal/modelsdev).
-    :pricing-source :anthropic
-    :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
-    :prepend-default-models? true}
-   :zai         {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
-                 :env-keys ["ZAI_API_KEY"]
-                 :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-5v-turbo"} {:name "glm-4.6v"}]}
-   :zai-coding  {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic
-                 ;; Coding Plan endpoint, but for budget accounting we use
-                 ;; retail :zai per-token rates (the plan meters overage at
-                 ;; the same rates). `:provider-model-source :zai` lets the
-                 ;; svar overlay inherit `:json-object-mode?` from :zai's
-                 ;; GLM table so we don't duplicate the entries.
-                 :pricing-source :zai
-                 :provider-model-source :zai
-                 :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
+  {:openai {:base-url "https://api.openai.com/v1"
+            :env-keys ["OPENAI_API_KEY"]
+            :default-models [{:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"}
+                             {:name "gpt-4o-mini"} {:name "o3-mini"}]}
+   :anthropic {:base-url "https://api.anthropic.com/v1"
+               :env-keys ["ANTHROPIC_API_KEY"]
+               :api-style :anthropic
+               :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"}
+                                {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
+                                {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                                {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+   :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
+                           :env-keys []
+                           :api-style :anthropic
+                           :provider-model-source :anthropic
+                           ;; OAuth coding plan: use retail Anthropic pricing for honest metering
+                           ;; once the included quota is exhausted (see internal/modelsdev).
+                           :pricing-source :anthropic
+                           :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"}
+                                            {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
+                                            {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                                            {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
+                           :prepend-default-models? true}
+   :zai {:base-url "https://api.z.ai/api/anthropic/v1"
+         :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
+         :env-keys ["ZAI_API_KEY"]
+         :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"}
+                          {:name "glm-5.1"} {:name "glm-4.7"} {:name "glm-5v-turbo"}
+                          {:name "glm-4.6v"}]}
+   :zai-coding {:base-url "https://api.z.ai/api/anthropic/v1"
+                :api-style :anthropic
+                ;; Coding Plan endpoint, but for budget accounting we use
+                ;; retail :zai per-token rates (the plan meters overage at
+                ;; the same rates). `:provider-model-source :zai` lets the
+                ;; svar overlay inherit `:json-object-mode?` from :zai's
+                ;; GLM table so we don't duplicate the entries.
+                :pricing-source :zai
+                :provider-model-source :zai
+                :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]}
    ;; Z.ai Coding Plan runtime alias. Vis registers this as
    ;; `:zai-coding-plan` (see `vis-provider-zai`); without the alias the
    ;; catalog miss reproduces the same `max_tokens = 2048` bug observed
    ;; on Copilot. Same policy as `:zai-coding`; keep both keys in sync.
-   :zai-coding-plan
-   {:base-url "https://api.z.ai/api/anthropic/v1" :api-style :anthropic
-    :pricing-source :zai
-    :provider-model-source :zai
-    :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
-     ;; `glm-5v-turbo` is the plan's only vision surface (`glm-4.6v` is metered
-     ;; separately and does not ride the plan), and it sits LAST so a
-     ;; `:cost`/`:speed` side-channel keeps picking a text model on the
-     ;; all-zero coding-plan price table.
-    :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"} {:name "glm-5v-turbo"}]}
+   :zai-coding-plan {:base-url "https://api.z.ai/api/anthropic/v1"
+                     :api-style :anthropic
+                     :pricing-source :zai
+                     :provider-model-source :zai
+                     :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
+                     ;; `glm-5v-turbo` is the plan's only vision surface (`glm-4.6v` is metered
+                     ;; separately and does not ride the plan), and it sits LAST so a
+                     ;; `:cost`/`:speed` side-channel keeps picking a text model on the
+                     ;; all-zero coding-plan price table.
+                     :default-models [{:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"}
+                                      {:name "glm-4.7"} {:name "glm-5.1"} {:name "glm-5v-turbo"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
    ;; function calling (unlike GLM-on-chat, which z.ai poisons with an XML
    ;; tool-call prompt).
-   :gemini      {:base-url "https://generativelanguage.googleapis.com/v1beta"
-                 :api-style :gemini
-                 :default-models [{:name "gemini-3-pro-preview"} {:name "gemini-3-flash-preview"}
-                                  {:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}]
-                 :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
-   :openrouter  {:base-url "https://openrouter.ai/api/v1"
-                 :env-keys ["OPENROUTER_API_KEY"]}
+   :gemini {:base-url "https://generativelanguage.googleapis.com/v1beta"
+            :api-style :gemini
+            :default-models [{:name "gemini-3-pro-preview"} {:name "gemini-3-flash-preview"}
+                             {:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}]
+            :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
+   :openrouter {:base-url "https://openrouter.ai/api/v1" :env-keys ["OPENROUTER_API_KEY"]}
    ;; Mistral — OpenAI-compatible `/v1/chat/completions`. No `:api-style` needed
    ;; (default OpenAI chat wire). The `:mistral` slug already exists in the bundled
    ;; `resources/models.dev.json` (env `MISTRAL_API_KEY`, full model catalog with
@@ -87,31 +92,30 @@
    ;; `modelsdev/provider-models`; NO `KNOWN_PROVIDER_MODELS` overlay required.
    ;; See `provider-pricing-source` (router.clj) — it keys models.dev off `:id`,
    ;; and `:mistral` is already a known catalog slug.
-   :mistral     {:base-url "https://api.mistral.ai/v1"
-                 :env-keys ["MISTRAL_API_KEY"]
-                 :default-models [{:name "mistral-large-latest"}
-                                  {:name "mistral-medium-latest"}
-                                  {:name "mistral-small-latest"}
-                                  {:name "codestral-latest"}]}
-   :github-copilot {:base-url "https://api.individual.githubcopilot.com"
-                    :default-models [{:name "claude-opus-5"} {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"}]
-                    :llm-headers {"Editor-Version" "vscode/1.100.0"
-                                  "Editor-Plugin-Version" "copilot-chat/0.26.7"
-                                  "Copilot-Integration-Id" "vscode-chat"
-                                  "User-Agent" "GitHubCopilotChat/0.26.7"}
-                    ;; Copilot currently exposes many historical GPT models; keep
-                    ;; the GPT family at gpt-5.3+ only. Other families (Claude,
-                    ;; Gemini, Grok) stay selectable.
-                    :min-gpt-version [5 3]
-                    :exclude-models #{"gpt-4o" "gpt-4.1"
-                                      "gpt-5" "gpt-5-mini" "gpt-5.1" "gpt-5.2" "gpt-5.2-codex"
-                                      "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
-                                      ;; Copilot advertises this on some accounts,
-                                      ;; then rejects inference with
-                                      ;; `400 model_not_supported`. Keep it out of
-                                      ;; cost routing until endpoint support is real.
-                                      "grok-code-fast-1"}
-                    :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
+   :mistral {:base-url "https://api.mistral.ai/v1"
+             :env-keys ["MISTRAL_API_KEY"]
+             :default-models [{:name "mistral-large-latest"} {:name "mistral-medium-latest"}
+                              {:name "mistral-small-latest"} {:name "codestral-latest"}]}
+   :github-copilot
+   {:base-url "https://api.individual.githubcopilot.com"
+    :default-models [{:name "claude-opus-5"} {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                     {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"}]
+    :llm-headers {"Editor-Version" "vscode/1.100.0"
+                  "Editor-Plugin-Version" "copilot-chat/0.26.7"
+                  "Copilot-Integration-Id" "vscode-chat"
+                  "User-Agent" "GitHubCopilotChat/0.26.7"}
+    ;; Copilot currently exposes many historical GPT models; keep
+    ;; the GPT family at gpt-5.3+ only. Other families (Claude,
+    ;; Gemini, Grok) stay selectable.
+    :min-gpt-version [5 3]
+    :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1" "gpt-5.2" "gpt-5.2-codex"
+                      "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"
+                      ;; Copilot advertises this on some accounts,
+                      ;; then rejects inference with
+                      ;; `400 model_not_supported`. Keep it out of
+                      ;; cost routing until endpoint support is real.
+                      "grok-code-fast-1"}
+    :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
    ;; Copilot plan tiers — runtime provider IDs (one per OAuth plan) that
    ;; INHERIT policy from `:github-copilot` via `:provider-model-source`.
    ;; `known-provider` merges the base entry under each tier-specific
@@ -127,22 +131,20 @@
    ;; claude-sonnet-4.6 burning the whole 2048-token budget on hidden
    ;; reasoning and surfacing `:svar.llm/empty-content` /
    ;; `:vis/comment-only-block` errors mid-turn.
-   :github-copilot-individual
-   {:base-url "https://api.individual.githubcopilot.com"
-    :provider-model-source :github-copilot}
-   :github-copilot-business
-   {:base-url "https://api.business.githubcopilot.com"
-    :provider-model-source :github-copilot}
-   :github-copilot-enterprise
-   {:base-url "https://api.enterprise.githubcopilot.com"
-    :provider-model-source :github-copilot}
+   :github-copilot-individual {:base-url "https://api.individual.githubcopilot.com"
+                               :provider-model-source :github-copilot}
+   :github-copilot-business {:base-url "https://api.business.githubcopilot.com"
+                             :provider-model-source :github-copilot}
+   :github-copilot-enterprise {:base-url "https://api.enterprise.githubcopilot.com"
+                               :provider-model-source :github-copilot}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
-                  :env-keys [] :api-style :openai-compatible-responses
-                  :default-models [{:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
+                  :env-keys []
+                  :api-style :openai-compatible-responses
+                  :default-models [{:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.5"}
+                                   {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
-                  :exclude-models #{"gpt-4o" "gpt-4.1"
-                                    "gpt-5" "gpt-5-mini" "gpt-5.1"
+                  :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
                                     "gpt-5.1-codex" "gpt-5.1-codex-max" "gpt-5.1-codex-mini"}
                   ;; Codex plan: pull retail OpenAI pricing for metering
                   ;; via internal/modelsdev (`:pricing-source` overlay).
@@ -183,21 +185,21 @@
    ;; locally — irrelevant for a local box.) Model discovery still uses the
    ;; OpenAI `/v1/models` (Ollama) / `/api/v0/models` (LM Studio) paths below,
    ;; independent of the chat api-style.
-   :ollama      {:base-url "http://localhost:11434/v1"
-                 :api-style :anthropic :api-key "ollama"
-                 :env-keys []}
+   :ollama
+   {:base-url "http://localhost:11434/v1" :api-style :anthropic :api-key "ollama" :env-keys []}
    ;; LM Studio's OpenAI-compatible `/v1/models` omits context length, so
    ;; svar would fall back to DEFAULT_CONTEXT_LIMIT and cripple a model that
    ;; actually serves 100k+. Its native REST endpoint at `/api/v0/models`
    ;; (host root, NOT under `/v1`) reports `max_context_length`,
    ;; `loaded_context_length`, and `capabilities` — `models!` reads it via the
    ;; `:models-base :host` + `:models-shape :lmstudio` hooks below.
-   :lmstudio    {:base-url "http://localhost:1234/v1"
-                 :api-style :anthropic :api-key "lmstudio"
-                 :env-keys []
-                 :models-path "/api/v0/models"
-                 :models-base :host
-                 :models-shape :lmstudio}})
+   :lmstudio {:base-url "http://localhost:1234/v1"
+              :api-style :anthropic
+              :api-key "lmstudio"
+              :env-keys []
+              :models-path "/api/v0/models"
+              :models-base :host
+              :models-shape :lmstudio}})
 
 ;; =============================================================================
 ;; Provider-independent model-family metadata
@@ -210,70 +212,227 @@
    is inferred from the provider's `:api-style` (`:anthropic` → anthropic
    thinking, everything else → openai-effort)."
   {;; ── OpenAI GPT-4o ────────────────────────────────────────────────────────
-   "gpt-4o"                    {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
-
+   "gpt-4o" {:intelligence :high :speed :medium :capabilities #{:chat :vision}}
    ;; ── OpenAI GPT-4.1 ──────────────────────────────────────────────────────
-   "gpt-4.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat :vision}}
-
+   "gpt-4.1" {:intelligence :high :speed :medium :capabilities #{:chat :vision}}
    ;; ── OpenAI GPT-5 (reasoning-capable, reasoning_effort) ──────────────────
-   "gpt-5"                     {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5-mini"                {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.1"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.1-codex"             {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.1-codex-mini"        {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.1-codex-max"         {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.3-codex"             {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.3-codex-spark"       {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.4"                   {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.4-mini"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.5"                   {:intelligence :frontier :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.6-luna"              {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gpt-5.6-sol"               {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-
+   "gpt-5" {:intelligence :frontier
+            :speed :medium
+            :capabilities #{:chat :vision}
+            :reasoning? true
+            :reasoning-style :openai-effort}
+   "gpt-5-mini" {:intelligence :high
+                 :speed :fast
+                 :capabilities #{:chat :vision}
+                 :reasoning? true
+                 :reasoning-style :openai-effort}
+   "gpt-5.1" {:intelligence :frontier
+              :speed :medium
+              :capabilities #{:chat :vision}
+              :reasoning? true
+              :reasoning-style :openai-effort}
+   "gpt-5.1-codex" {:intelligence :frontier
+                    :speed :medium
+                    :capabilities #{:chat :vision}
+                    :reasoning? true
+                    :reasoning-style :openai-effort}
+   "gpt-5.1-codex-mini" {:intelligence :high
+                         :speed :fast
+                         :capabilities #{:chat :vision}
+                         :reasoning? true
+                         :reasoning-style :openai-effort}
+   "gpt-5.1-codex-max" {:intelligence :frontier
+                        :speed :medium
+                        :capabilities #{:chat :vision}
+                        :reasoning? true
+                        :reasoning-style :openai-effort}
+   "gpt-5.3-codex" {:intelligence :high
+                    :speed :medium
+                    :capabilities #{:chat :vision}
+                    :reasoning? true
+                    :reasoning-style :openai-effort}
+   "gpt-5.3-codex-spark" {:intelligence :high
+                          :speed :fast
+                          :capabilities #{:chat :vision}
+                          :reasoning? true
+                          :reasoning-style :openai-effort}
+   "gpt-5.4" {:intelligence :frontier
+              :speed :medium
+              :capabilities #{:chat :vision}
+              :reasoning? true
+              :reasoning-style :openai-effort}
+   "gpt-5.4-mini" {:intelligence :high
+                   :speed :fast
+                   :capabilities #{:chat :vision}
+                   :reasoning? true
+                   :reasoning-style :openai-effort}
+   "gpt-5.5" {:intelligence :frontier
+              :speed :fast
+              :capabilities #{:chat :vision}
+              :reasoning? true
+              :reasoning-style :openai-effort}
+   "gpt-5.6-luna" {:intelligence :frontier
+                   :speed :medium
+                   :capabilities #{:chat :vision}
+                   :reasoning? true
+                   :reasoning-style :openai-effort}
+   "gpt-5.6-sol" {:intelligence :frontier
+                  :speed :medium
+                  :capabilities #{:chat :vision}
+                  :reasoning? true
+                  :reasoning-style :openai-effort}
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
-   "claude-fable-5"            {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-mythos-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-opus-5"             {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-opus-4-8"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-opus-4-7"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-opus-4-6"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-opus-4-5"           {:intelligence :frontier :speed :slow   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-sonnet-4"           {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-sonnet-4-6"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-sonnet-5"           {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-sonnet-4-5"         {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-sonnet-4-20250514"  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-   "claude-haiku-4-5"          {:intelligence :medium   :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :anthropic-thinking}
-
+   "claude-fable-5" {:intelligence :frontier
+                     :speed :slow
+                     :capabilities #{:chat :vision}
+                     :reasoning? true
+                     :reasoning-style :anthropic-thinking}
+   "claude-mythos-5" {:intelligence :frontier
+                      :speed :slow
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+   "claude-opus-5" {:intelligence :frontier
+                    :speed :slow
+                    :capabilities #{:chat :vision}
+                    :reasoning? true
+                    :reasoning-style :anthropic-thinking}
+   "claude-opus-4-8" {:intelligence :frontier
+                      :speed :slow
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+   "claude-opus-4-7" {:intelligence :frontier
+                      :speed :slow
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+   "claude-opus-4-6" {:intelligence :frontier
+                      :speed :slow
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+   "claude-opus-4-5" {:intelligence :frontier
+                      :speed :slow
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4" {:intelligence :high
+                      :speed :medium
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4-6" {:intelligence :high
+                        :speed :medium
+                        :capabilities #{:chat :vision}
+                        :reasoning? true
+                        :reasoning-style :anthropic-thinking}
+   "claude-sonnet-5" {:intelligence :high
+                      :speed :medium
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4-5" {:intelligence :high
+                        :speed :medium
+                        :capabilities #{:chat :vision}
+                        :reasoning? true
+                        :reasoning-style :anthropic-thinking}
+   "claude-sonnet-4-20250514" {:intelligence :high
+                               :speed :medium
+                               :capabilities #{:chat :vision}
+                               :reasoning? true
+                               :reasoning-style :anthropic-thinking}
+   "claude-haiku-4-5" {:intelligence :medium
+                       :speed :fast
+                       :capabilities #{:chat :vision}
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
    ;; ── Google Gemini 2.5 (reasoning_effort via OpenAI-compat gateway) ──────
-   "gemini-2.5-pro"            {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gemini-2.5-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gemini-3-flash-preview"    {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gemini-3-pro-preview"      {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gemini-3.1-pro-preview"    {:intelligence :frontier :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :openai-effort}
-   "gemini-2.0-flash"          {:intelligence :high     :speed :fast   :capabilities #{:chat :vision}}
-
+   "gemini-2.5-pro" {:intelligence :frontier
+                     :speed :medium
+                     :capabilities #{:chat :vision}
+                     :reasoning? true
+                     :reasoning-style :openai-effort}
+   "gemini-2.5-flash" {:intelligence :high
+                       :speed :fast
+                       :capabilities #{:chat :vision}
+                       :reasoning? true
+                       :reasoning-style :openai-effort}
+   "gemini-3-flash-preview" {:intelligence :high
+                             :speed :fast
+                             :capabilities #{:chat :vision}
+                             :reasoning? true
+                             :reasoning-style :openai-effort}
+   "gemini-3-pro-preview" {:intelligence :frontier
+                           :speed :medium
+                           :capabilities #{:chat :vision}
+                           :reasoning? true
+                           :reasoning-style :openai-effort}
+   "gemini-3.1-pro-preview" {:intelligence :frontier
+                             :speed :medium
+                             :capabilities #{:chat :vision}
+                             :reasoning? true
+                             :reasoning-style :openai-effort}
+   "gemini-2.0-flash" {:intelligence :high :speed :fast :capabilities #{:chat :vision}}
    ;; ── xAI / Copilot coding models ────────────────────────────────────────
-   "grok-code-fast-1"          {:intelligence :high     :speed :fast   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}
-
+   "grok-code-fast-1" {:intelligence :high
+                       :speed :fast
+                       :capabilities #{:chat}
+                       :reasoning? true
+                       :reasoning-style :openai-effort}
    ;; ── Zhipu / ZAI (GLM-4.6+ binary thinking: `thinking: {type: enabled}`) ─
    ;; Z.ai's chat/completions endpoint is OpenAI-compatible for everything
    ;; EXCEPT reasoning — it uses a binary `thinking` object at the top level.
    ;; Streaming delta surfaces reasoning_content (already handled).
-   "glm-4.6"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-4.6v"                  {:intelligence :high     :speed :medium :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
-   "glm-4.7"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-5.1"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-5.2"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-effort}
-   "glm-5.3"                   {:intelligence :high     :speed :medium :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-effort}
-   "glm-5-turbo"               {:intelligence :high     :speed :fast   :capabilities #{:chat}         :reasoning? true :reasoning-style :zai-thinking}
-   "glm-5v-turbo"              {:intelligence :high     :speed :fast   :capabilities #{:chat :vision} :reasoning? true :reasoning-style :zai-thinking}
-
+   "glm-4.6" {:intelligence :high
+              :speed :medium
+              :capabilities #{:chat}
+              :reasoning? true
+              :reasoning-style :zai-thinking}
+   "glm-4.6v" {:intelligence :high
+               :speed :medium
+               :capabilities #{:chat :vision}
+               :reasoning? true
+               :reasoning-style :zai-thinking}
+   "glm-4.7" {:intelligence :high
+              :speed :medium
+              :capabilities #{:chat}
+              :reasoning? true
+              :reasoning-style :zai-thinking}
+   "glm-5.1" {:intelligence :high
+              :speed :medium
+              :capabilities #{:chat}
+              :reasoning? true
+              :reasoning-style :zai-thinking}
+   "glm-5.2" {:intelligence :high
+              :speed :medium
+              :capabilities #{:chat}
+              :reasoning? true
+              :reasoning-style :zai-effort}
+   "glm-5.3" {:intelligence :high
+              :speed :medium
+              :capabilities #{:chat}
+              :reasoning? true
+              :reasoning-style :zai-effort}
+   "glm-5-turbo" {:intelligence :high
+                  :speed :fast
+                  :capabilities #{:chat}
+                  :reasoning? true
+                  :reasoning-style :zai-thinking}
+   "glm-5v-turbo" {:intelligence :high
+                   :speed :fast
+                   :capabilities #{:chat :vision}
+                   :reasoning? true
+                   :reasoning-style :zai-thinking}
    ;; ── DeepSeek (reasoning_effort on reasoner only) ────────────────────────
-   "deepseek-v3"               {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "deepseek-v3.2"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "deepseek-chat"             {:intelligence :high     :speed :medium :capabilities #{:chat}}
-   "deepseek-reasoner"         {:intelligence :frontier :speed :slow   :capabilities #{:chat} :reasoning? true :reasoning-style :openai-effort}})
+   "deepseek-v3" {:intelligence :high :speed :medium :capabilities #{:chat}}
+   "deepseek-v3.2" {:intelligence :high :speed :medium :capabilities #{:chat}}
+   "deepseek-chat" {:intelligence :high :speed :medium :capabilities #{:chat}}
+   "deepseek-reasoner" {:intelligence :frontier
+                        :speed :slow
+                        :capabilities #{:chat}
+                        :reasoning? true
+                        :reasoning-style :openai-effort}})
 
 ;; =============================================================================
 ;; Reasoning-depth translation (abstract → provider-specific)
@@ -340,24 +499,48 @@
                              Copilot Claude is back on `/v1/messages` and
                              therefore back on `:anthropic-thinking`; the
                              OpenAI-compatible Copilot rows keep this style."
-  {:low    {:openai-effort "low"    :anthropic-effort "low"  :anthropic-thinking 1024  :zai-thinking "disabled" :zai-effort "low"  :server-managed nil}
-   :balanced {:openai-effort "medium" :anthropic-effort "high" :anthropic-thinking 8192  :zai-thinking "enabled"  :zai-effort "high" :server-managed nil}
-   :deep     {:openai-effort "max"    :anthropic-effort "max"  :anthropic-thinking 24000 :zai-thinking "enabled"  :zai-effort "max"  :server-managed nil}})
+  {:low {:openai-effort "low"
+         :anthropic-effort "low"
+         :anthropic-thinking 1024
+         :zai-thinking "disabled"
+         :zai-effort "low"
+         :server-managed nil}
+   :balanced {:openai-effort "medium"
+              :anthropic-effort "high"
+              :anthropic-thinking 8192
+              :zai-thinking "enabled"
+              :zai-effort "high"
+              :server-managed nil}
+   :deep {:openai-effort "max"
+          :anthropic-effort "max"
+          :anthropic-thinking 24000
+          :zai-thinking "enabled"
+          :zai-effort "max"
+          :server-managed nil}})
 
 (defn normalize-reasoning-level
   "Coerce any accepted spelling to a canonical :low|:balanced|:deep keyword.
    Accepts those keywords or strings case-insensitively.
    Returns nil for unknown input."
   [v]
-  (let [raw (cond
-              (keyword? v) (name v)
-              (string? v)  v
-              :else        nil)
-        s (when raw (str/lower-case (str/trim raw)))]
+  (let [raw
+        (cond (keyword? v) (name v)
+              (string? v) v
+              :else nil)
+
+        s
+        (when raw (str/lower-case (str/trim raw)))]
+
     (case s
-      "low"      :low
-      "balanced" :balanced
-      "deep"     :deep
+      "low"
+      :low
+
+      "balanced"
+      :balanced
+
+      "deep"
+      :deep
+
       nil)))
 
 (defn- infer-reasoning-style
@@ -368,7 +551,7 @@
      - everything else          → `:openai-effort` (most gateways accept it)"
   [api-style model-map]
   (or (:reasoning-style model-map)
-    (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
+      (if (= api-style :anthropic) :anthropic-thinking :openai-effort)))
 
 (def VERBOSITY_LEVELS
   "Output-length hints accepted by the OpenAI Responses `text.verbosity` field.
@@ -386,8 +569,7 @@
    vendor: OpenAI Codex and GitHub Copilot GPT both ride
    `:openai-compatible-responses`, so both accept it."
   [api-style model-map]
-  (or (:verbosity-style model-map)
-    (when (= api-style :openai-compatible-responses) :openai-text)))
+  (or (:verbosity-style model-map) (when (= api-style :openai-compatible-responses) :openai-text)))
 
 (defn- caller-selectable-reasoning-effort?
   "True when the CALLER may choose this model's thinking depth.
@@ -399,8 +581,8 @@
    reach the wire."
   [api-style model-map]
   (boolean (and (:reasoning? model-map)
-             (contains? #{:openai-effort :anthropic-thinking :zai-effort}
-               (infer-reasoning-style api-style model-map)))))
+                (contains? #{:openai-effort :anthropic-thinking :zai-effort}
+                           (infer-reasoning-style api-style model-map)))))
 
 (def ^:private PROVIDER_NATIVE_REASONING_EFFORTS
   "Exact rungs a caller may pin through `:reasoning-effort`, weakest → strongest.
@@ -412,11 +594,11 @@
    advertise a rung can never be pinned to it."
   ["low" "high" "max"])
 
-(defn- normalize-reasoning-effort [effort]
+(defn- normalize-reasoning-effort
+  [effort]
   (when (string? effort)
     (let [normalized (str/lower-case (str/trim effort))]
-      (when (contains? (set PROVIDER_NATIVE_REASONING_EFFORTS) normalized)
-        normalized))))
+      (when (contains? (set PROVIDER_NATIVE_REASONING_EFFORTS) normalized) normalized))))
 
 (def ^:private EFFORT_LADDER
   "Every reasoning-effort rung models.dev advertises, weakest → strongest.
@@ -430,7 +612,10 @@
 (def ^:private EFFORT_RANK
   "Rung → position in `EFFORT_LADDER`. A map, so comparing two rungs never
    reflects into `java.util.List/indexOf`."
-  (into {} (map-indexed (fn [i v] [v i])) EFFORT_LADDER))
+  (into {}
+        (map-indexed (fn [i v]
+                       [v i]))
+        EFFORT_LADDER))
 
 (def ^:private UNCATALOGUED_EFFORT_CEILING
   "Strongest rung svar will send when models.dev advertises NO effort options
@@ -449,10 +634,10 @@
    either the model takes `budget_tokens`, or the catalog does not know it."
   [model-map]
   (let [advertised (->> (:reasoning-options model-map)
-                     (filter #(= "effort" (:type %)))
-                     (mapcat :values)
-                     (keep #(when (string? %) (str/lower-case (str/trim %))))
-                     set)]
+                        (filter #(= "effort" (:type %)))
+                        (mapcat :values)
+                        (keep #(when (string? %) (str/lower-case (str/trim %))))
+                        set)]
     (filterv advertised EFFORT_LADDER)))
 
 (defn- catalog-budget-tokens-option?
@@ -466,8 +651,8 @@
    the style's evidence-free ceiling."
   [model-map style]
   (or (seq (catalog-effort-values model-map))
-    (when-let [ceiling (get UNCATALOGUED_EFFORT_CEILING style)]
-      (filterv #(<= (long (EFFORT_RANK %)) (long (EFFORT_RANK ceiling))) EFFORT_LADDER))))
+      (when-let [ceiling (get UNCATALOGUED_EFFORT_CEILING style)]
+        (filterv #(<= (long (EFFORT_RANK %)) (long (EFFORT_RANK ceiling))) EFFORT_LADDER))))
 
 (def ^:private WEAKEST_THINKING_EFFORT
   "The weakest rung of `EFFORT_LADDER` that still asks the model to THINK.
@@ -495,18 +680,25 @@
    is a 400 on a row that stops at \"high\" (o-series, GPT-5.1, Opus 4.5), and a
    row that grows a rung above ours would never be reached."
   [wanted supported]
-  (let [want (EFFORT_RANK wanted)
-        floor (long (EFFORT_RANK WEAKEST_THINKING_EFFORT))
-        thinking? #(<= floor (long (EFFORT_RANK %)))]
-    (cond
-      (or (nil? want) (empty? supported)) wanted
-      (some #{wanted} supported) wanted
-      :else (let [candidates (if (<= floor (long want)) (filterv thinking? supported) supported)]
-              (when (seq candidates)
-                (or (last (filter #(<= (long (EFFORT_RANK %)) (long want)) candidates))
-                  (first candidates)))))))
+  (let [want
+        (EFFORT_RANK wanted)
 
-(defn- effort-option-values [model-map]
+        floor
+        (long (EFFORT_RANK WEAKEST_THINKING_EFFORT))
+
+        thinking?
+        #(<= floor (long (EFFORT_RANK %)))]
+
+    (cond (or (nil? want) (empty? supported)) wanted
+          (some #{wanted} supported) wanted
+          :else (let [candidates
+                      (if (<= floor (long want)) (filterv thinking? supported) supported)]
+                  (when (seq candidates)
+                    (or (last (filter #(<= (long (EFFORT_RANK %)) (long want)) candidates))
+                        (first candidates)))))))
+
+(defn- effort-option-values
+  [model-map]
   (filterv (set PROVIDER_NATIVE_REASONING_EFFORTS) (catalog-effort-values model-map)))
 
 (def ^:private ANTHROPIC_ADAPTIVE_THINKING
@@ -542,12 +734,15 @@
    tie, as it does for rows the catalog does not carry at all (custom
    deployments, brand-new ids, hand-built model maps)."
   [model-map]
-  (let [efforts? (seq (catalog-effort-values model-map))
-        budget? (catalog-budget-tokens-option? model-map)]
-    (cond
-      (and efforts? (not budget?)) true
-      (and budget? (not efforts?)) false
-      :else (boolean (re-find ANTHROPIC_ADAPTIVE_NAME_PATTERN (str (:name model-map)))))))
+  (let [efforts?
+        (seq (catalog-effort-values model-map))
+
+        budget?
+        (catalog-budget-tokens-option? model-map)]
+
+    (cond (and efforts? (not budget?)) true
+          (and budget? (not efforts?)) false
+          :else (boolean (re-find ANTHROPIC_ADAPTIVE_NAME_PATTERN (str (:name model-map)))))))
 
 (defn resolve-reasoning-effort
   "Resolve an exact provider-native reasoning effort for one model.
@@ -556,35 +751,50 @@
    translation: only the literal strings \"low\", \"high\" and \"max\" are accepted,
    and the requested value must appear in the model catalog's effort options.
    The returned map is stable evidence callers can retain with a routed result."
-  ([model-map effort]
-   (resolve-reasoning-effort nil model-map effort))
+  ([model-map effort] (resolve-reasoning-effort nil model-map effort))
   ([api-style model-map effort]
-   (let [requested (when (string? effort)
-                     (str/lower-case (str/trim effort)))
-         effective (normalize-reasoning-effort effort)
-         supported (effort-option-values model-map)
-         raw-style (infer-reasoning-style api-style model-map)
-         wire-style (if (and (= raw-style :anthropic-thinking)
-                          (not= api-style :anthropic))
-                      :openai-effort
-                      raw-style)
-         effective (when (and effective
-                           (some #{effective} supported)
-                           (contains? #{:openai-effort :anthropic-thinking :zai-effort}
-                             wire-style))
-                     effective)
-         extra-body (when effective
-                      (case wire-style
-                        :openai-effort {:reasoning_effort effective}
-                        ;; `output_config.effort` is the Opus 4.5+ control; the
-                        ;; adaptive `thinking` block only belongs to families
-                        ;; that actually take it (Opus 4.6+ / Sonnet 5 / Fable 5).
-                        :anthropic-thinking (cond-> {:output_config {:effort effective}}
-                                              (anthropic-adaptive-thinking-model? model-map)
-                                              (assoc :thinking ANTHROPIC_ADAPTIVE_THINKING))
-                        :zai-effort {:thinking {:type "enabled"}
-                                     :reasoning_effort effective}
-                        nil))]
+   (let [requested
+         (when (string? effort) (str/lower-case (str/trim effort)))
+
+         effective
+         (normalize-reasoning-effort effort)
+
+         supported
+         (effort-option-values model-map)
+
+         raw-style
+         (infer-reasoning-style api-style model-map)
+
+         wire-style
+         (if (and (= raw-style :anthropic-thinking) (not= api-style :anthropic))
+           :openai-effort
+           raw-style)
+
+         effective
+         (when (and effective
+                    (some #{effective} supported)
+                    (contains? #{:openai-effort :anthropic-thinking :zai-effort} wire-style))
+           effective)
+
+         extra-body
+         (when effective
+           (case wire-style
+             :openai-effort
+             {:reasoning_effort effective}
+
+             ;; `output_config.effort` is the Opus 4.5+ control; the
+             ;; adaptive `thinking` block only belongs to families
+             ;; that actually take it (Opus 4.6+ / Sonnet 5 / Fable 5).
+             :anthropic-thinking
+             (cond-> {:output_config {:effort effective}}
+               (anthropic-adaptive-thinking-model? model-map)
+               (assoc :thinking ANTHROPIC_ADAPTIVE_THINKING))
+
+             :zai-effort
+             {:thinking {:type "enabled"} :reasoning_effort effective}
+
+             nil))]
+
      {:requested requested
       :effective effective
       :supported supported
@@ -598,9 +808,10 @@
     ;; opt-in: Anthropic's own default effort is a depth, `display: "omitted"` is
     ;; an empty reasoning surface.
     (let [effort (clamp-effort (get-in REASONING_LEVELS [norm :anthropic-effort])
-                   (supported-efforts model-map :anthropic-thinking))]
+                               (supported-efforts model-map :anthropic-thinking))]
       (cond-> {:thinking ANTHROPIC_ADAPTIVE_THINKING}
-        effort (assoc :output_config {:effort effort})))
+        effort
+        (assoc :output_config {:effort effort})))
     {:thinking {:type "enabled" :budget_tokens budget}}))
 
 (defn- anthropic-adaptive-display-body
@@ -614,9 +825,9 @@
    to Anthropic's default effort, which is what \"no level\" means."
   [api-style model-map]
   (when (and (= api-style :anthropic)
-          (:reasoning? model-map)
-          (= :anthropic-thinking (infer-reasoning-style api-style model-map))
-          (anthropic-adaptive-thinking-model? model-map))
+             (:reasoning? model-map)
+             (= :anthropic-thinking (infer-reasoning-style api-style model-map))
+             (anthropic-adaptive-thinking-model? model-map))
     {:thinking ANTHROPIC_ADAPTIVE_THINKING}))
 
 (defn- zai-effort-rung
@@ -632,7 +843,7 @@
   [wanted model-map]
   (when wanted
     (if (<= (long (EFFORT_RANK (get-in REASONING_LEVELS [:balanced :zai-effort])))
-          (long (EFFORT_RANK wanted)))
+            (long (EFFORT_RANK wanted)))
       wanted
       (some #{wanted} (catalog-effort-values model-map)))))
 
@@ -661,8 +872,7 @@
         rates and model quality degrade. No-op on non-z.ai reasoning styles
         and on the Coding Plan endpoint (which has preserved thinking on
         server-side by default, but setting the flag explicitly is harmless)."
-  ([api-style model-map level]
-   (reasoning-extra-body api-style model-map level nil))
+  ([api-style model-map level] (reasoning-extra-body api-style model-map level nil))
   ([api-style model-map level {:keys [preserved-thinking?]}]
    (if-let [norm (normalize-reasoning-level level)]
      (when (:reasoning? model-map)
@@ -678,20 +888,27 @@
              ;; wire, coerce an Anthropic-thinking pin to the OpenAI reasoning
              ;; knob (`reasoning_effort`) — the correct shape for chat
              ;; completions; ignored harmlessly if the proxy doesn't honor it.
-             style (if (and (= raw-style :anthropic-thinking)
-                         (not= api-style :anthropic))
+             style (if (and (= raw-style :anthropic-thinking) (not= api-style :anthropic))
                      :openai-effort
                      raw-style)
              mapped (get-in REASONING_LEVELS [norm style])]
+
          (when mapped
            (case style
-             :openai-effort      (when-let [effort (clamp-effort mapped (supported-efforts model-map :openai-effort))]
-                                   {:reasoning_effort effort})
-             :anthropic-thinking (anthropic-thinking-extra-body model-map norm mapped)
-             :zai-thinking       {:thinking (cond-> {:type mapped}
-                                              ;; `clear_thinking: false` = keep reasoning_content
-                                              ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
-                                              preserved-thinking? (assoc :clear_thinking false))}
+             :openai-effort
+             (when-let [effort (clamp-effort mapped (supported-efforts model-map :openai-effort))]
+               {:reasoning_effort effort})
+
+             :anthropic-thinking
+             (anthropic-thinking-extra-body model-map norm mapped)
+
+             :zai-thinking
+             {:thinking (cond-> {:type mapped}
+                          ;; `clear_thinking: false` = keep reasoning_content
+                          ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
+                          preserved-thinking?
+                          (assoc :clear_thinking false))}
+
              ;; GLM-5.2+ (DeepSeek-V4 mechanism): thinking is ON and the DEPTH
              ;; is chosen by `reasoning_effort`. GLM's rungs are "low"/"high"/
              ;; "max" — NOT OpenAI's low/medium/high — and they line up 1:1 with
@@ -707,11 +924,14 @@
              ;; reasoning burn), whereas a small `max_tokens` cap just truncates
              ;; mid-think and starves the answer (600-token cap → all thinking, no
              ;; reply).
-             :zai-effort         (if-let [effort (zai-effort-rung mapped model-map)]
-                                   {:reasoning_effort effort
-                                    :thinking (cond-> {:type "enabled"}
-                                                preserved-thinking? (assoc :clear_thinking false))}
-                                   {:thinking {:type "disabled"}})
+             :zai-effort
+             (if-let [effort (zai-effort-rung mapped model-map)]
+               {:reasoning_effort effort
+                :thinking (cond-> {:type "enabled"}
+                            preserved-thinking?
+                            (assoc :clear_thinking false))}
+               {:thinking {:type "disabled"}})
+
              nil))))
      ;; No level named: Claude adaptive models still need the display opt-in,
      ;; everything else keeps the historical silent nil.
@@ -743,36 +963,40 @@
   ;; express — OpenAI long-context tiers (`:input-over-272k`), Anthropic
   ;; 5m/1h cache tiers, GLM `:json-object-mode?`, Copilot per-model wire
   ;; overrides (`:extra-body`, `:reasoning-style`).
-  {:openai
-   {;; Long-context tier pricing (>272k tokens) — not in models.dev.
-    "gpt-5.4"                   {:pricing {:input-over-272k 5.00 :cached-input-over-272k 0.50
-                                           :output-over-272k 22.50}}
-    "gpt-5.5"                   {:pricing {:input-over-272k 10.00 :cached-input-over-272k 1.00
-                                           :output-over-272k 45.00}}}
-
+  {:openai {;; Long-context tier pricing (>272k tokens) — not in models.dev.
+            "gpt-5.4" {:pricing
+                       {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
+            "gpt-5.5" {:pricing {:input-over-272k 10.00
+                                 :cached-input-over-272k 1.00
+                                 :output-over-272k 45.00}}}
    :openai-codex
    ;; Codex prompt budget = 272K input (catalog reports 400K product window
    ;; = 272K input + 128K output). Pricing flows from `:pricing-source :openai`.
-   {"gpt-5"                     {:context 400000}
-    "gpt-5.1"                   {:context 128000}
-    "gpt-5.3-codex"             {:context 272000}
-    "gpt-5.4"                   {:context 272000
-                                 :pricing {:input-over-272k 5.00 :cached-input-over-272k 0.50
-                                           :output-over-272k 22.50}}
-    "gpt-5.4-mini"              {:context 272000}
-    "gpt-5.5"                   {:context 272000
-                                 :pricing {:input-over-272k 10.00 :cached-input-over-272k 1.00
-                                           :output-over-272k 45.00}}
-    "gpt-5.6-luna"              {:context 272000}
-    "gpt-5.6-sol"               {:context 272000
-                                 :pricing {:input 5.00  :cached-input 0.50  :output 30.00
-                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
-                                           :output-over-272k 45.00}}
-    "gpt-5.6-terra"             {:context 272000
-                                 :pricing {:input 5.00  :cached-input 0.50  :output 30.00
-                                           :input-over-272k 10.00 :cached-input-over-272k 1.00
-                                           :output-over-272k 45.00}}}
-
+   {"gpt-5" {:context 400000}
+    "gpt-5.1" {:context 128000}
+    "gpt-5.3-codex" {:context 272000}
+    "gpt-5.4" {:context 272000
+               :pricing
+               {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
+    "gpt-5.4-mini" {:context 272000}
+    "gpt-5.5" {:context 272000
+               :pricing
+               {:input-over-272k 10.00 :cached-input-over-272k 1.00 :output-over-272k 45.00}}
+    "gpt-5.6-luna" {:context 272000}
+    "gpt-5.6-sol" {:context 272000
+                   :pricing {:input 5.00
+                             :cached-input 0.50
+                             :output 30.00
+                             :input-over-272k 10.00
+                             :cached-input-over-272k 1.00
+                             :output-over-272k 45.00}}
+    "gpt-5.6-terra" {:context 272000
+                     :pricing {:input 5.00
+                               :cached-input 0.50
+                               :output 30.00
+                               :input-over-272k 10.00
+                               :cached-input-over-272k 1.00
+                               :output-over-272k 45.00}}}
    :anthropic
    ;; Pricing/context flow from models.dev (`internal/modelsdev`). Overlay keeps
    ;; ONLY what the catalog can't supply: the 1-hour cache-write tier
@@ -782,29 +1006,40 @@
    ;; sonnets' 1M beta vs the 200K we enforce). FULL pricing stays only for models
    ;; the catalog lacks (mythos-5, sonnet-4, sonnet-4-20250514) or where the
    ;; catalog drifts from our metered retail rate (sonnet-5 → catalog 2/10 vs 3/15).
-   {"claude-fable-5"            {:pricing {:cache-write-1h 20.00} :context 1000000}
-    "claude-mythos-5"           {:pricing {:input 10.00 :cached-input 1.00  :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00} :context 1000000}
-    "claude-opus-5"             {:pricing {:cache-write-1h 10.00} :context 1000000}
-    "claude-opus-4-8"           {:pricing {:cache-write-1h 10.00} :context 1000000}
-    "claude-opus-4-7"           {:pricing {:cache-write-1h 10.00} :context 1000000}
-    "claude-opus-4-6"           {:pricing {:cache-write-1h 10.00} :context 1000000}
-    "claude-opus-4-5"           {:pricing {:cache-write-1h 10.00} :context 200000}
-    "claude-sonnet-4"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "claude-sonnet-4-6"         {:pricing {:cache-write-1h 6.00} :context 200000}
-    "claude-sonnet-5"           {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "claude-sonnet-4-5"         {:pricing {:cache-write-1h 6.00} :context 200000}
-    "claude-sonnet-4-20250514"  {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "claude-haiku-4-5"          {:pricing {:cache-write-1h 2.00} :context 200000}}
-
+   {"claude-fable-5" {:pricing {:cache-write-1h 20.00} :context 1000000}
+    "claude-mythos-5"
+    {:pricing
+     {:input 10.00 :cached-input 1.00 :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00}
+     :context 1000000}
+    "claude-opus-5" {:pricing {:cache-write-1h 10.00} :context 1000000}
+    "claude-opus-4-8" {:pricing {:cache-write-1h 10.00} :context 1000000}
+    "claude-opus-4-7" {:pricing {:cache-write-1h 10.00} :context 1000000}
+    "claude-opus-4-6" {:pricing {:cache-write-1h 10.00} :context 1000000}
+    "claude-opus-4-5" {:pricing {:cache-write-1h 10.00} :context 200000}
+    "claude-sonnet-4"
+    {:pricing
+     {:input 3.00 :cached-input 0.30 :cache-write-5m 3.75 :cache-write-1h 6.00 :output 15.00}
+     :context 200000}
+    "claude-sonnet-4-6" {:pricing {:cache-write-1h 6.00} :context 200000}
+    "claude-sonnet-5"
+    {:pricing
+     {:input 3.00 :cached-input 0.30 :cache-write-5m 3.75 :cache-write-1h 6.00 :output 15.00}
+     :context 200000}
+    "claude-sonnet-4-5" {:pricing {:cache-write-1h 6.00} :context 200000}
+    "claude-sonnet-4-20250514"
+    {:pricing
+     {:input 3.00 :cached-input 0.30 :cache-write-5m 3.75 :cache-write-1h 6.00 :output 15.00}
+     :context 200000}
+    "claude-haiku-4-5" {:pricing {:cache-write-1h 2.00} :context 200000}}
    :zai
    ;; Direct z.ai API — per-token billing. Pricing/context flow from models.dev
    ;; (`zai` provider — retail per-token rates). Overlay keeps ONLY the GLM
    ;; `:json-object-mode?` prose-leak guard, the deliberate `:output-limit 32768`
    ;; agentic cap, and `:context`. FULL entries stay for cloud models the catalog
    ;; lacks (minimax / gemma / qwen) and glm-4.6v's cached-input (catalog omits it).
-   {"glm-4.6"                   {:context 200000  :json-object-mode? true}
-    "glm-4.6v"                  {:pricing {:cached-input 0.05} :context 128000  :json-object-mode? true}
-    "glm-4.7"                   {:context 200000  :json-object-mode? true}
+   {"glm-4.6" {:context 200000 :json-object-mode? true}
+    "glm-4.6v" {:pricing {:cached-input 0.05} :context 128000 :json-object-mode? true}
+    "glm-4.7" {:context 200000 :json-object-mode? true}
     ;; `:output-limit` 32768 — a DELIBERATE agentic-responsiveness cap, not
     ;; just z.ai's hard ceiling. z.ai rejects max_tokens > 131072 with HTTP
     ;; 400, and the auto budget (context/4) is 50K–250K for these models, so
@@ -817,8 +1052,8 @@
     ;; (validated: merge / LRU-cache prompts produce code well within it).
     ;; Raise per-call via `:extra-body {:max_tokens N}` (≤131072) when a turn
     ;; genuinely needs a longer output.
-    "glm-5.1"                   {:context 200000  :output-limit 32768 :json-object-mode? true}
-    "glm-5.2"                   {:context 1000000 :output-limit 32768 :json-object-mode? true}
+    "glm-5.1" {:context 200000 :output-limit 32768 :json-object-mode? true}
+    "glm-5.2" {:context 1000000 :output-limit 32768 :json-object-mode? true}
     ;; GLM-5.3 shipped on the Coding Plan first: models.dev carries it under
     ;; `zai-coding-plan` / `zhipuai-coding-plan` but NOT yet under retail `zai`,
     ;; so this overlay is the only source of its metadata on every z.ai surface
@@ -826,18 +1061,18 @@
     ;; what the plan meters overage at, and what the catalog quotes for glm-5.3
     ;; on the gateways that already list it. The effort rungs are the catalog's
     ;; own: unlike glm-5.2, GLM-5.3 sells a "low".
-    "glm-5.3"                   {:pricing {:input 1.40 :cached-input 0.26 :output 4.40}
-                                 :context 1000000 :output-limit 32768 :json-object-mode? true
-                                 :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
-    "glm-5-turbo"               {:context 200000  :output-limit 32768 :json-object-mode? true}
-    "glm-5v-turbo"              {:context 200000  :output-limit 32768 :json-object-mode? true}
-    "minimax-m2.7:cloud"        {:pricing {:input 0.30  :output 1.20}  :context 200000}
-    "gemma4:31b-cloud"          {:pricing {:input 0.30  :output 0.90}  :context 128000}
-    "qwen3.5:397b-cloud"        {:pricing {:input 1.20  :output 5.00}  :context 128000}}
-
+    "glm-5.3" {:pricing {:input 1.40 :cached-input 0.26 :output 4.40}
+               :context 1000000
+               :output-limit 32768
+               :json-object-mode? true
+               :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
+    "glm-5-turbo" {:context 200000 :output-limit 32768 :json-object-mode? true}
+    "glm-5v-turbo" {:context 200000 :output-limit 32768 :json-object-mode? true}
+    "minimax-m2.7:cloud" {:pricing {:input 0.30 :output 1.20} :context 200000}
+    "gemma4:31b-cloud" {:pricing {:input 0.30 :output 0.90} :context 128000}
+    "qwen3.5:397b-cloud" {:pricing {:input 1.20 :output 5.00} :context 128000}}
    ;; :zai-coding inherits :zai's overlay table via `:provider-model-source :zai`
    ;; declared on the provider — no duplicate model map.
-
    :github-copilot
    ;; Copilot /models reports total context for GPT reasoning models, but the
    ;; prompt/input budget is smaller because 128K output is reserved. svar's
@@ -869,81 +1104,198 @@
    ;; the proxy's own depth with no way to ask for less — Gemini and Grok below
    ;; keep it because they ride the OpenAI-compatible wire, which is the wire
    ;; the lever actually misfires on.
-   {"claude-opus-5"             {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-opus-4.8"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-opus-4.7"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
+   {"claude-opus-5" {:pricing {:input 0.0 :output 0.0}
+                     :api-style :anthropic
+                     :reasoning? true
+                     :reasoning-style :anthropic-thinking}
+    "claude-opus-4.8" {:pricing {:input 0.0 :output 0.0}
+                       :api-style :anthropic
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
+    "claude-opus-4.7" {:pricing {:input 0.0 :output 0.0}
+                       :api-style :anthropic
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
     ;; Several Claude rows once carried Anthropic-native context copied
     ;; verbatim (`:context 1000000`) or stale Copilot caps (`144000`).
     ;; Both distort `auto-params` and pre-flight checks. Let refreshed
     ;; models.dev supply Copilot limits (currently 200K total / 168K
     ;; input for Opus 4.8 / 4.7 / 4.6 / Sonnet 4.6).
-    "claude-opus-4.6"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-opus-4.5"           {:pricing {:input 0.0 :output 0.0} :context 160000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-sonnet-4"           {:pricing {:input 0.0 :output 0.0} :context 216000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-sonnet-4.6"         {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-sonnet-5"           {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-fable-5"            {:pricing {:input 0.0 :output 0.0}                  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-sonnet-4.5"         {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-    "claude-haiku-4.5"          {:pricing {:input 0.0 :output 0.0} :context 144000  :api-style :anthropic :reasoning? true :reasoning-style :anthropic-thinking}
-
-    "gpt-5"                     {:pricing {:input 0.0 :output 0.0} :context 128000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5-mini"                {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1"                   {:pricing {:input 0.0 :output 0.0} :context 264000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex-max"         {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.1-codex-mini"        {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.3-codex"             {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.4"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.4-mini"              {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.5"                   {:pricing {:input 0.0 :output 0.0} :context 272000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
+    "claude-opus-4.6" {:pricing {:input 0.0 :output 0.0}
+                       :api-style :anthropic
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
+    "claude-opus-4.5" {:pricing {:input 0.0 :output 0.0}
+                       :context 160000
+                       :api-style :anthropic
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
+    "claude-sonnet-4" {:pricing {:input 0.0 :output 0.0}
+                       :context 216000
+                       :api-style :anthropic
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
+    "claude-sonnet-4.6" {:pricing {:input 0.0 :output 0.0}
+                         :api-style :anthropic
+                         :reasoning? true
+                         :reasoning-style :anthropic-thinking}
+    "claude-sonnet-5" {:pricing {:input 0.0 :output 0.0}
+                       :api-style :anthropic
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
+    "claude-fable-5" {:pricing {:input 0.0 :output 0.0}
+                      :api-style :anthropic
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
+    "claude-sonnet-4.5" {:pricing {:input 0.0 :output 0.0}
+                         :context 144000
+                         :api-style :anthropic
+                         :reasoning? true
+                         :reasoning-style :anthropic-thinking}
+    "claude-haiku-4.5" {:pricing {:input 0.0 :output 0.0}
+                        :context 144000
+                        :api-style :anthropic
+                        :reasoning? true
+                        :reasoning-style :anthropic-thinking}
+    "gpt-5" {:pricing {:input 0.0 :output 0.0}
+             :context 128000
+             :api-style :openai-compatible-responses
+             :reasoning-style :openai-effort
+             :extra-body {:store false
+                          :include ["reasoning.encrypted_content"]
+                          :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5-mini" {:pricing {:input 0.0 :output 0.0}
+                  :context 264000
+                  :api-style :openai-compatible-responses
+                  :reasoning-style :openai-effort
+                  :extra-body {:store false
+                               :include ["reasoning.encrypted_content"]
+                               :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1" {:pricing {:input 0.0 :output 0.0}
+               :context 264000
+               :api-style :openai-compatible-responses
+               :reasoning-style :openai-effort
+               :extra-body {:store false
+                            :include ["reasoning.encrypted_content"]
+                            :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1-codex" {:pricing {:input 0.0 :output 0.0}
+                     :context 272000
+                     :api-style :openai-compatible-responses
+                     :reasoning-style :openai-effort
+                     :extra-body {:store false
+                                  :include ["reasoning.encrypted_content"]
+                                  :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1-codex-max" {:pricing {:input 0.0 :output 0.0}
+                         :context 272000
+                         :api-style :openai-compatible-responses
+                         :reasoning-style :openai-effort
+                         :extra-body {:store false
+                                      :include ["reasoning.encrypted_content"]
+                                      :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.1-codex-mini" {:pricing {:input 0.0 :output 0.0}
+                          :context 272000
+                          :api-style :openai-compatible-responses
+                          :reasoning-style :openai-effort
+                          :extra-body {:store false
+                                       :include ["reasoning.encrypted_content"]
+                                       :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.3-codex" {:pricing {:input 0.0 :output 0.0}
+                     :context 272000
+                     :api-style :openai-compatible-responses
+                     :reasoning-style :openai-effort
+                     :extra-body {:store false
+                                  :include ["reasoning.encrypted_content"]
+                                  :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.4" {:pricing {:input 0.0 :output 0.0}
+               :context 272000
+               :api-style :openai-compatible-responses
+               :reasoning-style :openai-effort
+               :extra-body {:store false
+                            :include ["reasoning.encrypted_content"]
+                            :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.4-mini" {:pricing {:input 0.0 :output 0.0}
+                    :context 272000
+                    :api-style :openai-compatible-responses
+                    :reasoning-style :openai-effort
+                    :extra-body {:store false
+                                 :include ["reasoning.encrypted_content"]
+                                 :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.5" {:pricing {:input 0.0 :output 0.0}
+               :context 272000
+               :api-style :openai-compatible-responses
+               :reasoning-style :openai-effort
+               :extra-body {:store false
+                            :include ["reasoning.encrypted_content"]
+                            :reasoning {:effort "medium" :summary "detailed"}}}
     ;; Current Copilot GPT fleet. models.dev supplies provider metadata; 922K is
     ;; the actual input budget (the 1.05M product window reserves 128K output).
-    "gpt-5.6-luna"              {:pricing {:input 0.0 :output 0.0} :context 922000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.6-sol"               {:pricing {:input 0.0 :output 0.0} :context 922000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-    "gpt-5.6-terra"             {:pricing {:input 0.0 :output 0.0} :context 922000 :api-style :openai-compatible-responses :reasoning-style :openai-effort
-                                 :extra-body {:store false :include ["reasoning.encrypted_content"] :reasoning {:effort "medium" :summary "detailed"}}}
-
-    "gpt-4.1"                   {:pricing {:input 0.0 :output 0.0} :context 128000}
-    "gpt-4o"                    {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "gpt-5.6-luna" {:pricing {:input 0.0 :output 0.0}
+                    :context 922000
+                    :api-style :openai-compatible-responses
+                    :reasoning-style :openai-effort
+                    :extra-body {:store false
+                                 :include ["reasoning.encrypted_content"]
+                                 :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.6-sol" {:pricing {:input 0.0 :output 0.0}
+                   :context 922000
+                   :api-style :openai-compatible-responses
+                   :reasoning-style :openai-effort
+                   :extra-body {:store false
+                                :include ["reasoning.encrypted_content"]
+                                :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-5.6-terra" {:pricing {:input 0.0 :output 0.0}
+                     :context 922000
+                     :api-style :openai-compatible-responses
+                     :reasoning-style :openai-effort
+                     :extra-body {:store false
+                                  :include ["reasoning.encrypted_content"]
+                                  :reasoning {:effort "medium" :summary "detailed"}}}
+    "gpt-4.1" {:pricing {:input 0.0 :output 0.0} :context 128000}
+    "gpt-4o" {:pricing {:input 0.0 :output 0.0} :context 128000}
     ;; Gemini + Grok on Copilot also gate reasoning server-side
     ;; (pi-ai `compat.supportsReasoningEffort: false`). The proxy
     ;; routes these to their upstream backends — Anthropic for Claude,
     ;; Google for Gemini, xAI for Grok — and the upstream APIs do not
     ;; accept a top-level `reasoning_effort`. Match Claude's policy:
     ;; flag reasoning capability but stop pushing client-side hints.
-    "gemini-2.5-pro"            {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
-    "gemini-3-flash-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
-    "gemini-3-pro-preview"      {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
-    "gemini-3.1-pro-preview"    {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}
-    "grok-code-fast-1"          {:pricing {:input 0.0 :output 0.0} :context 128000 :reasoning? true :reasoning-style :server-managed}}
-
+    "gemini-2.5-pro" {:pricing {:input 0.0 :output 0.0}
+                      :context 128000
+                      :reasoning? true
+                      :reasoning-style :server-managed}
+    "gemini-3-flash-preview" {:pricing {:input 0.0 :output 0.0}
+                              :context 128000
+                              :reasoning? true
+                              :reasoning-style :server-managed}
+    "gemini-3-pro-preview" {:pricing {:input 0.0 :output 0.0}
+                            :context 128000
+                            :reasoning? true
+                            :reasoning-style :server-managed}
+    "gemini-3.1-pro-preview" {:pricing {:input 0.0 :output 0.0}
+                              :context 128000
+                              :reasoning? true
+                              :reasoning-style :server-managed}
+    "grok-code-fast-1" {:pricing {:input 0.0 :output 0.0}
+                        :context 128000
+                        :reasoning? true
+                        :reasoning-style :server-managed}}
    :openrouter
-   {"gpt-4o"                    {:pricing {:input 2.50  :cached-input 1.25  :output 10.00} :context 128000}
-    "claude-sonnet-4-6"         {:pricing {:input 3.00  :cached-input 0.30  :cache-write-5m 3.75  :cache-write-1h 6.00  :output 15.00} :context 200000}
-    "gemini-2.0-flash"          {:pricing {:input 0.10  :cached-input 0.025 :output 0.40}  :context 1000000}
+   {"gpt-4o" {:pricing {:input 2.50 :cached-input 1.25 :output 10.00} :context 128000}
+    "claude-sonnet-4-6"
+    {:pricing
+     {:input 3.00 :cached-input 0.30 :cache-write-5m 3.75 :cache-write-1h 6.00 :output 15.00}
+     :context 200000}
+    "gemini-2.0-flash" {:pricing {:input 0.10 :cached-input 0.025 :output 0.40} :context 1000000}
     ;; Public Google Gemini retail pricing (long-context tiered) — indexed under
     ;; openrouter since it's the multi-provider gateway in svar's defaults;
     ;; `tokens/estimate-cost` flattens by model name across providers.
-    "gemini-2.5-pro"            {:pricing {:input 1.25 :cached-input 0.125 :output 10.00
-                                           :input-over-200k 2.50 :cached-input-over-200k 0.25
-                                           :output-over-200k 15.00}
-                                 :context 2000000}}
-
-   :ollama
-   {}
-
+    "gemini-2.5-pro" {:pricing {:input 1.25
+                                :cached-input 0.125
+                                :output 10.00
+                                :input-over-200k 2.50
+                                :cached-input-over-200k 0.25
+                                :output-over-200k 15.00}
+                      :context 2000000}}
+   :ollama {}
    ;; :lmstudio — user-supplied local models; pricing/context come from
    ;; the caller's `:models` config (no built-in catalog).
    :lmstudio {}})
@@ -982,40 +1334,56 @@
       (merge (get KNOWN_PROVIDERS source) direct)
       direct)))
 
-(defn- pid-visible? [pid model-name]
+(defn- pid-visible?
+  [pid model-name]
   (letfn [(parse-gpt-version [model-name]
             (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
               [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
           (version< [a b] (neg? (compare (vec a) (vec b))))]
-    (let [known (known-provider pid)
-          excluded (set (:exclude-models known))
-          version (parse-gpt-version model-name)
-          min-version (:min-gpt-version known)]
+    (let [known
+          (known-provider pid)
+
+          excluded
+          (set (:exclude-models known))
+
+          version
+          (parse-gpt-version model-name)
+
+          min-version
+          (:min-gpt-version known)]
+
       (not (or (contains? excluded model-name)
-             (and version min-version (version< version min-version)))))))
+               (and version min-version (version< version min-version)))))))
 
 (defn- merged-provider-models
   "Catalog ⊕ overlay model map for one svar provider id (visible entries only).
    Same merge rules as `provider-model-entry` but enumerated."
   [pid]
-  (let [overlay (get KNOWN_PROVIDER_MODELS
-                  (or (get-in KNOWN_PROVIDERS [pid :provider-model-source]) pid))
-        catalog (modelsdev/provider-models
-                  (or (get-in KNOWN_PROVIDERS [pid :pricing-source])
-                    (get-in KNOWN_PROVIDERS [pid :provider-model-source])
-                    pid))]
-    (reduce
-      (fn [acc nm]
-        (if-not (pid-visible? pid nm)
-          acc
-          (let [c (get catalog nm)
-                o (get overlay nm)
-                merged (cond-> (merge c o)
-                         (and (:pricing c) (:pricing o))
-                         (assoc :pricing (merge (:pricing c) (:pricing o))))]
-            (assoc acc nm merged))))
-      {}
-      (into (set (keys catalog)) (keys overlay)))))
+  (let [overlay
+        (get KNOWN_PROVIDER_MODELS (or (get-in KNOWN_PROVIDERS [pid :provider-model-source]) pid))
+
+        catalog
+        (modelsdev/provider-models (or (get-in KNOWN_PROVIDERS [pid :pricing-source])
+                                       (get-in KNOWN_PROVIDERS [pid :provider-model-source])
+                                       pid))]
+
+    (reduce (fn [acc nm]
+              (if-not (pid-visible? pid nm)
+                acc
+                (let [c
+                      (get catalog nm)
+
+                      o
+                      (get overlay nm)
+
+                      merged
+                      (cond-> (merge c o)
+                        (and (:pricing c) (:pricing o))
+                        (assoc :pricing (merge (:pricing c) (:pricing o))))]
+
+                  (assoc acc nm merged))))
+            {}
+            (into (set (keys catalog)) (keys overlay)))))
 
 (def ^:const DEFAULT_CONTEXT_LIMIT
   "Fallback context window (tokens) for a model svar knows nothing about:
@@ -1031,47 +1399,49 @@
     When a model exists on multiple providers with different contexts, the most
     conservative context is used. Provider-aware code should use
     provider-model-context instead."
-  (assoc
-    (reduce
-      (fn [acc pid]
-        (reduce-kv (fn [macc model-name {:keys [context]}]
-                     (if (nil? context)
-                       macc
-                       (update macc model-name
-                         (fn [existing]
-                           (if (nil? existing)
-                             (long context)
-                             (min (long existing) (long context)))))))
-          acc (merged-provider-models pid)))
-      {} (keys KNOWN_PROVIDERS))
+  (assoc (reduce (fn [acc pid]
+                   (reduce-kv (fn [macc model-name {:keys [context]}]
+                                (if (nil? context)
+                                  macc
+                                  (update macc
+                                          model-name
+                                          (fn [existing]
+                                            (if (nil? existing)
+                                              (long context)
+                                              (min (long existing) (long context)))))))
+                              acc
+                              (merged-provider-models pid)))
+                 {}
+                 (keys KNOWN_PROVIDERS))
     :default DEFAULT_CONTEXT_LIMIT))
 
 (def MODEL_PRICING
   "Best-effort flattened model pricing for legacy token utilities.
     When a model exists on multiple providers, the lowest total pricing is chosen.
     Provider-aware code should NOT use this — use provider-model-pricing instead."
-  (assoc
-    (reduce
-      (fn [acc pid]
-        (reduce-kv (fn [macc model-name {:keys [pricing]}]
-                     (if-not pricing
-                       macc
-                       (let [pricing-total (+ (double (:input pricing 0.0))
-                                             (double (:output pricing 0.0)))]
-                         ;; Subscription/local providers advertise 0/0 for
-                         ;; routing; legacy cost utilities prefer paid rates.
-                         (if (zero? pricing-total)
-                           macc
-                           (update macc model-name
-                             (fn [existing]
-                               (if (or (nil? existing)
-                                     (< pricing-total
-                                       (+ (double (:input existing))
-                                         (double (:output existing)))))
-                                 pricing
-                                 existing)))))))
-          acc (merged-provider-models pid)))
-      {} (keys KNOWN_PROVIDERS))
+  (assoc (reduce (fn [acc pid]
+                   (reduce-kv (fn [macc model-name {:keys [pricing]}]
+                                (if-not pricing
+                                  macc
+                                  (let [pricing-total (+ (double (:input pricing 0.0))
+                                                         (double (:output pricing 0.0)))]
+                                    ;; Subscription/local providers advertise 0/0 for
+                                    ;; routing; legacy cost utilities prefer paid rates.
+                                    (if (zero? pricing-total)
+                                      macc
+                                      (update macc
+                                              model-name
+                                              (fn [existing]
+                                                (if (or (nil? existing)
+                                                        (< pricing-total
+                                                           (+ (double (:input existing))
+                                                              (double (:output existing)))))
+                                                  pricing
+                                                  existing)))))))
+                              acc
+                              (merged-provider-models pid)))
+                 {}
+                 (keys KNOWN_PROVIDERS))
     :default {:input 5.0 :output 15.0}))
 
 ;; =============================================================================
@@ -1218,30 +1588,33 @@
 ;; Model metadata lookup + fallback inference
 ;; =============================================================================
 
-(defn- regex-infer-metadata [model-name]
+(defn- regex-infer-metadata
+  [model-name]
   (let [m (str/lower-case (or model-name ""))]
-    (cond
-      (re-find #"mini|haiku|flash|lite|small|nano" m)
-      {:intelligence :medium :speed :fast
-       :capabilities (cond-> #{:chat}
-                       (re-find #"vision|claude|gemini|gpt-4o|glm.*v|pixtral" m) (conj :vision))}
-
-      (re-find #"reasoner|thinking" m)
-      {:intelligence :frontier :speed :slow :capabilities #{:chat}}
-
-      (re-find #"opus|frontier" m)
-      {:intelligence :frontier :speed :slow
-       :capabilities (cond-> #{:chat} (re-find #"claude" m) (conj :vision))}
-
-      (re-find #"sonnet|gpt-4o|gpt-5|pro|large|gemini-2\.[0-9]-pro|gemini-2\.5" m)
-      {:intelligence :high :speed :medium
-       :capabilities (cond-> #{:chat}
-                       (re-find #"vision|claude|gemini|gpt-4o|gpt-5|pixtral|glm.*v" m) (conj :vision))}
-
-      :else
-      {:intelligence :medium :speed :medium
-       :capabilities (cond-> #{:chat}
-                       (re-find #"vision|glm.*v|pixtral" m) (conj :vision))})))
+    (cond (re-find #"mini|haiku|flash|lite|small|nano" m)
+          {:intelligence :medium
+           :speed :fast
+           :capabilities (cond-> #{:chat}
+                           (re-find #"vision|claude|gemini|gpt-4o|glm.*v|pixtral" m)
+                           (conj :vision))}
+          (re-find #"reasoner|thinking" m)
+          {:intelligence :frontier :speed :slow :capabilities #{:chat}}
+          (re-find #"opus|frontier" m) {:intelligence :frontier
+                                        :speed :slow
+                                        :capabilities (cond-> #{:chat}
+                                                        (re-find #"claude" m)
+                                                        (conj :vision))}
+          (re-find #"sonnet|gpt-4o|gpt-5|pro|large|gemini-2\.[0-9]-pro|gemini-2\.5" m)
+          {:intelligence :high
+           :speed :medium
+           :capabilities (cond-> #{:chat}
+                           (re-find #"vision|claude|gemini|gpt-4o|gpt-5|pixtral|glm.*v" m)
+                           (conj :vision))}
+          :else {:intelligence :medium
+                 :speed :medium
+                 :capabilities (cond-> #{:chat}
+                                 (re-find #"vision|glm.*v|pixtral" m)
+                                 (conj :vision))})))
 
 (defn model-key-variants
   "Catalog/overlay lookup keys for a model name, tolerant of the dotted vs
@@ -1255,10 +1628,8 @@
    variants in the numeric version tail."
   [name]
   (let [s (str name)]
-    (distinct
-      [s
-       (str/replace s #"(\d)\.(\d)" "$1-$2")   ; dotted → dashed (4.8 → 4-8)
-       (str/replace s #"(\d)-(\d)" "$1.$2")]))) ; dashed → dotted (4-8 → 4.8)
+    (distinct [s (str/replace s #"(\d)\.(\d)" "$1-$2") ; dotted → dashed (4.8 → 4-8)
+               (str/replace s #"(\d)-(\d)" "$1.$2")]))) ; dashed → dotted (4-8 → 4.8)
 
 (defn lookup-by-model-variants
   "First value from map `m` matching any `model-key-variants` of `name`, or nil."
@@ -1271,9 +1642,12 @@
     separators). Falls back to regex inference for unknown models.
     Explicit fields in model-map override inferred values."
   [{:keys [name] :as model-map}]
-  (let [base (or (lookup-by-model-variants KNOWN_MODEL_METADATA name)
-               (regex-infer-metadata name))
-        inferred (assoc base :name name)]
+  (let [base
+        (or (lookup-by-model-variants KNOWN_MODEL_METADATA name) (regex-infer-metadata name))
+
+        inferred
+        (assoc base :name name)]
+
     (merge inferred (dissoc model-map :name))))
 
 (defn normalize-model
@@ -1284,18 +1658,19 @@
 
 (defn- configured-model-inputs
   [known provider-map]
-  (let [configured (:models provider-map)
-        defaults (:default-models known)]
-    (cond
-      (:prepend-default-models? known) (concat defaults configured)
-      (seq configured) configured
-      :else defaults)))
+  (let [configured
+        (:models provider-map)
+
+        defaults
+        (:default-models known)]
+
+    (cond (:prepend-default-models? known) (concat defaults configured)
+          (seq configured) configured
+          :else defaults)))
 
 (defn- conj-model-once
   [models model]
-  (if (some #(= (:name %) (:name model)) models)
-    models
-    (conj models model)))
+  (if (some #(= (:name %) (:name model)) models) models (conj models model)))
 
 (defn- parse-gpt-version
   "Extract comparable GPT version [major minor] from ids such as
@@ -1304,8 +1679,7 @@
   (when-let [[_ major minor] (re-find #"(?i)^gpt-(\d+)(?:\.(\d+))?" (str model-name))]
     [(Long/parseLong major) (Long/parseLong (or minor "0"))]))
 
-(defn- version< [a b]
-  (neg? (compare (vec a) (vec b))))
+(defn- version< [a b] (neg? (compare (vec a) (vec b))))
 
 (defn provider-excluded-model?
   "True when a provider-scoped catalog marks a model unavailable.
@@ -1315,12 +1689,19 @@
    from their base entry (e.g. all three Copilot tiers honour the same
    `:exclude-models #{gpt-4o ...}` defined on `:github-copilot`)."
   [provider-id model-name]
-  (let [known (known-provider provider-id)
-        excluded (set (:exclude-models known))
-        version (parse-gpt-version model-name)
-        min-version (:min-gpt-version known)]
-    (or (contains? excluded model-name)
-      (and version min-version (version< version min-version)))))
+  (let [known
+        (known-provider provider-id)
+
+        excluded
+        (set (:exclude-models known))
+
+        version
+        (parse-gpt-version model-name)
+
+        min-version
+        (:min-gpt-version known)]
+
+    (or (contains? excluded model-name) (and version min-version (version< version min-version)))))
 
 (defn provider-model-visible?
   "True when provider-scoped model filters allow `model-name`."
@@ -1343,8 +1724,7 @@
    `:openai` for retail metering, `:zai-coding` → `:zai-coding-plan` for
    id-mapping). Defaults to `provider-model-source`."
   [provider-id]
-  (or (get-in KNOWN_PROVIDERS [provider-id :pricing-source])
-    (provider-model-source provider-id)))
+  (or (get-in KNOWN_PROVIDERS [provider-id :pricing-source]) (provider-model-source provider-id)))
 
 (defn provider-model-entry
   "Returns provider-scoped entry for a provider/model, or nil if excluded.
@@ -1362,12 +1742,15 @@
    `:cache-write` from the catalog."
   [provider-id model-name]
   (when-not (provider-excluded-model? provider-id model-name)
-    (let [overlay (lookup-by-model-variants
-                    (get KNOWN_PROVIDER_MODELS (provider-model-source provider-id))
-                    model-name)
-          catalog (lookup-by-model-variants
-                    (modelsdev/provider-models (provider-pricing-source provider-id))
-                    model-name)]
+    (let [overlay
+          (lookup-by-model-variants (get KNOWN_PROVIDER_MODELS (provider-model-source provider-id))
+                                    model-name)
+
+          catalog
+          (lookup-by-model-variants (modelsdev/provider-models (provider-pricing-source
+                                                                 provider-id))
+                                    model-name)]
+
       (when (or overlay catalog)
         (cond-> (merge catalog overlay)
           (and (:pricing catalog) (:pricing overlay))
@@ -1377,15 +1760,15 @@
   "Returns provider-scoped pricing for provider/model, falling back to flattened MODEL_PRICING."
   [provider-id model-name]
   (or (:pricing (provider-model-entry provider-id model-name))
-    (get MODEL_PRICING model-name)
-    (:default MODEL_PRICING)))
+      (get MODEL_PRICING model-name)
+      (:default MODEL_PRICING)))
 
 (defn provider-model-context
   "Returns provider-scoped context window for provider/model, falling back to flattened MODEL_CONTEXT_LIMITS."
   [provider-id model-name]
   (or (:context (provider-model-entry provider-id model-name))
-    (get MODEL_CONTEXT_LIMITS model-name)
-    (:default MODEL_CONTEXT_LIMITS)))
+      (get MODEL_CONTEXT_LIMITS model-name)
+      (:default MODEL_CONTEXT_LIMITS)))
 
 (defn provider-base-url
   "Sane default base-url svar knows for `provider-id` (honours plan-tier
@@ -1394,7 +1777,7 @@
    (e.g. ollama, lmstudio). Returns nil for unknown providers."
   [provider-id]
   (or (get-in KNOWN_PROVIDERS [provider-id :base-url])
-    (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :base-url])))
+      (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :base-url])))
 
 (defn provider-default-models
   "Sane default model NAMES (vec of strings) svar curates for `provider-id`,
@@ -1404,9 +1787,11 @@
    for unknown providers."
   [provider-id]
   (->> (or (get-in KNOWN_PROVIDERS [provider-id :default-models])
-         (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :default-models]))
-    (keep (fn [m] (cond (string? m) m (map? m) (:name m))))
-    vec))
+           (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :default-models]))
+       (keep (fn [m]
+               (cond (string? m) m
+                     (map? m) (:name m))))
+       vec))
 
 ;; =============================================================================
 ;; Provider normalization
@@ -1419,8 +1804,7 @@
    — a local `llava`, a private gateway deployment, a model released after this
    catalog snapshot — so an explicit set outranks every inference below it."
   [model-map]
-  (when (and (map? model-map) (seq (:capabilities model-map)))
-    (set (:capabilities model-map))))
+  (when (and (map? model-map) (seq (:capabilities model-map))) (set (:capabilities model-map))))
 
 (defn- with-vision-capability
   "Decide `:vision` for ONE model from the strongest evidence available, and write
@@ -1441,16 +1825,19 @@
         left for a provider the catalog does not carry (Ollama, LM Studio, a custom
         base-url), where a wrong guess is the caller's to override via 1."
   [explicit model]
-  (let [inputs (set (get-in model [:modalities :input]))
-        sees? (cond
-                (some? explicit) (contains? explicit :vision)
-                (some? (:vision? model)) (boolean (:vision? model))
-                (seq inputs) (contains? inputs :image)
-                :else (contains? (set (:capabilities model)) :vision))
-        capabilities (set (or (:capabilities model) #{:chat}))]
-    (assoc model :capabilities (if sees?
-                                 (conj capabilities :vision)
-                                 (disj capabilities :vision)))))
+  (let [inputs
+        (set (get-in model [:modalities :input]))
+
+        sees?
+        (cond (some? explicit) (contains? explicit :vision)
+              (some? (:vision? model)) (boolean (:vision? model))
+              (seq inputs) (contains? inputs :image)
+              :else (contains? (set (:capabilities model)) :vision))
+
+        capabilities
+        (set (or (:capabilities model) #{:chat}))]
+
+    (assoc model :capabilities (if sees? (conj capabilities :vision) (disj capabilities :vision)))))
 
 (defn provider-model-metadata
   "Metadata for ONE model AS THIS PROVIDER SERVES IT: name inference ⊕ the provider's
@@ -1466,11 +1853,16 @@
    `provider-id` may be nil (an unknown or caller-defined provider): the catalog layer
    is then skipped and inference stands."
   [provider-id model-map]
-  (let [model-map (if (map? model-map) model-map {:name (str model-map)})
-        normalized (infer-model-metadata model-map)
-        entry (when provider-id (provider-model-entry provider-id (:name normalized)))]
-    (with-vision-capability (explicit-capabilities model-map)
-      (merge normalized entry))))
+  (let [model-map
+        (if (map? model-map) model-map {:name (str model-map)})
+
+        normalized
+        (infer-model-metadata model-map)
+
+        entry
+        (when provider-id (provider-model-entry provider-id (:name normalized)))]
+
+    (with-vision-capability (explicit-capabilities model-map) (merge normalized entry))))
 
 (defn- apply-image-input-policy
   "Provider-level VETO on image input: `:image-input? false` strips `:vision` from
@@ -1484,9 +1876,7 @@
    even a `:capabilities` set written per model; a provider that later grows image
    support drops the flag (or sets it `true`) and the catalog decides again."
   [image-input? model]
-  (if (false? image-input?)
-    (update model :capabilities #(disj (set %) :vision))
-    model))
+  (if (false? image-input?) (update model :capabilities #(disj (set %) :vision)) model))
 
 (defn- add-wire-capabilities
   "Stamp the CAPABILITY facts every surface needs onto one normalized model:
@@ -1501,15 +1891,20 @@
    ends up asking whether the id is `:openai-codex` — and then Copilot GPT loses
    a knob its endpoint accepts."
   [provider-api-style model]
-  (let [api-style (or (:api-style model) provider-api-style)
-        verbosity (infer-verbosity-style api-style model)]
-    (cond-> (assoc model
-              :reasoning-effort? (caller-selectable-reasoning-effort? api-style model))
+  (let [api-style
+        (or (:api-style model) provider-api-style)
+
+        verbosity
+        (infer-verbosity-style api-style model)]
+
+    (cond-> (assoc model :reasoning-effort? (caller-selectable-reasoning-effort? api-style model))
       (:reasoning? model)
       (assoc :reasoning-style (infer-reasoning-style api-style model))
 
       verbosity
-      (assoc :verbosity-style verbosity :verbosity-options VERBOSITY_LEVELS))))
+      (assoc :verbosity-style
+        verbosity :verbosity-options
+        VERBOSITY_LEVELS))))
 
 (defn normalize-provider
   "Normalizes a provider entry:
@@ -1526,31 +1921,46 @@
    `:image-input? false` on the provider (or on its KNOWN_PROVIDERS entry) vetoes
    `:vision` for every model it serves — see `apply-image-input-policy`."
   [idx provider-map]
-  (let [id (:id provider-map)
-        known (known-provider id)
-        base-url (or (:base-url provider-map) (:base-url known))
-        exclude-models (set (concat (:exclude-models known) (:exclude-models provider-map)))
-        api-style (or (:api-style provider-map) (:api-style known) :openai-compatible-chat)
-        image-input? (if (contains? provider-map :image-input?)
-                       (:image-input? provider-map)
-                       (:image-input? known))
-        models (->> (configured-model-inputs known provider-map)
-                 (keep (fn [m]
-                         (when-let [normalized (normalize-model m)]
-                           (when-not (contains? exclude-models (:name normalized))
-                             (add-wire-capabilities
-                               api-style
-                               (apply-image-input-policy
-                                 image-input?
-                                 (provider-model-metadata id (if (map? m) m normalized))))))))
-                 (reduce conj-model-once []))
-        root-name (:name (first models))]
-    (when-not id
-      (throw (ex-info "Provider :id is required" {:provider provider-map})))
+  (let [id
+        (:id provider-map)
+
+        known
+        (known-provider id)
+
+        base-url
+        (or (:base-url provider-map) (:base-url known))
+
+        exclude-models
+        (set (concat (:exclude-models known) (:exclude-models provider-map)))
+
+        api-style
+        (or (:api-style provider-map) (:api-style known) :openai-compatible-chat)
+
+        image-input?
+        (if (contains? provider-map :image-input?)
+          (:image-input? provider-map)
+          (:image-input? known))
+
+        models
+        (->> (configured-model-inputs known provider-map)
+             (keep (fn [m]
+                     (when-let [normalized (normalize-model m)]
+                       (when-not (contains? exclude-models (:name normalized))
+                         (add-wire-capabilities
+                           api-style
+                           (apply-image-input-policy
+                             image-input?
+                             (provider-model-metadata id (if (map? m) m normalized))))))))
+             (reduce conj-model-once []))
+
+        root-name
+        (:name (first models))]
+
+    (when-not id (throw (ex-info "Provider :id is required" {:provider provider-map})))
     (when-not base-url
       (throw (ex-info (str "Provider :base-url required for unknown provider " id
-                        ". Known providers: " (str/join ", " (map name (keys KNOWN_PROVIDERS))))
-               {:type :svar/unknown-provider :id id})))
+                           ". Known providers: " (str/join ", " (map name (keys KNOWN_PROVIDERS))))
+                      {:type :svar/unknown-provider :id id})))
     (when (empty? models)
       (throw (ex-info (str "Provider " id " has no models") {:type :svar/no-models :id id})))
     (cond-> {:id id
@@ -1561,8 +1971,8 @@
              :root root-name
              :models models}
       (some? (or (:stateless-items? provider-map) (:stateless-items? known)))
-      (assoc :stateless-items? (boolean (or (:stateless-items? provider-map)
-                                          (:stateless-items? known))))
+      (assoc :stateless-items?
+        (boolean (or (:stateless-items? provider-map) (:stateless-items? known))))
 
       (some? (or (:responses-path provider-map) (:responses-path known)))
       (assoc :responses-path (or (:responses-path provider-map) (:responses-path known)))
@@ -1586,33 +1996,30 @@
 
    Returns:
    Integer. Conservative context tokens."
-  (^long [^String model]
-   (context-limit model MODEL_CONTEXT_LIMITS))
+  (^long [^String model] (context-limit model MODEL_CONTEXT_LIMITS))
   (^long [^String model context-limits]
    (or (get context-limits model)
        ;; Try partial matching for versioned model names
-     (some (fn [[k v]]
-             (when (and (string? k) (str/includes? model k))
-               v))
-       context-limits)
-     (:default context-limits))))
+       (some (fn [[k v]]
+               (when (and (string? k) (str/includes? model k)) v))
+             context-limits)
+       (:default context-limits))))
 
 ;; =============================================================================
 ;; Router internals — time / observability windows
 ;; =============================================================================
 
 (def ^:private router-default-opts
-  {:window-ms              60000
-   :cooldown-ms            60000
-   :max-wait-ms            30000
+  {:window-ms 60000
+   :cooldown-ms 60000
+   :max-wait-ms 30000
    :transient-status-codes failure/TRANSIENT_STATUS_CODES
    :rate-limit DEFAULT_RATE_LIMIT_ROUTING
    ;; Circuit breaker defaults
-   :failure-threshold   5
-   :recovery-ms         60000})
+   :failure-threshold 5
+   :recovery-ms 60000})
 
-(def ^:private INTELLIGENCE_ORDER
-  {:frontier 4 :high 3 :medium 2 :low 1})
+(def ^:private INTELLIGENCE_ORDER {:frontier 4 :high 3 :medium 2 :low 1})
 
 ;; NOTE: there is intentionally no COST_ORDER — the `:cost` strategy
 ;; dispatches on the real `:pricing {:input N :output M}` attached to
@@ -1621,8 +2028,7 @@
 ;; quietly prefer a `:medium` $5/1M model over a `:high` $0.50/1M
 ;; model, which is the opposite of what the strategy promises.
 
-(def ^:private SPEED_ORDER
-  {:fast 3 :medium 2 :slow 1})
+(def ^:private SPEED_ORDER {:fast 3 :medium 2 :slow 1})
 
 (defn- router-now-ms ^long [router] ((:clock router)))
 
@@ -1644,8 +2050,8 @@
   [router ps]
   (let [state (or (:cb-state ps) :closed)]
     (if (and (= state :open)
-          (:cb-open-until ps)
-          (>= (router-now-ms router) (long (:cb-open-until ps))))
+             (:cb-open-until ps)
+             (>= (router-now-ms router) (long (:cb-open-until ps))))
       :half-open
       state)))
 
@@ -1653,26 +2059,35 @@
   "Returns true if the circuit breaker allows a request."
   [router ps]
   (let [state (cb-state router ps)]
-    (or (= state :closed)
-      (= state :half-open))))
+    (or (= state :closed) (= state :half-open))))
 
 (defn- cb-record-failure!
   "Records a failure. Transitions closed→open after threshold, half-open→open immediately."
   [router provider-id is-rate-limit?]
-  (let [now (router-now-ms router)
-        recovery-ms (long (if is-rate-limit?
-                            (:cooldown-ms router)
-                            (:recovery-ms router)))
-        threshold (long (:failure-threshold router))]
-    (swap! (:state router) update provider-id
+  (let [now
+        (router-now-ms router)
+
+        recovery-ms
+        (long (if is-rate-limit? (:cooldown-ms router) (:recovery-ms router)))
+
+        threshold
+        (long (:failure-threshold router))]
+
+    (swap! (:state router) update
+      provider-id
       (fn [ps]
-        (let [current-state (cb-state router ps)
-              new-failures (unchecked-inc (long (or (:cb-failures ps) 0)))]
-          (if (or (= current-state :half-open)
-                (>= new-failures threshold))
+        (let [current-state
+              (cb-state router ps)
+
+              new-failures
+              (unchecked-inc (long (or (:cb-failures ps) 0)))]
+
+          (if (or (= current-state :half-open) (>= new-failures threshold))
             (do (trove/log! {:level :warn
-                             :data {:provider provider-id :cb-state :open
-                                    :recovery-ms recovery-ms :failures new-failures
+                             :data {:provider provider-id
+                                    :cb-state :open
+                                    :recovery-ms recovery-ms
+                                    :failures new-failures
                                     :trigger (if is-rate-limit? :rate-limit :transient-error)}
                              :msg "Circuit breaker opened"})
                 (assoc ps
@@ -1684,13 +2099,18 @@
 (defn- cb-record-success!
   "Records a success. Transitions half-open→closed, resets failure count."
   [router provider-id]
-  (swap! (:state router) update provider-id
+  (swap! (:state router) update
+    provider-id
     (fn [ps]
       (let [current-state (cb-state router ps)]
         (if (= current-state :half-open)
-          (do (trove/log! {:level :info :data {:provider provider-id}
+          (do (trove/log! {:level :info
+                           :data {:provider provider-id}
                            :msg "Circuit breaker closed (probe succeeded)"})
-              (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil))
+              (assoc ps
+                :cb-state :closed
+                :cb-failures 0
+                :cb-open-until nil))
           ;; In closed state, reset consecutive failures on success
           (assoc ps :cb-failures 0))))))
 
@@ -1705,16 +2125,17 @@
     (let [{:keys [total-tokens total-cost]} @(:budget-state router)
           max-tokens (:max-tokens budget)
           max-cost (:max-cost budget)]
+
       (when (and max-tokens (>= (long total-tokens) (long max-tokens)))
         (throw (ex-info "Token budget exhausted"
-                 {:type :svar/budget-exhausted
-                  :budget budget
-                  :spent {:tokens total-tokens :cost total-cost}})))
+                        {:type :svar/budget-exhausted
+                         :budget budget
+                         :spent {:tokens total-tokens :cost total-cost}})))
       (when (and max-cost (>= (double total-cost) (double max-cost)))
         (throw (ex-info "Cost budget exhausted"
-                 {:type :svar/budget-exhausted
-                  :budget budget
-                  :spent {:tokens total-tokens :cost total-cost}}))))))
+                        {:type :svar/budget-exhausted
+                         :budget budget
+                         :spent {:tokens total-tokens :cost total-cost}}))))))
 
 (declare estimate-cost)
 
@@ -1727,19 +2148,25 @@
    across providers). No provider branching needed any more."
   [router _provider-id model-name api-usage]
   (when (:budget-state router)
-    (let [input-tokens  (long (or (:input-tokens api-usage) 0))
-          output-tokens (long (or (:output-tokens api-usage) 0))
-          total-tokens  (long (or (:total-tokens api-usage)
-                                (+ input-tokens output-tokens)))
-          pricing-map   {model-name (provider-model-pricing _provider-id model-name)}
-          cost          (estimate-cost model-name input-tokens output-tokens
-                          pricing-map
-                          {:api-usage api-usage})]
-      (swap! (:budget-state router)
-        (fn [bs]
-          (-> bs
-            (update :total-tokens + total-tokens)
-            (update :total-cost + (:total-cost cost))))))))
+    (let [input-tokens
+          (long (or (:input-tokens api-usage) 0))
+
+          output-tokens
+          (long (or (:output-tokens api-usage) 0))
+
+          total-tokens
+          (long (or (:total-tokens api-usage) (+ input-tokens output-tokens)))
+
+          pricing-map
+          {model-name (provider-model-pricing _provider-id model-name)}
+
+          cost
+          (estimate-cost model-name input-tokens output-tokens pricing-map {:api-usage api-usage})]
+
+      (swap! (:budget-state router) (fn [bs]
+                                      (-> bs
+                                          (update :total-tokens + total-tokens)
+                                          (update :total-cost + (:total-cost cost))))))))
 
 ;; =============================================================================
 ;; Cumulative stats recording
@@ -1748,18 +2175,20 @@
 (defn- record-cumulative!
   "Records cumulative stats for a provider after a successful request."
   [router provider-id token-count latency-ms]
-  (swap! (:state router) update provider-id
+  (swap! (:state router) update
+    provider-id
     (fn [ps]
       (-> ps
-        (update-in [:cum :requests] (fnil inc 0))
-        (update-in [:cum :total-tokens] (fnil + 0) (or token-count 0))
-        (update-in [:cum :latencies] (fnil conj []) latency-ms)))))
+          (update-in [:cum :requests] (fnil inc 0))
+          (update-in [:cum :total-tokens] (fnil + 0) (or token-count 0))
+          (update-in [:cum :latencies] (fnil conj []) latency-ms)))))
 
 ;; =============================================================================
 ;; Provider availability + model selection
 ;; =============================================================================
 
-(defn- provider-available? [router _provider ps]
+(defn- provider-available?
+  [router _provider ps]
   ;; Provider plans expose different, mutable limits. Guessed catalog RPM/TPM
   ;; values caused local false positives before any request reached upstream.
   ;; Route until the provider reports a real transient error; retry/fallback
@@ -1780,16 +2209,36 @@
         the router prefers any priced model over an unknown one."
   [pref]
   (case pref
-    :cost         (fn [m]
-                    (let [p (:pricing m)
-                          tag (:cost m)]
-                      (cond
-                        p   (+ (double (or (:input p) 0.0))
-                              (double (or (:output p) 0.0)))
-                        tag (case tag :low 0.1 :medium 1.0 :high 10.0 0.0)
-                        :else Double/POSITIVE_INFINITY)))
-    :intelligence (fn [m] (- (long (get INTELLIGENCE_ORDER (:intelligence m) 0))))
-    :speed        (fn [m] (- (long (get SPEED_ORDER (:speed m) 0))))
+    :cost
+    (fn [m]
+      (let [p
+            (:pricing m)
+
+            tag
+            (:cost m)]
+
+        (cond p (+ (double (or (:input p) 0.0)) (double (or (:output p) 0.0)))
+              tag (case tag
+                    :low
+                    0.1
+
+                    :medium
+                    1.0
+
+                    :high
+                    10.0
+
+                    0.0)
+              :else Double/POSITIVE_INFINITY)))
+
+    :intelligence
+    (fn [m]
+      (- (long (get INTELLIGENCE_ORDER (:intelligence m) 0))))
+
+    :speed
+    (fn [m]
+      (- (long (get SPEED_ORDER (:speed m) 0))))
+
     nil))
 
 (defn- force-provider-filter
@@ -1831,20 +2280,38 @@
         keep handing back the same dead root and spin `with-provider-fallback`
         forever."
   [provider prefs]
-  (let [require-reasoning? (:require-reasoning? prefs)
-        reasoning-effort (:reasoning-effort prefs)
-        required-caps (or (:capabilities prefs) #{})
-        caps-ok? (fn [m] (every? (:capabilities m) required-caps))
-        reasoning-ok? (fn [m] (if require-reasoning? (:reasoning? m) true))
-        effort-ok? (fn [m]
-                     (if reasoning-effort
-                       (some? (:effective
-                               (resolve-reasoning-effort
-                                 (or (:api-style m) (:api-style provider))
-                                 m reasoning-effort)))
-                       true))
-        exclude-set (or (:exclude-models prefs) #{})
-        not-excluded? (fn [m] (and m (not (contains? exclude-set (:name m)))))]
+  (let [require-reasoning?
+        (:require-reasoning? prefs)
+
+        reasoning-effort
+        (:reasoning-effort prefs)
+
+        required-caps
+        (or (:capabilities prefs) #{})
+
+        caps-ok?
+        (fn [m]
+          (every? (:capabilities m) required-caps))
+
+        reasoning-ok?
+        (fn [m]
+          (if require-reasoning? (:reasoning? m) true))
+
+        effort-ok?
+        (fn [m]
+          (if reasoning-effort
+            (some? (:effective (resolve-reasoning-effort (or (:api-style m) (:api-style provider))
+                                                         m
+                                                         reasoning-effort)))
+            true))
+
+        exclude-set
+        (or (:exclude-models prefs) #{})
+
+        not-excluded?
+        (fn [m]
+          (and m (not (contains? exclude-set (:name m)))))]
+
     (cond
       ;; Explicit force-model wins regardless of strategy AND regardless of
       ;; `:require-reasoning?`. The caller named this model, so reasoning is a
@@ -1852,40 +2319,52 @@
       ;; `reasoning-extra-body` no-ops), never a reason to refuse routing. The
       ;; reasoning FILTER still applies to `:prefer`/optimize below, where svar
       ;; — not the caller — chooses among models.
-      (:force-model prefs)
-      (let [m (first (filter #(= (:name %) (:force-model prefs)) (:models provider)))]
-        (when (and (not-excluded? m) (effort-ok? m)) m))
-
+      (:force-model prefs) (let [m (first (filter #(= (:name %) (:force-model prefs))
+                                                  (:models provider)))]
+                             (when (and (not-excluded? m) (effort-ok? m)) m))
       ;; Root model: there's nothing to choose between, so honor it regardless
       ;; of `:require-reasoning?` (same best-effort reasoning semantics as
       ;; force-model). This is what lets a single local provider (e.g. LM Studio)
       ;; serve `:reasoning`-flagged turns instead of "all providers exhausted".
       (= (:strategy prefs) :root)
-      (let [root-name (:root provider)
-            models (if (or reasoning-effort (seq required-caps))
-                     (:models provider)
-                     (filter #(= (:name %) root-name) (:models provider)))
-            m (first (filter #(and (not-excluded? %) (effort-ok? %) (caps-ok? %)) models))]
-        (when (not-excluded? m) m))
+      (let [root-name
+            (:root provider)
 
-      :else
-      (let [exclude (:exclude-model prefs)
-            candidates (->> (:models provider)
-                         (filter caps-ok?)
-                         (filter reasoning-ok?)
-                         (filter effort-ok?)
-                         (filter #(if exclude (not= (:name %) exclude) true))
-                         (remove #(contains? exclude-set (:name %))))]
-        (when (seq candidates)
-          (let [prefer (:prefer prefs)
-                prefs-vec (cond
-                            (vector? prefer) prefer
+            models
+            (if (or reasoning-effort (seq required-caps))
+              (:models provider)
+              (filter #(= (:name %) root-name) (:models provider)))
+
+            m
+            (first (filter #(and (not-excluded? %) (effort-ok? %) (caps-ok? %)) models))]
+
+        (when (not-excluded? m) m))
+      :else (let [exclude
+                  (:exclude-model prefs)
+
+                  candidates
+                  (->> (:models provider)
+                       (filter caps-ok?)
+                       (filter reasoning-ok?)
+                       (filter effort-ok?)
+                       (filter #(if exclude (not= (:name %) exclude) true))
+                       (remove #(contains? exclude-set (:name %))))]
+
+              (when (seq candidates)
+                (let [prefer
+                      (:prefer prefs)
+
+                      prefs-vec
+                      (cond (vector? prefer) prefer
                             (keyword? prefer) [prefer]
                             :else nil)]
-            (if (seq prefs-vec)
-              (let [key-fns (keep preference-sort-key prefs-vec)]
-                (first (sort-by (fn [m] (mapv #(% m) key-fns)) candidates)))
-              (first candidates))))))))
+
+                  (if (seq prefs-vec)
+                    (let [key-fns (keep preference-sort-key prefs-vec)]
+                      (first (sort-by (fn [m]
+                                        (mapv #(% m) key-fns))
+                                      candidates)))
+                    (first candidates))))))))
 
 (defn- candidate-sort-key
   "Composite sort key for cross-provider candidate selection.
@@ -1905,20 +2384,40 @@
    Returns `[[] priority]` when no `:prefer` is set — priority-only ordering,
    which preserves the historical `:strategy :root` / force-model semantics."
   [prefs]
-  (let [prefer (:prefer prefs)
-        prefs-vec (cond (vector? prefer) prefer
-                        (keyword? prefer) [prefer]
-                        :else nil)
-        key-fns (keep preference-sort-key prefs-vec)
-        model-score (fn [m] (if (seq key-fns) (mapv #(% m) key-fns) []))
-        order (:provider-order prefs)
-        order-rank (when (seq order)
-                     (let [idx (zipmap order (range))
-                           miss (count order)]
-                       (fn [p] (long (get idx (:id p) miss)))))]
+  (let [prefer
+        (:prefer prefs)
+
+        prefs-vec
+        (cond (vector? prefer) prefer
+              (keyword? prefer) [prefer]
+              :else nil)
+
+        key-fns
+        (keep preference-sort-key prefs-vec)
+
+        model-score
+        (fn [m]
+          (if (seq key-fns) (mapv #(% m) key-fns) []))
+
+        order
+        (:provider-order prefs)
+
+        order-rank
+        (when (seq order)
+          (let [idx
+                (zipmap order (range))
+
+                miss
+                (count order)]
+
+            (fn [p]
+              (long (get idx (:id p) miss)))))]
+
     (if order-rank
-      (fn [[p m]] [(order-rank p) (model-score m) (:priority p 0)])
-      (fn [[p m]] [(model-score m) (:priority p 0)]))))
+      (fn [[p m]]
+        [(order-rank p) (model-score m) (:priority p 0)])
+      (fn [[p m]]
+        [(model-score m) (:priority p 0)]))))
 
 (defn select-provider
   "Returns [provider model-map] or nil. Read-only.
@@ -1932,15 +2431,25 @@
    the payload, its credential is missing — asks what the fleet would use instead,
    and a read-only query must not answer with the provider it just ruled out."
   [router prefs]
-  (let [{:keys [providers state]} router
-        current-state @state
-        excluded (or (:exclude-providers prefs) #{})
-        candidates (->> (force-provider-filter prefs providers)
-                     (remove #(contains? excluded (:id %)))
-                     (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
-                     (filter (fn [[p _]] (provider-available? router p (get current-state (:id p) {})))))]
-    (when (seq candidates)
-      (first (sort-by (candidate-sort-key prefs) candidates)))))
+  (let [{:keys [providers state]}
+        router
+
+        current-state
+        @state
+
+        excluded
+        (or (:exclude-providers prefs) #{})
+
+        candidates
+        (->> (force-provider-filter prefs providers)
+             (remove #(contains? excluded (:id %)))
+             (keep (fn [p]
+                     (when-let [m (resolve-model p prefs)]
+                       [p m])))
+             (filter (fn [[p _]]
+                       (provider-available? router p (get current-state (:id p) {})))))]
+
+    (when (seq candidates) (first (sort-by (candidate-sort-key prefs) candidates)))))
 
 (defn- select-and-claim!
   "Atomically selects best provider and records a request for observability.
@@ -1952,52 +2461,82 @@
    failure is provider/model-specific, retrying the same combo is wasted
    tokens."
   [router prefs]
-  (let [{:keys [providers state]} router
-        sort-key (candidate-sort-key prefs)
-        excluded (or (:exclude-providers prefs) #{})]
+  (let [{:keys [providers state]}
+        router
+
+        sort-key
+        (candidate-sort-key prefs)
+
+        excluded
+        (or (:exclude-providers prefs) #{})]
+
     (loop []
-      (let [current @state
-            ts (router-now-ms router)
-            candidates (->> (force-provider-filter prefs providers)
-                         (remove #(contains? excluded (:id %)))
-                         (keep (fn [p] (when-let [m (resolve-model p prefs)] [p m])))
-                         (filter (fn [[p _]] (provider-available? router p (get current (:id p) {})))))]
+
+      (let [current
+            @state
+
+            ts
+            (router-now-ms router)
+
+            candidates
+            (->> (force-provider-filter prefs providers)
+                 (remove #(contains? excluded (:id %)))
+                 (keep (fn [p]
+                         (when-let [m (resolve-model p prefs)]
+                           [p m])))
+                 (filter (fn [[p _]]
+                           (provider-available? router p (get current (:id p) {})))))]
+
         (when (seq candidates)
-          (let [[provider model-map] (first (sort-by sort-key candidates))
-                pid (:id provider)
-                new-state (update-in current [pid :requests]
-                            (fn [r] (conj (router-prune-window router (or r [])) ts)))]
-            (if (compare-and-set! state current new-state)
-              [provider model-map]
-              (recur))))))))
+          (let [[provider model-map]
+                (first (sort-by sort-key candidates))
 
-(defn- earliest-available [router prefs]
-  (let [{:keys [providers state]} router
-        current-state @state
-        excluded (or (:exclude-providers prefs) #{})]
+                pid
+                (:id provider)
+
+                new-state
+                (update-in current
+                           [pid :requests]
+                           (fn [r]
+                             (conj (router-prune-window router (or r [])) ts)))]
+
+            (if (compare-and-set! state current new-state) [provider model-map] (recur))))))))
+
+(defn- earliest-available
+  [router prefs]
+  (let [{:keys [providers state]}
+        router
+
+        current-state
+        @state
+
+        excluded
+        (or (:exclude-providers prefs) #{})]
+
     (->> (force-provider-filter prefs providers)
-      (remove #(contains? excluded (:id %)))
-      (filter #(some? (resolve-model % prefs)))
-      (keep (fn [p]
-              (let [ps (get current-state (:id p) {})]
-                ;; Real upstream failures open the circuit; local rolling
-                ;; request/token counters never delay a request.
-                (when (= :open (or (:cb-state ps) :closed))
-                  (:cb-open-until ps)))))
-      sort first)))
+         (remove #(contains? excluded (:id %)))
+         (filter #(some? (resolve-model % prefs)))
+         (keep (fn [p]
+                 (let [ps (get current-state (:id p) {})]
+                   ;; Real upstream failures open the circuit; local rolling
+                   ;; request/token counters never delay a request.
+                   (when (= :open (or (:cb-state ps) :closed)) (:cb-open-until ps)))))
+         sort
+         first)))
 
-(defn- record-tokens! [router provider-id token-count]
+(defn- record-tokens!
+  [router provider-id token-count]
   (let [ts (router-now-ms router)]
-    (swap! (:state router) update-in [provider-id :tokens]
-      (fn [t] (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
+    (swap! (:state router) update-in
+      [provider-id :tokens]
+      (fn [t]
+        (conj (router-prune-window router (or t [])) {:ts ts :n (or token-count 0)})))))
 
 (def ^:private STREAM_WATCHDOG_ERROR_TYPES
   "See `failure/STREAM_WATCHDOG_ERROR_TYPES`."
   failure/STREAM_WATCHDOG_ERROR_TYPES)
 
-(defn- stream-watchdog-error?
-  [e]
-  (contains? STREAM_WATCHDOG_ERROR_TYPES (:type (ex-data e))))
+(defn- stream-watchdog-error? [e] (contains? STREAM_WATCHDOG_ERROR_TYPES (:type (ex-data e))))
 
 (defn- router-transient-error?
   "Router-level soft/hard verdict. All the evidence rules live in
@@ -2011,8 +2550,7 @@
    by the provider. When `:on-format-error :fallback-provider` is set on a
    call, `with-provider-fallback` treats these as transient and tries the
    next provider/model in the fleet (excluding the one that just failed)."
-  #{:svar.spec/schema-rejected
-    :svar.spec/required-field-missing})
+  #{:svar.spec/schema-rejected :svar.spec/required-field-missing})
 
 (defn- format-error?
   "Returns true when the exception is a typed schema/format failure that
@@ -2020,9 +2558,13 @@
    :fallback-provider` in prefs."
   [prefs e]
   (and (= :fallback-provider (:on-format-error prefs))
-    (let [t (:type (ex-data e))
-          retry-set (or (:format-retry-on prefs) DEFAULT_FORMAT_ERROR_TYPES)]
-      (contains? retry-set t))))
+       (let [t
+             (:type (ex-data e))
+
+             retry-set
+             (or (:format-retry-on prefs) DEFAULT_FORMAT_ERROR_TYPES)]
+
+         (contains? retry-set t))))
 
 (def ^:private classify-failure
   "See `failure/classify`: canonical provider/gateway failure classification."
@@ -2050,9 +2592,9 @@
   [e]
   (let [data (ex-data e)]
     (or (pos? (long (or (:content-acc-len data) 0)))
-      (pos? (long (or (:reasoning-acc-len data) 0)))
-      (some? (:partial-content data))
-      (some? (:reasoning data)))))
+        (pos? (long (or (:reasoning-acc-len data) 0)))
+        (some? (:partial-content data))
+        (some? (:reasoning data)))))
 
 (defn- rate-limit-delay-ms
   "Configured delay for the next same-provider retry, in ms, or nil once the
@@ -2066,7 +2608,8 @@
 
 (defn- provider-label
   [provider]
-  (some-> (:id provider) name))
+  (some-> (:id provider)
+          name))
 
 (defn- propagate-interrupt!
   "Re-throw an `InterruptedException` (or any cause that wraps one)
@@ -2077,8 +2620,11 @@
    being mistaken for a transient provider failure."
   [^Throwable e]
   (when (or (instance? InterruptedException e)
-          (some #(instance? InterruptedException %)
-            (take-while some? (iterate (fn [^Throwable t] (.getCause t)) (.getCause e)))))
+            (some #(instance? InterruptedException %)
+                  (take-while some?
+                              (iterate (fn [^Throwable t]
+                                         (.getCause t))
+                                       (.getCause e)))))
     ;; Restore interrupt status — we caught it once; the next blocking
     ;; call up the stack should see the flag again so its own
     ;; cancellation paths fire.
@@ -2115,118 +2661,151 @@
      :elapsed-ms N}` so the caller can emit a fallback event with the
    measured wall-clock elapsed."
   [router prefs trace provider model-map f e start-ms]
-  (let [policy   (:rate-limit router)
-        budget   (some-> (:fallback-after-ms policy) long)
-        budget?  (some? budget)
-        elapsed* #(- (long (router-now-ms router)) (long start-ms))
+  (let [policy
+        (:rate-limit router)
+
+        budget
+        (some-> (:fallback-after-ms policy)
+                long)
+
+        budget?
+        (some? budget)
+
+        elapsed*
+        #(- (long (router-now-ms router)) (long start-ms))
+
         budget-exhausted-result
         (fn [last-error]
           {:error last-error
            :rate-limit-budget-exhausted? true
            :fallback-provider? (:fallback-provider? policy)
            :elapsed-ms (long (elapsed*))})]
-    (loop [retry-index 0
-           last-error e]
-      (let [configured (rate-limit-delay-ms router retry-index)
+
+    (loop [retry-index
+           0
+
+           last-error
+           e]
+
+      (let [configured
+            (rate-limit-delay-ms router retry-index)
+
             ;; `failure/retry-sleep-plan` is the ONE policy both same-provider
             ;; ladders spend: a server-declared `Retry-After` is honored in
             ;; full or not at all, and only an undeclared wait clamps to the
             ;; remaining budget. Sleeping a truncated cooldown just re-enters
             ;; the window the provider named and is refused again.
-            plan     (when (some? configured)
-                       (failure/retry-sleep-plan last-error
-                         {:fallback-ms configured
-                          :elapsed-ms (elapsed*)
-                          :budget-ms (when budget? budget)
-                          :respect-retry-after? (:respect-retry-after? policy)}))
-            delay-ms (:delay-ms plan)]
+            plan
+            (when (some? configured)
+              (failure/retry-sleep-plan last-error
+                                        {:fallback-ms configured
+                                         :elapsed-ms (elapsed*)
+                                         :budget-ms (when budget? budget)
+                                         :respect-retry-after? (:respect-retry-after? policy)}))
+
+            delay-ms
+            (:delay-ms plan)]
+
         (cond
           ;; A retry is still in budget — sleep, then re-invoke `f`.
           (some? plan)
-          (do
-            (append-routing-event! trace prefs
-              (routing-event router :llm.routing/provider-retry
-                (cond-> {:status (:status (ex-data last-error))
-                         :reason :rate-limit
-                         :provider (provider-label provider)
-                         :model (:name model-map)
-                         :attempt (inc retry-index)
-                         :delay-ms delay-ms
-                         :elapsed-ms (long (elapsed*))
-                         :error (ex-message last-error)}
-                  ;; Name the cooldown as the SERVER's when it is: a minute of
-                  ;; waiting reads as a hang unless the surface can say who
-                  ;; asked for it.
-                  (some? (:retry-after-ms plan))
-                  (assoc :retry-after-ms (long (:retry-after-ms plan))))))
-            ;; Plain `Thread/sleep` instead of `(async/<!! (async/timeout
-            ;; ...))` so a Vis-side `Esc` (= thread interrupt) wakes the
-            ;; loop immediately with an `InterruptedException`. Core.async
-            ;; parks block on a CountDownLatch whose interrupt semantics
-            ;; vary by version; `Thread/sleep` is the contract we want.
-            (when (pos? (long delay-ms))
-              (Thread/sleep (long delay-ms)))
-            (let [outcome (try
-                            {:success (f provider model-map)}
-                            (catch Exception next-error
-                              ;; Cancellation MUST escape the retry loop —
-                              ;; otherwise an interrupted sleep gets
-                              ;; classified as `next-error` and the loop
-                              ;; spins on every subsequent Esc tick (vis
-                              ;; user-reported regression: \"clicking Esc
-                              ;; over and over, nothing happens\").
-                              (propagate-interrupt! next-error)
-                              {:error next-error}))]
-              (if (and (:error outcome)
-                    (router-transient-error? router (:error outcome)))
-                (if (stream-content-started? (:error outcome))
-                  (throw (:error outcome))
-                  (recur (inc retry-index) (:error outcome)))
-                ;; Non-transient outcome (success, or a terminal error like
-                ;; 401 / format-reject that retrying cannot cure). Forward as-is
-                ;; so the outer handler classifies it. Attach `:elapsed-ms` on
-                ;; the error path so the fallback event still carries the
-                ;; wall-time the same-provider phase consumed.
-                (cond-> outcome
-                  (:error outcome) (assoc :elapsed-ms (long (elapsed*)))))))
-
+          (do (append-routing-event! trace
+                                     prefs
+                                     (routing-event router
+                                                    :llm.routing/provider-retry
+                                                    (cond-> {:status (:status (ex-data last-error))
+                                                             :reason :rate-limit
+                                                             :provider (provider-label provider)
+                                                             :model (:name model-map)
+                                                             :attempt (inc retry-index)
+                                                             :delay-ms delay-ms
+                                                             :elapsed-ms (long (elapsed*))
+                                                             :error (ex-message last-error)}
+                                                      ;; Name the cooldown as the SERVER's when it is: a minute of
+                                                      ;; waiting reads as a hang unless the surface can say who
+                                                      ;; asked for it.
+                                                      (some? (:retry-after-ms plan))
+                                                      (assoc :retry-after-ms
+                                                        (long (:retry-after-ms plan))))))
+              ;; Plain `Thread/sleep` instead of `(async/<!! (async/timeout
+              ;; ...))` so a Vis-side `Esc` (= thread interrupt) wakes the
+              ;; loop immediately with an `InterruptedException`. Core.async
+              ;; parks block on a CountDownLatch whose interrupt semantics
+              ;; vary by version; `Thread/sleep` is the contract we want.
+              (when (pos? (long delay-ms)) (Thread/sleep (long delay-ms)))
+              (let [outcome (try {:success (f provider model-map)}
+                                 (catch Exception next-error
+                                   ;; Cancellation MUST escape the retry loop —
+                                   ;; otherwise an interrupted sleep gets
+                                   ;; classified as `next-error` and the loop
+                                   ;; spins on every subsequent Esc tick (vis
+                                   ;; user-reported regression: \"clicking Esc
+                                   ;; over and over, nothing happens\").
+                                   (propagate-interrupt! next-error)
+                                   {:error next-error}))]
+                (if (and (:error outcome) (router-transient-error? router (:error outcome)))
+                  (if (stream-content-started? (:error outcome))
+                    (throw (:error outcome))
+                    (recur (inc retry-index) (:error outcome)))
+                  ;; Non-transient outcome (success, or a terminal error like
+                  ;; 401 / format-reject that retrying cannot cure). Forward as-is
+                  ;; so the outer handler classifies it. Attach `:elapsed-ms` on
+                  ;; the error path so the fallback event still carries the
+                  ;; wall-time the same-provider phase consumed.
+                  (cond-> outcome
+                    (:error outcome)
+                    (assoc :elapsed-ms (long (elapsed*)))))))
           ;; Configured schedule exhausted OR budget gone — fall back
           ;; now. No extra padding; `:fallback-after-ms` is a cap, not
           ;; a target.
-          :else
-          (budget-exhausted-result last-error))))))
+          :else (budget-exhausted-result last-error))))))
 
-(defn with-provider-fallback [router prefs f]
+(defn with-provider-fallback
+  [router prefs f]
   (budget-check! router)
-  (let [reasoning-effort (:reasoning-effort prefs)
-        scoped-providers (force-provider-filter prefs (:providers router))
-        scoped-models (for [provider scoped-providers
-                            model (:models provider)
-                            :when (or (nil? (:force-model prefs))
-                                    (= (:force-model prefs) (:name model)))]
-                        [provider model])
-        effort-resolutions (when reasoning-effort
-                             (mapv (fn [[provider model]]
-                                     (resolve-reasoning-effort
-                                       (or (:api-style model) (:api-style provider))
-                                       model reasoning-effort))
-                               scoped-models))
-        supported-efforts (when reasoning-effort
-                            (vec (distinct (mapcat :supported effort-resolutions))))
-        _ (when (and reasoning-effort
-                  (not-any? :effective effort-resolutions))
-            (throw (ex-info
-                     (str "Reasoning effort " (pr-str reasoning-effort)
-                       " is unsupported; accepted values: "
-                       (if (seq supported-efforts)
-                         (str/join ", " supported-efforts)
-                         "none"))
-                     {:type :svar/unsupported-reasoning-effort
-                      :requested reasoning-effort
-                      :supported supported-efforts
-                      :provider (:force-provider prefs)
-                      :model (:force-model prefs)})))
-        tried (atom #{})
+  (let [reasoning-effort
+        (:reasoning-effort prefs)
+
+        scoped-providers
+        (force-provider-filter prefs (:providers router))
+
+        scoped-models
+        (for [provider
+              scoped-providers
+
+              model
+              (:models provider)
+
+              :when (or (nil? (:force-model prefs)) (= (:force-model prefs) (:name model)))]
+
+          [provider model])
+
+        effort-resolutions
+        (when reasoning-effort
+          (mapv (fn [[provider model]]
+                  (resolve-reasoning-effort (or (:api-style model) (:api-style provider))
+                                            model
+                                            reasoning-effort))
+                scoped-models))
+
+        supported-efforts
+        (when reasoning-effort (vec (distinct (mapcat :supported effort-resolutions))))
+
+        _
+        (when (and reasoning-effort (not-any? :effective effort-resolutions))
+          (throw (ex-info (str
+                            "Reasoning effort " (pr-str reasoning-effort)
+                            " is unsupported; accepted values: "
+                            (if (seq supported-efforts) (str/join ", " supported-efforts) "none"))
+                          {:type :svar/unsupported-reasoning-effort
+                           :requested reasoning-effort
+                           :supported supported-efforts
+                           :provider (:force-provider prefs)
+                           :model (:force-model prefs)})))
+
+        tried
+        (atom #{})
+
         ;; Providers that hit a non-format failure (rate-limit budget
         ;; exhausted, transient 5xx, etc.) get added here so the next
         ;; `select-and-claim!` skips them. Without this guard the loop
@@ -2234,115 +2813,156 @@
         ;; `provider-fallback: codex/gpt-5.3 → codex/gpt-5.3` event —
         ;; observed in production when a single-model chain hits 429
         ;; repeatedly (every fallback resolved back to the offender).
-        rate-limited (atom #{})
-        format-failed (atom #{})
-        last-format-error (atom nil)
+        rate-limited
+        (atom #{})
+
+        format-failed
+        (atom #{})
+
+        last-format-error
+        (atom nil)
+
         ;; Auth fallback is opt-in. Failed provider ids become fleet exclusions.
-        auth-failed (atom #{})
-        last-auth-error (atom nil)
+        auth-failed
+        (atom #{})
+
+        last-auth-error
+        (atom nil)
+
         ;; Unsupported model excludes name, not provider; siblings remain eligible.
-        model-unsupported (atom #{})
-        last-unsupported-error (atom nil)
-        last-transient-error (atom nil)
-        trace (atom [])
-        selected (atom nil)
-        pending-fallback (atom nil)
+        model-unsupported
+        (atom #{})
+
+        last-unsupported-error
+        (atom nil)
+
+        last-transient-error
+        (atom nil)
+
+        trace
+        (atom [])
+
+        selected
+        (atom nil)
+
+        pending-fallback
+        (atom nil)
+
         ;; Ordered record of EVERY failed attempt — `{:provider :model :status
         ;; :reason :error}` per provider tried. Unlike `pending-fallback` (which
         ;; is last-wins) this accumulates, so an "all providers exhausted" failure
         ;; can name WHY each provider bowed out (`anthropic: 429 · openai: 401`)
         ;; instead of a generic message. Surfaced on the terminal ex-info.
-        failed-attempts (atom [])
-        max-wait-ms (:max-wait-ms router)]
+        failed-attempts
+        (atom [])
+
+        max-wait-ms
+        (:max-wait-ms router)]
+
     (loop [attempts 0]
       (let [auth-fallback? (seq @auth-failed)
             ;; An opted-in auth failure releases an explicit pin only AFTER the
             ;; pinned provider rejects credentials. Known-bad providers stay out.
-            iter-prefs (cond-> (if auth-fallback?
-                                 (dissoc prefs :force-provider :force-model)
-                                 prefs)
-                         (seq @format-failed) (update :exclude-providers
-                                                (fnil into #{}) @format-failed)
-                         (seq @rate-limited) (update :exclude-providers
-                                               (fnil into #{}) @rate-limited)
-                         auth-fallback? (update :exclude-providers
-                                          (fnil into #{}) @auth-failed)
-                         (seq @model-unsupported) (update :exclude-models
-                                                    (fnil into #{}) @model-unsupported))]
+            iter-prefs (cond-> (if auth-fallback? (dissoc prefs :force-provider :force-model) prefs)
+                         (seq @format-failed)
+                         (update :exclude-providers (fnil into #{}) @format-failed)
+
+                         (seq @rate-limited)
+                         (update :exclude-providers (fnil into #{}) @rate-limited)
+
+                         auth-fallback?
+                         (update :exclude-providers (fnil into #{}) @auth-failed)
+
+                         (seq @model-unsupported)
+                         (update :exclude-models (fnil into #{}) @model-unsupported))]
+
         (if-let [[provider model-map] (select-and-claim! router iter-prefs)]
           (let [pid (:id provider)
                 start-ms (router-now-ms router)]
+
             (swap! tried conj pid)
             (when-not @selected
-              (reset! selected {:provider (provider-label provider)
-                                :model (:name model-map)}))
-            (when-let [{:keys [from-provider from-model status reason error elapsed-ms]} @pending-fallback]
-              (append-routing-event! trace prefs
-                (routing-event router
-                  (case reason
-                    :format-error :llm.routing/format-fallback
-                    :model-unsupported :llm.routing/model-fallback
-                    :llm.routing/provider-fallback)
-                  (cond-> {:status status
-                           :reason (if (= reason :rate-limit) :rate-limit-budget-exhausted reason)
-                           :from-provider (name from-provider)
-                           :from-model from-model
-                           :to-provider (provider-label provider)
-                           :to-model (:name model-map)
-                           :error error}
-                    (some? elapsed-ms) (assoc :elapsed-ms (long elapsed-ms)))))
+              (reset! selected {:provider (provider-label provider) :model (:name model-map)}))
+            (when-let [{:keys [from-provider from-model status reason error elapsed-ms]}
+                       @pending-fallback]
+              (append-routing-event! trace
+                                     prefs
+                                     (routing-event router
+                                                    (case reason
+                                                      :format-error
+                                                      :llm.routing/format-fallback
+
+                                                      :model-unsupported
+                                                      :llm.routing/model-fallback
+
+                                                      :llm.routing/provider-fallback)
+                                                    (cond-> {:status status
+                                                             :reason (if (= reason :rate-limit)
+                                                                       :rate-limit-budget-exhausted
+                                                                       reason)
+                                                             :from-provider (name from-provider)
+                                                             :from-model from-model
+                                                             :to-provider (provider-label provider)
+                                                             :to-model (:name model-map)
+                                                             :error error}
+                                                      (some? elapsed-ms)
+                                                      (assoc :elapsed-ms (long elapsed-ms)))))
               (reset! pending-fallback nil))
-            (let [result (try
-                           {:success (f provider model-map)}
-                           (catch Exception e
-                             ;; Cancellation MUST escape — see propagate-interrupt!.
-                             (propagate-interrupt! e)
-                             (cond
-                               (and (or (router-transient-error? router e)
+            (let [result (try {:success (f provider model-map)}
+                              (catch Exception e
+                                ;; Cancellation MUST escape — see propagate-interrupt!.
+                                (propagate-interrupt! e)
+                                (cond (and (or (router-transient-error? router e)
+                                               (stream-watchdog-error? e)
+                                               (and (= :fallback-provider (:on-auth-error prefs))
+                                                    (= :auth (:category (classify-failure e)))))
+                                           (stream-content-started? e))
+                                      (throw e)
+                                      ;; Watchdog spent its wait budget. Cross providers now.
                                       (stream-watchdog-error? e)
+                                      {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
+                                      (router-transient-error? router e) (handle-rate-limit-retries
+                                                                           router
+                                                                           prefs
+                                                                           trace
+                                                                           provider
+                                                                           model-map
+                                                                           f
+                                                                           e
+                                                                           start-ms)
+                                      (format-error? prefs e) {:format-error e}
                                       (and (= :fallback-provider (:on-auth-error prefs))
-                                        (= :auth (:category (classify-failure e)))))
-                                 (stream-content-started? e))
-                               (throw e)
-
-                               ;; Watchdog spent its wait budget. Cross providers now.
-                               (stream-watchdog-error? e)
-                               {:error e
-                                :elapsed-ms (- (router-now-ms router) start-ms)}
-
-                               (router-transient-error? router e)
-                               (handle-rate-limit-retries router prefs trace provider model-map f e start-ms)
-
-                               (format-error? prefs e)
-                               {:format-error e}
-
-                               (and (= :fallback-provider (:on-auth-error prefs))
-                                 (= :auth (:category (classify-failure e))))
-                               {:auth-error e}
-
-                               (= :model-unavailable (:category (classify-failure e)))
-                               {:model-unsupported e}
-
-                               :else (throw e))))]
+                                           (= :auth (:category (classify-failure e))))
+                                      {:auth-error e}
+                                      (= :model-unavailable (:category (classify-failure e)))
+                                      {:model-unsupported e}
+                                      :else (throw e))))]
               (cond
                 (:success result)
                 (let [result (:success result)
                       effort-resolution (when reasoning-effort
-                                          (resolve-reasoning-effort
-                                            (or (:api-style model-map) (:api-style provider))
-                                            model-map reasoning-effort))
+                                          (resolve-reasoning-effort (or (:api-style model-map)
+                                                                        (:api-style provider))
+                                                                    model-map
+                                                                    reasoning-effort))
                       token-count (or (get-in result [:api-usage :total-tokens])
-                                    (get-in result [:tokens :total])
-                                    0)
+                                      (get-in result [:tokens :total])
+                                      0)
                       latency-ms (- (router-now-ms router) start-ms)
                       trace-value @trace]
+
                   (record-tokens! router pid token-count)
                   (cb-record-success! router pid)
                   (record-cumulative! router pid token-count latency-ms)
-                  (budget-record! router pid (:name model-map)
-                    (or (:api-usage result)
-                      {:input-tokens 0 :output-tokens 0 :total-tokens 0
-                       :input-tokens-details {:regular 0 :cache-write 0 :cache-read 0}}))
+                  (budget-record! router
+                                  pid
+                                  (:name model-map)
+                                  (or (:api-usage result)
+                                      {:input-tokens 0
+                                       :output-tokens 0
+                                       :total-tokens 0
+                                       :input-tokens-details
+                                       {:regular 0 :cache-write 0 :cache-read 0}}))
                   (cond-> (assoc result
                             :routed/provider-id pid
                             :routed/model (:name model-map)
@@ -2350,33 +2970,40 @@
                             :routed/selected @selected
                             :routed/actual {:provider (provider-label provider)
                                             :model (:name model-map)}
-                            :routed/fallback? (boolean (seq (filter #(not= :llm.routing/provider-retry (:event/type %)) trace-value))))
-                    effort-resolution (assoc :routed/reasoning-effort effort-resolution)
-                    (seq trace-value) (assoc :routed/trace trace-value)))
+                            :routed/fallback? (boolean (seq (filter #(not=
+                                                                       :llm.routing/provider-retry
+                                                                       (:event/type %))
+                                                                    trace-value))))
+                    effort-resolution
+                    (assoc :routed/reasoning-effort effort-resolution)
 
-                (:format-error result)
-                (let [e (:format-error result)]
-                  (trove/log! {:level :warn
-                               :id ::format-error-fallback
-                               :data {:provider-id pid
-                                      :model (:name model-map)
-                                      :ex-type (:type (ex-data e))}
-                               :msg "format error: trying next provider"})
-                  (swap! format-failed conj pid)
-                  (reset! last-format-error e)
-                  (reset! pending-fallback {:from-provider pid
-                                            :from-model (:name model-map)
+                    (seq trace-value)
+                    (assoc :routed/trace trace-value)))
+                (:format-error result) (let [e (:format-error result)]
+                                         (trove/log! {:level :warn
+                                                      :id ::format-error-fallback
+                                                      :data {:provider-id pid
+                                                             :model (:name model-map)
+                                                             :ex-type (:type (ex-data e))}
+                                                      :msg "format error: trying next provider"})
+                                         (swap! format-failed conj pid)
+                                         (reset! last-format-error e)
+                                         (reset! pending-fallback {:from-provider pid
+                                                                   :from-model (:name model-map)
+                                                                   :status (:status (ex-data e))
+                                                                   :reason :format-error
+                                                                   :error (ex-message e)})
+                                         (swap! failed-attempts conj
+                                           {:provider pid
+                                            :model (:name model-map)
                                             :status (:status (ex-data e))
                                             :reason :format-error
                                             :error (ex-message e)})
-                  (swap! failed-attempts conj {:provider pid :model (:name model-map)
-                                               :status (:status (ex-data e)) :reason :format-error
-                                               :error (ex-message e)})
-                  (recur (inc attempts)))
-
+                                         (recur (inc attempts)))
                 (:auth-error result)
                 (let [e (:auth-error result)
                       status (:status (ex-data e))]
+
                   (trove/log! {:level :warn
                                :id ::auth-provider-fallback
                                :data {:provider-id pid :model (:name model-map) :status status}
@@ -2388,21 +3015,20 @@
                                             :status status
                                             :reason :authentication
                                             :error (ex-message e)})
-                  (swap! failed-attempts conj {:provider pid
-                                               :model (:name model-map)
-                                               :status status
-                                               :reason :authentication
-                                               :error (ex-message e)})
+                  (swap! failed-attempts conj
+                    {:provider pid
+                     :model (:name model-map)
+                     :status status
+                     :reason :authentication
+                     :error (ex-message e)})
                   (recur (inc attempts)))
-
                 (:model-unsupported result)
                 (let [e (:model-unsupported result)]
-                  (trove/log! {:level :warn
-                               :id ::model-unsupported
-                               :data {:provider-id pid
-                                      :model (:name model-map)
-                                      :status (:status (ex-data e))}
-                               :msg "model unsupported by endpoint: excluding model, trying next"})
+                  (trove/log!
+                    {:level :warn
+                     :id ::model-unsupported
+                     :data {:provider-id pid :model (:name model-map) :status (:status (ex-data e))}
+                     :msg "model unsupported by endpoint: excluding model, trying next"})
                   ;; Exclude the MODEL name (not the provider): sibling models
                   ;; on the same provider may still serve the call.
                   (swap! model-unsupported conj (:name model-map))
@@ -2412,24 +3038,25 @@
                                             :status (:status (ex-data e))
                                             :reason :model-unsupported
                                             :error (ex-message e)})
-                  (swap! failed-attempts conj {:provider pid :model (:name model-map)
-                                               :status (:status (ex-data e)) :reason :model-unsupported
-                                               :error (ex-message e)})
+                  (swap! failed-attempts conj
+                    {:provider pid
+                     :model (:name model-map)
+                     :status (:status (ex-data e))
+                     :reason :model-unsupported
+                     :error (ex-message e)})
                   (recur (inc attempts)))
-
                 (:error result)
                 (let [e (:error result)
                       status (:status (ex-data e))
                       ;; :rate-limit drives cooldown; watchdogs retain a distinct
                       ;; trace reason; other exhausted transients stay generic.
-                      reason (cond
-                               (= 429 status) :rate-limit
-                               (stream-watchdog-error? e) :stream-timeout
-                               :else :transient-error)]
+                      reason (cond (= 429 status) :rate-limit
+                                   (stream-watchdog-error? e) :stream-timeout
+                                   :else :transient-error)]
+
                   (trove/log! {:level :warn
                                :id ::provider-retry
-                               :data {:provider-id pid
-                                      :error (ex-message e)}
+                               :data {:provider-id pid :error (ex-message e)}
                                :msg "provider attempt failed"})
                   (cb-record-failure! router pid (= 429 status))
                   ;; Mark this provider as rate-limited / transient so the
@@ -2438,87 +3065,91 @@
                   ;; offender right back into itself.
                   (swap! rate-limited conj pid)
                   (reset! last-transient-error e)
-                  (if (and (= reason :rate-limit)
-                        (false? (:fallback-provider? result)))
+                  (if (and (= reason :rate-limit) (false? (:fallback-provider? result)))
                     (throw e)
-                    (do
-                      (reset! pending-fallback
-                        (cond-> {:from-provider pid
-                                 :from-model (:name model-map)
-                                 :status status
-                                 :reason reason
-                                 :error (ex-message e)}
-                          (some? (:elapsed-ms result)) (assoc :elapsed-ms (:elapsed-ms result))))
-                      (swap! failed-attempts conj
-                        (cond-> {:provider pid :model (:name model-map)
-                                 :status status :reason reason :error (ex-message e)}
-                          (some? (:elapsed-ms result)) (assoc :elapsed-ms (:elapsed-ms result))))
-                      (recur (inc attempts))))))))
-          (cond
-            (and @last-format-error (seq @format-failed))
-            (let [e @last-format-error]
-              (throw (ex-info (ex-message e)
-                       (merge (ex-data e)
-                         {:routed/trace @trace
-                          :tried @tried
-                          :format-failed @format-failed
-                          :attempts @failed-attempts})
-                       e)))
+                    (do (reset! pending-fallback (cond-> {:from-provider pid
+                                                          :from-model (:name model-map)
+                                                          :status status
+                                                          :reason reason
+                                                          :error (ex-message e)}
+                                                   (some? (:elapsed-ms result))
+                                                   (assoc :elapsed-ms (:elapsed-ms result))))
+                        (swap! failed-attempts conj
+                          (cond-> {:provider pid
+                                   :model (:name model-map)
+                                   :status status
+                                   :reason reason
+                                   :error (ex-message e)}
+                            (some? (:elapsed-ms result))
+                            (assoc :elapsed-ms (:elapsed-ms result))))
+                        (recur (inc attempts))))))))
+          (cond (and @last-format-error (seq @format-failed))
+                (let [e @last-format-error]
+                  (throw (ex-info (ex-message e)
+                                  (merge (ex-data e)
+                                         {:routed/trace @trace
+                                          :tried @tried
+                                          :format-failed @format-failed
+                                          :attempts @failed-attempts})
+                                  e)))
+                ;; Preserve concrete auth rejection after the auth-fallback fleet ends.
+                (and @last-auth-error (= :authentication (:reason (peek @failed-attempts))))
+                (let [e @last-auth-error]
+                  (throw (ex-info (ex-message e)
+                                  (merge (ex-data e)
+                                         {:routed/trace @trace
+                                          :tried @tried
+                                          :auth-failed @auth-failed
+                                          :attempts @failed-attempts})
+                                  e)))
+                ;; Every candidate model was rejected as unsupported and nothing
+                ;; else can take the call — surface the concrete upstream reason
+                ;; rather than a generic "all providers exhausted".
+                (and @last-unsupported-error (seq @model-unsupported))
+                (let [e @last-unsupported-error]
+                  (throw (ex-info (ex-message e)
+                                  (merge (ex-data e)
+                                         {:routed/trace @trace
+                                          :tried @tried
+                                          :model-unsupported @model-unsupported
+                                          :attempts @failed-attempts})
+                                  e)))
+                :else (let [earliest (earliest-available router iter-prefs)]
+                        (if (and earliest (< attempts 3))
+                          (let [wait-ms (min (- (long earliest) (router-now-ms router))
+                                             (long max-wait-ms))]
+                            (when (pos? wait-ms)
+                              (trove/log! {:level :info
+                                           :data {:wait-ms wait-ms :prefs iter-prefs}
+                                           :msg "All providers busy, waiting"})
+                              ;; Interruptible sleep — see comment in handle-rate-limit-retries.
+                              (Thread/sleep (long wait-ms)))
+                            (recur (inc attempts)))
+                          ;; No candidate could take the call. A SINGLE provider having been
+                          ;; in play is NOT a fleet exhaustion — it's one provider being
+                          ;; unavailable, and the CALLER owns where to go next. Surface it as
+                          ;; `:provider-unavailable` (carrying the upstream transient's
+                          ;; status/body) so the fleet-wide "all exhausted" wording is
+                          ;; reserved for a real multi-provider walk.
+                          (let [single? (<= (count @tried) 1)
+                                te @last-transient-error
+                                te-data (when te (ex-data te))]
 
-            ;; Preserve concrete auth rejection after the auth-fallback fleet ends.
-            (and @last-auth-error
-              (= :authentication (:reason (peek @failed-attempts))))
-            (let [e @last-auth-error]
-              (throw (ex-info (ex-message e)
-                       (merge (ex-data e)
-                         {:routed/trace @trace
-                          :tried @tried
-                          :auth-failed @auth-failed
-                          :attempts @failed-attempts})
-                       e)))
+                            (throw (ex-info
+                                     (if single? "Provider unavailable" "All providers exhausted")
+                                     (cond-> {:type (if single?
+                                                      :svar.llm/provider-unavailable
+                                                      :svar.llm/all-providers-exhausted)
+                                              :prefs iter-prefs
+                                              :tried @tried
+                                              :format-failed @format-failed
+                                              :attempts @failed-attempts
+                                              :routed/trace @trace}
+                                       (and single? (:status te-data))
+                                       (assoc :status (:status te-data))
 
-            ;; Every candidate model was rejected as unsupported and nothing
-            ;; else can take the call — surface the concrete upstream reason
-            ;; rather than a generic "all providers exhausted".
-            (and @last-unsupported-error (seq @model-unsupported))
-            (let [e @last-unsupported-error]
-              (throw (ex-info (ex-message e)
-                       (merge (ex-data e)
-                         {:routed/trace @trace
-                          :tried @tried
-                          :model-unsupported @model-unsupported
-                          :attempts @failed-attempts})
-                       e)))
-
-            :else
-            (let [earliest (earliest-available router iter-prefs)]
-              (if (and earliest (< attempts 3))
-                (let [wait-ms (min (- (long earliest) (router-now-ms router)) (long max-wait-ms))]
-                  (when (pos? wait-ms)
-                    (trove/log! {:level :info :data {:wait-ms wait-ms :prefs iter-prefs}
-                                 :msg "All providers busy, waiting"})
-                    ;; Interruptible sleep — see comment in handle-rate-limit-retries.
-                    (Thread/sleep (long wait-ms)))
-                  (recur (inc attempts)))
-                ;; No candidate could take the call. A SINGLE provider having been
-                ;; in play is NOT a fleet exhaustion — it's one provider being
-                ;; unavailable, and the CALLER owns where to go next. Surface it as
-                ;; `:provider-unavailable` (carrying the upstream transient's
-                ;; status/body) so the fleet-wide "all exhausted" wording is
-                ;; reserved for a real multi-provider walk.
-                (let [single? (<= (count @tried) 1)
-                      te @last-transient-error
-                      te-data (when te (ex-data te))]
-                  (throw (ex-info (if single? "Provider unavailable" "All providers exhausted")
-                           (cond-> {:type (if single?
-                                            :svar.llm/provider-unavailable
-                                            :svar.llm/all-providers-exhausted)
-                                    :prefs iter-prefs :tried @tried
-                                    :format-failed @format-failed
-                                    :attempts @failed-attempts
-                                    :routed/trace @trace}
-                             (and single? (:status te-data)) (assoc :status (:status te-data))
-                             (and single? (:body te-data)) (assoc :body (:body te-data))))))))))))))
+                                       (and single? (:body te-data))
+                                       (assoc :body (:body te-data))))))))))))))
 
 ;; =============================================================================
 ;; Router creation
@@ -2550,44 +3181,60 @@
   ([providers] (make-router providers {}))
   ([providers opts]
    (when-not (sequential? providers)
-     (throw (ex-info "make-router expects a vector of provider maps" {:type :svar/invalid-providers :got (type providers)})))
+     (throw (ex-info "make-router expects a vector of provider maps"
+                     {:type :svar/invalid-providers :got (type providers)})))
    (when (empty? providers)
      (throw (ex-info "make-router requires at least one provider" {:type :svar/no-providers})))
-   (let [normalized (vec (map-indexed normalize-provider providers))
-         ids (map :id normalized)
-         dupes (keys (filter (fn [[_ n]] (> (long n) 1)) (frequencies ids)))
-         merged (merge router-default-opts opts)
-         budget (:budget opts)
-         init-provider-state {:requests [] :tokens []
-                              :cb-state :closed :cb-failures 0 :cb-open-until nil
-                              :cum {:requests 0 :total-tokens 0 :latencies []}}]
+   (let [normalized
+         (vec (map-indexed normalize-provider providers))
+
+         ids
+         (map :id normalized)
+
+         dupes
+         (keys (filter (fn [[_ n]]
+                         (> (long n) 1))
+                       (frequencies ids)))
+
+         merged
+         (merge router-default-opts opts)
+
+         budget
+         (:budget opts)
+
+         init-provider-state
+         {:requests []
+          :tokens []
+          :cb-state :closed
+          :cb-failures 0
+          :cb-open-until nil
+          :cum {:requests 0 :total-tokens 0 :latencies []}}]
+
      (when (seq dupes)
        (throw (ex-info (str "Duplicate provider IDs: " (str/join ", " (map name dupes)))
-                {:type :svar/duplicate-provider-ids :ids dupes})))
-     {:providers              normalized
-      :state                  (atom (zipmap ids (repeat init-provider-state)))
-      :budget                 budget
-      :budget-state           (when budget (atom {:total-tokens 0 :total-cost 0.0}))
-      :network                (merge DEFAULT_RETRY
-                                {:timeout-ms         DEFAULT_TIMEOUT_MS
-                                 :ttft-timeout-ms    DEFAULT_TTFT_TIMEOUT_MS
-                                 :idle-timeout-ms    DEFAULT_IDLE_TIMEOUT_MS
-                                 :semantic-timeout-ms DEFAULT_SEMANTIC_TIMEOUT_MS}
-                                (:network opts))
-      :tokens                 {:check-context? (let [cc (:check-context? (:tokens opts))]
-                                                 (if (some? cc) cc true))
-                               :pricing (merge MODEL_PRICING
-                                          (:pricing (:tokens opts)))
-                               :context-limits (merge MODEL_CONTEXT_LIMITS
-                                                 (:context-limits (:tokens opts)))
-                               :output-reserve (:output-reserve (:tokens opts))}
-      :clock                  (get opts :clock #(System/currentTimeMillis))
-      :window-ms              (:window-ms merged)
-      :cooldown-ms            (:cooldown-ms merged)
-      :max-wait-ms            (:max-wait-ms merged)
-      :rate-limit             (merge DEFAULT_RATE_LIMIT_ROUTING (:rate-limit merged))
-      :failure-threshold   (:failure-threshold merged)
-      :recovery-ms         (:recovery-ms merged)
+                       {:type :svar/duplicate-provider-ids :ids dupes})))
+     {:providers normalized
+      :state (atom (zipmap ids (repeat init-provider-state)))
+      :budget budget
+      :budget-state (when budget (atom {:total-tokens 0 :total-cost 0.0}))
+      :network (merge DEFAULT_RETRY
+                      {:timeout-ms DEFAULT_TIMEOUT_MS
+                       :ttft-timeout-ms DEFAULT_TTFT_TIMEOUT_MS
+                       :idle-timeout-ms DEFAULT_IDLE_TIMEOUT_MS
+                       :semantic-timeout-ms DEFAULT_SEMANTIC_TIMEOUT_MS}
+                      (:network opts))
+      :tokens {:check-context? (let [cc (:check-context? (:tokens opts))]
+                                 (if (some? cc) cc true))
+               :pricing (merge MODEL_PRICING (:pricing (:tokens opts)))
+               :context-limits (merge MODEL_CONTEXT_LIMITS (:context-limits (:tokens opts)))
+               :output-reserve (:output-reserve (:tokens opts))}
+      :clock (get opts :clock #(System/currentTimeMillis))
+      :window-ms (:window-ms merged)
+      :cooldown-ms (:cooldown-ms merged)
+      :max-wait-ms (:max-wait-ms merged)
+      :rate-limit (merge DEFAULT_RATE_LIMIT_ROUTING (:rate-limit merged))
+      :failure-threshold (:failure-threshold merged)
+      :recovery-ms (:recovery-ms merged)
       :transient-status-codes (:transient-status-codes merged)})))
 
 ;; =============================================================================
@@ -2618,67 +3265,84 @@
    cannot read. An explicit `:model`/`:provider`+`:model` pin still wins."
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning reasoning-effort
-                prefer-providers on-format-error format-retry-on on-auth-error
-                exclude-providers exclude-models on-chunk capabilities]} routing-opts
-        error-strategy (or on-transient-error :hybrid)
-        ;; Build prefs map for with-provider-fallback
-        base-prefs (cond
-                     ;; Exact provider + model override
-                     (and provider model)
-                     (let [p (first (filter #(= (:id %) provider) (:providers router)))]
-                       (when-not p
-                         (throw (ex-info (str "Unknown provider: " provider)
-                                  {:type :svar/routing-resolution-failed
-                                   :provider provider
-                                   :available (mapv :id (:providers router))})))
-                       (when-not (some #(= (:name %) model) (:models p))
-                         (throw (ex-info (str "Model " model " not found in provider " provider)
-                                  {:type :svar/routing-resolution-failed
-                                   :provider provider :model model
-                                   :available (mapv :name (:models p))})))
-                       {:strategy :root :force-provider provider :force-model model})
-                     ;; Provider override + optimize: honor the optimization
-                     ;; WITHIN the pinned provider (force-provider restricts to
-                     ;; it; :prefer selects the model). Without optimize, keep
-                     ;; the historical `:strategy :root` so a bare provider pin
-                     ;; still resolves to that provider's root model.
-                     (and provider optimize)
-                     {:force-provider provider :prefer optimize}
+                prefer-providers on-format-error format-retry-on on-auth-error exclude-providers
+                exclude-models on-chunk capabilities]}
+        routing-opts
 
-                     provider
-                     {:strategy :root :force-provider provider
-                      :prefer :cost}
-                     ;; Model override — find in any provider
-                     model
-                     {:strategy :root :force-model model}
-                     ;; Ordered provider preference: pick the `:optimize`-best
-                     ;; model WITHIN each provider, walking the declared order
-                     ;; (with-provider-fallback handles fall-through on
-                     ;; failure). Use for cheap side-channel tasks where the
-                     ;; caller wants a deliberate plan order + smallest model
-                     ;; per plan, not a single global cost winner.
-                     (seq prefer-providers)
-                     {:prefer (or optimize :cost)
-                      :provider-order (vec prefer-providers)}
-                     ;; Optimize across all
-                     optimize
-                     {:prefer optimize}
-                     ;; Default — first model of first provider
-                     :else
-                     {:strategy :root})
-        prefs (cond-> base-prefs
-                reasoning            (assoc :require-reasoning? true)
-                (seq capabilities)   (assoc :capabilities (set capabilities))
-                reasoning-effort     (assoc :reasoning-effort reasoning-effort)
-                on-format-error      (assoc :on-format-error on-format-error)
-                format-retry-on      (assoc :format-retry-on format-retry-on)
-                on-auth-error        (assoc :on-auth-error on-auth-error)
-                (seq exclude-providers) (assoc :exclude-providers (set exclude-providers))
-                (seq exclude-models) (assoc :exclude-models (set exclude-models))
-                ;; Routing events fire live and remain in final `:routed/trace`.
-                on-chunk             (assoc :on-chunk on-chunk))]
-    {:prefs prefs
-     :error-strategy error-strategy}))
+        error-strategy
+        (or on-transient-error :hybrid)
+
+        ;; Build prefs map for with-provider-fallback
+        base-prefs
+        (cond
+          ;; Exact provider + model override
+          (and provider model) (let [p (first (filter #(= (:id %) provider) (:providers router)))]
+                                 (when-not p
+                                   (throw (ex-info (str "Unknown provider: " provider)
+                                                   {:type :svar/routing-resolution-failed
+                                                    :provider provider
+                                                    :available (mapv :id (:providers router))})))
+                                 (when-not (some #(= (:name %) model) (:models p))
+                                   (throw (ex-info (str "Model " model
+                                                        " not found in provider " provider)
+                                                   {:type :svar/routing-resolution-failed
+                                                    :provider provider
+                                                    :model model
+                                                    :available (mapv :name (:models p))})))
+                                 {:strategy :root :force-provider provider :force-model model})
+          ;; Provider override + optimize: honor the optimization
+          ;; WITHIN the pinned provider (force-provider restricts to
+          ;; it; :prefer selects the model). Without optimize, keep
+          ;; the historical `:strategy :root` so a bare provider pin
+          ;; still resolves to that provider's root model.
+          (and provider optimize) {:force-provider provider :prefer optimize}
+          provider {:strategy :root :force-provider provider :prefer :cost}
+          ;; Model override — find in any provider
+          model {:strategy :root :force-model model}
+          ;; Ordered provider preference: pick the `:optimize`-best
+          ;; model WITHIN each provider, walking the declared order
+          ;; (with-provider-fallback handles fall-through on
+          ;; failure). Use for cheap side-channel tasks where the
+          ;; caller wants a deliberate plan order + smallest model
+          ;; per plan, not a single global cost winner.
+          (seq prefer-providers) {:prefer (or optimize :cost)
+                                  :provider-order (vec prefer-providers)}
+          ;; Optimize across all
+          optimize {:prefer optimize}
+          ;; Default — first model of first provider
+          :else {:strategy :root})
+
+        prefs
+        (cond-> base-prefs
+          reasoning
+          (assoc :require-reasoning? true)
+
+          (seq capabilities)
+          (assoc :capabilities (set capabilities))
+
+          reasoning-effort
+          (assoc :reasoning-effort reasoning-effort)
+
+          on-format-error
+          (assoc :on-format-error on-format-error)
+
+          format-retry-on
+          (assoc :format-retry-on format-retry-on)
+
+          on-auth-error
+          (assoc :on-auth-error on-auth-error)
+
+          (seq exclude-providers)
+          (assoc :exclude-providers (set exclude-providers))
+
+          (seq exclude-models)
+          (assoc :exclude-models (set exclude-models))
+
+          ;; Routing events fire live and remain in final `:routed/trace`.
+          on-chunk
+          (assoc :on-chunk on-chunk))]
+
+    {:prefs prefs :error-strategy error-strategy}))
 
 ;; =============================================================================
 ;; Token Encoding Registry
@@ -2717,11 +3381,9 @@
    need exact Claude/Gemini counts should use the provider count_tokens
    API; this fallback is a fast, dependency-free, version-stable estimate."
   ^Encoding [^String model-name]
-  (try
-    (let [^ModelType model-type (.orElseThrow (ModelType/fromName model-name))]
-      (.getEncodingForModel registry model-type))
-    (catch Exception _
-      (.getEncoding registry EncodingType/O200K_BASE))))
+  (try (let [^ModelType model-type (.orElseThrow (ModelType/fromName model-name))]
+         (.getEncodingForModel registry model-type))
+       (catch Exception _ (.getEncoding registry EncodingType/O200K_BASE))))
 
 ;; =============================================================================
 ;; Token Input Limits
@@ -2729,14 +3391,15 @@
 
 (defn max-input-tokens
   "Calculates maximum input tokens for a model, reserving space for output."
-  (^long [^String model]
-   (max-input-tokens model {}))
+  (^long [^String model] (max-input-tokens model {}))
   (^long [^String model {:keys [output-reserve trim-ratio context-limits]}]
-   (let [limit (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
-         effective-reserve (or output-reserve DEFAULT_OUTPUT_RESERVE)]
-     (if trim-ratio
-       (long (* limit (double trim-ratio)))
-       (- limit (long effective-reserve))))))
+   (let [limit
+         (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
+
+         effective-reserve
+         (or output-reserve DEFAULT_OUTPUT_RESERVE)]
+
+     (if trim-ratio (long (* limit (double trim-ratio))) (- limit (long effective-reserve))))))
 
 ;; =============================================================================
 ;; Token Counting
@@ -2751,14 +3414,13 @@
 (defn- tokens-per-message
   "Returns the number of overhead tokens per message for a model."
   [^String model]
-  (cond
-    (str/includes? model "gpt-4o")       4
-    (str/includes? model "gpt-4")        3
-    (str/includes? model "gpt-3.5")      4
-    (str/includes? model "claude")       3
-    (str/includes? model "llama")        3
-    (str/includes? model "mistral")      3
-    :else                                4))
+  (cond (str/includes? model "gpt-4o") 4
+        (str/includes? model "gpt-4") 3
+        (str/includes? model "gpt-3.5") 4
+        (str/includes? model "claude") 3
+        (str/includes? model "llama") 3
+        (str/includes? model "mistral") 3
+        :else 4))
 
 (defn- tokens-per-name
   "Returns additional tokens if a message has a 'name' field."
@@ -2792,64 +3454,85 @@
 (defn- image-dimensions-from-base64
   "Extracts image dimensions from a base64-encoded image string."
   [^String base64-str]
-  (try
-    (image-dimensions (.decode (Base64/getDecoder) base64-str))
-    (catch Exception _ nil)))
+  (try (image-dimensions (.decode (Base64/getDecoder) base64-str)) (catch Exception _ nil)))
 
 (defn- image-dimensions-from-url
   "Fetches image dimensions from an HTTP(S) URL by reading only the
    image header metadata."
   [^String url-str]
-  (try
-    (let [url (.toURL (URI. url-str))
-          conn ^HttpURLConnection (.openConnection url)]
-      (.setConnectTimeout conn IMAGE_URL_TIMEOUT_MS)
-      (.setReadTimeout conn IMAGE_URL_TIMEOUT_MS)
-      (.setRequestMethod conn "GET")
-      (.setRequestProperty conn "Range" "bytes=0-65535")
-      (try
-        (with-open [is (.getInputStream conn)]
-          (image-dimensions (.readAllBytes is)))
-        (finally
-          (.disconnect conn))))
-    (catch Exception _ nil)))
+  (try (let [url
+             (.toURL (URI. url-str))
+
+             conn
+             ^HttpURLConnection (.openConnection url)]
+
+         (.setConnectTimeout conn IMAGE_URL_TIMEOUT_MS)
+         (.setReadTimeout conn IMAGE_URL_TIMEOUT_MS)
+         (.setRequestMethod conn "GET")
+         (.setRequestProperty conn "Range" "bytes=0-65535")
+         (try (with-open [is (.getInputStream conn)]
+                (image-dimensions (.readAllBytes is)))
+              (finally (.disconnect conn))))
+       (catch Exception _ nil)))
 
 (defn- calculate-image-tokens
   "Applies OpenAI's vision token formula given image dimensions."
   ^long [^long width ^long height detail]
   (if (= "low" detail)
     85
-    (let [max-side (double (max width height))
-          scale1 (if (> max-side 2048.0) (/ 2048.0 max-side) 1.0)
-          w1 (* (double width) scale1)
-          h1 (* (double height) scale1)
-          min-side (min w1 h1)
-          scale2 (if (> min-side 768.0) (/ 768.0 min-side) 1.0)
-          w2 (* w1 scale2)
-          h2 (* h1 scale2)
-          tiles-w (long (Math/ceil (/ w2 512.0)))
-          tiles-h (long (Math/ceil (/ h2 512.0)))
-          tiles (* tiles-w tiles-h)]
+    (let [max-side
+          (double (max width height))
+
+          scale1
+          (if (> max-side 2048.0) (/ 2048.0 max-side) 1.0)
+
+          w1
+          (* (double width) scale1)
+
+          h1
+          (* (double height) scale1)
+
+          min-side
+          (min w1 h1)
+
+          scale2
+          (if (> min-side 768.0) (/ 768.0 min-side) 1.0)
+
+          w2
+          (* w1 scale2)
+
+          h2
+          (* h1 scale2)
+
+          tiles-w
+          (long (Math/ceil (/ w2 512.0)))
+
+          tiles-h
+          (long (Math/ceil (/ h2 512.0)))
+
+          tiles
+          (* tiles-w tiles-h)]
+
       (+ (* 170 tiles) 85))))
 
 (defn- estimate-image-block-tokens
   "Estimates tokens for a single image_url message block."
   ^long [block]
-  (let [url (get-in block [:image_url :url] "")
-        detail (get-in block [:image_url :detail])]
+  (let [url
+        (get-in block [:image_url :url] "")
+
+        detail
+        (get-in block [:image_url :detail])]
+
     (if (= "low" detail)
       85
-      (let [dims (cond
-                   (str/starts-with? url "data:")
-                   (let [comma-idx (str/index-of url ",")]
-                     (when comma-idx
-                       (image-dimensions-from-base64 (subs url (inc (long comma-idx))))))
-
-                   (or (str/starts-with? url "http://")
-                     (str/starts-with? url "https://"))
-                   (image-dimensions-from-url url)
-
-                   :else nil)]
+      (let [dims (cond (str/starts-with? url "data:") (let [comma-idx (str/index-of url ",")]
+                                                        (when comma-idx
+                                                          (image-dimensions-from-base64
+                                                            (subs url (inc (long comma-idx))))))
+                       (or (str/starts-with? url "http://") (str/starts-with? url "https://"))
+                       (image-dimensions-from-url url)
+                       :else nil)]
         (if dims
           (calculate-image-tokens (long (first dims)) (long (second dims)) detail)
           IMAGE_TOKEN_FALLBACK)))))
@@ -2861,52 +3544,52 @@
 (defn- extract-text-from-content
   "Extracts text content and image token counts from a message content field."
   [content]
-  (cond
-    (string? content)
-    {:text content :image-tokens 0}
-
-    (vector? content)
-    (let [{:keys [texts image-tokens]}
-          (reduce (fn [{:keys [texts ^long image-tokens]} block]
-                    (cond
-                      (and (map? block) (= "text" (:type block)))
-                      {:texts (conj texts (:text block))
-                       :image-tokens image-tokens}
-
-                      (and (map? block) (= "image_url" (:type block)))
-                      {:texts texts
-                       :image-tokens (+ image-tokens
-                                       (long (estimate-image-block-tokens block)))}
-
-                      :else
-                      {:texts texts :image-tokens image-tokens}))
-            {:texts [] :image-tokens 0}
-            content)]
-      {:text (str/join "\n" texts) :image-tokens image-tokens})
-
-    :else
-    {:text "" :image-tokens 0}))
+  (cond (string? content) {:text content :image-tokens 0}
+        (vector? content)
+        (let [{:keys [texts image-tokens]}
+              (reduce (fn [{:keys [texts ^long image-tokens]} block]
+                        (cond (and (map? block) (= "text" (:type block)))
+                              {:texts (conj texts (:text block)) :image-tokens image-tokens}
+                              (and (map? block) (= "image_url" (:type block)))
+                              {:texts texts
+                               :image-tokens (+ image-tokens
+                                                (long (estimate-image-block-tokens block)))}
+                              :else {:texts texts :image-tokens image-tokens}))
+                      {:texts [] :image-tokens 0}
+                      content)]
+          {:text (str/join "\n" texts) :image-tokens image-tokens})
+        :else {:text "" :image-tokens 0}))
 
 (defn count-messages
   "Counts tokens for a chat completion message array."
   ^long [^String model messages]
-  (let [encoding (model->encoding model)
-        tpm (tokens-per-message model)
-        tpn (tokens-per-name model)
-        message-tokens (reduce
-                         (fn [^long acc {:keys [role content name] :as _message}]
-                           (let [{:keys [text image-tokens]} (extract-text-from-content content)]
-                             (+ acc
-                               (long tpm)
-                               (long (.countTokens encoding (or (some-> role clojure.core/name) "")))
-                               (long (.countTokens encoding (or text "")))
-                               (long image-tokens)
-                               (if name
-                                 (+ (long tpn) (long (.countTokens encoding name)))
-                                 0))))
-                         0
-                         messages)
-        reply-priming 3]
+  (let [encoding
+        (model->encoding model)
+
+        tpm
+        (tokens-per-message model)
+
+        tpn
+        (tokens-per-name model)
+
+        message-tokens
+        (reduce (fn [^long acc {:keys [role content name] :as _message}]
+                  (let [{:keys [text image-tokens]} (extract-text-from-content content)]
+                    (+ acc
+                       (long tpm)
+                       (long (.countTokens encoding
+                                           (or (some-> role
+                                                       clojure.core/name)
+                                               "")))
+                       (long (.countTokens encoding (or text "")))
+                       (long image-tokens)
+                       (if name (+ (long tpn) (long (.countTokens encoding name))) 0))))
+                0
+                messages)
+
+        reply-priming
+        3]
+
     (+ (long message-tokens) reply-priming)))
 
 ;; =============================================================================
@@ -2916,38 +3599,41 @@
 (defn- get-model-pricing
   "Gets pricing for a model, with fallback to default.
    Handles model name variations by checking for partial matches."
-  ([^String model]
-   (get-model-pricing model MODEL_PRICING))
+  ([^String model] (get-model-pricing model MODEL_PRICING))
   ([^String model pricing]
    (or (get pricing model)
-     (some (fn [[k v]]
-             (when (and (string? k) (str/includes? model k))
-               v))
-       pricing)
-     (:default pricing))))
+       (some (fn [[k v]]
+               (when (and (string? k) (str/includes? model k)) v))
+             pricing)
+       (:default pricing))))
 
 (defn- million-cost
   [tokens rate]
-  (* (/ (double (max 0 (long (or tokens 0)))) 1000000.0)
-    (double (or rate 0.0))))
+  (* (/ (double (max 0 (long (or tokens 0)))) 1000000.0) (double (or rate 0.0))))
 
 (defn- tier-rate
   "Some providers price full requests differently when prompt/input size
    crosses a public threshold. `selector-tokens` is prompt/input size."
   [pricing k selector-tokens]
-  (let [selector-tokens (long (or selector-tokens 0))
-        over-272k (keyword (str (name k) "-over-272k"))
-        over-200k (keyword (str (name k) "-over-200k"))]
-    (or (when (> selector-tokens 272000)
-          (get pricing over-272k))
-      (when (> selector-tokens 200000)
-        (get pricing over-200k))
-      (get pricing k))))
+  (let [selector-tokens
+        (long (or selector-tokens 0))
+
+        over-272k
+        (keyword (str (name k) "-over-272k"))
+
+        over-200k
+        (keyword (str (name k) "-over-200k"))]
+
+    (or (when (> selector-tokens 272000) (get pricing over-272k))
+        (when (> selector-tokens 200000) (get pricing over-200k))
+        (get pricing k))))
 
 (defn- cache-write-rate
   [pricing ttl]
   (case ttl
-    :1h (or (:cache-write-1h pricing) (:cache-write pricing) (:input pricing))
+    :1h
+    (or (:cache-write-1h pricing) (:cache-write pricing) (:input pricing))
+
     (or (:cache-write-5m pricing) (:cache-write pricing) (:input pricing))))
 
 (defn- usage-cache-tokens
@@ -2975,23 +3661,52 @@
   ([model input-tokens output-tokens pricing-map]
    (estimate-cost model input-tokens output-tokens pricing-map {}))
   ([model input-tokens output-tokens pricing-map opts]
-   (let [pricing (get-model-pricing model pricing-map)
+   (let [pricing
+         (get-model-pricing model pricing-map)
+
          {:keys [cached-tokens cache-creation-tokens]}
          (merge (usage-cache-tokens (:api-usage opts))
-           (select-keys opts [:cached-tokens :cache-creation-tokens]))
-         cached-tokens         (long (or cached-tokens 0))
-         cache-creation-tokens (long (or cache-creation-tokens 0))
-         input-uncached-tokens (max 0 (- (long input-tokens) cached-tokens cache-creation-tokens))
-         input-rate (tier-rate pricing :input input-tokens)
-         cached-rate (or (tier-rate pricing :cached-input input-tokens) input-rate)
-         output-rate (tier-rate pricing :output input-tokens)
-         cache-write-rate (cache-write-rate pricing (or (:cache-creation-ttl opts) :5min))
-         input-uncached-cost (double (million-cost input-uncached-tokens input-rate))
-         input-cached-cost (double (million-cost cached-tokens cached-rate))
-         input-cache-write-cost (double (million-cost cache-creation-tokens cache-write-rate))
-         input-cost (+ input-uncached-cost input-cached-cost input-cache-write-cost)
-         output-cost (double (million-cost output-tokens output-rate))
-         total-cost (+ input-cost output-cost)]
+                (select-keys opts [:cached-tokens :cache-creation-tokens]))
+
+         cached-tokens
+         (long (or cached-tokens 0))
+
+         cache-creation-tokens
+         (long (or cache-creation-tokens 0))
+
+         input-uncached-tokens
+         (max 0 (- (long input-tokens) cached-tokens cache-creation-tokens))
+
+         input-rate
+         (tier-rate pricing :input input-tokens)
+
+         cached-rate
+         (or (tier-rate pricing :cached-input input-tokens) input-rate)
+
+         output-rate
+         (tier-rate pricing :output input-tokens)
+
+         cache-write-rate
+         (cache-write-rate pricing (or (:cache-creation-ttl opts) :5min))
+
+         input-uncached-cost
+         (double (million-cost input-uncached-tokens input-rate))
+
+         input-cached-cost
+         (double (million-cost cached-tokens cached-rate))
+
+         input-cache-write-cost
+         (double (million-cost cache-creation-tokens cache-write-rate))
+
+         input-cost
+         (+ input-uncached-cost input-cached-cost input-cache-write-cost)
+
+         output-cost
+         (double (million-cost output-tokens output-rate))
+
+         total-cost
+         (+ input-cost output-cost)]
+
      {:input-cost input-cost
       :input-uncached-cost input-uncached-cost
       :input-cached-cost input-cached-cost
@@ -3013,49 +3728,54 @@
 
 (defn- content-cache-ttl
   [content]
-  (cond
-    (map? content)
-    (when (:svar/cache content)
-      (:svar/cache-ttl content))
-
-    (sequential? content)
-    (some content-cache-ttl content)
-
-    :else nil))
+  (cond (map? content) (when (:svar/cache content) (:svar/cache-ttl content))
+        (sequential? content) (some content-cache-ttl content)
+        :else nil))
 
 (defn- messages-cache-creation-ttl
   [messages]
-  (if (some #(= :1h (content-cache-ttl (:content %))) messages)
-    :1h
-    :5min))
+  (if (some #(= :1h (content-cache-ttl (:content %))) messages) :1h :5min))
 
 (defn count-and-estimate
   "Counts tokens and estimates cost in one call. Cost map separates
    uncached input, cached-read input, cache-write input, output, and total."
-  ([^String model messages ^String output-text]
-   (count-and-estimate model messages output-text {}))
-  ([^String model messages ^String output-text {:keys [pricing input-tokens api-usage
-                                                       cache-creation-ttl]}]
+  ([^String model messages ^String output-text] (count-and-estimate model messages output-text {}))
+  ([^String model messages ^String output-text
+    {:keys [pricing input-tokens api-usage cache-creation-ttl]}]
    (let [;; Canonical shape (Phase A): :input-tokens is TOTAL,
          ;; :input-tokens-details holds subset breakdown.
-         input-tokens   (long (or (:input-tokens api-usage)
-                                input-tokens
-                                (count-messages model messages)))
-         output-tokens  (long (or (:output-tokens api-usage)
-                                (count-tokens model output-text)))
-         reasoning-tokens (long (or (get-in api-usage [:output-tokens-details :reasoning])
-                                  0))
-         details        (:input-tokens-details api-usage)
-         cached-tokens  (long (or (:cache-read details) 0))
-         cache-creation-tokens (long (or (:cache-write details) 0))
-         total-tokens   (+ input-tokens output-tokens)
-         cost (estimate-cost model input-tokens output-tokens
-                (or pricing MODEL_PRICING)
-                {:api-usage api-usage
-                 :cached-tokens cached-tokens
-                 :cache-creation-tokens cache-creation-tokens
-                 :cache-creation-ttl (or cache-creation-ttl
-                                       (messages-cache-creation-ttl messages))})]
+         input-tokens
+         (long (or (:input-tokens api-usage) input-tokens (count-messages model messages)))
+
+         output-tokens
+         (long (or (:output-tokens api-usage) (count-tokens model output-text)))
+
+         reasoning-tokens
+         (long (or (get-in api-usage [:output-tokens-details :reasoning]) 0))
+
+         details
+         (:input-tokens-details api-usage)
+
+         cached-tokens
+         (long (or (:cache-read details) 0))
+
+         cache-creation-tokens
+         (long (or (:cache-write details) 0))
+
+         total-tokens
+         (+ input-tokens output-tokens)
+
+         cost
+         (estimate-cost model
+                        input-tokens
+                        output-tokens
+                        (or pricing MODEL_PRICING)
+                        {:api-usage api-usage
+                         :cached-tokens cached-tokens
+                         :cache-creation-tokens cache-creation-tokens
+                         :cache-creation-ttl (or cache-creation-ttl
+                                                 (messages-cache-creation-ttl messages))})]
+
      {:input-tokens input-tokens
       :output-tokens output-tokens
       :reasoning-tokens reasoning-tokens
@@ -3078,39 +3798,75 @@
 (defn truncate-text
   "Truncates text to fit within a token limit.
    Uses proper tokenization to ensure accurate truncation."
-  ([^String model ^String text ^long max-tokens]
-   (truncate-text model text max-tokens {}))
+  ([^String model ^String text ^long max-tokens] (truncate-text model text max-tokens {}))
   ([^String model ^String text ^long max-tokens {:keys [truncation-marker from] :or {from :end}}]
    (when (nil? text) (anomaly/incorrect! "Cannot truncate nil text" {:type :svar.tokens/nil-input}))
-   (when (<= max-tokens 0) (anomaly/incorrect! "max-tokens must be positive" {:type :svar.tokens/invalid-limit :max-tokens max-tokens}))
-   (let [^Encoding encoding (model->encoding model)
-         ^IntArrayList tokens (.encode encoding text)
-         token-count (.size tokens)]
+   (when (<= max-tokens 0)
+     (anomaly/incorrect! "max-tokens must be positive"
+                         {:type :svar.tokens/invalid-limit :max-tokens max-tokens}))
+   (let [^Encoding encoding
+         (model->encoding model)
+
+         ^IntArrayList tokens
+         (.encode encoding text)
+
+         token-count
+         (.size tokens)]
+
      (if (<= token-count max-tokens)
        text
-       (let [marker-tokens (if truncation-marker (.size (.encode encoding ^String truncation-marker)) 0)
-             effective-max (int (- max-tokens (long marker-tokens)))
-              ;; Convert IntArrayList to int[] for slicing
-             token-array (.toArray tokens)
-             truncated-ints (case from
-                              :end (take effective-max token-array)
-                              :start (drop (- token-count effective-max) token-array)
-                              :middle (let [half (quot effective-max 2)
-                                            first-half (take half token-array)
-                                            second-half (drop (- token-count half) token-array)]
-                                        (concat first-half second-half)))
-             truncated-list (let [list (IntArrayList.)]
-                              (doseq [t truncated-ints] (.add list (int t)))
-                              list)
-             truncated-text (.decode encoding truncated-list)]
+       (let [marker-tokens
+             (if truncation-marker (.size (.encode encoding ^String truncation-marker)) 0)
+
+             effective-max
+             (int (- max-tokens (long marker-tokens)))
+
+             ;; Convert IntArrayList to int[] for slicing
+             token-array
+             (.toArray tokens)
+
+             truncated-ints
+             (case from
+               :end
+               (take effective-max token-array)
+
+               :start
+               (drop (- token-count effective-max) token-array)
+
+               :middle
+               (let [half
+                     (quot effective-max 2)
+
+                     first-half
+                     (take half token-array)
+
+                     second-half
+                     (drop (- token-count half) token-array)]
+
+                 (concat first-half second-half)))
+
+             truncated-list
+             (let [list (IntArrayList.)]
+               (doseq [t truncated-ints]
+                 (.add list (int t)))
+               list)
+
+             truncated-text
+             (.decode encoding truncated-list)]
+
          (if truncation-marker
            (case from
-             :end (str truncated-text truncation-marker)
-             :start (str truncation-marker truncated-text)
-             :middle (let [parts (str/split truncated-text #"\s+" 2)]
-                       (if (> (count parts) 1)
-                         (str (first parts) truncation-marker (second parts))
-                         (str truncated-text truncation-marker))))
+             :end
+             (str truncated-text truncation-marker)
+
+             :start
+             (str truncation-marker truncated-text)
+
+             :middle
+             (let [parts (str/split truncated-text #"\s+" 2)]
+               (if (> (count parts) 1)
+                 (str (first parts) truncation-marker (second parts))
+                 (str truncated-text truncation-marker))))
            truncated-text))))))
 
 ;; =============================================================================
@@ -3142,41 +3898,65 @@
       callers (e.g. the Anthropic `count_tokens` path) inject only the
       *transport*.
    3. Offline `count-messages` tiktoken estimate."
-  ([^String model messages]
-   (check-context-limit model messages {}))
-  ([^String model messages {:keys [output-reserve throw? context-limits input-tokens exact-count-fn]
-                            :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
-   (let [ctx-limit (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
-         effective-reserve (long output-reserve)
-         max-input (- ctx-limit effective-reserve)
-         offline-tokens (long (or input-tokens (count-messages model messages)))
-         ;; Refine near the limit: only when the cheap estimate says we're
-         ;; close enough that its imprecision could change ok?/overflow.
-         refine? (and exact-count-fn
-                   (nil? input-tokens)
-                   (>= (/ (double offline-tokens) (double max-input))
-                     CONTEXT_REFINE_UTILIZATION))
-         input-tokens (long (or (when refine? (exact-count-fn))
-                              offline-tokens))
-         ok? (<= input-tokens max-input)
-         overflow (if ok? 0 (- input-tokens max-input))
-         result {:ok? ok?
-                 :input-tokens input-tokens
-                 :max-input-tokens max-input
-                 :context-limit ctx-limit
-                 :output-reserve effective-reserve
-                 :overflow overflow
-                 :utilization (double (/ input-tokens max-input))
-                 :error (when-not ok?
-                          (format "Context overflow: %d tokens exceed limit of %d (model %s has %d context, reserving %d for output). Reduce input by %d tokens."
-                            input-tokens max-input model ctx-limit effective-reserve overflow))}]
+  ([^String model messages] (check-context-limit model messages {}))
+  ([^String model messages
+    {:keys [output-reserve throw? context-limits input-tokens exact-count-fn]
+     :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
+   (let
+     [ctx-limit
+      (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
+
+      effective-reserve
+      (long output-reserve)
+
+      max-input
+      (- ctx-limit effective-reserve)
+
+      offline-tokens
+      (long (or input-tokens (count-messages model messages)))
+
+      ;; Refine near the limit: only when the cheap estimate says we're
+      ;; close enough that its imprecision could change ok?/overflow.
+      refine?
+      (and exact-count-fn
+           (nil? input-tokens)
+           (>= (/ (double offline-tokens) (double max-input)) CONTEXT_REFINE_UTILIZATION))
+
+      input-tokens
+      (long (or (when refine? (exact-count-fn)) offline-tokens))
+
+      ok?
+      (<= input-tokens max-input)
+
+      overflow
+      (if ok? 0 (- input-tokens max-input))
+
+      result
+      {:ok? ok?
+       :input-tokens input-tokens
+       :max-input-tokens max-input
+       :context-limit ctx-limit
+       :output-reserve effective-reserve
+       :overflow overflow
+       :utilization (double (/ input-tokens max-input))
+       :error
+       (when-not ok?
+         (format
+           "Context overflow: %d tokens exceed limit of %d (model %s has %d context, reserving %d for output). Reduce input by %d tokens."
+           input-tokens
+           max-input
+           model
+           ctx-limit
+           effective-reserve
+           overflow))}]
+
      (when (and throw? (not ok?))
        (anomaly/incorrect! (:error result)
-         {:type :svar.tokens/context-overflow
-          :model model
-          :input-tokens input-tokens
-          :max-input-tokens max-input
-          :overflow overflow}))
+                           {:type :svar.tokens/context-overflow
+                            :model model
+                            :input-tokens input-tokens
+                            :max-input-tokens max-input
+                            :overflow overflow}))
      result)))
 
 ;; =============================================================================
@@ -3186,34 +3966,51 @@
 (defn router-stats
   "Returns cumulative + windowed stats for the router."
   [router]
-  (let [current-state @(:state router)
-        budget-state (when (:budget-state router) @(:budget-state router))
+  (let [current-state
+        @(:state router)
+
+        budget-state
+        (when (:budget-state router) @(:budget-state router))
+
         provider-stats
-        (reduce-kv
-          (fn [acc pid ps]
-            (let [windowed-requests (router-prune-window router (:requests ps []))
-                  windowed-tokens (router-prune-window router (:tokens ps []))
-                  cum (or (:cum ps) {})
-                  latencies (or (:latencies cum) [])
-                  avg-latency (if (seq latencies)
-                                (/ (double (reduce + 0 latencies)) (long (count latencies)))
-                                0.0)]
-              (assoc acc pid
-                {:circuit-breaker (cb-state router ps)
-                 :cb-failures (or (:cb-failures ps) 0)
-                 :windowed {:requests (count windowed-requests)
-                            :tokens (reduce + 0 (map :n windowed-tokens))}
-                 :cumulative {:requests (or (:requests cum) 0)
-                              :total-tokens (or (:total-tokens cum) 0)
-                              :avg-latency-ms avg-latency}})))
-          {} current-state)
-        total-requests (reduce + 0 (map #(get-in % [1 :cumulative :requests]) provider-stats))
-        total-tokens (reduce + 0 (map #(get-in % [1 :cumulative :total-tokens]) provider-stats))]
-    (cond-> {:total {:requests total-requests
-                     :tokens total-tokens}
-             :providers provider-stats}
-      budget-state (assoc :budget {:limit (:budget router)
-                                   :spent budget-state}))))
+        (reduce-kv (fn [acc pid ps]
+                     (let [windowed-requests
+                           (router-prune-window router (:requests ps []))
+
+                           windowed-tokens
+                           (router-prune-window router (:tokens ps []))
+
+                           cum
+                           (or (:cum ps) {})
+
+                           latencies
+                           (or (:latencies cum) [])
+
+                           avg-latency
+                           (if (seq latencies)
+                             (/ (double (reduce + 0 latencies)) (long (count latencies)))
+                             0.0)]
+
+                       (assoc acc
+                         pid {:circuit-breaker (cb-state router ps)
+                              :cb-failures (or (:cb-failures ps) 0)
+                              :windowed {:requests (count windowed-requests)
+                                         :tokens (reduce + 0 (map :n windowed-tokens))}
+                              :cumulative {:requests (or (:requests cum) 0)
+                                           :total-tokens (or (:total-tokens cum) 0)
+                                           :avg-latency-ms avg-latency}})))
+                   {}
+                   current-state)
+
+        total-requests
+        (reduce + 0 (map #(get-in % [1 :cumulative :requests]) provider-stats))
+
+        total-tokens
+        (reduce + 0 (map #(get-in % [1 :cumulative :total-tokens]) provider-stats))]
+
+    (cond-> {:total {:requests total-requests :tokens total-tokens} :providers provider-stats}
+      budget-state
+      (assoc :budget {:limit (:budget router) :spent budget-state}))))
 
 (defn reset-budget!
   "Resets the router's token/cost budget counters to zero."
@@ -3225,9 +4022,13 @@
 (defn reset-provider!
   "Manually resets a provider's circuit breaker to :closed."
   [router provider-id]
-  (swap! (:state router) update provider-id
+  (swap! (:state router) update
+    provider-id
     (fn [ps]
-      (assoc ps :cb-state :closed :cb-failures 0 :cb-open-until nil)))
+      (assoc ps
+        :cb-state :closed
+        :cb-failures 0
+        :cb-open-until nil)))
   router)
 
 (defn resolve-effective-model
@@ -3256,38 +4057,47 @@
    (resolve-effective-model router {:optimize :cost})                       ;; cheapest
    (resolve-effective-model router {:optimize :intelligence})               ;; frontier
    (resolve-effective-model router {:provider :openai :model \"gpt-5-mini\"}) ;; exact"
-  ([router]
-   (resolve-effective-model router nil))
+  ([router] (resolve-effective-model router nil))
   ([router overrides]
    (when router
-     (let [routing-opts (select-keys overrides
-                          [:optimize :provider :model :reasoning :capabilities :exclude-providers
-                           :exclude-models :prefer-providers])
-           {:keys [prefs]} (resolve-routing router routing-opts)
-           [provider model-map] (select-provider router prefs)
-           reasoning-level (some-> (:reasoning overrides) normalize-reasoning-level)]
+     (let [routing-opts
+           (select-keys overrides
+                        [:optimize :provider :model :reasoning :capabilities :exclude-providers
+                         :exclude-models :prefer-providers])
+
+           {:keys [prefs]}
+           (resolve-routing router routing-opts)
+
+           [provider model-map]
+           (select-provider router prefs)
+
+           reasoning-level
+           (some-> (:reasoning overrides)
+                   normalize-reasoning-level)]
+
        (when model-map
-         (cond-> {:name              (:name model-map)
-                  :reasoning?        (boolean (:reasoning? model-map))
-                   ;; What the model can READ, not just how it thinks: a channel
-                   ;; holding an image asks this before deciding whether to send
-                   ;; the pixels or route the description elsewhere.
-                  :capabilities      (or (:capabilities model-map) #{})
+         (cond-> {:name (:name model-map)
+                  :reasoning? (boolean (:reasoning? model-map))
+                  ;; What the model can READ, not just how it thinks: a channel
+                  ;; holding an image asks this before deciding whether to send
+                  ;; the pixels or route the description elsewhere.
+                  :capabilities (or (:capabilities model-map) #{})
                   ;; Capability, not vendor: `normalize-provider` stamped these
                   ;; from the wire the model actually rides, so a channel can
                   ;; decide whether to OFFER a reasoning-depth or verbosity
                   ;; control without owning a model table of its own.
-                  :reasoning-style   (:reasoning-style model-map)
+                  :reasoning-style (:reasoning-style model-map)
                   :reasoning-effort? (boolean (:reasoning-effort? model-map))
-                  :verbosity-style   (:verbosity-style model-map)
+                  :verbosity-style (:verbosity-style model-map)
                   :verbosity-options (:verbosity-options model-map)
-                  :provider          (:id provider)
+                  :provider (:id provider)
                   ;; The model's own api-style wins, exactly as the request path
                   ;; resolves it — one Copilot provider serves an Anthropic wire
                   ;; for Claude and a Responses wire for GPT.
-                  :api-style         (or (:api-style model-map) (:api-style provider))
-                  :pricing           (:pricing model-map)
-                  :context           (:context model-map)
-                  :intelligence      (:intelligence model-map)
-                  :speed             (:speed model-map)}
-           reasoning-level (assoc :reasoning reasoning-level)))))))
+                  :api-style (or (:api-style model-map) (:api-style provider))
+                  :pricing (:pricing model-map)
+                  :context (:context model-map)
+                  :intelligence (:intelligence model-map)
+                  :speed (:speed model-map)}
+           reasoning-level
+           (assoc :reasoning reasoning-level)))))))

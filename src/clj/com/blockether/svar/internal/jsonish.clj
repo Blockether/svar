@@ -3,11 +3,9 @@
    
    Provides SAP (Schemaless Adaptive Parsing) for malformed JSON from LLMs.
    Handles unquoted keys/values, trailing commas, markdown code blocks, etc."
-  (:require
-   [clojure.string :as str])
-  (:import
-   [com.blockether.svar JsonishParser JsonishParser$ParseCandidate]
-   [java.util List Map]))
+  (:require [clojure.string :as str])
+  (:import [com.blockether.svar JsonishParser JsonishParser$ParseCandidate]
+           [java.util List Map]))
 
 (defn- normalize-key
   "Normalizes a JSON key to idiomatic Clojure keyword.
@@ -21,8 +19,8 @@
    Keyword. Normalized Clojure keyword."
   [k]
   (-> k
-    (str/replace "_" "-")
-    keyword))
+      (str/replace "_" "-")
+      keyword))
 
 (defn- java->clojure
   "Converts Java Map/List to Clojure data structures recursively.
@@ -35,15 +33,12 @@
    Returns:
    Clojure data structure (map with keyword keys, vector, or primitive)."
   [obj]
-  (cond
-    (instance? Map obj)
-    (into {} (map (fn [[k v]] [(normalize-key k) (java->clojure v)]) obj))
-
-    (instance? List obj)
-    (mapv java->clojure obj)
-
-    :else
-    obj))
+  (cond (instance? Map obj) (into {}
+                                  (map (fn [[k v]]
+                                         [(normalize-key k) (java->clojure v)])
+                                       obj))
+        (instance? List obj) (mapv java->clojure obj)
+        :else obj))
 
 (defn parse-json
   "Parses JSON-ish string using full SAP (Schemaless Adaptive Parsing) cascade.
@@ -80,12 +75,16 @@
   [input]
   (when (or (nil? input) (empty? input))
     (throw (IllegalArgumentException. "Input cannot be nil or empty")))
+  (let [parser
+        (JsonishParser.)
 
-  (let [parser (JsonishParser.)
-        candidates (.parseWithCandidates parser input)
-        ^JsonishParser$ParseCandidate best (first candidates)]
-    {:value (java->clojure (.value best))
-     :warnings (vec (.fixes best))}))
+        candidates
+        (.parseWithCandidates parser input)
+
+        ^JsonishParser$ParseCandidate best
+        (first candidates)]
+
+    {:value (java->clojure (.value best)) :warnings (vec (.fixes best))}))
 
 (defn parse-partial
   "Parses potentially truncated JSON from streaming. Returns the best-effort
@@ -95,10 +94,14 @@
    Useful for streaming where accumulated text may be mid-token or mid-value."
   [input]
   (when (and input (not (str/blank? input)))
-    (try
-      (let [parser (JsonishParser.)
-            result (.parse parser input)
-            value (get result "value")]
-        (when (and value (instance? Map value))
-          (java->clojure value)))
-      (catch Exception _ nil))))
+    (try (let [parser
+               (JsonishParser.)
+
+               result
+               (.parse parser input)
+
+               value
+               (get result "value")]
+
+           (when (and value (instance? Map value)) (java->clojure value)))
+         (catch Exception _ nil))))

@@ -20,10 +20,9 @@
                    :messages [(system \"Help the user.\")
                               (user \"What is 2+2?\")]
                    :model \"gpt-4o\"})"
-  (:require
-   [com.blockether.svar.internal.llm :as llm]
-   [com.blockether.svar.internal.router :as router]
-   [com.blockether.svar.internal.spec :as spec]))
+  (:require [com.blockether.svar.internal.llm :as llm]
+            [com.blockether.svar.internal.router :as router]
+            [com.blockether.svar.internal.spec :as spec]))
 
 ;; =============================================================================
 ;; Router
@@ -113,11 +112,21 @@
 (def TYPE_KEYWORD "Type: Clojure keyword." :spec.type/keyword)
 
 ;; Fixed-size vector types (generated — 36 defs for INT/STRING/DOUBLE × 1..12)
-(doseq [[prefix kw-prefix] [["INT" "int"] ["STRING" "string"] ["DOUBLE" "double"]]
-        n (range 1 13)]
-  (let [sym (symbol (str "TYPE_" prefix "_V_" n))
-        kw (keyword "spec.type" (str kw-prefix "-v-" n))
-        doc (format "Type: Fixed-size %s vector (%d element%s)." kw-prefix n (if (= n 1) "" "s"))]
+(doseq [[prefix kw-prefix]
+        [["INT" "int"] ["STRING" "string"] ["DOUBLE" "double"]]
+
+        n
+        (range 1 13)]
+
+  (let [sym
+        (symbol (str "TYPE_" prefix "_V_" n))
+
+        kw
+        (keyword "spec.type" (str kw-prefix "-v-" n))
+
+        doc
+        (format "Type: Fixed-size %s vector (%d element%s)." kw-prefix n (if (= n 1) "" "s"))]
+
     (intern *ns* (with-meta sym {:doc doc :clj-kondo/ignore [:clojure-lsp/unused-public-var]}) kw)))
 
 ;; Cardinality
@@ -144,7 +153,9 @@
   llm/open-session)
 (def close-session! "Closes an explicit LLM session. Idempotent." llm/close-session!)
 (def session-history "Returns an explicit session's canonical replay history." llm/session-history)
-(def ask! "Asks the LLM and returns structured Clojure data with token usage and cost. With an explicit session, appends one native completion turn." llm/ask!)
+(def ask!
+  "Asks the LLM and returns structured Clojure data with token usage and cost. With an explicit session, appends one native completion turn."
+  llm/ask!)
 (def ask-code!
   "Native tool-calling completion. Sibling of `ask!` (structured `:spec`).
    The model takes action by calling a `:tool`; no tool call ⇒ its text is the

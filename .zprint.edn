@@ -1,0 +1,369 @@
+;; zprint — the canonical formatter for svar.
+;; `make format` (fmt.clj) applies it; Vis' format-on-write picks it up from here too.
+;; Kept identical to the vis repo's .zprint.edn so both trees share one house style.
+
+{:width 100
+
+ ;; Binding forms (let, loop, binding, with-open, etc.):
+ ;; each value on its own line, blank line between pairs for visual separation.
+ ;; Single-pair exception: k and v on one line, no blank line before body.
+ :binding {:flow?         true
+           :indent        0
+           :nl-separator? true}
+
+ ;; Comments: preserve lines exactly as written, no merging or reflowing
+ :comment {:wrap?       false
+           :smart-wrap? false}
+
+ ;; Map literals: one key-value per line when multi-entry maps don't fit on one line, no commas
+ :map {:indent 0
+       :comma? false}
+
+ ;; Pair forms (cond, assoc, etc.): keep values aligned, no blank separators
+ :pair {:indent 0}
+
+ ;; cond->/cond->>/case: each test on its own line, value on next line,
+ ;; blank line between clauses for visual separation.
+ ;;
+ ;; let/loop/for/doseq/etc.: binding vector flows (name on one line, value on next,
+ ;; blank line between pairs), then blank line before body forms.
+ ;; Single-pair exception: [k v] on one line, single newline before body.
+ ;;
+ ;; A binding entry reached through `#(…)` is NOT a binding form: zprint looks the
+ ;; :fn-map entry up by the symbol inside the reader macro but hands the option-fn
+ ;; the whole `(fn* [] …)` form, whose second element is the ARGUMENT vector. Guiding
+ ;; that as pairs walks off the end of the form and zprint throws, so every entry
+ ;; below prints an `fn*` form plainly instead.
+ ;;
+ ;; fn: for single-arity forms, put the signature vector on its own line before the body.
+ ;;
+ ;; `make format` loads THIS file through zprint's own config loader, so the
+ ;; :option-fn guides below are sci-compiled into real functions.
+ :fn-map
+ {"map" :hang
+  "mapv" :hang
+  "mapcat" :hang
+  "filter" :hang
+  "reduce" :hang
+
+  "cond->"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (if (= 'fn* (first sexpr))
+                    {:guide [:element-*] :next-inner {:list {:option-fn nil}}}
+                    (let [has-init?  (even? len)
+                          pair-count (quot (if has-init? (- len 2) (- len 1)) 2)
+                          head       (if has-init? [:element :element :newline] [:element :newline])]
+                      (if (pos? pair-count)
+                        {:guide (into head
+                                  (mapcat (fn [i]
+                                            (if (< i (dec pair-count))
+                                              [:element :newline :element :newline :newline]
+                                              [:element :newline :element]))
+                                    (range pair-count)))
+                         :next-inner {:list {:option-fn nil}}}
+                        {:guide [:element-*]}))))}}]
+
+  "cond->>"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (if (= 'fn* (first sexpr))
+                    {:guide [:element-*] :next-inner {:list {:option-fn nil}}}
+                    (let [has-init?  (even? len)
+                          pair-count (quot (if has-init? (- len 2) (- len 1)) 2)
+                          head       (if has-init? [:element :element :newline] [:element :newline])]
+                      (if (pos? pair-count)
+                        {:guide (into head
+                                  (mapcat (fn [i]
+                                            (if (< i (dec pair-count))
+                                              [:element :newline :element :newline :newline]
+                                              [:element :newline :element]))
+                                    (range pair-count)))
+                         :next-inner {:list {:option-fn nil}}}
+                        {:guide [:element-*]}))))}}]
+
+  "case"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (if (= 'fn* (first sexpr))
+                    {:guide [:element-*] :next-inner {:list {:option-fn nil}}}
+                    (let [rest-count   (- len 2)
+                          has-default? (odd? rest-count)
+                          pair-count   (quot rest-count 2)
+                          pairs-guide  (mapcat (fn [i]
+                                                 (if (< i (dec pair-count))
+                                                   [:element :newline :element :newline :newline]
+                                                   [:element :newline :element]))
+                                         (range pair-count))
+                          default-guide (when has-default? [:newline :newline :element])
+                          guide (into [:element :element :newline]
+                                  (concat pairs-guide default-guide))]
+                      {:guide guide :next-inner {:list {:option-fn nil}}})))}}]
+
+  ;; Binding forms: :element-binding-vec formats the [bindings] vector using the
+  ;; :binding config, then :newline :newline inserts a blank line before the body.
+  ;; Single-pair exception: override :binding to not flow, use single :newline.
+  "fn"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [named?      (symbol? (second sexpr))
+                        vector-idx  (if named? 2 1)
+                        signature   (nth sexpr vector-idx nil)
+                        body-count  (- len (inc vector-idx))
+                        guide-head  (if named?
+                                      [:element :element :element :newline]
+                                      [:element :element :newline])]
+                    (if (vector? signature)
+                      {:guide (into guide-head
+                                (when (pos? body-count)
+                                  (into [:element-best]
+                                    (mapcat (fn [_] [:newline :element-best])
+                                      (range (dec body-count))))))
+                       :next-inner {:list {:option-fn nil}}}
+                      {:guide [:element-*]})))}}]
+
+  "let"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "loop"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "when-let"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "when-some"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "if-let"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (if (= 'fn* (first sexpr))
+                    {:guide [:element-*] :next-inner {:list {:option-fn nil}}}
+                    (let [pair-count   (quot (count (second sexpr)) 2)
+                          single-pair? (= pair-count 1)
+                          body-count   (- len 2)
+                          newlines     (if single-pair? [:newline] [:newline :newline])
+                          guide        (if (= 'fn* (first sexpr))
+                                         ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                         [:element-*]
+                                         (into (into [:element :element-binding-vec] newlines)
+                                           (when (pos? body-count)
+                                             (into [:element-best]
+                                               (mapcat (fn [_] [:newline :element-best])
+                                                 (range (dec body-count)))))))]
+                      (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                        single-pair? (merge {:binding {:flow?         false
+                                                       :nl-separator? false}})))))}}]
+
+  "if-some"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "with-open"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "with-redefs"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "binding"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "for"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "doseq"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]
+
+  "dotimes"
+  [:guided
+   {:list
+    {:option-fn (fn [options len sexpr]
+                  (let [pair-count   (quot (count (second sexpr)) 2)
+                        single-pair? (= pair-count 1)
+                        body-count   (- len 2)
+                        newlines     (if single-pair? [:newline] [:newline :newline])
+                        guide        (if (= 'fn* (first sexpr))
+                                       ;; `#(let …)` and friends: an arg vector is not a binding vector
+                                       [:element-*]
+                                       (into (into [:element :element-binding-vec] newlines)
+                                         (when (pos? body-count)
+                                           (into [:element-best]
+                                             (mapcat (fn [_] [:newline :element-best])
+                                               (range (dec body-count)))))))]
+                    (cond-> {:guide guide :next-inner {:list {:option-fn nil}}}
+                      single-pair? (merge {:binding {:flow?         false
+                                                     :nl-separator? false}}))))}}]}}
