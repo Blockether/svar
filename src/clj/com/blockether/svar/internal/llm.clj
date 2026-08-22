@@ -2398,6 +2398,16 @@
   [provider-id base-url]
   (not (or (= :openai-codex provider-id)
          (str/includes? (str base-url) "chatgpt.com/backend-api"))))
+
+(defn- responses-explicit-cache?
+  "THE gate for explicit `prompt_cache_breakpoint` markers on a Responses call:
+   an endpoint that takes the field at all, and a host that has not already
+   refused it. The stateless funnel and a session's delta input both decide
+   through this, so the two never disagree about one turn's wire shape."
+  [provider-id base-url]
+  (and (responses-explicit-cache-endpoint? provider-id base-url)
+    (not (failure/explicit-cache-refused-host? base-url))))
+
 (def ^:private OPENAI_EXPLICIT_CACHE_BREAKPOINT {:mode "explicit"})
 
 (defn- responses-cacheable-input-block?
@@ -5227,8 +5237,7 @@
                        :else (throw e)))))]
            (attempt {:stateless-items? (boolean (or (:stateless-items? opts)
                                                   (failure/stateless-items-host? base-url)))
-                     :explicit-cache?  (and (responses-explicit-cache-endpoint? provider-id base-url)
-                                         (not (failure/explicit-cache-refused-host? base-url)))}))
+                     :explicit-cache?  (responses-explicit-cache? provider-id base-url)}))
 
          :else
          (if on-chunk
@@ -6966,9 +6975,13 @@
     :else (throw (ex-info "Session input must be text, a canonical message, or turn options."
                    {:type :svar.session/invalid-input}))))
 
-(defn- messages->responses-input [messages model]
+(defn- messages->responses-input
+  "The input entries a session sends for `messages`. `explicit-cache?` is the
+   endpoint's own answer, never a guess from the model name: a delta must carry
+   exactly what the full request body for that same turn would have carried."
+  [messages model explicit-cache?]
   (let [messages (sanitize-replayed-messages messages model true)
-        explicit-cache? (gpt-5-6-or-later? model)]
+        explicit-cache? (and explicit-cache? (gpt-5-6-or-later? model))]
     (->> messages
       (remove #(= "system" (:role %)))
       (mapcat #(responses-message-input-entries % explicit-cache?))
@@ -7015,7 +7028,6 @@
       (let [{new-messages :messages turn-opts :opts} (session-turn input)
             [active-model call-opts] (session-call-route router base-opts turn-opts provider-id)
             full-messages (into @history new-messages)
-            delta-input (messages->responses-input new-messages active-model)
             call-opts (assoc call-opts :messages full-messages)
              ;; ONE progress flag per turn: every attempt inside it - a socket
              ;; reconnect, the degradation to HTTP, the router's own ladder -
@@ -7032,7 +7044,12 @@
             result (binding [*responses-session-transport*
                              (fn [request-body completion-opts fallback!]
                                (responses-session-completion!
-                                 transport-state request-body delta-input
+                                 transport-state request-body
+                                 ;; The endpoint this body was just built for
+                                 ;; decides the delta's cache markers too, and a
+                                 ;; self-heal retry rebuilds the delta with it.
+                                 (messages->responses-input new-messages active-model
+                                   (responses-explicit-cache? provider-id (:base-url completion-opts)))
                                  (merge completion-opts session-opts) fallback!))]
                      (ask-code! router call-opts))
             assistant-message (or (:assistant-message result)

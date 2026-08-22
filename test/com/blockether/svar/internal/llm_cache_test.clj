@@ -203,6 +203,19 @@
       ;; the model contract itself is unchanged - only the endpoint gate moved
       (expect (some? (re-find #"prompt_cache_breakpoint" (pr-str on))))))
 
+  (it "gates a session delta by the endpoint answer, not the model name"
+    ;; Regression: the incremental input a session sends from its second turn on
+    ;; decided the marker from the model name alone, so a cached block still put
+    ;; the field the Codex backend refuses on the wire of every later turn.
+    (let [msgs [{:role "user" :content [(sut/cached "turn two")]}]
+          off  (#'sut/messages->responses-input msgs "gpt-5.6-sol" false)
+          on   (#'sut/messages->responses-input msgs "gpt-5.6-sol" true)
+          old  (#'sut/messages->responses-input msgs "gpt-5.5" true)]
+      (expect (nil? (re-find #"prompt_cache_breakpoint" (pr-str off))))
+      (expect (some? (re-find #"prompt_cache_breakpoint" (pr-str on))))
+      ;; the model contract still decides on an endpoint that takes the field
+      (expect (nil? (re-find #"prompt_cache_breakpoint" (pr-str old))))))
+
   (it "keeps the field off a Codex request built by the dispatch funnel"
     ;; The reported shape: system + task + tool call + tool result is the second
     ;; iteration of any agent turn, and it is where the rolling marker first

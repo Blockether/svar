@@ -165,6 +165,30 @@
           (expect (nil? (re-find #"prompt_cache_breakpoint" (json/write-json-str @sent))))
           ;; the prompt cache still rides on the stable key Codex itself uses
           (expect (string? (:prompt_cache_key (first @sent))))))))
+  (it "never sends an explicit cache breakpoint in a session delta"
+    ;; Regression: the delta a session sends from its second turn onwards decided
+    ;; the explicit `prompt_cache_breakpoint` marker from the MODEL NAME alone, so
+    ;; a caller marking a block for caching put on the wire the very field the
+    ;; ChatGPT Codex backend refuses with HTTP 400 - and it did so on the
+    ;; incremental turn, where a resend after emitted output cannot self-heal.
+    (let [events (atom [(completed-event "resp_1" "first")
+                        (completed-event "resp_2" "second")])
+          sent (atom [])
+          closes (atom 0)]
+      (with-redefs [sut/open-responses-websocket!
+                    (fake-websocket-factory events sent closes)]
+        (with-open [session (open-test-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (svar/ask! session "one")
+          (svar/ask! session
+            {:input [{:role "user"
+                      :content [{:type "text" :text "two" :svar/cache true}]}]})
+          (let [delta-request (second @sent)]
+            (expect (= "resp_1" (:previous_response_id delta-request)))
+            (expect (= 1 (count (:input delta-request))))
+            (expect (nil? (re-find #"prompt_cache_breakpoint"
+                            (json/write-json-str delta-request)))))))))
+
   (it "reuses one socket while a model change starts a full Responses chain"
     ;; Codex keeps the provider transport alive across model switches, but a
     ;; continuation cursor is model-bound: the first request for the new model
