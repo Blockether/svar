@@ -154,7 +154,9 @@
 (def close-session! "Closes an explicit LLM session. Idempotent." llm/close-session!)
 (def session-history "Returns an explicit session's canonical replay history." llm/session-history)
 (def ask!
-  "Asks the LLM and returns structured Clojure data with token usage and cost. With an explicit session, appends one native completion turn."
+  "Asks the LLM and returns structured Clojure data with token usage and cost. With
+   an explicit session, appends one native completion turn; `{:history [...]}`
+   replaces canonical history while retaining the physical provider connection."
   llm/ask!)
 (def ask-code!
   "Native tool-calling completion. Sibling of `ask!` (structured `:spec`).

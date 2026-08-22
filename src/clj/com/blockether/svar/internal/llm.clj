@@ -4081,10 +4081,16 @@
         (:input request-body)
 
         warmup-continuation?
-        (and (:cursor prior) (= stable (:stable prior)) (= full-input (:warmup-input prior)))
+        (and (not (:session-reset? opts))
+             (:cursor prior)
+             (= stable (:stable prior))
+             (= full-input (:warmup-input prior)))
 
         continue?
-        (and (:cursor prior) (= stable (:stable prior)) (nil? (:warmup-input prior)))
+        (and (not (:session-reset? opts))
+             (:cursor prior)
+             (= stable (:stable prior))
+             (nil? (:warmup-input prior)))
 
         connect-opts
         (select-keys opts [:base-url :responses-path :api-key :headers :timeout-ms])
@@ -6708,9 +6714,10 @@
 
    When `router` is an explicit session from `open-session`, `opts` is the next
    turn (text, canonical message(s), or `{:input ...}` plus ordinary call
-   options). A per-turn `:routing :model` switches the logical Responses chain
-   while retaining the provider's physical WebSocket; changing providers on an
-   existing session is rejected.
+   options). `{:history [...]}` replaces the session's canonical replay history
+   and starts a new logical Responses chain on the SAME physical WebSocket. A
+   per-turn `:routing :model` also switches the logical chain while retaining
+   that socket; changing providers on an existing session is rejected.
 
    Params:
    `router` - Router instance from make-router. Required.
@@ -8331,20 +8338,31 @@
 
 (defn- session-turn
   [input]
-  (cond (string? input) {:messages [(user input)] :opts {}}
-        (and (map? input) (:role input)) {:messages [input] :opts {}}
-        (sequential? input) {:messages (vec input) :opts {}}
+  (cond (string? input) {:messages [(user input)] :opts {} :replace-history? false}
+        (and (map? input) (:role input)) {:messages [input] :opts {} :replace-history? false}
+        (sequential? input) {:messages (vec input) :opts {} :replace-history? false}
         (map? input)
-        (let [turn-input (or (:input input) (:messages input))]
-          (when-not turn-input
-            (throw (ex-info "A session turn requires :input or :messages."
+        (let [replace-history?
+              (contains? input :history)
+
+              _
+              (when (and replace-history? (or (contains? input :input) (contains? input :messages)))
+                (throw (ex-info "A session turn cannot combine :history with :input or :messages."
+                                {:type :svar.session/invalid-input})))
+
+              turn-input
+              (if replace-history? (:history input) (or (:input input) (:messages input)))]
+
+          (when (nil? turn-input)
+            (throw (ex-info "A session turn requires :input, :messages, or :history."
                             {:type :svar.session/invalid-input})))
           {:messages (cond (string? turn-input) [(user turn-input)]
                            (and (map? turn-input) (:role turn-input)) [turn-input]
                            (sequential? turn-input) (vec turn-input)
                            :else (throw (ex-info "Session input must be text or canonical messages."
                                                  {:type :svar.session/invalid-input})))
-           :opts (dissoc input :input :messages)})
+           :opts (dissoc input :input :messages :history)
+           :replace-history? replace-history?})
         :else (throw (ex-info "Session input must be text, a canonical message, or turn options."
                               {:type :svar.session/invalid-input}))))
 
@@ -8412,14 +8430,14 @@
     (-ask-session! [_ input]
       (locking lock
         (when @closed? (throw (ex-info "The LLM session is closed." {:type :svar.session/closed})))
-        (let [{new-messages :messages turn-opts :opts}
+        (let [{new-messages :messages turn-opts :opts replace-history? :replace-history?}
               (session-turn input)
 
               [active-model call-opts]
               (session-call-route router base-opts turn-opts provider-id)
 
               full-messages
-              (into @history new-messages)
+              (if replace-history? new-messages (into @history new-messages))
 
               call-opts
               (assoc call-opts :messages full-messages)
@@ -8431,14 +8449,16 @@
               (atom false)
 
               session-opts
-              (assoc (select-keys call-opts
-                                  [:websocket-max-retries :websocket-retry-delay-ms
-                                   :websocket-prewarm?])
-                :session-progress progress
-                ;; Control events go to the caller's OWN callback, not the
-                ;; accumulating text wrapper built by the streaming path.
-                :session-on-restart (:on-chunk call-opts)
-                :session-on-rate-limits (:on-chunk call-opts))
+              (cond-> (assoc (select-keys call-opts
+                                          [:websocket-max-retries :websocket-retry-delay-ms
+                                           :websocket-prewarm?])
+                        :session-progress progress
+                        ;; Control events go to the caller's OWN callback, not the
+                        ;; accumulating text wrapper built by the streaming path.
+                        :session-on-restart (:on-chunk call-opts)
+                        :session-on-rate-limits (:on-chunk call-opts))
+                replace-history?
+                (assoc :session-reset? true))
 
               result
               (binding [*responses-session-transport*
@@ -8484,10 +8504,11 @@
    the session, which then runs on HTTP/SSE; `:websocket-max-retries` (default 5)
    and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune that
    ladder. `opts` are ordinary `ask-code!` options and may include initial
-   `:messages`. A session turn may override `:routing :model`: the logical
-   continuation resets and canonical history is replayed through the same physical
-   provider socket. A turn cannot change providers. The returned value implements
-   `Closeable`."
+   `:messages`. A turn may pass `{:history [...]}` to atomically replace the
+   canonical replay history and start a fresh logical chain without replacing the
+   socket. A per-turn `:routing :model` likewise resets the logical chain and
+   replays canonical history through that socket. A turn cannot change providers.
+   The returned value implements `Closeable`."
   [router opts]
   (let [resolved
         (router/resolve-routing router (routing-opts-with-reasoning opts))

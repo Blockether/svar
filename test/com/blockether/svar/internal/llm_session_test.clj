@@ -291,6 +291,50 @@
               (expect (= "resp_2" (:previous_response_id continued-request)))
               (expect (= 1 (count (:input continued-request)))))))
         (expect (= 1 @opens))))
+  (it
+    "replaces canonical history on the same socket and continues from the new chain"
+    (let [events
+          (atom [(completed-event "resp_warm" "") (completed-event "resp_1" "first")
+                 (completed-event "resp_2" "rebased") (completed-event "resp_3" "continued")])
+
+          sent
+          (atom [])
+
+          opens
+          (atom 0)
+
+          closes
+          (atom 0)
+
+          factory
+          (fake-websocket-factory events sent closes)
+
+          replacement
+          [{:role "system" :content "new instructions"} {:role "user" :content "start here"}]]
+
+      (with-redefs [sut/open-responses-websocket! (fn [opts]
+                                                    (swap! opens inc)
+                                                    (factory opts))]
+        (with-open [session (svar/open-session (codex-router)
+                                               {:routing {:provider :openai-codex
+                                                          :model "gpt-5.6"}})]
+          (expect (= "first" (:content (svar/ask! session "one"))))
+          (expect (= "rebased" (:content (svar/ask! session {:history replacement}))))
+          (expect (= "continued" (:content (svar/ask! session "next"))))
+          (expect (= 4 (count @sent)))
+          (expect (= 1 (count (filter #(false? (:generate %)) @sent))))
+          (let [[warmup first-request replay continued] @sent
+                history (svar/session-history session)]
+
+            (expect (false? (:generate warmup)))
+            (expect (= "resp_warm" (:previous_response_id first-request)))
+            (expect (nil? (:previous_response_id replay)))
+            (expect (= 1 (count (:input replay))))
+            (expect (= "resp_2" (:previous_response_id continued)))
+            (expect (= 1 (count (:input continued))))
+            (expect (= replacement (subvec history 0 2)))
+            (expect (= ["system" "user" "assistant" "user" "assistant"] (mapv :role history))))))
+      (expect (= 1 @opens))))
   (it "rejects a provider change inside one explicit session"
       (with-open [session (open-test-session (codex-router)
                                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
