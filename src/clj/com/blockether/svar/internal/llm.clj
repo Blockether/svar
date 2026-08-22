@@ -2389,6 +2389,15 @@
   (when-let [[_ major minor] (re-find #"(?i)(?:^|/)gpt-(\d+)\.(\d+)(?:$|[-.])" (str model))]
     (not (neg? (compare [(parse-long major) (parse-long minor)] [5 6])))))
 
+(defn- responses-explicit-cache-endpoint?
+  "True when a Responses endpoint accepts explicit `prompt_cache_breakpoint`
+   markers. The ChatGPT Codex backend does NOT: it answers HTTP 400
+   `prompt_cache_breakpoint is not supported on this model`, and the Codex client
+   itself never sends the field - there `prompt_cache_key` plus the implicit
+   prefix IS the whole cache contract. Public `api.openai.com` keeps the markers."
+  [provider-id base-url]
+  (not (or (= :openai-codex provider-id)
+         (str/includes? (str base-url) "chatgpt.com/backend-api"))))
 (def ^:private OPENAI_EXPLICIT_CACHE_BREAKPOINT {:mode "explicit"})
 
 (defn- responses-cacheable-input-block?
@@ -2589,10 +2598,14 @@
 
 (defn- build-openai-responses-request-body
   ([messages model extra-body]
-   (build-openai-responses-request-body messages model extra-body false))
-  ([messages model extra-body stateless-items?]
+   (build-openai-responses-request-body messages model extra-body nil))
+  ([messages model extra-body {:keys [stateless-items? explicit-cache?]
+                               :or   {explicit-cache? true}}]
    (let [messages       (sanitize-replayed-messages messages model true)
-         explicit-cache? (gpt-5-6-or-later? model)
+         ;; A breakpoint is a property of the ENDPOINT as much as of the model,
+         ;; so the caller can switch the markers off for a backend that refuses
+         ;; the field even though the model name is GPT-5.6 or later.
+         explicit-cache? (and explicit-cache? (gpt-5-6-or-later? model))
          messages       (cond-> messages
                           explicit-cache? add-rolling-responses-cache-breakpoint)
          [tools tool-choice extra-body] (extra-body-tools extra-body)
@@ -5171,8 +5184,8 @@
 
          (= api-style :openai-compatible-responses)
          (let [responses-call
-               (fn [stateless?]
-                 (let [request-body (build-openai-responses-request-body messages model extra-body stateless?)
+               (fn [build-opts]
+                 (let [request-body (build-openai-responses-request-body messages model extra-body build-opts)
                        completion-opts {:api-key         api-key
                                         :base-url        base-url
                                         :responses-path  (or responses-path "/responses")
@@ -5187,20 +5200,35 @@
                      (*responses-session-transport*
                        request-body completion-opts
                        #(openai-responses-completion request-body completion-opts))
-                     (openai-responses-completion request-body completion-opts))))]
-           ;; Stateless is sticky per host: an explicit provider opt, or a host
-           ;; that already rejected a replayed server item id. Otherwise try the
-           ;; full replay once and self-heal on THAT exact 400 — but never after
-           ;; the stream has emitted output, which a resend would duplicate.
-           (if (or (:stateless-items? opts) (failure/stateless-items-host? base-url))
-             (responses-call true)
-             (try
-               (responses-call false)
-               (catch Exception e
-                 (if (failure/retry-without-server-item-ids? e)
-                   (do (failure/mark-stateless-items! base-url)
-                       (responses-call true))
-                   (throw e))))))
+                     (openai-responses-completion request-body completion-opts))))
+               ;; Two payload capabilities are sticky per host. Stateless replay:
+               ;; an explicit provider opt, or a host that already rejected a
+               ;; replayed server item id. Explicit cache breakpoints: an endpoint
+               ;; that takes the field at all, and one that has not refused it.
+               ;; Either is proven by THAT exact 400 and self-heals once on the
+               ;; spot - but never after the stream has emitted output, which a
+               ;; resend would duplicate.
+               attempt
+               (fn attempt [build-opts]
+                 (try
+                   (responses-call build-opts)
+                   (catch Exception e
+                     (cond
+                       (and (not (:stateless-items? build-opts))
+                         (failure/retry-without-server-item-ids? e))
+                       (do (failure/mark-stateless-items! base-url)
+                           (attempt (assoc build-opts :stateless-items? true)))
+
+                       (and (:explicit-cache? build-opts)
+                         (failure/retry-without-explicit-cache? e))
+                       (do (failure/mark-explicit-cache-refused! base-url)
+                           (attempt (assoc build-opts :explicit-cache? false)))
+
+                       :else (throw e)))))]
+           (attempt {:stateless-items? (boolean (or (:stateless-items? opts)
+                                                  (failure/stateless-items-host? base-url)))
+                     :explicit-cache?  (and (responses-explicit-cache-endpoint? provider-id base-url)
+                                         (not (failure/explicit-cache-refused-host? base-url)))}))
 
          :else
          (if on-chunk

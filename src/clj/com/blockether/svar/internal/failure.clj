@@ -895,6 +895,41 @@
     (not (stream-output-started? e))))
 
 ;; -----------------------------------------------------------------------------
+;; Explicit prompt-cache breakpoint registry (endpoint capability)
+;; -----------------------------------------------------------------------------
+;;
+;; A GPT-5.6+ Responses request can mark exact cache boundaries with
+;; `prompt_cache_breakpoint`. Support is a property of the ENDPOINT, not of the
+;; model name it was inferred from: the ChatGPT Codex backend answers HTTP 400
+;; `prompt_cache_breakpoint is not supported on this model`, and every resend of
+;; the same body fails identically - the REQUEST has to change. The transport
+;; drops the markers; the verdict lives here next to the classification.
+
+(def explicit-cache-refused-hosts*
+  "Hosts proven to reject an explicit `prompt_cache_breakpoint`. Sticky for the
+   process: the capability belongs to the deployment, not to one turn."
+  (atom #{}))
+
+(defn mark-explicit-cache-refused!
+  "Remember that `base-url`'s host rejects explicit cache breakpoints."
+  [base-url]
+  (when-let [h (url->host base-url)]
+    (swap! explicit-cache-refused-hosts* conj h))
+  nil)
+
+(defn explicit-cache-refused-host?
+  "True once this host has rejected an explicit `prompt_cache_breakpoint`."
+  [base-url]
+  (boolean (some-> (url->host base-url) (@explicit-cache-refused-hosts*))))
+
+(defn retry-without-explicit-cache?
+  "THE verdict for the cache-breakpoint self-heal: the endpoint named
+   `prompt_cache_breakpoint` as the field it refuses AND nothing was streamed
+   yet, so re-sending the turn without the markers cannot duplicate output."
+  [^Throwable e]
+  (and (str/includes? (haystack e) "prompt_cache_breakpoint")
+    (not (stream-output-started? e))))
+;; -----------------------------------------------------------------------------
 ;; The two verdicts every layer asks for
 ;; -----------------------------------------------------------------------------
 

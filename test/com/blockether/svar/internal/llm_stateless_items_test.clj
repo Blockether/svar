@@ -34,7 +34,7 @@
    {:role "user" :content [{:type "tool_result" :tool_use_id "c1|fc_1" :content "1"}]}])
 
 (defn- input-of [stateless?]
-  (:input (build-responses convo "m-A" {} stateless?)))
+  (:input (build-responses convo "m-A" {} {:stateless-items? stateless?})))
 
 (defn- items-of [stateless? type]
   (filterv #(= type (:type %)) (input-of stateless?)))

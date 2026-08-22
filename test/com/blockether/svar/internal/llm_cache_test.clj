@@ -6,15 +6,18 @@
 
    - `cached` markers survive `system`/`user`/`assistant` canonical content.
    - Anthropic emits `cache_control: {type: \"ephemeral\"}` per marked block.
-   - GPT-5.6+ Responses emits exact rolling `prompt_cache_breakpoint` markers;
-     older OpenAI wires strip unsupported `:svar/*` markers.
+   - GPT-5.6+ Responses emits exact rolling `prompt_cache_breakpoint` markers
+     where the ENDPOINT takes them; older OpenAI wires, and a backend that
+     refuses the field, strip unsupported `:svar/*` markers.
    - `extract-anthropic-response-data` surfaces
      `cache_creation_input_tokens` / `cache_read_input_tokens` on
      `:prompt_tokens_details` so downstream callers see real cache hits.
 
-   Pure-data tests only \u2014 no LLM calls."
+   Pure data, except one funnel test that stubs the transport — no LLM calls."
   (:require
    [clojure.string]
+   [com.blockether.svar.core :as svar]
+   [com.blockether.svar.internal.failure :as failure]
    [lazytest.core :refer [defdescribe expect it]]
    [com.blockether.svar.internal.llm :as sut]))
 
@@ -172,6 +175,113 @@
                 [{:role "user" :content [(sut/cached "stable")]}]
                 "gpt-5.5" {})]
       (expect (nil? (get-in body [:input 0 :content 0 :prompt_cache_breakpoint]))))))
+
+(defdescribe responses-explicit-cache-endpoint-test
+  ;; Regression: `prompt_cache_breakpoint` was gated on the MODEL NAME alone, so
+  ;; a `gpt-5.6-*` model served by the ChatGPT Codex backend answered HTTP 400
+  ;; "prompt_cache_breakpoint is not supported on this model" from the second
+  ;; request of a turn onwards - the first request has a single input boundary,
+  ;; so no rolling marker is written yet - and the agent turn died there.
+  (it "refuses the field for the ChatGPT Codex backend and keeps it for OpenAI"
+    (expect (not (#'sut/responses-explicit-cache-endpoint?
+                  :openai-codex "https://chatgpt.com/backend-api")))
+    ;; a differently named provider pointed at that same backend is that wire
+    (expect (not (#'sut/responses-explicit-cache-endpoint?
+                  :my-codex "https://chatgpt.com/backend-api")))
+    (expect (#'sut/responses-explicit-cache-endpoint? :openai "https://api.openai.com/v1"))
+    (expect (#'sut/responses-explicit-cache-endpoint? :gateway "https://gw.example.invalid/v1")))
+
+  (it "builds a GPT-5.6 body without markers once the endpoint refuses them"
+    (let [msgs [{:role "user" :content "turn one"}
+                {:role "assistant" :content "answer one"}
+                {:role "user" :content [(sut/cached "turn two")]}]
+          off  (#'sut/build-openai-responses-request-body
+                msgs "gpt-5.6-sol" {} {:explicit-cache? false})
+          on   (#'sut/build-openai-responses-request-body
+                msgs "gpt-5.6-sol" {} nil)]
+      (expect (nil? (re-find #"prompt_cache_breakpoint" (pr-str off))))
+      ;; the model contract itself is unchanged - only the endpoint gate moved
+      (expect (some? (re-find #"prompt_cache_breakpoint" (pr-str on))))))
+
+  (it "keeps the field off a Codex request built by the dispatch funnel"
+    ;; The reported shape: system + task + tool call + tool result is the second
+    ;; iteration of any agent turn, and it is where the rolling marker first
+    ;; lands on an item the ChatGPT Codex backend rejects with HTTP 400.
+    (let [captured (atom [])
+          router   (svar/make-router
+                     [{:id :openai-codex
+                       :api-key "test-key"
+                       :base-url "https://chatgpt.com/backend-api"
+                       :api-style :openai-compatible-responses
+                       :responses-path "/codex/responses"
+                       :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}])]
+      (with-redefs [sut/openai-responses-completion
+                    (fn [body _opts]
+                      (swap! captured conj body)
+                      {:content "ok" :model "gpt-5.6" :usage {}})]
+        (svar/ask! router
+          {:messages [{:role "system" :content "agent rules"}
+                      {:role "user" :content "task"}
+                      {:role "assistant" :content [{:type "tool_use" :id "call_1|fc_1"
+                                                    :name "run" :input {}}]}
+                      {:role "user" :content [{:type "tool_result" :tool_use_id "call_1|fc_1"
+                                               :content "1"}]}]
+           :routing {:provider :openai-codex :model "gpt-5.6"}}))
+      (expect (= 1 (count @captured)))
+      (expect (nil? (re-find #"prompt_cache_breakpoint" (pr-str @captured))))
+      ;; what Codex itself caches on is untouched
+      (expect (some? (:prompt_cache_key (first @captured)))))))
+
+(defdescribe explicit-cache-self-heal-verdict-test
+  (it "self-heals on the endpoint's own rejection, and only before output"
+    (let [refusal (fn [data]
+                    (ex-info "prompt_cache_breakpoint is not supported on this model"
+                      (merge {:status 400} data)))]
+      (expect (failure/retry-without-explicit-cache? (refusal {})))
+      ;; already streamed bytes: a resend would duplicate them
+      (expect (not (failure/retry-without-explicit-cache? (refusal {:content-acc-len 12}))))
+      (expect (not (failure/retry-without-explicit-cache? (ex-info "Overloaded" {:status 529}))))))
+
+  (it "remembers the host that refused the field"
+    (let [url "https://breakpoint-test.example.invalid/v1"]
+      (try
+        (expect (not (failure/explicit-cache-refused-host? url)))
+        (failure/mark-explicit-cache-refused! url)
+        (expect (failure/explicit-cache-refused-host? url))
+        (expect (not (failure/explicit-cache-refused-host? "https://other.example.invalid/v1")))
+        (finally
+          (swap! failure/explicit-cache-refused-hosts* disj "breakpoint-test.example.invalid")))))
+
+  (it "drops the markers and retries once when an endpoint refuses them"
+    (let [captured (atom [])
+          calls    (atom 0)
+          router   (svar/make-router
+                     [{:id :gw :api-key "k"
+                       :base-url "https://cachegate.example.invalid/v1"
+                       :api-style :openai-compatible-responses
+                       :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}])
+          msgs     [{:role "system" :content "agent rules"}
+                    {:role "user" :content "task"}
+                    {:role "assistant" :content [{:type "tool_use" :id "call_1|fc_1"
+                                                  :name "run" :input {}}]}
+                    {:role "user" :content [{:type "tool_result" :tool_use_id "call_1|fc_1"
+                                             :content "1"}]}]
+          respond  (fn [body _opts]
+                     (swap! captured conj body)
+                     (if (= 1 (swap! calls inc))
+                       (throw (ex-info "prompt_cache_breakpoint is not supported on this model"
+                                {:status 400 :source :provider}))
+                       {:content "ok" :model "gpt-5.6" :usage {}}))]
+      (try
+        (with-redefs [sut/openai-responses-completion respond]
+          (svar/ask! router {:messages msgs :routing {:provider :gw :model "gpt-5.6"}})
+          ;; the host is remembered, so the next turn never sends the field again
+          (svar/ask! router {:messages msgs :routing {:provider :gw :model "gpt-5.6"}}))
+        (expect (= 3 @calls))
+        (expect (= [1 0 0]
+                  (mapv #(count (re-seq #"prompt_cache_breakpoint" (pr-str %))) @captured)))
+        (finally
+          (swap! failure/explicit-cache-refused-hosts* disj "cachegate.example.invalid"))))))
 
 (defdescribe openai-canonical-usage-test
   ;; Phase A: normalize-openai-usage emits canonical shape — :input-tokens

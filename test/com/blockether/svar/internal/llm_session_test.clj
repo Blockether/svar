@@ -143,6 +143,28 @@
             (expect (= "two" (get-in second-request [:input 0 :content 0 :text])))))
         (expect (= 1 @closes)))))
 
+  (it "never sends an explicit cache breakpoint to the ChatGPT Codex backend"
+    ;; Regression: from the second request of a session onwards the body carried
+    ;; a rolling `prompt_cache_breakpoint` (the first request has one input
+    ;; boundary, so no marker is written yet) and the Codex backend answered
+    ;; HTTP 400 "prompt_cache_breakpoint is not supported on this model" - the
+    ;; turn died, and every identical resend after it died the same way.
+    (let [events (atom [(completed-event "resp_1" "first")
+                        (completed-event "resp_2" "second")
+                        (completed-event "resp_3" "third")])
+          sent (atom [])
+          closes (atom 0)]
+      (with-redefs [sut/open-responses-websocket!
+                    (fake-websocket-factory events sent closes)]
+        (with-open [session (open-test-session (codex-router)
+                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+          (svar/ask! session "one")
+          (svar/ask! session "two")
+          (svar/ask! session "three")
+          (expect (= 3 (count @sent)))
+          (expect (nil? (re-find #"prompt_cache_breakpoint" (json/write-json-str @sent))))
+          ;; the prompt cache still rides on the stable key Codex itself uses
+          (expect (string? (:prompt_cache_key (first @sent))))))))
   (it "reuses one socket while a model change starts a full Responses chain"
     ;; Codex keeps the provider transport alive across model switches, but a
     ;; continuation cursor is model-bound: the first request for the new model
