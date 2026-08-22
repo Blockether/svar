@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.132] - 2026-08-22
+
+### Changed
+- fix(llm): stop reading the Responses reasoning config as thinking
+- release: update version files for v0.7.131, bump to next dev version
+
+
 ## [v0.7.131] - 2026-08-22
 
 ### Changed
@@ -2312,7 +2319,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.131...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.132...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2478,3 +2485,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.129]: https://github.com/Blockether/svar/releases/tag/v0.7.129
 [v0.7.130]: https://github.com/Blockether/svar/releases/tag/v0.7.130
 [v0.7.131]: https://github.com/Blockether/svar/releases/tag/v0.7.131
+[v0.7.132]: https://github.com/Blockether/svar/releases/tag/v0.7.132
