@@ -190,3 +190,39 @@
             (it "is the same budget the router's same-provider phase spends"
                 (expect (= (long failure/RETRY_PHASE_BUDGET_MS)
                            (long (:fallback-after-ms router/DEFAULT_RATE_LIMIT_ROUTING)))))))
+
+;; Regression, Vis retry composition: routed 5xx failures passed through the
+;; seven-attempt low-level ladder inside every one of the router's seven attempts,
+;; multiplying one declared retry phase into 49 wire requests.
+(defdescribe
+  routed-transient-retry-ownership-test
+  (it "lets the router own one seven-attempt transient retry phase"
+      (let [wire-attempts
+            (atom 0)
+
+            provider
+            {:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+
+            model-map
+            (first (:models provider))
+
+            routed-opts
+            (#'llm/inject-routed-params {:initial-delay-ms 1 :max-delay-ms 1} provider model-map)
+
+            r
+            (llm/make-router [provider]
+                             {:rate-limit {:same-provider-delays-ms [0 0 0 0 0 0]
+                                           :fallback-after-ms 60000
+                                           :fallback-provider? true}})]
+
+        (try (router/with-provider-fallback
+               r
+               {}
+               (fn [_provider _model]
+                 (#'llm/with-retry
+                  (fn []
+                    (swap! wire-attempts inc)
+                    (throw (ex-info "HTTP 503" {:type :svar.core/http-error :status 503})))
+                  routed-opts)))
+             (catch clojure.lang.ExceptionInfo _ nil))
+        (expect (= failure/RETRY_MAX_ATTEMPTS @wire-attempts)))))

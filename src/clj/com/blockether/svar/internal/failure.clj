@@ -362,15 +362,13 @@
   [1000 2000 4000 8000 15000 15000])
 
 (def RETRY_PHASE_BUDGET_MS
-  "Wall-clock cap for ONE same-provider retry phase. The low-level HTTP ladder
-   (`llm/with-retry`) and the router's `:fallback-after-ms` are the SAME phase
-   seen at two layers, so they spend one budget rather than two.
+  "Wall-clock cap for one same-provider retry phase. Direct calls spend it in
+   `llm/with-retry`; routed calls spend it in the router-owned retry loop.
 
    Measured (vis session 07d38cba, 2026-08-07): an `anthropic-coding-plan` 429
    answered `Retry-After: 60`, again `60`, then `42`. The request that finally
    succeeded landed ~163 s after the first refusal — so a budget shorter than
-   that turns a throttle the provider itself scheduled into a hard failure,
-   which is exactly what a 60 s cap does to a one-minute cooldown."
+   that turns a throttle the provider itself scheduled into a hard failure."
   180000)
 
 (defn backoff-ms
@@ -1083,14 +1081,12 @@
   "Canonical same-provider HTTP retry policy for `llm/with-retry`.
 
    The returned map carries `:retry?`, the canonical `:classification`, a stable
-   `:reason` when it retries and a `:no-retry-reason` when it does NOT — that
-   refusal used to be computed and dropped, so nothing downstream could say WHY a
-   failure was never resent. Router policy (provider selection and whether it owns a
-   429 cooldown) is supplied as options; it never changes failure evidence.
-   Deliberate stream watchdog aborts remain router-owned and are not retried
-   here, even before output."
+   `:reason` when it retries and a `:no-retry-reason` when it does not. Routed
+   calls set `:router-handles-transients?`; then this layer performs exactly one
+   attempt and hands every transient failure to the router's single retry phase.
+   Direct calls omit it and retain the low-level retry ladder."
   ([e] (low-level-retry-decision e nil))
-  ([^Throwable e {:keys [router-handles-rate-limit?]}]
+  ([^Throwable e {:keys [router-handles-transients?]}]
    (let [classification
          (classify e)
 
@@ -1106,41 +1102,38 @@
                       :context-length-exceeded :model-unavailable :invalid-request}
                     category)
 
-         transport?
+         transport-candidate?
          (and (not hard-category?) (not started?) (transport-retryable? e))
 
-         ;; Low-level retry may retry response failures and genuine transport
-         ;; drops, but never after visible output, router-owned watchdogs, or a
-         ;; router-owned 429. `:connect-timeout` and `:transport-drop` join that
-         ;; set ONLY when the failure carries an HTTP status: the shared LiteLLM
-         ;; gateway maps `litellm.Timeout` onto 408 and answers a pre-response
-         ;; socket drop with 502 while the real cause sits in the body, so the
-         ;; exception is never connect-phase typed and `transport-retryable?`
-         ;; cannot see it — yet the status proves a server answered, and both
-         ;; categories are `:reached-model? false`, so replaying is
-         ;; side-effect-safe. Status-LESS connect failures stay with
-         ;; `transport-retryable?` and its host-health gate, which alone can tell
-         ;; a transient blip from a host that was never reachable.
-         response-retry?
+         ;; A direct call may retry response failures and genuine transport
+         ;; drops, but never after visible output or router-owned watchdogs.
+         ;; `:connect-timeout` and `:transport-drop` join that set only when the
+         ;; failure carries an HTTP status: the shared LiteLLM gateway maps its
+         ;; own timeout/drop wrappers onto 408/502 responses.
+         response-candidate?
          (and (not started?)
               retryable?
               (or (contains? #{:rate-limited :upstream-timeout :gateway-unavailable} category)
-                  (and (some? status) (contains? #{:connect-timeout :transport-drop} category)))
-              (not (and router-handles-rate-limit? (= :rate-limited category))))
+                  (and (some? status) (contains? #{:connect-timeout :transport-drop} category))))
+
+         retry-candidate?
+         (boolean (or transport-candidate? response-candidate?))
+
+         router-owned?
+         (and router-handles-transients? retry-candidate?)
 
          retry?
-         (boolean (or transport? response-retry?))]
+         (and retry-candidate? (not router-owned?))]
 
      {:retry? retry?
       :reason (when retry?
-                (cond transport? :connection-error
+                (cond transport-candidate? :connection-error
                       (and (= :gateway-unavailable category) (nil? status)) :transient-message
                       :else :http-status))
       :classification classification
       :no-retry-reason (when-not retry?
                          (cond hard-category? :hard-category
-                               (and router-handles-rate-limit? (= :rate-limited category))
-                               :router-owned-rate-limit
+                               router-owned? :router-owned-transient
                                started? :output-already-streamed
                                (not retryable?) :not-retryable
                                :else :no-retry-path))})))

@@ -371,13 +371,14 @@
                                                       {:type :svar.core/http-error :status 401}))]
           (expect (false? retry?))
           (expect (= :hard-category no-retry-reason))))
-    (it "names the router as the owner of the 429 cooldown it declined"
-        (let [{:keys [retry? no-retry-reason]} (sut/low-level-retry-decision
-                                                 (err "HTTP 429"
-                                                      {:type :svar.core/http-error :status 429})
-                                                 {:router-handles-rate-limit? true})]
-          (expect (false? retry?))
-          (expect (= :router-owned-rate-limit no-retry-reason))))
+    (it "names the router as owner of every routed transient"
+        (doseq [e [(err "HTTP 429" {:type :svar.core/http-error :status 429})
+                   (err "HTTP 503" {:type :svar.core/http-error :status 503})
+                   (java.net.SocketTimeoutException. "read timed out")]]
+          (let [{:keys [retry? no-retry-reason]}
+                (sut/low-level-retry-decision e {:router-handles-transients? true})]
+            (expect (false? retry?))
+            (expect (= :router-owned-transient no-retry-reason)))))
     (it "leaves no refusal reason on a decision that DOES retry"
         (let [{:keys [retry? reason no-retry-reason]}
               (sut/low-level-retry-decision

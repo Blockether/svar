@@ -1942,7 +1942,7 @@
   ([f] (with-retry f {}))
   ([f
     {:keys [max-retries initial-delay-ms max-delay-ms multiplier budget-ms
-            router-handles-rate-limit? on-retry provider-id model]
+            router-handles-transients? on-retry provider-id model]
      :or {max-retries failure/RETRY_MAX_ATTEMPTS
           initial-delay-ms failure/RETRY_INITIAL_DELAY_MS
           max-delay-ms failure/RETRY_MAX_DELAY_MS
@@ -1955,8 +1955,8 @@
                          (catch Exception e
                            (let [{:keys [retry? reason classification no-retry-reason]}
                                  (retry-decision e
-                                                 {:router-handles-rate-limit?
-                                                  router-handles-rate-limit?})]
+                                                 {:router-handles-transients?
+                                                  router-handles-transients?})]
                              (if (and retry? (< attempt (long max-retries)))
                                {:retry true
                                 :error e
@@ -2026,10 +2026,13 @@
                             (min (* (double delay-ms) (double multiplier))
                                  (double max-delay-ms))))))
                :else (let [err (:error result)]
-                       (log-retry-declined! {:attempt attempt
-                                             :declined (:declined result)
-                                             :classification (:classification result)
-                                             :error err})
+                       ;; Delegation is not a refusal: the router immediately owns
+                       ;; this failure and emits the one canonical retry event.
+                       (when-not (= :router-owned-transient (:declined result))
+                         (log-retry-declined! {:attempt attempt
+                                               :declined (:declined result)
+                                               :classification (:classification result)
+                                               :error err}))
                        (throw err))))))))
 
 (def ^:private content-block-types #{"text" "output_text"})
@@ -4449,7 +4452,7 @@
                                (assoc :body (truncate-error-body response-body)))))))))
 
 (defn- chat-completion-with-retry
-  "Calls the LLM API with exponential backoff retry for rate limits."
+  "Calls the LLM API with the direct-call transient retry policy."
   [messages model api-key base-url retry-opts timeout-ms extra-body api-style]
   (let [api-style
         (or api-style :openai-compatible-chat)
@@ -6523,7 +6526,9 @@
      `:openai-compatible-chat` api-style - hardens prose-leaking models (GLM
      family historically leaks prose into
      `content` under `:deep` reasoning).
-   - `:llm-headers` merges provider defaults with caller headers; caller wins."
+   - `:llm-headers` merges provider defaults with caller headers; caller wins.
+   - routed primitives carry `:router-handles-transients?`, making the router
+     the sole owner of retry schedule, budget, telemetry, and fallback."
   [opts provider model-map]
   (let [ctx
         (long (or (:context model-map) router/DEFAULT_CONTEXT_LIMIT))
@@ -6591,7 +6596,7 @@
                :base-url (:base-url provider)
                :api-style (or (:api-style model-map) (:api-style provider))
                :provider-id (:id provider)
-               :router-handles-rate-limit? true
+               :router-handles-transients? true
                :json-object-mode? json-object-mode?
                :extra-body merged-body)
         ;; Forward the routed model's real context window so `resolve-opts`'
