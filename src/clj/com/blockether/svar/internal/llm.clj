@@ -3796,30 +3796,40 @@
 
 (defn- websocket-event-status
   "HTTP status for a Responses WebSocket failure event: the one the server wrapped
-   into the event when it sent one (Codex reads both `status` and `status_code`),
-   else the status its error CODE stands for."
-  [event error code]
-  (let [raw (or (get event "status")
-                (get event "status_code")
-                (get error "status")
-                (get error "status_code"))]
-    (cond (number? raw) (long raw)
-          (string? raw) (parse-long raw)
-          :else (get stream-failed-code->status
-                     (some-> code
-                             str/lower-case)))))
+   into the event, response, or error when it sent one (Codex reads both `status`
+   and `status_code`), else the status its error CODE stands for."
+  [event response error code]
+  (let [raw
+        (or (get event "status")
+            (get event "status_code")
+            (get response "status")
+            (get response "status_code")
+            (get error "status")
+            (get error "status_code"))
+
+        explicit
+        (cond (number? raw) (long raw)
+              (string? raw) (parse-long raw)
+              :else nil)]
+
+    (or explicit
+        (get stream-failed-code->status
+             (some-> code
+                     str/lower-case)))))
 
 (defn- websocket-event-error
   "Types an `error` / `response.failed` event from the Responses WebSocket exactly
    as the SSE path types a mid-stream failure - carrying the `:status` that makes
-   the router's transient classification (429/5xx) fire. Without it a rate limit
-   that arrived over the socket ended the turn while the identical failure over
-   SSE was retried; the Codex CLI maps its wrapped websocket error events onto the
-   same HTTP-status errors for that reason. `:code` stays: the session's own
-   recovery (rejected cursor, connection limit) classifies on it."
+   the router's transient classification (429/5xx) fire. Responses nests its
+   provider verdict at `response.error`; bare websocket errors put it at `error`.
+   `:code` stays: the session's own recovery (rejected cursor, connection limit)
+   classifies on it."
   [event]
-  (let [error
-        (or (get event "error") event)
+  (let [response
+        (get event "response")
+
+        error
+        (or (get event "error") (get response "error") event)
 
         code
         (some-> (or (get error "code") (get error "type") (get event "code"))
@@ -3829,7 +3839,7 @@
         (or (get error "message") (get event "message") "Responses WebSocket request failed.")
 
         status
-        (websocket-event-status event error code)
+        (websocket-event-status event response error code)
 
         overflow?
         (context-overflow-failure? code message)]

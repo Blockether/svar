@@ -2631,6 +2631,14 @@
     (.interrupt (Thread/currentThread))
     (throw e)))
 
+(defn- provider-retry-reason
+  "Stable UI reason for one same-provider transient retry."
+  [error]
+  (let [status (:status (ex-data error))]
+    (cond (= 429 status) :rate-limit
+          (and status (<= 500 (long status) 599)) :server-error
+          :else :transient-error)))
+
 (defn- handle-rate-limit-retries
   "Same-provider retry loop for any transient error (429/5xx/network) before any streamed content.
 
@@ -2711,22 +2719,22 @@
           (some? plan)
           (do (append-routing-event! trace
                                      prefs
-                                     (routing-event router
-                                                    :llm.routing/provider-retry
-                                                    (cond-> {:status (:status (ex-data last-error))
-                                                             :reason :rate-limit
-                                                             :provider (provider-label provider)
-                                                             :model (:name model-map)
-                                                             :attempt (inc retry-index)
-                                                             :delay-ms delay-ms
-                                                             :elapsed-ms (long (elapsed*))
-                                                             :error (ex-message last-error)}
-                                                      ;; Name the cooldown as the SERVER's when it is: a minute of
-                                                      ;; waiting reads as a hang unless the surface can say who
-                                                      ;; asked for it.
-                                                      (some? (:retry-after-ms plan))
-                                                      (assoc :retry-after-ms
-                                                        (long (:retry-after-ms plan))))))
+                                     (routing-event
+                                       router
+                                       :llm.routing/provider-retry
+                                       (cond-> {:status (:status (ex-data last-error))
+                                                :reason (provider-retry-reason last-error)
+                                                :provider (provider-label provider)
+                                                :model (:name model-map)
+                                                :attempt (inc retry-index)
+                                                :delay-ms delay-ms
+                                                :elapsed-ms (long (elapsed*))
+                                                :error (ex-message last-error)}
+                                         ;; Name the cooldown as the SERVER's when it is: a minute of
+                                         ;; waiting reads as a hang unless the surface can say who
+                                         ;; asked for it.
+                                         (some? (:retry-after-ms plan))
+                                         (assoc :retry-after-ms (long (:retry-after-ms plan))))))
               ;; Plain `Thread/sleep` instead of `(async/<!! (async/timeout
               ;; ...))` so a Vis-side `Esc` (= thread interrupt) wakes the
               ;; loop immediately with an `InterruptedException`. Core.async

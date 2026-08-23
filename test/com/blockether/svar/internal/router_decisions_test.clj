@@ -873,7 +873,9 @@
           (expect (= [:llm.routing/provider-retry :llm.routing/provider-retry
                       :llm.routing/provider-fallback]
                      (mapv :event/type trace)))
-          ;; A 5xx/529 is transient, NOT a rate limit — label stays :transient-error.
+          ;; A 5xx/529 is a server failure, NOT a rate limit. Every same-provider
+          ;; retry and the eventual fallover must say that plainly.
+          (expect (= [:server-error :server-error :transient-error] (mapv :reason trace)))
           (expect (= status (:status (last trace)))))))))
 
 (defdescribe

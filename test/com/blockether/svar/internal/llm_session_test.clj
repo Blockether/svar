@@ -558,6 +558,61 @@
               (expect (= "resp_1" (:previous_response_id retried)))
               (expect (= 1 (count (:input retried)))))))
         (expect (zero? @http-calls))))
+  (it "retries a nested response failure without discarding the healthy socket"
+      ;; Regression, vis session 1413beac: `response.failed` nests its error below
+      ;; `response`. The WebSocket parser missed it, so the second failure was
+      ;; untyped and ended a 66-iteration turn instead of using the retry ladder.
+      (let [events
+            (atom [(completed-event "resp_1" "first")
+                   (json/write-json-str {"type" "response.failed"
+                                         "response" {"status" "failed"
+                                                     "error" {"code" "internal_error"
+                                                              "message"
+                                                              "You can retry your request."}}})
+                   (completed-event "resp_2" "second")])
+
+            sent
+            (atom [])
+
+            opens
+            (atom 0)
+
+            closes
+            (atom 0)
+
+            aborts
+            (atom 0)
+
+            factory
+            (fake-websocket-factory events sent closes aborts)
+
+            router
+            (svar/make-router [{:id :openai-codex
+                                :api-key "test-key"
+                                :base-url "https://chatgpt.com/backend-api"
+                                :api-style :openai-compatible-responses
+                                :responses-path "/codex/responses"
+                                :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]
+                              {:rate-limit {:same-provider-delays-ms [0 0]
+                                            :respect-retry-after? false}})]
+
+        (with-redefs [sut/open-responses-websocket! (fn [opts]
+                                                      (swap! opens inc)
+                                                      (factory opts))]
+          (with-open [session (open-test-session router
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (svar/ask! session "one")
+            (let [result (svar/ask! session "two")
+                  [_ failed retried] @sent]
+
+              (expect (= "second" (:content result)))
+              (expect (= 500 (get-in result [:routed/trace 0 :status])))
+              (expect (= :server-error (get-in result [:routed/trace 0 :reason])))
+              (expect (= ["resp_1" "resp_1"] (mapv :previous_response_id [failed retried])))
+              (expect (= [1 1] (mapv #(count (:input %)) [failed retried]))))))
+        (expect (= 1 @opens))
+        (expect (zero? @aborts))))
   (it "keeps the status the server wrapped into the error event"
       (let [error (websocket-event-error {"type" "error"
                                           "status_code" 503
