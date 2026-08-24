@@ -3507,7 +3507,7 @@
             (when (re-find pattern response-body) message))
           API_KEY_ERROR_PATTERNS)))
 
-(declare extract-stream-delta http-post-stream!)
+(declare enrich-responses-reasoning-event extract-stream-delta http-post-stream!)
 
 (defn responses-url
   "Builds an OpenAI Responses-style endpoint URL.
@@ -3952,7 +3952,14 @@
         (StringBuilder.)
 
         tool-args
-        (StringBuilder.)]
+        (StringBuilder.)
+
+        ;; The summary-part boundaries a Codex reasoning stream only IMPLIES.
+        ;; Carry them exactly like the SSE reader does, or two bold headlines
+        ;; stream glued (`**A****B**`) and the terminal join REWRITES the
+        ;; cumulative - which every append-only consumer slices garbage from.
+        current-reasoning-item
+        (atom nil)]
 
     (loop [output-items
            []
@@ -3972,7 +3979,8 @@
               (throw (ex-info "Responses WebSocket closed before a terminal response."
                               {:type :svar.session/transport-closed :close raw}))
               :else
-              (let [event (json/read-json raw)
+              (let [event (enrich-responses-reasoning-event current-reasoning-item
+                                                            (json/read-json raw))
                     event-type (get event "type")
                     rate-limits (codex-rate-limit-snapshot event)]
 
@@ -5387,6 +5395,42 @@
         last-semantic-ns
         (atom (System/nanoTime))
 
+        ;; Stream progress profile. The semantic deadline is a HEURISTIC
+        ;; constant, and nothing in the logs carried the distribution it should
+        ;; be tuned against. Record the longest silence between two model
+        ;; progress events, the phase that silence fell in, and how many
+        ;; keepalive-class events arrived during it - never any model text.
+        first-semantic-ns
+        (atom nil)
+
+        max-gap-ns
+        (atom 0)
+
+        max-gap-phase
+        (atom :pre-first-token)
+
+        semantic-events
+        (atom 0)
+
+        quiet-events
+        (atom 0)
+
+        progress-phase
+        (fn []
+          (cond (pos? (.length tool-args-acc)) :tool-args
+                (pos? (.length content-acc)) :text
+                (pos? (.length reasoning-acc)) :reasoning
+                :else :pre-first-token))
+
+        progress-profile
+        (fn []
+          (let [first-ns @first-semantic-ns]
+            {:ttft-ms (when first-ns (quot (- (long first-ns) (long request-start-ns)) 1000000))
+             :max-gap-ms (quot (long @max-gap-ns) 1000000)
+             :max-gap-phase @max-gap-phase
+             :semantic-events @semantic-events
+             :quiet-events @quiet-events}))
+
         idle-fired?
         (atom false)
 
@@ -5444,11 +5488,13 @@
               (reset! semantic-fired? true)
               (trove/log! {:level :warn
                            :id ::stream-semantic-timeout
-                           :data (log-data {:url url
-                                            :semantic-timeout-ms semantic-timeout-ms
-                                            :elapsed-ms elapsed-ms
-                                            :content-acc-len (.length content-acc)
-                                            :reasoning-acc-len (.length reasoning-acc)})
+                           :data (log-data (merge (progress-profile)
+                                                  {:url url
+                                                   :semantic-timeout-ms semantic-timeout-ms
+                                                   :elapsed-ms elapsed-ms
+                                                   :phase (progress-phase)
+                                                   :content-acc-len (.length content-acc)
+                                                   :reasoning-acc-len (.length reasoning-acc)}))
                            :msg "stream semantic timeout, closing"}))))]
 
     (try
@@ -5495,8 +5541,17 @@
                        (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
                      (when-let [err (stream-failed-error parsed)]
                        (reset! failed-response err))
-                     (when (stream-semantic-event? parsed extracted content-piece reasoning-piece)
-                       (reset! last-semantic-ns (System/nanoTime)))
+                     (if (stream-semantic-event? parsed extracted content-piece reasoning-piece)
+                       (let [now-ns (System/nanoTime)
+                             gap-ns (- now-ns (long @last-semantic-ns))]
+
+                         (when (nil? @first-semantic-ns) (reset! first-semantic-ns now-ns))
+                         (when (> gap-ns (long @max-gap-ns))
+                           (reset! max-gap-ns gap-ns)
+                           (reset! max-gap-phase (progress-phase)))
+                         (swap! semantic-events inc)
+                         (reset! last-semantic-ns now-ns))
+                       (swap! quiet-events inc))
                      (when content-piece (.append content-acc content-piece))
                      (when reasoning-piece (.append reasoning-acc reasoning-piece))
                      (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
@@ -5737,7 +5792,9 @@
             ;; died with the exception unless a caller printed its ex-data.
             (do (trove/log! {:level :warn
                              :id ::stream-truncated
-                             :data (log-data (assoc stream-finalization :url url))
+                             :data (log-data (merge stream-finalization
+                                                    (progress-profile)
+                                                    {:url url :outcome :truncated}))
                              :msg "stream ended before terminal marker"})
                 (throw (ex-info "Stream ended before terminal marker."
                                 {:type :svar.core/stream-truncated
@@ -5813,15 +5870,22 @@
               assistant-msg)
 
             stream-finalization
-            (stream-finalization-summary {:terminal @terminal-event
-                                          :incomplete nil
-                                          :last-event-type @last-event-type
-                                          :last-finish-reason @last-finish-reason
-                                          :stop-details @stop-details
-                                          :content-acc content-acc
-                                          :reasoning-acc reasoning-acc
-                                          :response response})]
+            (assoc (stream-finalization-summary {:terminal @terminal-event
+                                                 :incomplete nil
+                                                 :last-event-type @last-event-type
+                                                 :last-finish-reason @last-finish-reason
+                                                 :stop-details @stop-details
+                                                 :content-acc content-acc
+                                                 :reasoning-acc reasoning-acc
+                                                 :response response})
+              :progress (progress-profile))]
 
+        (trove/log! {:level :info
+                     :id ::stream-progress
+                     :data (log-data (assoc (progress-profile)
+                                       :url url
+                                       :outcome :complete))
+                     :msg "stream progress profile"})
         (trove/log! {:level :debug
                      :id ::stream-finalized
                      :data (log-data (assoc stream-finalization :url url))

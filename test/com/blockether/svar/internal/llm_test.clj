@@ -581,6 +581,38 @@
               (expect (= "ok" (:content result)))
               (expect (= 50 @seen))))))
     (it
+      "profiles stream progress without counting heartbeats as progress"
+      ;; The semantic deadline is a HEURISTIC constant and nothing in the logs
+      ;; carried the distribution to tune it against. Record time-to-first
+      ;; progress, the longest silence and the phase it fell in - and never let
+      ;; a keepalive count as progress, or this telemetry lies exactly the way
+      ;; the transport idle timeout it supplements did.
+      (let
+        [stream
+         (str
+           "data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n"
+           "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"plan\"}\n\n"
+           "data: {\"type\":\"response.in_progress\",\"response\":{\"status\":\"in_progress\"}}\n\n"
+           "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
+           "data: [DONE]\n\n")]
+        (with-redefs [http/post (fn [_url _opts]
+                                  {:status 200
+                                   :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+          (let [result (sut/openai-responses-completion
+                         {:model "test-model"
+                          :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                         {:api-key "sk-test"
+                          :base-url "https://example.invalid/v1"
+                          :responses-path "/codex/responses"})
+                progress (get-in result [:stream-finalization :progress])]
+
+            (expect (= "ok" (:content result)))
+            (expect (= 2 (:semantic-events progress)))
+            (expect (= 2 (:quiet-events progress)))
+            (expect (contains? #{:pre-first-token :reasoning} (:max-gap-phase progress)))
+            (expect (nat-int? (:ttft-ms progress)))
+            (expect (nat-int? (:max-gap-ms progress)))))))
+    (it
       "responses heartbeats cannot postpone the semantic deadline"
       (let
         [heartbeat

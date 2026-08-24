@@ -1,6 +1,7 @@
 (ns com.blockether.svar.internal.llm-session-test
   "Explicit session contract for stateful OpenAI Codex Responses calls."
   (:require [charred.api :as json]
+            [clojure.string :as str]
             [com.blockether.svar.core :as svar]
             [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.llm :as sut]
@@ -930,3 +931,85 @@
                             nil
                             (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))
             (expect (= 1 (count @sent))))))))
+
+(def ^:private receive-websocket-response!
+  (ns-resolve 'com.blockether.svar.internal.llm 'receive-websocket-response!))
+
+(defn- reasoning-stream-events
+  "One Codex reasoning stream: two summary parts inside the first reasoning
+   item, a third inside a SECOND item, then the terminal response."
+  [headline-a headline-b headline-c]
+  (let [part
+        (fn [text]
+          {"type" "summary_text" "text" text})
+
+        item
+        (fn [id parts]
+          {"id" id "type" "reasoning" "summary" parts})]
+
+    (mapv json/write-json-str
+          [{"type" "response.output_item.added" "item" (item "rs_1" [])}
+           {"type" "response.reasoning_summary_part.added" "part" (part "")}
+           {"type" "response.reasoning_summary_text.delta" "delta" headline-a}
+           {"type" "response.reasoning_summary_part.done" "part" (part headline-a)}
+           {"type" "response.reasoning_summary_part.added" "part" (part "")}
+           {"type" "response.reasoning_summary_text.delta" "delta" headline-b}
+           {"type" "response.reasoning_summary_part.done" "part" (part headline-b)}
+           {"type" "response.output_item.done"
+            "item" (item "rs_1" [(part headline-a) (part headline-b)])}
+           {"type" "response.output_item.added" "item" (item "rs_2" [])}
+           {"type" "response.reasoning_summary_part.added" "part" (part "")}
+           {"type" "response.reasoning_summary_text.delta" "delta" headline-c}
+           {"type" "response.reasoning_summary_part.done" "part" (part headline-c)}
+           {"type" "response.output_item.done" "item" (item "rs_2" [(part headline-c)])}
+           {"type" "response.completed"
+            "response" {"id" "resp_1"
+                        "status" "completed"
+                        "output" []
+                        "usage" {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}])))
+
+(defdescribe
+  websocket-reasoning-boundary-test
+  (it "keeps the streamed reasoning cumulative append-only across summary parts"
+      ;; Regression: only the SSE reader ran events through
+      ;; `enrich-responses-reasoning-event`, so a WebSocket session streamed the
+      ;; summary parts with no separator - two bold headlines glued into the
+      ;; `****` artifact - and then REWROTE the cumulative at
+      ;; `response.completed`, where the terminal join puts the "\n\n" back.
+      ;; A rewritten cumulative also breaks every append-only consumer, which
+      ;; slices the increment off the previous length.
+      (let [headline-a
+            "**Designing process role derivation**"
+
+            headline-b
+            "**Implementing lazy log timestamps**"
+
+            headline-c
+            "**Investigating GraalPy engine logs**"
+
+            events
+            (atom (reasoning-stream-events headline-a headline-b headline-c))
+
+            chunks
+            (atom [])
+
+            socket
+            {:receive! (fn [_]
+                         (let [event (first @events)]
+                           (swap! events subvec 1)
+                           event))}
+
+            result
+            (receive-websocket-response! socket
+                                         {:timeout-ms 1000
+                                          :url "https://example.test/codex/responses"
+                                          :on-chunk (fn [chunk]
+                                                      (swap! chunks conj chunk))})
+
+            streamed
+            (keep :reasoning @chunks)]
+
+        (expect (= (str/join "\n\n" [headline-a headline-b headline-c]) (:reasoning result)))
+        (expect (= (:reasoning result) (last streamed)))
+        (expect (nil? (re-find #"\*\*\*\*" (:reasoning result))))
+        (expect (every? #(str/starts-with? (:reasoning result) %) streamed)))))
