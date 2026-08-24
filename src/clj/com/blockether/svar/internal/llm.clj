@@ -4623,11 +4623,11 @@
 
 (def ^:private nonterminal-stream-statuses #{"in_progress" "queued" "running"})
 
-(def ^:private transport-only-stream-event-types
-  #{"heartbeat" "keepalive" "ping" "response.created" "response.in_progress" "response.queued"})
 
 (defn- stream-semantic-event?
-  "True when parsed stream event means model/progress, not transport keepalive."
+  "True only when a parsed event advances model output or terminates the response.
+   Transport notices, rate-limit snapshots and repeated provider state are liveness,
+   not semantic progress."
   [parsed extracted content-piece reasoning-piece]
   (let [event-type
         (stream-event-type parsed)
@@ -4638,19 +4638,14 @@
         terminal-finish?
         (and finish-reason (not (contains? nonterminal-stream-statuses finish-reason)))]
 
-    (boolean (and (not (contains? transport-only-stream-event-types event-type))
-                  (or content-piece
-                      reasoning-piece
-                      terminal-finish?
-                      (:provider-state extracted)
-                      (:api-usage extracted)
-                      (:terminal? extracted)
-                      (:incomplete? extracted)
-                      (and event-type
-                           (or (str/starts-with? event-type "response.")
-                               (str/includes? event-type ".delta")
-                               (str/includes? event-type ".done")
-                               (str/includes? event-type "message"))))))))
+    (boolean (or (seq content-piece)
+                 (seq reasoning-piece)
+                 (seq (:tool-args-delta extracted))
+                 (:tool-call-preview extracted)
+                 (contains? #{"message_start" "response.output_item.added"} event-type)
+                 terminal-finish?
+                 (:terminal? extracted)
+                 (:incomplete? extracted)))))
 
 (defn- stream-failed-error
   "Provider-failure payload carried by an OpenAI Responses `response.failed`
@@ -5049,6 +5044,11 @@
                 false)
             true))
         false))))
+
+(defn- semantic-restart-safe?
+  "True when a semantic stall emitted only rewindable reasoning, never answer/tool output."
+  [^StringBuilder content-acc ^StringBuilder tool-args-acc tool-call-preview]
+  (and (zero? (.length content-acc)) (zero? (.length tool-args-acc)) (empty? tool-call-preview)))
 
 (defn- start-semantic-stream-watchdog!
   "Arms a semantic check on the shared scheduler: closes `stream` if
@@ -5605,6 +5605,10 @@
                            :stream-finalization stream-finalization
                            :content-acc-len (.length content-acc)
                            :reasoning-acc-len (.length reasoning-acc)
+                           :tool-args-acc-len (.length tool-args-acc)
+                           :safe-to-restart? (semantic-restart-safe? content-acc
+                                                                     tool-args-acc
+                                                                     @tool-call-preview-atom)
                            :partial-content (when (pos? (.length content-acc)) (str content-acc))
                            :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when @idle-fired?
@@ -5881,6 +5885,12 @@
                         :stream-finalization stream-finalization
                         :content-acc-len (.length content-acc)
                         :reasoning-acc-len (.length reasoning-acc)
+                        :tool-args-acc-len (.length tool-args-acc)
+                        :safe-to-restart? (boolean (and semantic?
+                                                        (semantic-restart-safe?
+                                                          content-acc
+                                                          tool-args-acc
+                                                          @tool-call-preview-atom)))
                         :partial-content (when (pos? (.length content-acc)) (str content-acc))
                         :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
                        e)))))
@@ -5926,6 +5936,12 @@
                       :stream-finalization stream-finalization
                       :content-acc-len (.length content-acc)
                       :reasoning-acc-len (.length reasoning-acc)
+                      :tool-args-acc-len (.length tool-args-acc)
+                      :safe-to-restart? (boolean (and semantic?
+                                                      (semantic-restart-safe?
+                                                        content-acc
+                                                        tool-args-acc
+                                                        @tool-call-preview-atom)))
                       :partial-content (when (pos? (.length content-acc)) (str content-acc))
                       :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}
                      e))))

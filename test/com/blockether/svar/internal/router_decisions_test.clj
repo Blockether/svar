@@ -407,6 +407,36 @@
           (expect (= [:llm.routing/provider-fallback] (mapv :event/type trace)))
           (expect (= :stream-timeout (get-in trace [0 :reason])))
           (expect (= [:llm.routing/provider-fallback] (mapv :event/type @live))))))
+  (it "replays rewindable reasoning after a semantic stall"
+      (let [[clock _]
+            (mock-clock)
+
+            r
+            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                              {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                             {:clock clock
+                              :failure-threshold 1
+                              :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
+
+            calls
+            (atom [])
+
+            result
+            (router/with-provider-fallback r
+                                           {}
+                                           (fn [provider _model]
+                                             (swap! calls conj (:id provider))
+                                             (if (= :p1 (:id provider))
+                                               (throw (ex-info "semantic stall after reasoning"
+                                                               {:type
+                                                                :svar.core/stream-semantic-timeout
+                                                                :reasoning-acc-len 1760
+                                                                :safe-to-restart? true}))
+                                               (success-result 100))))]
+
+        (expect (= [:p1 :p2] @calls))
+        (expect (= :p2 (:routed/provider-id result)))
+        (expect (= :stream-timeout (get-in result [:routed/trace 0 :reason])))))
   (it "does not replay after visible output started"
       (doseq [timeout-type [:svar.core/stream-ttft-timeout :svar.core/stream-idle-timeout
                             :svar.core/stream-semantic-timeout]]

@@ -2591,10 +2591,11 @@
 (defn- stream-content-started?
   [e]
   (let [data (ex-data e)]
-    (or (pos? (long (or (:content-acc-len data) 0)))
-        (pos? (long (or (:reasoning-acc-len data) 0)))
-        (some? (:partial-content data))
-        (some? (:reasoning data)))))
+    (and (not (true? (:safe-to-restart? data)))
+         (or (pos? (long (or (:content-acc-len data) 0)))
+             (pos? (long (or (:reasoning-acc-len data) 0)))
+             (some? (:partial-content data))
+             (some? (:reasoning data))))))
 
 (defn- rate-limit-delay-ms
   "Configured delay for the next same-provider retry, in ms, or nil once the

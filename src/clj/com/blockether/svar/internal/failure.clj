@@ -1056,7 +1056,10 @@
          ;; account states, never transient throttles.
          (not (auth-error? hay))
          (not (provider-limit-failure? status hay))
-         (or (and (contains? STREAM_WATCHDOG_ERROR_TYPES etype) (not started?))
+         (or (and (contains? STREAM_WATCHDOG_ERROR_TYPES etype)
+                  (or (not started?)
+                      (and (= etype :svar.core/stream-semantic-timeout)
+                           (true? (:safe-to-restart? data)))))
              (and status (contains? codes status))
              (and (= etype :svar.core/http-error)
                   (or (some-> msg

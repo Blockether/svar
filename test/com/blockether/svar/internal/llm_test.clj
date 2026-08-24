@@ -617,6 +617,8 @@
                            nil
                            (catch Exception e e))]
             (expect (= :svar.core/stream-semantic-timeout (:type (ex-data error))))
+            (expect (true? (:safe-to-restart? (ex-data error))))
+            (expect (zero? (:tool-args-acc-len (ex-data error))))
             (expect (true? @closed?))))))
     (it
       "responses transport backfills terminal reasoning without duplicating prior content"

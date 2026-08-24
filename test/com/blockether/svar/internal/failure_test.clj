@@ -408,6 +408,16 @@
         (expect (false? (sut/transient-error? (err "idle"
                                                    {:type :svar.core/stream-idle-timeout
                                                     :content-acc-len 42})))))
+    (it "re-routes a semantic stall after rewindable reasoning only"
+        (expect (sut/transient-error? (err "semantic stall"
+                                           {:type :svar.core/stream-semantic-timeout
+                                            :reasoning-acc-len 42
+                                            :safe-to-restart? true}))))
+    (it "does not let the rewind marker make visible answer text retryable"
+        (expect (false? (sut/transient-error? (err "semantic stall"
+                                                   {:type :svar.core/stream-semantic-timeout
+                                                    :content-acc-len 42
+                                                    :safe-to-restart? false})))))
     (it "re-routes a truncated stream before visible output"
         (expect (sut/transient-error? (err "truncated" {:type :svar.core/stream-truncated}))))
     (it "never re-routes a hard quota/billing wall, whatever the status"
