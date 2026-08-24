@@ -1013,3 +1013,75 @@
         (expect (= (:reasoning result) (last streamed)))
         (expect (nil? (re-find #"\*\*\*\*" (:reasoning result))))
         (expect (every? #(str/starts-with? (:reasoning result) %) streamed)))))
+
+(defn- stalled-websocket-factory
+  "A socket that keeps proving it is alive and never carries model progress.
+   `cap` bounds a regression: with no semantic deadline the reader would read
+   liveness frames until the frame timeout, which is minutes."
+  [opens sent aborts cap]
+  (let [frame
+        (json/write-json-str {"type" "response.in_progress" "response" {"status" "in_progress"}})
+
+        frames
+        (atom 0)]
+
+    (fn [_]
+      (swap! opens inc)
+      {:send! (fn [payload]
+                (swap! sent conj (json/read-json payload :key-fn keyword)))
+       :receive!
+       (fn [wait-ms]
+         (Thread/sleep (long (min 5 (long wait-ms))))
+         (if (< (long (swap! frames inc)) (long cap)) frame (throw (TimeoutException. "no frame"))))
+       :close! (fn []
+                 nil)
+       :abort! (fn []
+                 (swap! aborts inc))})))
+
+(defdescribe
+  websocket-semantic-timeout-test
+  (it "drops a socket that stays alive without model progress"
+      ;; Only the SSE reader armed the semantic watchdog, so a Codex session
+      ;; whose socket kept sending `response.in_progress` held the turn open for
+      ;; as long as the frame timeout allowed - a live connection with nothing to
+      ;; show for it - and the stalled socket was then handed to the next turn.
+      (let [opens
+            (atom 0)
+
+            sent
+            (atom [])
+
+            aborts
+            (atom 0)
+
+            router
+            (svar/make-router
+              [{:id :openai-codex
+                :api-key "test-key"
+                :base-url "https://chatgpt.com/backend-api"
+                :api-style :openai-compatible-responses
+                :responses-path "/codex/responses"
+                :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]
+              {:network {:semantic-timeout-ms 50 :idle-timeout-ms 2000 :max-retries 1}
+               :rate-limit {:same-provider-delays-ms [0 0] :respect-retry-after? false}})]
+
+        (with-redefs [sut/open-responses-websocket!
+                      (stalled-websocket-factory opens sent aborts 400)]
+          (with-open [session (open-test-session router
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (let [started-ns (System/nanoTime)
+                  error (try (svar/ask! session "one") nil (catch Exception e e))
+                  elapsed-ms (quot (- (System/nanoTime) started-ns) 1000000)
+                  attempts (:attempts (ex-data error))]
+
+              ;; The ROUTER owns the verdict: it spent its own ladder on a
+              ;; classified stall instead of the transport quietly replaying.
+              (expect (= :svar.llm/provider-unavailable (:type (ex-data error))))
+              (expect (some #(re-find #"semantic timeout" (str (:error %))) attempts))
+              ;; Caught by the 50ms semantic deadline, never by the 2s frame one.
+              (expect (< elapsed-ms 1500))
+              (expect (pos? @opens))
+              ;; Every stalled socket is given up, never carried into the next
+              ;; attempt: its pending response still owns the connection.
+              (expect (= @opens @aborts))))))))

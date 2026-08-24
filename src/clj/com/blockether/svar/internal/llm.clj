@@ -3507,7 +3507,11 @@
             (when (re-find pattern response-body) message))
           API_KEY_ERROR_PATTERNS)))
 
-(declare enrich-responses-reasoning-event extract-stream-delta http-post-stream!)
+(declare enrich-responses-reasoning-event
+         extract-stream-delta
+         http-post-stream!
+         semantic-restart-safe?
+         stream-semantic-event?)
 
 (defn responses-url
   "Builds an OpenAI Responses-style endpoint URL.
@@ -3943,8 +3947,96 @@
             (some? (get credits "balance"))
             (assoc :balance (get credits "balance"))))))))
 
+(defn- stream-progress-monitor
+  "Model-progress accounting shared by BOTH stream transports.
+
+   Transport liveness is not progress: only the caller's `semantic?` verdict
+   moves `:last-semantic-ns`, the deadline the semantic watchdogs read, so a
+   connection that stays alive while the model emits nothing is still caught.
+   Each reader used to grow this accounting by hand and the WebSocket one simply
+   never got it - keep it here so a third transport cannot repeat that.
+
+   `:content-acc`/`:reasoning-acc`/`:tool-args-acc` are the live accumulators:
+   the phase a silence fell in is READ off them, never guessed. `:started-ns` is
+   the monotonic instant the request left, defaulting to now.
+
+   Returns:
+     `:last-semantic-ns` - atom (monotonic ns) a watchdog polls.
+     `:observe!`         - (fn [semantic?]) accounts one parsed event.
+     `:stalled-ms`       - (fn []) ms since the last semantic event.
+     `:phase`            - (fn []) :tool-args | :text | :reasoning | :pre-first-token.
+     `:profile`          - (fn []) {:ttft-ms :max-gap-ms :max-gap-phase
+                                    :semantic-events :quiet-events}."
+  [{:keys [^StringBuilder content-acc ^StringBuilder reasoning-acc ^StringBuilder tool-args-acc
+           started-ns]}]
+  (let [start-ns
+        (long (or started-ns (System/nanoTime)))
+
+        first-semantic-ns
+        (atom nil)
+
+        last-semantic-ns
+        (atom start-ns)
+
+        max-gap-ns
+        (atom 0)
+
+        max-gap-phase
+        (atom :pre-first-token)
+
+        semantic-events
+        (atom 0)
+
+        quiet-events
+        (atom 0)
+
+        phase
+        (fn []
+          (cond (pos? (.length tool-args-acc)) :tool-args
+                (pos? (.length content-acc)) :text
+                (pos? (.length reasoning-acc)) :reasoning
+                :else :pre-first-token))]
+
+    {:last-semantic-ns last-semantic-ns
+     :phase phase
+     :stalled-ms (fn []
+                   (quot (- (System/nanoTime) (long @last-semantic-ns)) 1000000))
+     :observe! (fn [semantic?]
+                 (if semantic?
+                   (let [now-ns
+                         (System/nanoTime)
+
+                         gap-ns
+                         (- now-ns (long @last-semantic-ns))]
+
+                     (when (nil? @first-semantic-ns) (reset! first-semantic-ns now-ns))
+                     (when (> gap-ns (long @max-gap-ns))
+                       (reset! max-gap-ns gap-ns)
+                       (reset! max-gap-phase (phase)))
+                     (swap! semantic-events inc)
+                     (reset! last-semantic-ns now-ns))
+                   (swap! quiet-events inc)))
+     :profile (fn []
+                (let [first-ns @first-semantic-ns]
+                  {:ttft-ms (when first-ns (quot (- (long first-ns) start-ns) 1000000))
+                   :max-gap-ms (quot (long @max-gap-ns) 1000000)
+                   :max-gap-phase @max-gap-phase
+                   :semantic-events @semantic-events
+                   :quiet-events @quiet-events}))}))
 (defn- receive-websocket-response!
-  [socket {:keys [timeout-ms on-chunk on-rate-limits url]}]
+  "Reads ONE Responses turn off a session socket.
+
+   Runs the SAME event pipeline as the SSE reader - reasoning-boundary
+   enrichment, delta extraction, then `stream-progress-monitor` accounting - so
+   neither transport can quietly miss a protocol fix or a watchdog the other one
+   already carries.
+
+   Frames that only prove the connection alive (`response.in_progress`,
+   `codex.rate_limits`) never postpone `:semantic-timeout-ms`: a socket that
+   keeps talking while the model emits nothing raises
+   `:svar.core/stream-semantic-timeout` carrying `:safe-to-restart?`, exactly
+   like a keepalive-only SSE body. Deciding what happens next is the router's."
+  [socket {:keys [timeout-ms semantic-timeout-ms on-chunk on-rate-limits url]}]
   (let [content
         (StringBuilder.)
 
@@ -3959,7 +4051,70 @@
         ;; stream glued (`**A****B**`) and the terminal join REWRITES the
         ;; cumulative - which every append-only consumer slices garbage from.
         current-reasoning-item
-        (atom nil)]
+        (atom nil)
+
+        ;; Only read by the restart-safety verdict: a preview means a tool call
+        ;; is already on its way to the caller, so a replay could duplicate it.
+        tool-call-preview-acc
+        (atom nil)
+
+        progress
+        (stream-progress-monitor
+          {:content-acc content :reasoning-acc reasoning :tool-args-acc tool-args})
+
+        semantic-ms
+        (when (and (number? semantic-timeout-ms) (pos? (long semantic-timeout-ms)))
+          (long semantic-timeout-ms))
+
+        stalled?
+        (fn []
+          (boolean (and semantic-ms (>= (long ((:stalled-ms progress))) (long semantic-ms)))))
+
+        semantic-timeout!
+        (fn []
+          (let [profile ((:profile progress))]
+            (trove/log! {:level :warn
+                         :id ::stream-semantic-timeout
+                         :data (log-data (assoc profile
+                                           :url url
+                                           :transport :websocket
+                                           :semantic-timeout-ms semantic-ms
+                                           :phase ((:phase progress))))
+                         :msg "stream semantic timeout, closing"})
+            (throw
+              (ex-info
+                (str "Stream semantic timeout (" semantic-ms "ms without model/progress event).")
+                {:type :svar.core/stream-semantic-timeout
+                 :stream? true
+                 :transport :websocket
+                 :url url
+                 :semantic-timeout-ms semantic-ms
+                 :progress profile
+                 :phase ((:phase progress))
+                 :content-acc-len (.length content)
+                 :reasoning-acc-len (.length reasoning)
+                 :tool-args-acc-len (.length tool-args)
+                 :safe-to-restart? (semantic-restart-safe? content tool-args @tool-call-preview-acc)
+                 :partial-content (when (pos? (.length content)) (str content))
+                 :reasoning (when (pos? (.length reasoning)) (str reasoning))}))))
+
+        receive-frame!
+        (fn []
+          ;; Wait no longer than the FIRST of the two deadlines: total silence is
+          ;; the transport's business, a talkative socket carrying no model
+          ;; progress is the semantic watchdog's.
+          (let [wait
+                (if semantic-ms
+                  (max 1
+                       (min (long timeout-ms)
+                            (- (long semantic-ms) (long ((:stalled-ms progress))))))
+                  (long timeout-ms))
+
+                raw
+                (try ((:receive! socket) wait)
+                     (catch TimeoutException e (if (stalled?) (semantic-timeout!) (throw e))))]
+
+            (if (and (instance? TimeoutException raw) (stalled?)) (semantic-timeout!) raw)))]
 
     (loop [output-items
            []
@@ -3973,65 +4128,77 @@
            latest-rate-limits
            nil]
 
-      (let [raw ((:receive! socket) timeout-ms)]
-        (cond (instance? Throwable raw) (throw raw)
-              (:svar.websocket/closed raw)
-              (throw (ex-info "Responses WebSocket closed before a terminal response."
-                              {:type :svar.session/transport-closed :close raw}))
-              :else
-              (let [event (enrich-responses-reasoning-event current-reasoning-item
-                                                            (json/read-json raw))
-                    event-type (get event "type")
-                    rate-limits (codex-rate-limit-snapshot event)]
+      (let [raw (receive-frame!)]
+        (cond
+          (instance? Throwable raw) (throw raw)
+          (:svar.websocket/closed raw)
+          (throw (ex-info "Responses WebSocket closed before a terminal response."
+                          {:type :svar.session/transport-closed :close raw}))
+          :else
+          (let [event (enrich-responses-reasoning-event current-reasoning-item (json/read-json raw))
+                event-type (get event "type")
+                rate-limits (codex-rate-limit-snapshot event)]
 
-                (when (contains? #{"error" "response.failed"} event-type)
-                  (throw (websocket-event-error event)))
-                (when (and rate-limits on-rate-limits) (on-rate-limits rate-limits))
-                (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
-                              tool-args-delta tool-call-preview]
-                       :as delta}
-                      (extract-stream-delta event)
-                      next-provider-state (merge-provider-state accumulated-provider-state
-                                                                (:provider-state delta))
-                      next-api-usage (or (:api-usage delta) accumulated-api-usage)
-                      next-rate-limits (or rate-limits latest-rate-limits)
-                      item (when (= "response.output_item.done" event-type) (get event "item"))]
+            (when (contains? #{"error" "response.failed"} event-type)
+              (throw (websocket-event-error event)))
+            (when (and rate-limits on-rate-limits) (on-rate-limits rate-limits))
+            (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
+                          tool-args-delta tool-call-preview]
+                   :as delta}
+                  (extract-stream-delta event)
+                  content-piece (or content-delta (when (zero? (.length content)) content-fallback))
+                  reasoning-piece (or reasoning-delta
+                                      (when (zero? (.length reasoning)) reasoning-fallback))
+                  next-provider-state (merge-provider-state accumulated-provider-state
+                                                            (:provider-state delta))
+                  next-api-usage (or (:api-usage delta) accumulated-api-usage)
+                  next-rate-limits (or rate-limits latest-rate-limits)
+                  item (when (= "response.output_item.done" event-type) (get event "item"))]
 
-                  (when content-delta (.append content ^String content-delta))
-                  (when reasoning-delta (.append reasoning ^String reasoning-delta))
-                  (when tool-args-delta (.append tool-args ^String tool-args-delta))
-                  (when (and (zero? (.length content)) content-fallback)
-                    (.append content ^String content-fallback))
-                  (when (and (zero? (.length reasoning)) reasoning-fallback)
-                    (.append reasoning ^String reasoning-fallback))
-                  (when (and on-chunk
-                             (or content-delta reasoning-delta tool-args-delta tool-call-preview))
-                    (on-chunk {:content (str content)
-                               :reasoning (nonblank-str (str reasoning))
-                               :tool-input (nonblank-str (str tool-args))
-                               :tool-call-preview tool-call-preview
-                               :provider-state next-provider-state
-                               :api-usage next-api-usage
-                               :done? false}))
-                  (if (contains? #{"response.completed" "response.incomplete"} event-type)
-                    (cond-> (extract-response-data {:parsed (merge-response-output
-                                                              (get event "response")
-                                                              (cond-> output-items
-                                                                item
-                                                                (conj item)))
-                                                    :raw-body raw
-                                                    :url url
-                                                    :status 200
-                                                    :streaming? true
-                                                    :transport :websocket})
-                      next-rate-limits
-                      (assoc :rate-limits next-rate-limits))
-                    (recur (cond-> output-items
-                             item
-                             (conj item))
-                           next-provider-state
-                           next-api-usage
-                           next-rate-limits)))))))))
+              ((:observe! progress)
+                (stream-semantic-event? event delta content-piece reasoning-piece))
+              (when content-piece (.append content ^String content-piece))
+              (when reasoning-piece (.append reasoning ^String reasoning-piece))
+              (when tool-args-delta (.append tool-args ^String tool-args-delta))
+              (when tool-call-preview (swap! tool-call-preview-acc merge tool-call-preview))
+              (when (and on-chunk
+                         (or content-delta reasoning-delta tool-args-delta tool-call-preview))
+                (on-chunk {:content (str content)
+                           :reasoning (nonblank-str (str reasoning))
+                           :tool-input (nonblank-str (str tool-args))
+                           :tool-call-preview tool-call-preview
+                           :provider-state next-provider-state
+                           :api-usage next-api-usage
+                           :done? false}))
+              (when (stalled?) (semantic-timeout!))
+              (if (contains? #{"response.completed" "response.incomplete"} event-type)
+                (let [profile ((:profile progress))]
+                  (trove/log! {:level :info
+                               :id ::stream-progress
+                               :data (log-data (assoc profile
+                                                 :url url
+                                                 :transport :websocket
+                                                 :outcome :complete))
+                               :msg "stream progress profile"})
+                  (-> (extract-response-data {:parsed (merge-response-output (get event "response")
+                                                                             (cond-> output-items
+                                                                               item
+                                                                               (conj item)))
+                                              :raw-body raw
+                                              :url url
+                                              :status 200
+                                              :streaming? true
+                                              :transport :websocket})
+                      (update :stream-finalization assoc :progress profile)
+                      (cond->
+                        next-rate-limits
+                        (assoc :rate-limits next-rate-limits))))
+                (recur (cond-> output-items
+                         item
+                         (conj item))
+                       next-provider-state
+                       next-api-usage
+                       next-rate-limits)))))))))
 
 (defn- session-request-body
   [body input previous-response-id]
@@ -4145,6 +4312,7 @@
           (receive-websocket-response!
             socket
             {:timeout-ms (or (:idle-timeout-ms opts) (:timeout-ms opts) Long/MAX_VALUE)
+             :semantic-timeout-ms (:semantic-timeout-ms opts)
              :on-chunk (when-not warmup? (:on-chunk opts))
              :on-rate-limits rate-limits!
              :url (:url socket)}))]
@@ -4191,6 +4359,14 @@
 
             (cond (websocket-upgrade-refused? error)
                   (do (disable-session-websockets! transport-state) (throw error))
+                  ;; The MODEL stalled while the socket stayed healthy: the pending
+                  ;; response still owns this connection and the cursor points at a
+                  ;; response that never completed, so drop both and hand the
+                  ;; classified error to the ROUTER - the one layer that knows
+                  ;; whether visible output makes a replay safe. Retrying here would
+                  ;; rebuild the nested ladder we deliberately collapsed.
+                  (= :svar.core/stream-semantic-timeout (:type (ex-data error)))
+                  (do (close-session-socket! transport-state :abort) (throw error))
                   (and cursor (previous-response-missing? error) budget?)
                   (do (restart! {:reason :cursor-rejected
                                  :attempt attempt
@@ -5392,44 +5568,26 @@
         bytes-seen?
         (atom false)
 
+        ;; Model-progress accounting, shared with the WebSocket reader so the
+        ;; semantic deadline and its telemetry cannot exist on one transport
+        ;; only. That deadline is a HEURISTIC constant and nothing in the logs
+        ;; carried the distribution to tune it against, so the profile records
+        ;; time-to-first progress, the longest silence, the phase it fell in and
+        ;; how many keepalive-class events arrived - never any model text.
+        progress
+        (stream-progress-monitor {:content-acc content-acc
+                                  :reasoning-acc reasoning-acc
+                                  :tool-args-acc tool-args-acc
+                                  :started-ns request-start-ns})
+
         last-semantic-ns
-        (atom (System/nanoTime))
-
-        ;; Stream progress profile. The semantic deadline is a HEURISTIC
-        ;; constant, and nothing in the logs carried the distribution it should
-        ;; be tuned against. Record the longest silence between two model
-        ;; progress events, the phase that silence fell in, and how many
-        ;; keepalive-class events arrived during it - never any model text.
-        first-semantic-ns
-        (atom nil)
-
-        max-gap-ns
-        (atom 0)
-
-        max-gap-phase
-        (atom :pre-first-token)
-
-        semantic-events
-        (atom 0)
-
-        quiet-events
-        (atom 0)
+        (:last-semantic-ns progress)
 
         progress-phase
-        (fn []
-          (cond (pos? (.length tool-args-acc)) :tool-args
-                (pos? (.length content-acc)) :text
-                (pos? (.length reasoning-acc)) :reasoning
-                :else :pre-first-token))
+        (:phase progress)
 
         progress-profile
-        (fn []
-          (let [first-ns @first-semantic-ns]
-            {:ttft-ms (when first-ns (quot (- (long first-ns) (long request-start-ns)) 1000000))
-             :max-gap-ms (quot (long @max-gap-ns) 1000000)
-             :max-gap-phase @max-gap-phase
-             :semantic-events @semantic-events
-             :quiet-events @quiet-events}))
+        (:profile progress)
 
         idle-fired?
         (atom false)
@@ -5541,17 +5699,8 @@
                        (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
                      (when-let [err (stream-failed-error parsed)]
                        (reset! failed-response err))
-                     (if (stream-semantic-event? parsed extracted content-piece reasoning-piece)
-                       (let [now-ns (System/nanoTime)
-                             gap-ns (- now-ns (long @last-semantic-ns))]
-
-                         (when (nil? @first-semantic-ns) (reset! first-semantic-ns now-ns))
-                         (when (> gap-ns (long @max-gap-ns))
-                           (reset! max-gap-ns gap-ns)
-                           (reset! max-gap-phase (progress-phase)))
-                         (swap! semantic-events inc)
-                         (reset! last-semantic-ns now-ns))
-                       (swap! quiet-events inc))
+                     ((:observe! progress)
+                       (stream-semantic-event? parsed extracted content-piece reasoning-piece))
                      (when content-piece (.append content-acc content-piece))
                      (when reasoning-piece (.append reasoning-acc reasoning-piece))
                      (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
