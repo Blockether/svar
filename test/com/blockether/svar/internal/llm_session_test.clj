@@ -14,6 +14,8 @@
 (def ^:private close-websocket! (ns-resolve 'com.blockether.svar.internal.llm 'close-websocket!))
 (def ^:private websocket-event-error
   (ns-resolve 'com.blockether.svar.internal.llm 'websocket-event-error))
+(def ^:private previous-response-missing?
+  (ns-resolve 'com.blockether.svar.internal.llm 'previous-response-missing?))
 
 (defn- completed-event
   [id text]
@@ -626,6 +628,78 @@
                                                    "message" "Previous response not found"}})]
         (expect (= "previous_response_not_found" (:code (ex-data error))))
         (expect (nil? (:status (ex-data error))))))
+  (it "reads the prose form of a rejected continuation cursor"
+      ;; Regression, vis session 9cc1d0a0: ChatGPT rejects a forgotten cursor in
+      ;; PROSE with spaces, never with the underscored field name, so the rewind
+      ;; below stayed unreachable and a recoverable 400 ended the turn.
+      (let [error (websocket-event-error
+                    {"type" "response.failed"
+                     "response" {"status" "failed"
+                                 "error" {"code" "invalid_request_error"
+                                          "status" 400
+                                          "message"
+                                          "Previous response with id 'resp_1' not found."}}})]
+        (expect (= 400 (:status (ex-data error))))
+        (expect (previous-response-missing? error))))
+  (it "rewinds to the full history when the server forgot the cursor"
+      ;; Regression, vis session 9cc1d0a0: the same 400 escaped to the router,
+      ;; which correctly refuses to retry a 400 - so a turn died holding a healthy
+      ;; socket and the whole canonical history it could have replayed.
+      (let [events
+            (atom [(completed-event "resp_1" "first")
+                   (json/write-json-str
+                     {"type" "response.failed"
+                      "response" {"status" "failed"
+                                  "error" {"code" "invalid_request_error"
+                                           "status" 400
+                                           "message"
+                                           "Previous response with id 'resp_1' not found."}}})
+                   (completed-event "resp_2" "second")])
+
+            sent
+            (atom [])
+
+            opens
+            (atom 0)
+
+            closes
+            (atom 0)
+
+            aborts
+            (atom 0)
+
+            restarts
+            (atom [])
+
+            factory
+            (fake-websocket-factory events sent closes aborts)]
+
+        (with-redefs [sut/open-responses-websocket! (fn [opts]
+                                                      (swap! opens inc)
+                                                      (factory opts))]
+          (with-open [session (open-test-session
+                                (codex-router)
+                                {:routing {:provider :openai-codex :model "gpt-5.6"}
+                                 :on-chunk (fn [chunk]
+                                             (when (:restarted? chunk)
+                                               (swap! restarts conj (:reason chunk))))})]
+            (svar/ask! session "one")
+            (let [result (svar/ask! session "two")
+                  [opening rejected replayed] @sent]
+
+              (expect (= "second" (:content result)))
+              (expect (= "resp_1" (:previous_response_id rejected)))
+              ;; The rewind drops the cursor and replays everything the session owns.
+              (expect (nil? (:previous_response_id replayed)))
+              (expect (< (count (:input rejected)) (count (:input replayed))))
+              (expect (< (count (:input opening)) (count (:input replayed))))
+              (expect (= [:cursor-rejected] @restarts))
+              ;; The router never saw it: recovery belongs to the session that
+              ;; still holds the canonical history.
+              (expect (empty? (:routed/trace result))))))
+        ;; Same socket throughout - a forgotten cursor is not a sick transport.
+        (expect (= 1 @opens))
+        (expect (zero? @aborts))))
   (it "sends a tool result as the next incremental Responses item"
       (let [events
             (atom [(tool-call-event) (completed-event "resp_2" "done")])

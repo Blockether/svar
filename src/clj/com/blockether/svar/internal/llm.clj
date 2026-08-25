@@ -3706,6 +3706,14 @@
   "Ceiling for a reconnect wait: a transport hiccup is not a rate limit."
   4000)
 
+(def ^:private ^:const SESSION_CURSOR_RESET_ALLOWANCE
+  "Times ONE turn may rewind a rejected `previous_response_id` and replay its full
+   canonical history. A server that forgot a cursor is answering about the CHAIN,
+   not about the socket, so the rewind gets its own one-shot allowance: a turn
+   that already spent its reconnect budget can still rewind, and rewinding never
+   spends that budget in return."
+  1)
+
 (defn- websocket-handshake-status
   "HTTP status behind a refused WebSocket handshake, or nil. The JDK carries the
    refusing response on its own `WebSocketHandshakeException`; a transport seam
@@ -3804,20 +3812,22 @@
 (defn- websocket-event-status
   "HTTP status for a Responses WebSocket failure event: the one the server wrapped
    into the event, response, or error when it sent one (Codex reads both `status`
-   and `status_code`), else the status its error CODE stands for."
+   and `status_code`), else the status its error CODE stands for.
+
+   Candidates are scanned for the first NUMERIC one: `response.status` on a failed
+   Responses event is the word `failed`, and stopping there discarded the numeric
+   status the nested error was carrying."
   [event response error code]
-  (let [raw
-        (or (get event "status")
-            (get event "status_code")
-            (get response "status")
-            (get response "status_code")
-            (get error "status")
-            (get error "status_code"))
+  (let [numeric
+        (fn [raw]
+          (cond (number? raw) (long raw)
+                (string? raw) (parse-long raw)
+                :else nil))
 
         explicit
-        (cond (number? raw) (long raw)
-              (string? raw) (parse-long raw)
-              :else nil)]
+        (some numeric
+              [(get event "status") (get event "status_code") (get response "status")
+               (get response "status_code") (get error "status") (get error "status_code")])]
 
     (or explicit
         (get stream-failed-code->status
@@ -3866,6 +3876,13 @@
                (assoc :status status)))))
 
 (defn- previous-response-missing?
+  "True when the provider refused THIS request because it no longer remembers the
+   response we continued from.
+
+   The verdict arrives two ways: a machine `code`, and PROSE - whose real ChatGPT
+   form is `Previous response with id 'resp_...' not found.`, spelled with spaces
+   rather than the underscored field name. Matching only the underscored spelling
+   left the rewind below unreachable, so a recoverable 400 ended the turn."
   [e]
   (let [data
         (ex-data e)
@@ -3876,12 +3893,14 @@
                 str/lower-case)
 
         message
-        (some-> (ex-message e)
-                str/lower-case)]
+        (or (some-> (ex-message e)
+                    str/lower-case)
+            "")]
 
     (or (contains? #{"previous_response_not_found" "previous_response_id_not_found"} code)
-        (and (str/includes? (or message "") "previous_response")
-             (str/includes? (or message "") "not found")))))
+        (and (or (str/includes? message "previous_response")
+                 (str/includes? message "previous response"))
+             (str/includes? message "not found")))))
 
 (defn- merge-response-output
   [response output-items]
@@ -4329,7 +4348,10 @@
            0
 
            warmup?
-           prewarm?]
+           prewarm?
+
+           cursor-resets
+           0]
 
       (let [outcome
             (try {:result
@@ -4345,7 +4367,7 @@
                     :warmup-input full-input)
                   ;; The warmup already supplied the full first request. The inference
                   ;; continues that response with an empty input delta.
-                  (recur (if response-id [] full-input) response-id retries false))
+                  (recur (if response-id [] full-input) response-id retries false cursor-resets))
               (do (swap! transport-state #(-> %
                                               (assoc :stable stable
                                                      :cursor response-id)
@@ -4355,7 +4377,8 @@
                     (assoc :rate-limits (:rate-limits @transport-state))))))
           (let [error (:error outcome)
                 attempt (inc (long retries))
-                budget? (<= attempt max-retries)]
+                budget? (<= attempt max-retries)
+                cursor-budget? (< (long cursor-resets) (long SESSION_CURSOR_RESET_ALLOWANCE))]
 
             (cond (websocket-upgrade-refused? error)
                   (do (disable-session-websockets! transport-state) (throw error))
@@ -4367,12 +4390,16 @@
                   ;; rebuild the nested ladder we deliberately collapsed.
                   (= :svar.core/stream-semantic-timeout (:type (ex-data error)))
                   (do (close-session-socket! transport-state :abort) (throw error))
-                  (and cursor (previous-response-missing? error) budget?)
+                  ;; The server forgot the chain this request continued from. The
+                  ;; SOCKET is healthy and the canonical history is ours, so rewind
+                  ;; on the same connection and leave the reconnect budget for real
+                  ;; transport failures.
+                  (and cursor (previous-response-missing? error) cursor-budget?)
                   (do (restart! {:reason :cursor-rejected
-                                 :attempt attempt
-                                 :max-retries max-retries
+                                 :attempt (inc (long cursor-resets))
+                                 :max-retries SESSION_CURSOR_RESET_ALLOWANCE
                                  :error (ex-message error)})
-                      (recur full-input nil attempt false))
+                      (recur full-input nil retries false (inc (long cursor-resets))))
                   (and (websocket-retryable-error? error) budget?)
                   (do (close-session-socket! transport-state :abort)
                       (session-retry-sleep! attempt opts)
@@ -4380,7 +4407,7 @@
                                  :attempt attempt
                                  :max-retries max-retries
                                  :error (ex-message error)})
-                      (recur full-input nil attempt false))
+                      (recur full-input nil attempt false cursor-resets))
                   (websocket-retryable-error? error)
                   (do (disable-session-websockets! transport-state) (throw error))
                   warmup?
@@ -4388,7 +4415,7 @@
                   ;; A provider verdict about `generate=false` must not suppress the
                   ;; real request on an otherwise healthy socket.
                   (do (swap! transport-state assoc :prewarmed? true)
-                      (recur full-input nil retries false))
+                      (recur full-input nil retries false cursor-resets))
                   :else (throw error))))))))
 
 (defn- responses-session-completion!
