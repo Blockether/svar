@@ -609,9 +609,24 @@
             (expect (= "ok" (:content result)))
             (expect (= 2 (:semantic-events progress)))
             (expect (= 2 (:quiet-events progress)))
-            (expect (contains? #{:pre-first-token :reasoning} (:max-gap-phase progress)))
+            (expect (contains? #{:pre-first-token :reasoning :text} (:max-gap-phase progress)))
             (expect (nat-int? (:ttft-ms progress)))
             (expect (nat-int? (:max-gap-ms progress)))))))
+    ;; Regression, vis session 907a20a8-877c-4395-9cba-1450317dbd38: the silence that FIRED
+    ;; the watchdog was still open, so a stream killed after 240 000 ms of quiet
+    ;; reported `:max-gap-ms 6175` — its last HEALTHY pause. The telemetry that exists
+    ;; to tune the deadline was structurally blind to the deadline being hit.
+    (it "counts the silence still open when the profile is read"
+        (let [monitor ((ns-resolve 'com.blockether.svar.internal.llm 'stream-progress-monitor)
+                        {:content-acc (StringBuilder.)
+                         :reasoning-acc (StringBuilder.)
+                         :tool-args-acc (StringBuilder.)})]
+          ((:observe! monitor) true)
+          (Thread/sleep 40)
+          (let [profile ((:profile monitor))]
+            (expect (<= 30 (long (:max-gap-ms profile))))
+            (expect (= 1 (:semantic-events profile)))
+            (expect (= :pre-first-token (:max-gap-phase profile))))))
     (it
       "responses heartbeats cannot postpone the semantic deadline"
       (let

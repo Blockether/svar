@@ -407,36 +407,85 @@
           (expect (= [:llm.routing/provider-fallback] (mapv :event/type trace)))
           (expect (= :stream-timeout (get-in trace [0 :reason])))
           (expect (= [:llm.routing/provider-fallback] (mapv :event/type @live))))))
-  (it "replays rewindable reasoning after a semantic stall"
-      (let [[clock _]
-            (mock-clock)
+  ;; Regression, vis session 907a20a8-877c-4395-9cba-1450317dbd38: a reasoning-phase stall
+  ;; crossed straight to provider fallback, so the only provider able to serve the
+  ;; request never got the replay the watchdog had just made safe. The turn died 816 s
+  ;; in and the user had to re-ask it by hand.
+  (it
+    "re-issues a rewindable stall on the same provider before crossing"
+    (let [[clock _]
+          (mock-clock)
 
-            r
-            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
-                              {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
-                             {:clock clock
-                              :failure-threshold 1
-                              :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
+          r
+          (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}]
+                           {:clock clock
+                            :failure-threshold 1
+                            :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
 
-            calls
-            (atom [])
+          calls
+          (atom [])
 
-            result
-            (router/with-provider-fallback r
-                                           {}
-                                           (fn [provider _model]
-                                             (swap! calls conj (:id provider))
-                                             (if (= :p1 (:id provider))
-                                               (throw (ex-info "semantic stall after reasoning"
-                                                               {:type
-                                                                :svar.core/stream-semantic-timeout
-                                                                :reasoning-acc-len 1760
-                                                                :safe-to-restart? true}))
-                                               (success-result 100))))]
+          live
+          (atom [])
 
-        (expect (= [:p1 :p2] @calls))
-        (expect (= :p2 (:routed/provider-id result)))
-        (expect (= :stream-timeout (get-in result [:routed/trace 0 :reason])))))
+          result
+          (router/with-provider-fallback r
+                                         {:on-chunk #(swap! live conj %)}
+                                         (fn [provider _model]
+                                           (swap! calls conj (:id provider))
+                                           (if (= 1 (count @calls))
+                                             (throw (ex-info "semantic stall after reasoning"
+                                                             {:type
+                                                              :svar.core/stream-semantic-timeout
+                                                              :reasoning-acc-len 1760
+                                                              :safe-to-restart? true}))
+                                             (success-result 100))))
+
+          trace
+          (:routed/trace result)]
+
+      (expect (= [:p1 :p1] @calls))
+      (expect (= :p1 (:routed/provider-id result)))
+      (expect (= [:llm.routing/provider-retry] (mapv :event/type trace)))
+      (expect (= :stream-stalled (get-in trace [0 :reason])))
+      (expect (zero? (long (get-in trace [0 :delay-ms]))))
+      (expect (= [:llm.routing/provider-retry] (mapv :event/type @live)))))
+  (it
+    "spends exactly one restart on a stall that keeps stalling"
+    (let [[clock _]
+          (mock-clock)
+
+          r
+          (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                            {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                           {:clock clock
+                            :failure-threshold 1
+                            :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
+
+          calls
+          (atom [])
+
+          result
+          (router/with-provider-fallback r
+                                         {}
+                                         (fn [provider _model]
+                                           (swap! calls conj (:id provider))
+                                           (if (= :p1 (:id provider))
+                                             (throw (ex-info "semantic stall after reasoning"
+                                                             {:type
+                                                              :svar.core/stream-semantic-timeout
+                                                              :reasoning-acc-len 1760
+                                                              :safe-to-restart? true}))
+                                             (success-result 100))))
+
+          trace
+          (:routed/trace result)]
+
+      (expect (= [:p1 :p1 :p2] @calls))
+      (expect (= :p2 (:routed/provider-id result)))
+      (expect (= [:llm.routing/provider-retry :llm.routing/provider-fallback]
+                 (mapv :event/type trace)))
+      (expect (= :stream-timeout (get-in trace [1 :reason])))))
   (it "does not replay after visible output started"
       (doseq [timeout-type [:svar.core/stream-ttft-timeout :svar.core/stream-idle-timeout
                             :svar.core/stream-semantic-timeout]]

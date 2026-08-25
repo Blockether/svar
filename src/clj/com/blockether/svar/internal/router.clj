@@ -2538,6 +2538,18 @@
 
 (defn- stream-watchdog-error? [e] (contains? STREAM_WATCHDOG_ERROR_TYPES (:type (ex-data e))))
 
+(def ^:private STALL_RESTART_ALLOWANCE
+  "See `failure/STALL_RESTART_ALLOWANCE`."
+  failure/STALL_RESTART_ALLOWANCE)
+
+(defn- stall-restart-safe?
+  "True for a stream the MODEL stalled while its transport stayed healthy and
+   no non-rewindable output had reached the caller — `llm`'s own
+   `:safe-to-restart?` verdict. The retry event lets a consumer discard any partial
+   reasoning before replay, which is what keeps the re-issue free of duplicates."
+  [e]
+  (and (stream-watchdog-error? e) (true? (:safe-to-restart? (ex-data e)))))
+
 (defn- router-transient-error?
   "Router-level soft/hard verdict. All the evidence rules live in
    `failure/transient-error?`; the router only supplies its configured
@@ -2769,6 +2781,48 @@
           ;; a target.
           :else (budget-exhausted-result last-error))))))
 
+(defn- handle-stalled-stream-restart
+  "Re-issue a restart-safe stall on the SAME provider, at most
+   `failure/STALL_RESTART_ALLOWANCE` times, before the caller crosses providers.
+
+   No sleep: a stall is not a cooldown, and the watchdog already spent minutes
+   waiting. Each restart is announced as `:llm.routing/provider-retry` with
+   `:reason :stream-stalled` — the marker a consumer already drops its partial
+   stream on, which is what keeps the replay free of duplicated output.
+
+   Anything OTHER than a further stall is handed back untouched so the fallback
+   ladder classifies it: a request that stalled and then met a real refusal has
+   stopped being a stall, and re-entering here for it would rebuild the nested
+   ladder this router deliberately collapsed."
+  [router prefs trace provider model-map f e start-ms]
+  (let [elapsed* #(- (router-now-ms router) (long start-ms))]
+    (loop [restarts 0
+           last-error e]
+
+      (if (>= restarts (long STALL_RESTART_ALLOWANCE))
+        {:error last-error :elapsed-ms (long (elapsed*))}
+        (do (append-routing-event! trace
+                                   prefs
+                                   (routing-event router
+                                                  :llm.routing/provider-retry
+                                                  {:status (:status (ex-data last-error))
+                                                   :reason :stream-stalled
+                                                   :provider (provider-label provider)
+                                                   :model (:name model-map)
+                                                   :attempt (inc restarts)
+                                                   :delay-ms 0
+                                                   :elapsed-ms (long (elapsed*))
+                                                   :error (ex-message last-error)}))
+            (let [outcome (try {:success (f provider model-map)}
+                               (catch Exception next-error
+                                 ;; Cancellation MUST escape — see propagate-interrupt!.
+                                 (propagate-interrupt! next-error)
+                                 {:error next-error}))]
+              (cond (:success outcome) outcome
+                    (stall-restart-safe? (:error outcome)) (recur (inc restarts) (:error outcome))
+                    (stream-content-started? (:error outcome)) (throw (:error outcome))
+                    :else (assoc outcome :elapsed-ms (long (elapsed*))))))))))
+
 (defn with-provider-fallback
   [router prefs f]
   (budget-check! router)
@@ -2917,35 +2971,50 @@
                                                       (some? elapsed-ms)
                                                       (assoc :elapsed-ms (long elapsed-ms)))))
               (reset! pending-fallback nil))
-            (let [result (try {:success (f provider model-map)}
-                              (catch Exception e
-                                ;; Cancellation MUST escape — see propagate-interrupt!.
-                                (propagate-interrupt! e)
-                                (cond (and (or (router-transient-error? router e)
-                                               (stream-watchdog-error? e)
-                                               (and (= :fallback-provider (:on-auth-error prefs))
-                                                    (= :auth (:category (classify-failure e)))))
-                                           (stream-content-started? e))
-                                      (throw e)
-                                      ;; Watchdog spent its wait budget. Cross providers now.
-                                      (stream-watchdog-error? e)
-                                      {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
-                                      (router-transient-error? router e) (handle-rate-limit-retries
-                                                                           router
-                                                                           prefs
-                                                                           trace
-                                                                           provider
-                                                                           model-map
-                                                                           f
-                                                                           e
-                                                                           start-ms)
-                                      (format-error? prefs e) {:format-error e}
-                                      (and (= :fallback-provider (:on-auth-error prefs))
-                                           (= :auth (:category (classify-failure e))))
-                                      {:auth-error e}
-                                      (= :model-unavailable (:category (classify-failure e)))
-                                      {:model-unsupported e}
-                                      :else (throw e))))]
+            (let [result (try
+                           {:success (f provider model-map)}
+                           (catch Exception e
+                             ;; Cancellation MUST escape — see propagate-interrupt!.
+                             (propagate-interrupt! e)
+                             (cond (and (or (router-transient-error? router e)
+                                            (stream-watchdog-error? e)
+                                            (and (= :fallback-provider (:on-auth-error prefs))
+                                                 (= :auth (:category (classify-failure e)))))
+                                        (stream-content-started? e))
+                                   (throw e)
+                                   ;; The MODEL stalled while the transport stayed
+                                   ;; healthy and only rewindable output was painted:
+                                   ;; announce the reset and re-issue on the provider
+                                   ;; whose cache is warm, before spending a fallback
+                                   ;; on a request that never produced an answer.
+                                   (stall-restart-safe? e) (handle-stalled-stream-restart
+                                                             router
+                                                             prefs
+                                                             trace
+                                                             provider
+                                                             model-map
+                                                             f
+                                                             e
+                                                             start-ms)
+                                   ;; Watchdog spent its wait budget. Cross providers now.
+                                   (stream-watchdog-error? e)
+                                   {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
+                                   (router-transient-error? router e) (handle-rate-limit-retries
+                                                                        router
+                                                                        prefs
+                                                                        trace
+                                                                        provider
+                                                                        model-map
+                                                                        f
+                                                                        e
+                                                                        start-ms)
+                                   (format-error? prefs e) {:format-error e}
+                                   (and (= :fallback-provider (:on-auth-error prefs))
+                                        (= :auth (:category (classify-failure e))))
+                                   {:auth-error e}
+                                   (= :model-unavailable (:category (classify-failure e)))
+                                   {:model-unsupported e}
+                                   :else (throw e))))]
               (cond
                 (:success result)
                 (let [result (:success result)

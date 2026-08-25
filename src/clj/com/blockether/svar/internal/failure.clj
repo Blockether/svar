@@ -371,6 +371,25 @@
    that turns a throttle the provider itself scheduled into a hard failure."
   180000)
 
+(def STALL_RESTART_ALLOWANCE
+  "Same-provider re-issues granted to a stream the MODEL stalled, before the
+   router crosses providers.
+
+   A restart-safe stall is not a provider refusing us: the socket stayed healthy,
+   keepalives kept arriving, and no final text or tool call reached the caller.
+   Any partial reasoning is rewindable; that is what `:safe-to-restart?` asserts.
+   There is no cooldown to honor and nothing to wait for, so the cheapest recovery
+   is to re-issue the same request once, on the same provider, into its warm prompt
+   cache.
+
+   Measured (vis session 907a20a8, 2026-08-25): a reasoning-phase semantic timeout
+   on `openai-codex` went straight to provider fallback, found no second provider
+   able to serve it, and killed a turn 816 s in — the recovery the watchdog exists
+   to enable never ran once. ONE, deliberately: a second stall is evidence about
+   the PROVIDER rather than about this request, and that is the fallback ladder's
+   verdict to make."
+  1)
+
 (defn backoff-ms
   "Exponential backoff with FULL JITTER, the AWS-recommended shape.
 

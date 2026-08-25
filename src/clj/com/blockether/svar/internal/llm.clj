@@ -3985,7 +3985,10 @@
      `:stalled-ms`       - (fn []) ms since the last semantic event.
      `:phase`            - (fn []) :tool-args | :text | :reasoning | :pre-first-token.
      `:profile`          - (fn []) {:ttft-ms :max-gap-ms :max-gap-phase
-                                    :semantic-events :quiet-events}."
+                           :semantic-events :quiet-events}, counting the silence
+                           still OPEN at the call: the gap that FIRES a watchdog
+                           never gets a closing event, so a profile built from
+                           closed gaps alone can never see it."
   [{:keys [^StringBuilder content-acc ^StringBuilder reasoning-acc ^StringBuilder tool-args-acc
            started-ns]}]
   (let [start-ns
@@ -4036,10 +4039,24 @@
                      (reset! last-semantic-ns now-ns))
                    (swap! quiet-events inc)))
      :profile (fn []
-                (let [first-ns @first-semantic-ns]
+                (let [first-ns
+                      @first-semantic-ns
+
+                      ;; Measured (vis session 907a20a8, 2026-08-25): a websocket
+                      ;; stream died after 240 000 ms of silence and reported
+                      ;; `:max-gap-ms 6175` - the last HEALTHY pause, because the
+                      ;; silence that killed it was still open and no event ever
+                      ;; closed it. The one measurement the deadline constant needs
+                      ;; was the one this profile could not take.
+                      open-gap-ns
+                      (- (System/nanoTime) (long @last-semantic-ns))
+
+                      open-widest?
+                      (> open-gap-ns (long @max-gap-ns))]
+
                   {:ttft-ms (when first-ns (quot (- (long first-ns) start-ns) 1000000))
-                   :max-gap-ms (quot (long @max-gap-ns) 1000000)
-                   :max-gap-phase @max-gap-phase
+                   :max-gap-ms (quot (long (if open-widest? open-gap-ns @max-gap-ns)) 1000000)
+                   :max-gap-phase (if open-widest? (phase) @max-gap-phase)
                    :semantic-events @semantic-events
                    :quiet-events @quiet-events}))}))
 (defn- receive-websocket-response!
