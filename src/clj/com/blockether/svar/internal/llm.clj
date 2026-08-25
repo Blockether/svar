@@ -6652,10 +6652,10 @@
    Returns a map carrying the resolved network/pricing/context values plus
    the per-call LLM tuning options."
   [router
-   {:keys [model timeout-ms ttft-timeout-ms idle-timeout-ms semantic-timeout-ms check-context?
-           output-reserve api-key base-url provider-id api-style extra-body provider-state
-           cache-system? format-retries format-retry-on on-format-error responses-path llm-headers
-           verbosity context stateless-items?]
+   {:keys [model timeout-ms ttft-timeout-ms first-byte-timeout-ms idle-timeout-ms
+           semantic-timeout-ms check-context? output-reserve api-key base-url provider-id api-style
+           extra-body provider-state cache-system? format-retries format-retry-on on-format-error
+           responses-path llm-headers verbosity context stateless-items?]
     :as opts}]
   (let [{:keys [network tokens]}
         router
@@ -6692,6 +6692,11 @@
              :ttft-timeout-ms (cond (contains? opts :ttft-timeout-ms) ttft-timeout-ms
                                     (contains? network :ttft-timeout-ms) (:ttft-timeout-ms network)
                                     :else router/DEFAULT_TTFT_TIMEOUT_MS)
+             :first-byte-timeout-ms
+             (validated-first-byte-timeout-ms
+               (cond (contains? opts :first-byte-timeout-ms) first-byte-timeout-ms
+                     (contains? network :first-byte-timeout-ms) (:first-byte-timeout-ms network)
+                     :else router/DEFAULT_FIRST_BYTE_TIMEOUT_MS))
              :idle-timeout-ms (cond (contains? opts :idle-timeout-ms) idle-timeout-ms
                                     (contains? network :idle-timeout-ms) (:idle-timeout-ms network)
                                     :else router/DEFAULT_IDLE_TIMEOUT_MS)
@@ -7385,9 +7390,9 @@
     [{:keys [spec schema-tail-pointer?] :as opts0}
      opts0
 
-     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms
-             semantic-timeout-ms check-context? output-reserve network pricing context-limits
-             responses-path llm-headers]}
+     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms first-byte-timeout-ms
+             idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing
+             context-limits responses-path llm-headers]}
      (resolve-opts router opts0)
 
      provider-id
@@ -7545,9 +7550,10 @@
      (cond-> (merge network
                     {:timeout-ms timeout-ms
                      :api-style api-style
-                     ;; See `ask-code!*`: carry resolved streaming
-                     ;; timeouts verbatim so explicit nil disables any.
+                     ;; Carry resolved streaming timeouts verbatim so explicit nil
+                     ;; disables each phase-specific deadline.
                      :ttft-timeout-ms ttft-timeout-ms
+                     :first-byte-timeout-ms first-byte-timeout-ms
                      :idle-timeout-ms idle-timeout-ms
                      :semantic-timeout-ms semantic-timeout-ms})
        provider-id
@@ -8201,9 +8207,9 @@
      {:keys [on-chunk tools tool-choice]}
      opts
 
-     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms idle-timeout-ms
-             semantic-timeout-ms output-reserve check-context? network pricing context-limits
-             responses-path llm-headers]}
+     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms first-byte-timeout-ms
+             idle-timeout-ms semantic-timeout-ms output-reserve check-context? network pricing
+             context-limits responses-path llm-headers]}
      (resolve-opts router opts)
 
      provider-id
@@ -8292,6 +8298,7 @@
                     {:timeout-ms timeout-ms
                      :api-style api-style
                      :ttft-timeout-ms ttft-timeout-ms
+                     :first-byte-timeout-ms first-byte-timeout-ms
                      :idle-timeout-ms idle-timeout-ms
                      :semantic-timeout-ms semantic-timeout-ms})
        provider-id

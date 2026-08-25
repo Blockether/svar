@@ -435,6 +435,25 @@
               ;; (100k in * $10/M) + (1k out * $20/M) = 1.02
               (expect (approx= 1.02 (get-in result [:cost :total-cost])))))))))
 
+;; Regression, td-99117b: ask-code! dropped the public first-byte timeout
+;; before constructing the streaming HTTP retry policy.
+(defdescribe
+  ask-code-network-timeout-propagation-test
+  (it "forwards the resolved first-byte timeout to chat-completion"
+      (let [calls (atom [])]
+        (with-redefs [router/provider-model-pricing fixed-pricing
+                      sut/chat-completion (mock-chat [{:content "done"
+                                                       :tool-calls []
+                                                       :api-usage usage-good
+                                                       :http-response {:status 200}
+                                                       :stream-finalization {:finish-reason
+                                                                             "stop"}}]
+                                                     calls)]
+
+          (svar/ask-code! (test-router)
+                          {:messages [(svar/user "Say done.")] :first-byte-timeout-ms 600000})
+          (expect (= 600000 (get-in (first @calls) [:retry-opts :first-byte-timeout-ms])))))))
+
 ;; =============================================================================
 ;; Anthropic refusal (stop_reason "refusal") — classify, DON'T resend, surface
 ;; stop_details. A refused Fable/Opus 5 request is a documented, non-transient
