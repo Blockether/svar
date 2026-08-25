@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.142] - 2026-08-25
+
+### Changed
+- fix(network): propagate first-byte timeout through asks
+- release: update version files for v0.7.141, bump to next dev version
+
+
 ## [v0.7.141] - 2026-08-25
 
 ### Changed
@@ -2382,7 +2389,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.141...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.142...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2558,3 +2565,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.139]: https://github.com/Blockether/svar/releases/tag/v0.7.139
 [v0.7.140]: https://github.com/Blockether/svar/releases/tag/v0.7.140
 [v0.7.141]: https://github.com/Blockether/svar/releases/tag/v0.7.141
+[v0.7.142]: https://github.com/Blockether/svar/releases/tag/v0.7.142
