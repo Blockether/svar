@@ -19,13 +19,16 @@
                   [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}
                    {:id :anthropic :api-key "sk-test2" :models [{:name "claude-sonnet-4-6"}]}])]
           (expect (= 2 (count (:providers r))))))
-    (it "sets default network timeout-ms"
+    (it "sets default network timeouts"
         (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])]
-          (expect (= defaults/DEFAULT_TIMEOUT_MS (get-in r [:network :timeout-ms])))))
-    (it "allows custom timeout-ms via :network"
+          (expect (= defaults/DEFAULT_TIMEOUT_MS (get-in r [:network :timeout-ms])))
+          (expect (= defaults/DEFAULT_FIRST_BYTE_TIMEOUT_MS
+                     (get-in r [:network :first-byte-timeout-ms])))))
+    (it "allows custom timeouts via :network"
         (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}]
-                                 {:network {:timeout-ms 300000}})]
-          (expect (= 300000 (get-in r [:network :timeout-ms])))))
+                                 {:network {:timeout-ms 300000 :first-byte-timeout-ms 600000}})]
+          (expect (= 300000 (get-in r [:network :timeout-ms])))
+          (expect (= 600000 (get-in r [:network :first-byte-timeout-ms])))))
     (it "sets check-context? to true by default in :tokens"
         (let [r (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}])]
           (expect (true? (get-in r [:tokens :check-context?])))))

@@ -3548,11 +3548,17 @@
 (def ^:dynamic *stream-semantic-timeout-ms* router/DEFAULT_SEMANTIC_TIMEOUT_MS)
 
 (def ^:dynamic *stream-first-byte-timeout-ms*
-  "Ceiling (ms) on the wait for the FIRST byte of a streaming response body,
-   enforced by the idle watchdog until one line has been read. Bind it to widen,
-   tighten or disable (nil/0) the pre-first-byte window for one call; the
-   inter-chunk `:idle-timeout-ms` governs every gap after that byte."
+  "Ceiling (ms) on the wait for the FIRST byte of a streaming response body.
+   Public callers configure it with `:first-byte-timeout-ms`; nil/0 disables it."
   router/DEFAULT_FIRST_BYTE_TIMEOUT_MS)
+
+(defn- validated-first-byte-timeout-ms
+  [value]
+  (when-not (or (nil? value) (and (number? value) (not (neg? (double value)))))
+    (throw (ex-info
+             ":first-byte-timeout-ms must be nil or a non-negative number"
+             {:type :svar/invalid-network-timeout :key :first-byte-timeout-ms :value value})))
+  value)
 (def ^:dynamic *cancel-fn*
   "Optional no-arg predicate for caller-driven cancellation. When bound to
    a fn that returns truthy, an in-flight streaming call aborts ASAP — a
@@ -4505,25 +4511,31 @@
      - :base-url        - Provider base URL.
      - :responses-path  - Endpoint path, default `/responses`.
      - :headers         - Extra headers merged over the default auth headers.
-     - :timeout-ms          - Request timeout.
+     - :timeout-ms          - Whole-request timeout.
+     - :ttft-timeout-ms     - Pre-headers timeout.
+     - :first-byte-timeout-ms - Post-headers wait for the first stream byte.
+     - :idle-timeout-ms     - Inter-chunk timeout after the first byte.
      - :semantic-timeout-ms - Maximum time without meaningful model progress.
                               SSE heartbeats do not reset this deadline.
      - :on-chunk            - Optional streaming callback.
 
-   Transport liveness is covered separately by `:ttft-timeout-ms` and
-   `:idle-timeout-ms`.
-
    Returns same normalized shape as `chat-completion`:
    {:content :reasoning :provider-state :api-usage :http-response}"
   [request-body
-   {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms idle-timeout-ms
-           semantic-timeout-ms on-chunk]
+   {:keys [api-key base-url responses-path headers timeout-ms ttft-timeout-ms first-byte-timeout-ms
+           idle-timeout-ms semantic-timeout-ms on-chunk]
     :or {responses-path "/responses"
          timeout-ms router/DEFAULT_TIMEOUT_MS
          ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS
          idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS
-         semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS}}]
-  (let [url
+         semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS}
+    :as opts}]
+  (let [first-byte-timeout-ms
+        (validated-first-byte-timeout-ms (if (contains? opts :first-byte-timeout-ms)
+                                           first-byte-timeout-ms
+                                           router/DEFAULT_FIRST_BYTE_TIMEOUT_MS))
+
+        url
         (responses-url base-url responses-path)
 
         model
@@ -4559,13 +4571,19 @@
                                   :url url
                                   :timeout-ms timeout-ms
                                   :ttft-timeout-ms ttft-timeout-ms
+                                  :first-byte-timeout-ms first-byte-timeout-ms
                                   :idle-timeout-ms idle-timeout-ms
                                   :semantic-timeout-ms semantic-timeout-ms
                                   :stream? (boolean stream?)})
                  :msg "responses request dispatched"})
     (try
       (if stream?
-        (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
+        (binding [*stream-semantic-timeout-ms*
+                  semantic-timeout-ms
+
+                  *stream-first-byte-timeout-ms*
+                  first-byte-timeout-ms]
+
           (http-post-stream! url
                              request-body
                              http-headers
@@ -6227,6 +6245,11 @@
         provider-id
         (:provider-id retry-opts)
 
+        first-byte-timeout-ms
+        (if (contains? retry-opts :first-byte-timeout-ms)
+          (:first-byte-timeout-ms retry-opts)
+          router/DEFAULT_FIRST_BYTE_TIMEOUT_MS)
+
         llm-headers
         (:llm-headers retry-opts)
 
@@ -6264,7 +6287,12 @@
 
     (try
       (with-retry (fn []
-                    (binding [*stream-semantic-timeout-ms* semantic-timeout-ms]
+                    (binding [*stream-semantic-timeout-ms*
+                              semantic-timeout-ms
+
+                              *stream-first-byte-timeout-ms*
+                              first-byte-timeout-ms]
+
                       (http-post-stream! chat-url
                                          request-body
                                          headers
@@ -6334,14 +6362,13 @@
      - :ttft-timeout-ms - Integer. Time-to-first-token timeout for
                           streaming responses (default:
                           router/DEFAULT_TTFT_TIMEOUT_MS). Bounds the
-                          wait between the request leaving and the
-                          response headers arriving. Surfaces
-                          `:svar.core/stream-ttft-timeout`. Pass `nil`
-                          to disable.
-     - :idle-timeout-ms - Integer. Inter-chunk idle timeout for streaming
-                          responses (default: router/DEFAULT_IDLE_TIMEOUT_MS).
-                          Closes the SSE stream if no bytes arrive for this
-                          long; surfaces `:svar.core/stream-idle-timeout`.
+                          pre-headers wait. Pass `nil` to disable.
+     - :first-byte-timeout-ms - Number. Bounds the post-headers wait for the
+                               first stream byte (default:
+                               router/DEFAULT_FIRST_BYTE_TIMEOUT_MS). Pass
+                               nil/0 to disable.
+     - :idle-timeout-ms - Integer. Inter-chunk idle timeout after the first
+                          byte (default: router/DEFAULT_IDLE_TIMEOUT_MS).
                           Pass `nil` to disable.
      - :semantic-timeout-ms - Integer. Model/progress timeout for streaming
                               responses while transport bytes still arrive.
@@ -6359,13 +6386,17 @@
    (let [timeout-ms
          (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
 
-         ;; `contains?` (not `get` with default) so a caller can pass
-         ;; `:ttft-timeout-ms nil` / `:idle-timeout-ms nil` to explicitly
-         ;; disable each watchdog without falling through to the default.
+         ;; `contains?` (not `get` with default) so a caller can explicitly
+         ;; disable each watchdog with nil without falling through to defaults.
          ttft-timeout-ms
          (if (contains? opts :ttft-timeout-ms)
            (:ttft-timeout-ms opts)
            router/DEFAULT_TTFT_TIMEOUT_MS)
+
+         first-byte-timeout-ms
+         (validated-first-byte-timeout-ms (if (contains? opts :first-byte-timeout-ms)
+                                            (:first-byte-timeout-ms opts)
+                                            router/DEFAULT_FIRST_BYTE_TIMEOUT_MS))
 
          idle-timeout-ms
          (if (contains? opts :idle-timeout-ms)
@@ -6429,6 +6460,7 @@
                         :headers headers
                         :timeout-ms timeout-ms
                         :ttft-timeout-ms ttft-timeout-ms
+                        :first-byte-timeout-ms first-byte-timeout-ms
                         :idle-timeout-ms idle-timeout-ms
                         :semantic-timeout-ms semantic-timeout-ms
                         :on-chunk on-chunk}]
@@ -6469,7 +6501,8 @@
                                             model
                                             api-key
                                             base-url
-                                            opts
+                                            (assoc opts
+                                              :first-byte-timeout-ms first-byte-timeout-ms)
                                             timeout-ms
                                             ttft-timeout-ms
                                             idle-timeout-ms
@@ -6896,16 +6929,16 @@
    layer so an explicit `nil` from the caller disables the watchdog
    without falling through to the router default.
 
-   `k` is one of `:timeout-ms`, `:ttft-timeout-ms`, `:idle-timeout-ms`,
-   `:semantic-timeout-ms`. `default` is `router/DEFAULT_*_MS`. Mirrors what `resolve-opts` /
-   `ask-code!*` / `ask!*` already do internally; lifted here so every
-   public entrypoint (`routed-chat-completion`, `chat-completion`,
-   `ask!`, `ask-code!`, `abstract!`, `eval!`, `refine!`, `sample!`)
-   resolves the same way."
+   `k` is one of `:timeout-ms`, `:ttft-timeout-ms`,
+   `:first-byte-timeout-ms`, `:idle-timeout-ms`, `:semantic-timeout-ms`.
+   `default` is `router/DEFAULT_*_MS`. Mirrors what `resolve-opts` / `ask-code!*` /
+   `ask!*` already do internally; lifted here so every public entrypoint resolves
+   the same way."
   [opts router-network k default]
-  (cond (contains? opts k) (get opts k)
-        (contains? router-network k) (get router-network k)
-        :else default))
+  (let [value (cond (contains? opts k) (get opts k)
+                    (contains? router-network k) (get router-network k)
+                    :else default)]
+    (if (= k :first-byte-timeout-ms) (validated-first-byte-timeout-ms value) value)))
 
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
@@ -6918,12 +6951,12 @@
                           Interrupts `HttpClient.send` if the upstream
                           never returns response headers within the
                           window. Raises `:svar.core/stream-ttft-timeout`.
-     - :idle-timeout-ms — inter-chunk idle ceiling for streaming. Closes
-                          the SSE `InputStream` if no bytes arrive within
-                          the window. Raises `:svar.core/stream-idle-timeout`.
-     - :semantic-timeout-ms — model/progress ceiling for streaming while
-                              transport pings may continue. Raises
-                              `:svar.core/stream-semantic-timeout`.
+     - :first-byte-timeout-ms — post-headers ceiling until the first stream
+                                byte. Raises `:svar.core/stream-idle-timeout`
+                                with `:first-byte? true`.
+     - :idle-timeout-ms — inter-chunk idle ceiling after the first byte.
+     - :semantic-timeout-ms — model/progress ceiling while transport pings
+                              may continue.
 
    Precedence per key: caller `opts` > router `:network` > package
    default. Pass an explicit `nil` to disable the corresponding watchdog."
@@ -6940,6 +6973,12 @@
         ttft-timeout-ms
         (resolved-network-timeout opts network :ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS)
 
+        first-byte-timeout-ms
+        (resolved-network-timeout opts
+                                  network
+                                  :first-byte-timeout-ms
+                                  router/DEFAULT_FIRST_BYTE_TIMEOUT_MS)
+
         idle-timeout-ms
         (resolved-network-timeout opts network :idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS)
 
@@ -6954,28 +6993,29 @@
                                    (fn [provider model-map]
                                      (let [{:keys [extra-body api-style responses-path llm-headers]}
                                            (inject-routed-params opts provider model-map)]
-                                       (chat-completion messages
-                                                        (:name model-map)
-                                                        (:api-key provider)
-                                                        (:base-url provider)
-                                                        (cond-> {:extra-body extra-body
-                                                                 :api-style api-style
-                                                                 :timeout-ms timeout-ms
-                                                                 :ttft-timeout-ms ttft-timeout-ms
-                                                                 :idle-timeout-ms idle-timeout-ms
-                                                                 :semantic-timeout-ms
-                                                                 semantic-timeout-ms}
-                                                          (:id provider)
-                                                          (assoc :provider-id (:id provider))
+                                       (chat-completion
+                                         messages
+                                         (:name model-map)
+                                         (:api-key provider)
+                                         (:base-url provider)
+                                         (cond-> {:extra-body extra-body
+                                                  :api-style api-style
+                                                  :timeout-ms timeout-ms
+                                                  :ttft-timeout-ms ttft-timeout-ms
+                                                  :first-byte-timeout-ms first-byte-timeout-ms
+                                                  :idle-timeout-ms idle-timeout-ms
+                                                  :semantic-timeout-ms semantic-timeout-ms}
+                                           (:id provider)
+                                           (assoc :provider-id (:id provider))
 
-                                                          (:on-chunk opts)
-                                                          (assoc :on-chunk (:on-chunk opts))
+                                           (:on-chunk opts)
+                                           (assoc :on-chunk (:on-chunk opts))
 
-                                                          responses-path
-                                                          (assoc :responses-path responses-path)
+                                           responses-path
+                                           (assoc :responses-path responses-path)
 
-                                                          llm-headers
-                                                          (assoc :llm-headers llm-headers))))))))
+                                           llm-headers
+                                           (assoc :llm-headers llm-headers))))))))
 
 ;; =============================================================================
 ;; Explicit session protocol

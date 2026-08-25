@@ -40,6 +40,35 @@
   (when-let [[_ model-map] (sut/select-provider router prefs)]
     (:name model-map)))
 
+(def ^:private resolved-network-timeout @#'sut/resolved-network-timeout)
+
+(defdescribe first-byte-timeout-resolution-test
+             (it "resolves call, router, and package values in precedence order"
+                 (expect (= 900000
+                            (resolved-network-timeout {:first-byte-timeout-ms 900000}
+                                                      {:first-byte-timeout-ms 600000}
+                                                      :first-byte-timeout-ms
+                                                      120000)))
+                 (expect (= 600000
+                            (resolved-network-timeout {}
+                                                      {:first-byte-timeout-ms 600000}
+                                                      :first-byte-timeout-ms
+                                                      120000)))
+                 (expect (= 120000 (resolved-network-timeout {} {} :first-byte-timeout-ms 120000)))
+                 (expect (nil? (resolved-network-timeout {:first-byte-timeout-ms nil}
+                                                         {:first-byte-timeout-ms 600000}
+                                                         :first-byte-timeout-ms
+                                                         120000))))
+             (it "rejects invalid values clearly"
+                 (let [error (try (resolved-network-timeout {:first-byte-timeout-ms "slow"}
+                                                            {}
+                                                            :first-byte-timeout-ms
+                                                            120000)
+                                  nil
+                                  (catch clojure.lang.ExceptionInfo e e))]
+                   (expect (= :svar/invalid-network-timeout (:type (ex-data error))))
+                   (expect (= :first-byte-timeout-ms (:key (ex-data error)))))))
+
 ;;; ── Tests ──────────────────────────────────────────────────────────────
 
 (defdescribe root-strategy-test
@@ -559,27 +588,36 @@
                           :base-url "https://example.invalid/v1"
                           :responses-path "/codex/responses"})]
             (expect (= "```clojure\n(answer \"4\")\n```" (:content result)))))))
-    (it "responses transport arms the caller's semantic watchdog"
+    (it "responses transport arms the caller's stream watchdogs"
         (let [seen
-              (atom :unset)
+              (atom {})
 
               stream
               (str "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"
                    "data: [DONE]\n\n")]
 
           (with-redefs [http/post (fn [_url _opts]
-                                    (reset! seen sut/*stream-semantic-timeout-ms*)
+                                    (reset! seen {:semantic sut/*stream-semantic-timeout-ms*
+                                                  :first-byte sut/*stream-first-byte-timeout-ms*})
                                     {:status 200
                                      :body (ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
-            (let [result (sut/openai-responses-completion
-                           {:model "test-model"
-                            :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
-                           {:api-key "sk-test"
-                            :base-url "https://example.invalid/v1"
-                            :responses-path "/codex/responses"
-                            :semantic-timeout-ms 50})]
+            (let [request {:model "test-model"
+                           :input [{:role "user" :content [{:type "input_text" :text "hi"}]}]}
+                  result (sut/openai-responses-completion request
+                                                          {:api-key "sk-test"
+                                                           :base-url "https://example.invalid/v1"
+                                                           :responses-path "/codex/responses"
+                                                           :first-byte-timeout-ms 75
+                                                           :semantic-timeout-ms 50})]
+
               (expect (= "ok" (:content result)))
-              (expect (= 50 @seen))))))
+              (expect (= {:semantic 50 :first-byte 75} @seen))
+              (sut/openai-responses-completion request
+                                               {:api-key "sk-test"
+                                                :base-url "https://example.invalid/v1"
+                                                :responses-path "/codex/responses"
+                                                :first-byte-timeout-ms nil})
+              (expect (nil? (:first-byte @seen)))))))
     (it
       "profiles stream progress without counting heartbeats as progress"
       ;; The semantic deadline is a HEURISTIC constant and nothing in the logs
