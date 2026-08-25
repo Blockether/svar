@@ -2,7 +2,8 @@
   "Tests for router creation and defaults."
   (:require [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.internal.router :as defaults]
-            [com.blockether.svar.internal.llm :as llm]))
+            [com.blockether.svar.internal.llm :as llm]
+            [com.blockether.svar.core :as svar]))
 
 (defdescribe
   make-router-test
@@ -112,6 +113,133 @@
         (expect (some? (:budget stats)))
         (expect (= 0 (get-in stats [:budget :spent :total-tokens]))))))
 
+(defdescribe
+  prompt-cache-metric-test
+  "Svar-owned, route-local provider prompt-cache telemetry."
+  (it
+    "reports token-weighted reads separately from request hit frequency"
+    (let [now
+          (atom 1000)
+
+          router
+          (llm/make-router [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"}]}]
+                           {:clock #(long @now)})
+
+          complete!
+          (fn [scope input cached]
+            (defaults/with-provider-fallback
+              router
+              {:force-provider :openai :force-model "gpt-4o" :prompt-cache-scope scope}
+              (fn [_ _]
+                {:api-usage {:input-tokens input
+                             :output-tokens 0
+                             :total-tokens input
+                             :input-tokens-details
+                             {:regular (- input cached) :cache-write 0 :cache-read cached}}})))
+
+          _
+          (complete! "session-1" 10000 9000)
+
+          second-result
+          (complete! "session-1" 1000 0)
+
+          status
+          (svar/prompt-cache-status router "session-1" :openai "gpt-4o")]
+
+      (expect (= status (:prompt-cache second-result)))
+      (expect (= :provider-prompt-cache (:kind status)))
+      (expect (= :openai (:provider-id status)))
+      (expect (= "gpt-4o" (:model status)))
+      (expect (true? (:fresh? status)))
+      (expect (= 0 (:latest-age-ms status)))
+      (expect (= 8 (:window-size status)))
+      (expect (= 2 (:sample-count status)))
+      (expect (= 1 (:hit-requests status)))
+      (expect (= 11000 (:input-tokens status)))
+      (expect (= 9000 (:cache-read-tokens status)))
+      (expect (= 82 (:token-read-percent status)))
+      (expect (= 50 (:request-hit-percent status)))
+      (expect (= status (svar/prompt-cache-status router)))
+      (complete! "session-2" 500 0)
+      (expect (= 1 (:sample-count (svar/prompt-cache-status router "session-2" :openai "gpt-4o"))))
+      (expect (= 2
+                 (:sample-count (svar/prompt-cache-status router "session-1" :openai "gpt-4o"))))))
+  (it
+    "expires stale observations, bounds the window, and isolates model routes"
+    (let [now
+          (atom 1000)
+
+          router
+          (llm/make-router
+            [{:id :openai :api-key "sk-test" :models [{:name "gpt-4o"} {:name "gpt-4.1"}]}]
+            {:clock #(long @now) :prompt-cache {:window-size 2 :fresh-for-ms 1000}})
+
+          complete!
+          (fn [model input cached]
+            (defaults/with-provider-fallback
+              router
+              {:force-provider :openai :force-model model :prompt-cache-scope "session-1"}
+              (fn [_ _]
+                {:api-usage {:input-tokens input
+                             :output-tokens 0
+                             :total-tokens input
+                             :input-tokens-details
+                             {:regular (- input cached) :cache-write 0 :cache-read cached}}})))]
+
+      (complete! "gpt-4o" 100 100)
+      (swap! now + 100)
+      (complete! "gpt-4o" 100 0)
+      (swap! now + 100)
+      (complete! "gpt-4o" 100 100)
+      (expect (= 2 (:sample-count (svar/prompt-cache-status router "session-1" :openai "gpt-4o"))))
+      (expect (= 50
+                 (:request-hit-percent
+                   (svar/prompt-cache-status router "session-1" :openai "gpt-4o"))))
+      (expect (nil? (svar/prompt-cache-status router "session-1" :openai "gpt-4.1")))
+      (swap! now + 1001)
+      (let [stale (svar/prompt-cache-status router "session-1" :openai "gpt-4o")]
+        (expect (false? (:fresh? stale)))
+        (expect (= 1001 (:latest-age-ms stale)))
+        (expect (= 0 (:sample-count stale)))
+        (expect (nil? (:token-read-percent stale)))
+        (expect (nil? (:request-hit-percent stale))))
+      (complete! "gpt-4.1" 200 0)
+      (let [fresh (svar/prompt-cache-status router)]
+        (expect (= "gpt-4.1" (:model fresh)))
+        (expect (true? (:fresh? fresh)))
+        (expect (= 1 (:sample-count fresh)))
+        (expect (= 0 (:token-read-percent fresh)))
+        (expect (= 0 (:request-hit-percent fresh))))))
+  (it
+    "ages cache observations from request start and prunes inactive identities"
+    (let [now
+          (atom 1000)
+
+          router
+          (llm/make-router [{:id :anthropic :api-key "sk-test" :models [{:name "claude-test"}]}]
+                           {:clock #(long @now) :prompt-cache {:window-size 8 :fresh-for-ms 1000}})
+
+          complete!
+          (fn [scope duration-ms]
+            (defaults/with-provider-fallback
+              router
+              {:force-provider :anthropic :force-model "claude-test" :prompt-cache-scope scope}
+              (fn [_ _]
+                (swap! now + duration-ms)
+                {:api-usage {:input-tokens 100
+                             :output-tokens 0
+                             :total-tokens 100
+                             :input-tokens-details {:regular 0 :cache-write 0 :cache-read 100}}})))]
+
+      (complete! "old-session" 900)
+      (expect (= 900
+                 (:latest-age-ms
+                   (svar/prompt-cache-status router "old-session" :anthropic "claude-test"))))
+      (swap! now + 101)
+      (expect (false? (:fresh?
+                        (svar/prompt-cache-status router "old-session" :anthropic "claude-test"))))
+      (complete! "new-session" 0)
+      (expect (nil? (svar/prompt-cache-status router "old-session" :anthropic "claude-test"))))))
 (defdescribe reset-budget-test
              "Tests for reset-budget! function"
              (it "resets budget counters"

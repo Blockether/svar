@@ -2001,12 +2001,27 @@
 ;; Router internals — time / observability windows
 ;; =============================================================================
 
+(def ^:const DEFAULT_PROMPT_CACHE_WINDOW
+  "Number of recent, fresh requests summarized per provider/model route."
+  8)
+
+(def ^:const DEFAULT_PROMPT_CACHE_FRESH_FOR_MS
+  "Conservative observation-freshness horizon. Both Anthropic's default cache
+   and OpenAI's shortest documented in-memory retention cover five minutes."
+  300000)
+
+(def ^:private MAX_PROMPT_CACHE_SAMPLE_TOKENS
+  "Defensive ceiling for one provider usage reading."
+  1000000000000)
+
 (def ^:private router-default-opts
   {:window-ms 60000
    :cooldown-ms 60000
    :max-wait-ms 30000
    :transient-status-codes failure/TRANSIENT_STATUS_CODES
    :rate-limit DEFAULT_RATE_LIMIT_ROUTING
+   :prompt-cache {:window-size DEFAULT_PROMPT_CACHE_WINDOW
+                  :fresh-for-ms DEFAULT_PROMPT_CACHE_FRESH_FOR_MS}
    ;; Circuit breaker defaults
    :failure-threshold 5
    :recovery-ms 60000})
@@ -2159,6 +2174,134 @@
                                       (-> bs
                                           (update :total-tokens + total-tokens)
                                           (update :total-cost + (:total-cost cost))))))))
+
+;; =============================================================================
+;; Provider prompt-cache observability
+;; =============================================================================
+
+(defn- prompt-cache-token-count
+  "A malformed provider usage envelope is no reason to break routing telemetry."
+  ^long [value]
+  (if (number? value)
+    (let [n (double value)]
+      (cond (Double/isNaN n) 0
+            (Double/isInfinite n) 0
+            (<= n 0.0) 0
+            (>= n (double MAX_PROMPT_CACHE_SAMPLE_TOKENS)) MAX_PROMPT_CACHE_SAMPLE_TOKENS
+            :else (long n)))
+    0))
+
+(defn- prompt-cache-percent
+  ^long [part total]
+  (if (pos? (long total))
+    (min 100 (long (Math/round (* 100.0 (/ (double part) (double total))))))
+    0))
+
+(defn- prompt-cache-route [scope provider-id model] [scope provider-id (str model)])
+
+(defn- prompt-cache-status-for
+  [router scope provider-id model]
+  (when-let [{:keys [state] meter-window-size :window-size meter-fresh-for-ms :fresh-for-ms}
+             (:prompt-cache-meter router)]
+    (let [route (prompt-cache-route scope provider-id model)
+          samples (get-in @state [:routes route])]
+
+      (when (seq samples)
+        (let [window-size (long meter-window-size)
+              fresh-for-ms (long meter-fresh-for-ms)
+              now (router-now-ms router)
+              latest-at (long (:at-ms (peek samples)))
+              latest-age (max 0 (- now latest-at))
+              fresh (filterv #(<= (max 0 (- now (long (:at-ms %)))) fresh-for-ms) samples)
+              input (reduce + 0 (map :input-tokens fresh))
+              cached (reduce + 0 (map :cache-read-tokens fresh))
+              hits (count (filter #(pos? (long (:cache-read-tokens %))) fresh))
+              requests (count fresh)]
+
+          (cond-> {:kind :provider-prompt-cache
+                   :provider-id provider-id
+                   :model (str model)
+                   :fresh? (<= latest-age fresh-for-ms)
+                   :latest-age-ms latest-age
+                   :fresh-for-ms fresh-for-ms
+                   :window-size window-size
+                   :sample-count requests}
+            (pos? requests)
+            (assoc :hit-requests
+              hits :input-tokens
+              input :cache-read-tokens
+              cached :token-read-percent
+              (prompt-cache-percent cached input) :request-hit-percent
+              (prompt-cache-percent hits requests))))))))
+
+(defn prompt-cache-status
+  "Returns Svar's cache-identity- and route-local provider prompt-cache summary,
+   or nil before a measured request. `:token-read-percent` is cache-read input
+   divided by total input; `:request-hit-percent` is requests with any cache read
+   divided by measured requests. Only samples no older than `:fresh-for-ms`
+   contribute. A stale route remains identifiable with `:fresh? false` and zero
+   samples, but carries no misleading rate. The cache identity is never returned.
+   This is provider prompt caching, not Responses WebSocket continuation; session
+   transport counters report that separately."
+  ([router]
+   (when-let [[scope provider-id model] (get @(:state (:prompt-cache-meter router)) :latest-route)]
+     (prompt-cache-status-for router scope provider-id model)))
+  ([router scope provider-id model] (prompt-cache-status-for router scope provider-id model)))
+
+(defn- record-prompt-cache!
+  [router scope provider-id model api-usage request-start-ms]
+  (let [input
+        (prompt-cache-token-count (:input-tokens api-usage))
+
+        cached
+        (min input
+             (prompt-cache-token-count (get-in api-usage [:input-tokens-details :cache-read])))]
+
+    (when (and scope (pos? input))
+      (let [{:keys [state] meter-window-size :window-size meter-fresh-for-ms :fresh-for-ms}
+            (:prompt-cache-meter router)
+
+            window-size
+            (long meter-window-size)
+
+            fresh-for-ms
+            (long meter-fresh-for-ms)
+
+            route
+            (prompt-cache-route scope provider-id model)
+
+            now
+            (router-now-ms router)
+
+            cutoff
+            (- now fresh-for-ms)
+
+            ;; Provider cache retention is measured from request start, not response
+            ;; completion. A long reasoning call therefore ages its own observation.
+            sample
+            {:at-ms (long (or request-start-ms now)) :input-tokens input :cache-read-tokens cached}]
+
+        (swap! state (fn [meter]
+                       (let [active-routes
+                             (into {}
+                                   (filter (fn [[_ samples]]
+                                             (when-let [latest (peek samples)]
+                                               (>= (long (:at-ms latest)) cutoff))))
+                                   (:routes meter))
+
+                             prior
+                             (get active-routes route)
+
+                             recent
+                             (filterv #(>= (long (:at-ms %)) cutoff) prior)
+
+                             samples
+                             (vec (take-last window-size (conj recent sample)))]
+
+                         (assoc meter
+                           :latest-route route
+                           :routes (assoc active-routes route samples)))))
+        (prompt-cache-status-for router scope provider-id model)))))
 
 ;; =============================================================================
 ;; Cumulative stats recording
@@ -3019,7 +3162,13 @@
                                       (get-in result [:tokens :total])
                                       0)
                       latency-ms (- (router-now-ms router) start-ms)
-                      trace-value @trace]
+                      trace-value @trace
+                      prompt-cache (record-prompt-cache! router
+                                                         (:prompt-cache-scope prefs)
+                                                         pid
+                                                         (:name model-map)
+                                                         (:api-usage result)
+                                                         start-ms)]
 
                   (record-tokens! router pid token-count)
                   (cb-record-success! router pid)
@@ -3044,6 +3193,9 @@
                                                                        :llm.routing/provider-retry
                                                                        (:event/type %))
                                                                     trace-value))))
+                    prompt-cache
+                    (assoc :prompt-cache prompt-cache)
+
                     effort-resolution
                     (assoc :routed/reasoning-effort effort-resolution)
 
@@ -3268,7 +3420,12 @@
                        (frequencies ids)))
 
          merged
-         (merge router-default-opts opts)
+         (update (merge router-default-opts opts)
+                 :prompt-cache
+                 #(merge (:prompt-cache router-default-opts) %))
+
+         prompt-cache-config
+         (:prompt-cache merged)
 
          budget
          (:budget opts)
@@ -3286,6 +3443,9 @@
                        {:type :svar/duplicate-provider-ids :ids dupes})))
      {:providers normalized
       :state (atom (zipmap ids (repeat init-provider-state)))
+      :prompt-cache-meter {:state (atom {:routes {} :latest-route nil})
+                           :window-size (max 1 (long (:window-size prompt-cache-config)))
+                           :fresh-for-ms (max 1 (long (:fresh-for-ms prompt-cache-config)))}
       :budget budget
       :budget-state (when budget (atom {:total-tokens 0 :total-cost 0.0}))
       :network (merge DEFAULT_RETRY
@@ -3338,7 +3498,7 @@
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning reasoning-effort
                 prefer-providers on-format-error format-retry-on on-auth-error exclude-providers
-                exclude-models on-chunk capabilities]}
+                exclude-models on-chunk capabilities prompt-cache-scope]}
         routing-opts
 
         error-strategy
@@ -3386,6 +3546,9 @@
 
         prefs
         (cond-> base-prefs
+          prompt-cache-scope
+          (assoc :prompt-cache-scope prompt-cache-scope)
+
           reasoning
           (assoc :require-reasoning? true)
 

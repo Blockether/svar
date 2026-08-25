@@ -30,6 +30,11 @@
 
 (def make-router "Creates a router from a vector of provider maps." llm/make-router)
 (def router-stats "Returns cumulative + windowed stats for the router." llm/router-stats)
+(defn prompt-cache-status
+  "Returns Svar-owned, route-local provider prompt-cache telemetry."
+  ([router] (llm/prompt-cache-status router))
+  ([router cache-scope provider-id model]
+   (llm/prompt-cache-status router cache-scope provider-id model)))
 (def reset-budget! "Resets the router's token/cost budget counters to zero." llm/reset-budget!)
 (def reset-provider! "Manually resets a provider's circuit breaker to :closed." llm/reset-provider!)
 
@@ -153,6 +158,9 @@
   llm/open-session)
 (def close-session! "Closes an explicit LLM session. Idempotent." llm/close-session!)
 (def session-history "Returns an explicit session's canonical replay history." llm/session-history)
+(def session-status
+  "Returns provider-safe transport telemetry for an explicit session."
+  llm/session-status)
 (def ask!
   "Asks the LLM and returns structured Clojure data with token usage and cost. With
    an explicit session, appends one native completion turn; `{:history [...]}`

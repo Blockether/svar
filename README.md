@@ -35,10 +35,10 @@ SVAR takes a different approach: let the LLM produce plain text, then parse and 
 
 | Category | Functions | Description |
 |----------|-----------|-------------|
-| [**Router**](#router) | `make-router`, `router-stats`, `reset-budget!`, `reset-provider!` | Multi-provider routing with circuit breakers, cost budgets, automatic fallback. The entry point to the library. |
+| [**Router**](#router) | `make-router`, `router-stats`, `prompt-cache-status`, `reset-budget!`, `reset-provider!` | Multi-provider routing with circuit breakers, cost budgets, automatic fallback, and provider prompt-cache telemetry. The entry point to the library. |
 | [**Structured Output**](#schemaless-adaptive-parsing-ask) | `ask!` | LLM → validated Clojure map via spec. Works with any text-producing LLM — SAP parser handles malformed JSON, unquoted keys, trailing commas, markdown blocks. Supports [streaming](#streaming) via `:on-chunk`. Token counting + cost estimation via JTokkit. |
 | [**Tool Calling**](#tool-calling-ask-code) | `ask-code!` | Native tool-calling completion. The model acts by calling your tools (`tool_use` / `tool_calls` / `function_call` — shaped per wire); no tool call means its text IS the final answer. Supports [streaming](#streaming) via `:on-chunk`. |
-| [**Stateful Codex Sessions**](#stateful-codex-sessions-open-session) | `open-session`, `ask!`, `close-session!`, `session-history` | Persistent Responses WebSocket, delta-only turns, server continuation, and canonical replay fallback for `:openai-codex`. |
+| [**Stateful Codex Sessions**](#stateful-codex-sessions-open-session) | `open-session`, `ask!`, `close-session!`, `session-history`, `session-status` | Persistent Responses WebSocket, delta-only turns, server continuation, canonical replay fallback, and provider-safe transport telemetry for `:openai-codex`. |
 | [**Spec DSL**](#spec-dsl-reference) | `spec`, `field`, `spec->prompt`, `validate-data` | Define output shapes: types, enums, refs, optional fields, namespaced keys, fixed-size vectors. |
 | [**Parsing**](#parsing--validation) | `str->data`, `str->data-with-spec`, `data->str` | Schemaless and spec-validated JSON↔Clojure. Handles malformed JSON out of the box. |
 | [**Models**](#available-models-models) | `models!` | List available models from your provider. |
@@ -108,6 +108,27 @@ Vector order = priority. If the first provider fails (rate limit, outage), the r
        :failure-threshold 5                          ;; failures before circuit opens
        :recovery-ms 60000})))                        ;; ms before retry after open
 ```
+
+### Provider prompt-cache telemetry
+
+Svar measures provider prompt-cache reads at the same routing boundary that knows
+which provider and model actually served a request. Every successful routed result
+with measured `:api-usage` carries a `:prompt-cache` summary. The summary separates
+`:token-read-percent` (cached input tokens / all input tokens) from
+`:request-hit-percent` (requests with any cache read / measured requests), and names
+`:fresh?`, `:latest-age-ms`, `:fresh-for-ms`, `:sample-count`, and `:window-size`.
+It is scoped by the call's stable cache identity plus the actual provider/model, so a
+fallback or a second session never averages unrelated caches together.
+
+`(svar/prompt-cache-status router)` returns the most recently measured summary.
+Explicit sessions include their own scoped summary in `(svar/session-status session)`.
+The defaults are eight requests and a conservative five-minute freshness horizon,
+aged from request start (so long reasoning consumes retention time); configure them
+on `make-router` with `{:prompt-cache {:window-size 8 :fresh-for-ms 300000}}`.
+A directly queried stale observation keeps route and age metadata but publishes no
+rates; subsequent traffic prunes inactive cache identities. Responses WebSocket delta continuation
+is intentionally not counted as a provider prompt-cache hit; its counters live under
+`session-status :transport`.
 
 ### Routing Options
 
@@ -287,7 +308,7 @@ Use `ask-code!` when the model should ACT — by calling tools you define — ra
 
 Returns `{:stop-reason :tool-calls|:end :tool-calls [{:id <str> :name <str> :input <map>} ...] :content <text-or-nil> :reasoning <provider-reasoning-when-present> :assistant-message <canonical-assistant-turn — MUST be appended to :messages on the next call> :tokens {:input N :output N :reasoning N :total N} :cost {:input-cost N :output-cost N :total-cost N} :duration-ms N}`.
 
-`ask-code!` accepts the same routing, reasoning, verbosity, network, and streaming controls as `ask!`, minus the structured-output-only knobs (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`). See [TOOL_CALLING.md](TOOL_CALLING.md) for the full wire-level design.
+`ask-code!` accepts the same routing, reasoning, verbosity, network, and streaming controls as `ask!`, minus the structured-output-only knobs (`:spec`, `:format-retries`, `:format-retry-on`, `:json-object-mode?`). A successfully routed result with provider usage also carries Svar's current `:prompt-cache` summary; callers should render that value rather than recomputing a ratio from token totals. See [TOOL_CALLING.md](TOOL_CALLING.md) for the full wire-level design.
 
 Add `:strict true` to a tool definition to have the provider sample that tool's `input` under `:schema` as a grammar, so an argument can never come back malformed (an array arriving as JSON text, a missing required key). Anthropic takes it as-is and still allows optional properties. The OpenAI wires (chat, responses, and the ChatGPT Codex backend) enforce a harsher subset: every property must be listed in `required` — mark optional ones nullable — and every object must set `additionalProperties: false`. Gemini has no per-tool equivalent and ignores the flag. When a route rejects the field, svar re-sends once with it stripped rather than failing the turn.
 
@@ -311,7 +332,11 @@ For a multi-turn `:openai-codex` agent, open one explicit session instead of reb
                   :content "55"}]})))
 ```
 
-The session keeps one Responses WebSocket, a stable `prompt_cache_key`, and the latest `previous_response_id`. Before its first inference it sends a best-effort `response.create` prewarm with `generate=false`; the real request then reuses that response ID and sends an empty delta (`:websocket-prewarm? false` disables this optimization). Afterward it sends only new user/tool items. A turn may select another model on the same Codex provider with `{:input ... :routing {:model "..."}}`: Svar retains the physical WebSocket, resets the model-bound continuation, and replays canonical history once; later turns on that model are incremental again. Provider changes require a different session. Svar still owns canonical history: a rejected cursor or dropped connection reconnects and replays the whole history, up to `:websocket-max-retries` times (default 5, waits tuned by `:websocket-retry-delay-ms`). When that ladder is spent - or the endpoint refuses the upgrade with `426` - the session leaves the WebSocket for the rest of its life and runs on the existing HTTP/SSE Responses transport, which always carries the full history. A restarted turn tells `:on-chunk` so consumers can drop the text an interrupted attempt already streamed: `{:event/type :llm.session/stream-restarted :restarted? true :content ""}`. Informational `codex.rate_limits` events are normalized into the result’s `:rate-limits` and emitted through `:on-chunk` as `{:event/type :llm.session/rate-limits :rate-limits …}`. Calls on one session are serialized; `with-open` or `close-session!` closes its socket. `session-history` returns the replayable canonical messages.
+The session keeps one Responses WebSocket, a stable `prompt_cache_key`, and the latest `previous_response_id`. Before its first inference it sends a best-effort `response.create` prewarm with `generate=false`; the real request then reuses that response ID and sends an empty delta (`:websocket-prewarm? false` disables this optimization). Afterward it sends only new user/tool items. A turn may select another model on the same Codex provider with `{:input ... :routing {:model "..."}}`: Svar retains the physical WebSocket, resets the model-bound continuation, and replays canonical history once; later turns on that model are incremental again. Provider changes require a different session. At the next turn boundary after 55 minutes, Svar gracefully rotates the physical socket before Codex's 60-minute limit and fully replays canonical history with the same `prompt_cache_key`; `:websocket-max-age-ms` changes that threshold.
+
+Svar also owns Codex's opaque `x-codex-turn-state`. It captures the first value returned for a logical agent/tool turn, echoes it through that turn's tool-result follow-ups (`client_metadata` on WebSocket, the request header on HTTP), and clears it before the next user turn, history replacement, or model change. Callers neither store nor forward this provider state. `session-status` exposes a sanitized transport view instead: current mode and connection age plus counters for socket opens, prewarms, initial requests, delta requests, full replays, reconnects, cursor/history/model resets, HTTP fallbacks, and rotations. It also carries the session-scoped provider `:prompt-cache` summary described above. It never returns the socket, cursor, turn-state token, credentials, or cache key.
+
+Svar still owns canonical history: a rejected cursor or dropped connection reconnects and replays the whole history, up to `:websocket-max-retries` times (default 5, waits tuned by `:websocket-retry-delay-ms`). When that ladder is spent - or the endpoint refuses the upgrade with `426` - the session leaves the WebSocket for the rest of its life and runs on the existing HTTP/SSE Responses transport, which always carries the full history. A restarted turn tells `:on-chunk` so consumers can drop the text an interrupted attempt already streamed: `{:event/type :llm.session/stream-restarted :restarted? true :content ""}`. Informational `codex.rate_limits` events are normalized into the result’s `:rate-limits` and emitted through `:on-chunk` as `{:event/type :llm.session/rate-limits :rate-limits …}`. Calls on one session are serialized; `with-open` or `close-session!` closes its socket. `session-history` returns the replayable canonical messages and `session-status` returns Svar's live observability snapshot.
 
 The API name is provider-neutral, but the stateful backend currently supports only `:openai-codex`; opening it for another provider fails explicitly instead of pretending that provider has server-side continuation.
 

@@ -50,15 +50,22 @@
                                           "content" [{"type" "output_text" "text" text}]}])
                          "usage" {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}))
 (defn- tool-call-event
-  []
-  (json/write-json-str
-    {"type" "response.completed"
-     "response"
-     {"id" "resp_tool"
-      "status" "completed"
-      "output"
-      [{"id" "fc_1" "call_id" "call_1" "type" "function_call" "name" "run" "arguments" "{\"x\":1}"}]
-      "usage" {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}))
+  ([] (tool-call-event "resp_tool" "fc_1" "call_1"))
+  ([response-id item-id call-id]
+   (json/write-json-str {"type" "response.completed"
+                         "response" {"id" response-id
+                                     "status" "completed"
+                                     "output" [{"id" item-id
+                                                "call_id" call-id
+                                                "type" "function_call"
+                                                "name" "run"
+                                                "arguments" "{\"x\":1}"}]
+                                     "usage"
+                                     {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}})))
+
+(defn- turn-state-event
+  [value]
+  (json/write-json-str {"type" "response.metadata" "headers" {"x-codex-turn-state" value}}))
 
 (defn- fake-websocket-factory
   ([events sent closes] (fake-websocket-factory events sent closes (atom 0)))
@@ -170,6 +177,111 @@
               (expect (= 1 (count (:input second-request))))
               (expect (= "two" (get-in second-request [:input 0 :content 0 :text])))))
           (expect (= 1 @closes)))))
+  (it
+    "rotates an aged socket and replays canonical history with the same cache key"
+    (let [opens
+          (atom 0)
+
+          sent
+          (atom [])
+
+          closes
+          (atom [])
+
+          aborts
+          (atom [])
+
+          factory
+          (fn [_]
+            (let [n
+                  (swap! opens inc)
+
+                  events
+                  (atom (if (= 1 n)
+                          [(turn-state-event "turn-state-1")
+                           (tool-call-event "resp_tool" "fc_1" "call_1")
+                           (completed-event "resp_unrotated" "old socket")]
+                          [(completed-event "resp_2" "rotated")]))]
+
+              {:opened-ns (if (= 1 n) (- (System/nanoTime) 3360000000000) (System/nanoTime))
+               :send! (fn [payload]
+                        (swap! sent conj [n (json/read-json payload :key-fn keyword)]))
+               :receive! (fn [_]
+                           (let [event (first @events)]
+                             (swap! events subvec 1)
+                             event))
+               :close! (fn []
+                         (swap! closes conj n))
+               :abort! (fn []
+                         (swap! aborts conj n))}))]
+
+      (with-redefs [sut/open-responses-websocket! factory]
+        (with-open [session (open-test-session (codex-router)
+                                               {:routing {:provider :openai-codex :model "gpt-5.6"}
+                                                :tools [{:name "run"
+                                                         :description "Runs a task"
+                                                         :schema {:type "object"}}]})]
+          (expect (= :tool-calls (:stop-reason (svar/ask! session "one"))))
+          (expect (= "rotated"
+                     (:content (svar/ask! session
+                                          {:role "user"
+                                           :content [{:type "tool_result"
+                                                      :tool_use_id "call_1|fc_1"
+                                                      :content "ok"}]}))))
+          (let [[[first-socket first-request] [second-socket replay]] @sent]
+            (expect (= [1 2] [first-socket second-socket]))
+            (expect (nil? (:previous_response_id first-request)))
+            (expect (nil? (:previous_response_id replay)))
+            (expect (= 3 (count (:input replay))))
+            (expect (= (:prompt_cache_key first-request) (:prompt_cache_key replay)))
+            (expect (= "turn-state-1" (get-in replay [:client_metadata :x-codex-turn-state]))))))
+      (expect (= 2 @opens))
+      (expect (= [1 2] @closes))
+      (expect (empty? @aborts))))
+  (it
+    "exposes Svar-owned transport telemetry without leaking provider state"
+    (let [events
+          (atom [(completed-event "resp_warm" "") (completed-event "resp_1" "first")
+                 (completed-event "resp_2" "second")])
+
+          sent
+          (atom [])
+
+          closes
+          (atom 0)
+
+          status-fn
+          (ns-resolve 'com.blockether.svar.core 'session-status)]
+
+      (expect (some? status-fn))
+      (when status-fn
+        (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
+          (with-open [session (svar/open-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (svar/ask! session "one")
+            (svar/ask! session "two")
+            (let [{:keys [provider-id transport prompt-cache]} (status-fn session)]
+              (expect (= :openai-codex provider-id))
+              (expect (= :websocket (:mode transport)))
+              (expect (<= 0 (:connection-age-ms transport)))
+              (expect (= {:websocket-opens 1
+                          :prewarm-requests 1
+                          :initial-requests 0
+                          :delta-requests 2
+                          :full-replay-requests 0
+                          :reconnects 0
+                          :cursor-resets 0
+                          :history-resets 0
+                          :model-resets 0
+                          :http-fallbacks 0
+                          :rotations 0}
+                         (:counters transport)))
+              (expect (not-any? #(contains? transport %) [:socket :cursor :turn-state]))
+              (expect (= :provider-prompt-cache (:kind prompt-cache)))
+              (expect (= 2 (:sample-count prompt-cache)))
+              (expect (= 0 (:token-read-percent prompt-cache)))
+              (expect (= 0 (:request-hit-percent prompt-cache)))))))))
   (it "never sends an explicit cache breakpoint to the ChatGPT Codex backend"
       ;; Regression: from the second request of a session onwards the body carried
       ;; a rolling `prompt_cache_breakpoint` (the first request has one input
@@ -730,6 +842,88 @@
               (expect (= "resp_tool" (:previous_response_id delta-request)))
               (expect (= [{:type "function_call_output" :call_id "call_1" :output "ok"}]
                          (:input delta-request))))))))
+  (it "replays one Codex turn-state value through tool follow-ups and resets it for the next user"
+      (let [events
+            (atom [(turn-state-event "turn-state-1") (tool-call-event "resp_tool_1" "fc_1" "call_1")
+                   (turn-state-event "turn-state-2") (tool-call-event "resp_tool_2" "fc_2" "call_2")
+                   (completed-event "resp_3" "done") (completed-event "resp_4" "next")])
+
+            sent
+            (atom [])
+
+            closes
+            (atom 0)
+
+            tool-result
+            (fn [call-id]
+              {:role "user" :content [{:type "tool_result" :tool_use_id call-id :content "ok"}]})]
+
+        (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :tools [{:name "run"
+                                                           :description "Runs a task"
+                                                           :schema {:type "object"}}]})]
+            (expect (= :tool-calls (:stop-reason (svar/ask! session "run it"))))
+            (expect (= :tool-calls (:stop-reason (svar/ask! session (tool-result "call_1|fc_1")))))
+            (expect (= "done" (:content (svar/ask! session (tool-result "call_2|fc_2")))))
+            (expect (= "next" (:content (svar/ask! session "new user turn"))))
+            (expect (= [nil "turn-state-1" "turn-state-1" nil]
+                       (mapv #(get-in % [:client_metadata :x-codex-turn-state]) @sent)))))))
+  (it
+    "carries Codex turn state through the sticky HTTP fallback without exposing policy to callers"
+    (let [http-opts
+          (atom [])
+
+          calls
+          (atom 0)
+
+          tool-message
+          {:role "assistant"
+           :content [{:type "tool_use" :id "call_1|fc_1" :name "run" :input {:x 1}}]}]
+
+      (with-redefs [sut/open-responses-websocket!
+                    (fn [_]
+                      (throw (java.io.IOException. "upgrade unavailable")))
+
+                    sut/openai-responses-completion
+                    (fn [_body opts]
+                      (swap! http-opts conj opts)
+                      (case (swap! calls inc)
+                        1
+                        {:content nil
+                         :assistant-message tool-message
+                         :tool-calls [{:id "call_1|fc_1" :name "run" :arguments {:x 1}}]
+                         :stop-reason :tool-calls
+                         :api-usage {:input-tokens 10 :output-tokens 2}
+                         :http-response {:status 200
+                                         :headers {"x-codex-turn-state" "http-turn-state"}}}
+
+                        {:content "done"
+                         :assistant-message {:role "assistant"
+                                             :content [{:type "text" :text "done"}]}
+                         :tool-calls []
+                         :stop-reason :end
+                         :api-usage {:input-tokens 10 :output-tokens 2}
+                         :http-response {:status 200 :headers {}}}))]
+
+        (with-open [session (open-test-session (codex-router)
+                                               {:routing {:provider :openai-codex :model "gpt-5.6"}
+                                                :websocket-max-retries 0
+                                                :tools [{:name "run"
+                                                         :description "Runs a task"
+                                                         :schema {:type "object"}}]})]
+          (expect (= :tool-calls (:stop-reason (svar/ask! session "run it"))))
+          (expect (= "done"
+                     (:content (svar/ask! session
+                                          {:role "user"
+                                           :content [{:type "tool_result"
+                                                      :tool_use_id "call_1|fc_1"
+                                                      :content "ok"}]}))))
+          (expect (= "done" (:content (svar/ask! session "new user turn"))))
+          (expect (= [nil "http-turn-state" nil]
+                     (mapv #(get-in % [:headers "x-codex-turn-state"]) @http-opts)))))))
   (it "falls back to the existing HTTP Responses transport when WebSocket setup fails"
       (let [http-bodies (atom [])]
         (with-redefs [sut/open-responses-websocket! (fn [_]

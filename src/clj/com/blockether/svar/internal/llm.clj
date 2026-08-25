@@ -3696,7 +3696,8 @@
                (when (compare-and-set! closed? false true) (close-websocket! socket)))
      :abort! (fn []
                (when (compare-and-set! closed? false true) (abort-websocket! socket)))
-     :url url}))
+     :url url
+     :opened-ns (System/nanoTime)}))
 
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRIES
   "Stream failures ONE turn may answer by reconnecting and replaying before the
@@ -3711,6 +3712,79 @@
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS
   "Ceiling for a reconnect wait: a transport hiccup is not a rate limit."
   4000)
+
+(def ^:private ^:const SESSION_WEBSOCKET_MAX_AGE_MS
+  "Age at which an idle Codex socket is retired before the provider's hard
+   60-minute connection limit. The next turn opens a socket and replays canonical
+   history under the unchanged prompt-cache key."
+  3300000)
+
+(def ^:private SESSION_TRANSPORT_COUNTER_DEFAULTS
+  {:websocket-opens 0
+   :prewarm-requests 0
+   :initial-requests 0
+   :delta-requests 0
+   :full-replay-requests 0
+   :reconnects 0
+   :cursor-resets 0
+   :history-resets 0
+   :model-resets 0
+   :http-fallbacks 0
+   :rotations 0})
+
+(defn- bump-session-counter!
+  [transport-state counter]
+  (swap! transport-state update-in [:transport-counters counter] (fnil inc 0)))
+
+(defn- record-session-websocket-request!
+  "Classifies every attempted Responses request by the wire shape Svar selected.
+   Warmups stand alone. An inference with a cursor is incremental; a cursorless
+   inference is initial only before any prior inference attempt, otherwise replay."
+  [transport-state warmup? cursor]
+  (swap! transport-state (fn [state]
+                           (let [counters
+                                 (merge SESSION_TRANSPORT_COUNTER_DEFAULTS
+                                        (:transport-counters state))
+
+                                 initial-requests
+                                 (long (:initial-requests counters))
+
+                                 delta-requests
+                                 (long (:delta-requests counters))
+
+                                 replay-requests
+                                 (long (:full-replay-requests counters))
+
+                                 inference-requests
+                                 (+ initial-requests delta-requests replay-requests)
+
+                                 counter
+                                 (cond warmup? :prewarm-requests
+                                       cursor :delta-requests
+                                       (zero? inference-requests) :initial-requests
+                                       :else :full-replay-requests)]
+
+                             (-> state
+                                 (assoc :last-request-transport :websocket)
+                                 (update-in [:transport-counters counter] (fnil inc 0)))))))
+
+(defn- session-transport-status
+  "Public, provider-state-free transport view for one explicit session."
+  [transport-state closed?]
+  (let [{:keys [socket socket-opened-ns http-only? last-request-transport transport-counters]}
+        @transport-state
+
+        connection-age-ms
+        (when (and socket socket-opened-ns)
+          (max 0 (quot (- (System/nanoTime) (long socket-opened-ns)) 1000000)))]
+
+    {:mode (cond closed? :closed
+                 http-only? :http
+                 socket :websocket
+                 :else :pending)
+     :connection-age-ms connection-age-ms
+     :last-request-transport last-request-transport
+     :counters (merge SESSION_TRANSPORT_COUNTER_DEFAULTS transport-counters)}))
 
 (def ^:private ^:const SESSION_CURSOR_RESET_ALLOWANCE
   "Times ONE turn may rewind a rejected `previous_response_id` and replay its full
@@ -3741,7 +3815,25 @@
   [transport-state mode]
   (when-let [socket (:socket @transport-state)]
     (try ((if (= :abort mode) (:abort! socket) (:close! socket))) (catch Throwable _ nil)))
-  (swap! transport-state dissoc :socket :cursor :stable :warmup-input))
+  (swap! transport-state dissoc :socket :socket-opened-ns :cursor :stable :warmup-input))
+
+(defn- rotate-aged-session-socket!
+  "Gracefully retires an idle socket at a turn boundary before Codex does. The
+   response cursor belongs to that physical connection and is dropped; provider
+   turn state and the request's prompt-cache identity deliberately survive."
+  [transport-state opts]
+  (let [{:keys [socket socket-opened-ns]}
+        @transport-state
+
+        max-age-ms
+        (max 0 (long (or (:websocket-max-age-ms opts) SESSION_WEBSOCKET_MAX_AGE_MS)))]
+
+    (when (and socket
+               socket-opened-ns
+               (>= (- (System/nanoTime) (long socket-opened-ns)) (* max-age-ms 1000000)))
+      (close-session-socket! transport-state :graceful)
+      (bump-session-counter! transport-state :rotations)
+      true)))
 
 (defn- disable-session-websockets!
   "Gives the WebSocket up for the REST of this session and drops the socket, so
@@ -3780,7 +3872,13 @@
                                                 status
                                                 (assoc :status status))
                                               e))))))]
-        (swap! transport-state assoc :socket socket)
+        (swap! transport-state (fn [state]
+                                 (-> state
+                                     (assoc :socket socket
+                                            :socket-opened-ns (long (or (:opened-ns socket)
+                                                                        (System/nanoTime))))
+                                     (update-in [:transport-counters :websocket-opens]
+                                                (fnil inc 0)))))
         socket)))
 
 (def ^:private stream-failed-code->status
@@ -4065,6 +4163,44 @@
                    :max-gap-phase (if open-widest? (phase) @max-gap-phase)
                    :semantic-events @semantic-events
                    :quiet-events @quiet-events}))}))
+(def ^:private CODEX_TURN_STATE_HEADER "x-codex-turn-state")
+
+(defn- scalar-header-value
+  [value]
+  (cond (string? value) value
+        (sequential? value) (some-> (first value)
+                                    str)
+        (nil? value) nil
+        :else (str value)))
+
+(defn- header-value-ci
+  "Read one HTTP-style header without depending on provider casing or value shape."
+  [headers header-name]
+  (when (map? headers)
+    (let [target (str/lower-case header-name)]
+      (some (fn [[k value]]
+              (when (= target (str/lower-case (if (keyword? k) (name k) (str k))))
+                (some-> value
+                        scalar-header-value
+                        not-empty)))
+            headers))))
+
+(defn- codex-turn-state-from-event
+  "Extract the opaque Codex sticky-routing token from a metadata event."
+  [event]
+  (or (header-value-ci (get event "headers") CODEX_TURN_STATE_HEADER)
+      (header-value-ci (get-in event ["response" "headers"]) CODEX_TURN_STATE_HEADER)
+      (some-> (or (get event "turn_state") (get event "turn-state"))
+              scalar-header-value
+              not-empty)))
+
+(defn- remember-codex-turn-state!
+  "Store the first token minted for a logical turn; later metadata cannot replace it."
+  [transport-state value]
+  (when-not (str/blank? value)
+    (swap! transport-state (fn [state]
+                             (if (:turn-state state) state (assoc state :turn-state value))))))
+
 (defn- receive-websocket-response!
   "Reads ONE Responses turn off a session socket.
 
@@ -4078,7 +4214,7 @@
    keeps talking while the model emits nothing raises
    `:svar.core/stream-semantic-timeout` carrying `:safe-to-restart?`, exactly
    like a keepalive-only SSE body. Deciding what happens next is the router's."
-  [socket {:keys [timeout-ms semantic-timeout-ms on-chunk on-rate-limits url]}]
+  [socket {:keys [timeout-ms semantic-timeout-ms on-chunk on-rate-limits on-turn-state url]}]
   (let [content
         (StringBuilder.)
 
@@ -4179,11 +4315,13 @@
           :else
           (let [event (enrich-responses-reasoning-event current-reasoning-item (json/read-json raw))
                 event-type (get event "type")
-                rate-limits (codex-rate-limit-snapshot event)]
+                rate-limits (codex-rate-limit-snapshot event)
+                turn-state (codex-turn-state-from-event event)]
 
             (when (contains? #{"error" "response.failed"} event-type)
               (throw (websocket-event-error event)))
             (when (and rate-limits on-rate-limits) (on-rate-limits rate-limits))
+            (when (and turn-state on-turn-state) (on-turn-state turn-state))
             (let [{:keys [content-delta reasoning-delta content-fallback reasoning-fallback
                           tool-args-delta tool-call-preview]
                    :as delta}
@@ -4243,14 +4381,19 @@
                        next-rate-limits)))))))))
 
 (defn- session-request-body
-  [body input previous-response-id]
+  [body input previous-response-id turn-state]
   (cond-> (-> body
               (dissoc :previous_response_id :max_tokens :max_output_tokens :text)
               (assoc :type "response.create"
                      :stream true
                      :input input))
     previous-response-id
-    (assoc :previous_response_id previous-response-id)))
+    (assoc :previous_response_id previous-response-id)
+
+    turn-state
+    (update :client_metadata
+            (fn [metadata]
+              (assoc (or metadata {}) CODEX_TURN_STATE_HEADER turn-state)))))
 
 (defn- websocket-transport-error?
   [error]
@@ -4301,6 +4444,7 @@
    one ladder step too, but keeps the socket: nothing about the connection is
    wrong, only the chain the server no longer remembers."
   [transport-state request-body delta-input opts]
+  (rotate-aged-session-socket! transport-state opts)
   (let [stable
         (dissoc request-body :input :stream :previous_response_id)
 
@@ -4347,17 +4491,25 @@
 
         perform!
         (fn [socket input cursor warmup?]
-          ((:send! socket)
-            (json/write-json-str (cond-> (session-request-body request-body input cursor)
-                                   warmup?
-                                   (assoc :generate false))))
-          (receive-websocket-response!
-            socket
-            {:timeout-ms (or (:idle-timeout-ms opts) (:timeout-ms opts) Long/MAX_VALUE)
-             :semantic-timeout-ms (:semantic-timeout-ms opts)
-             :on-chunk (when-not warmup? (:on-chunk opts))
-             :on-rate-limits rate-limits!
-             :url (:url socket)}))]
+          (let [turn-state
+                (:turn-state @transport-state)
+
+                payload
+                (json/write-json-str
+                  (cond-> (session-request-body request-body input cursor turn-state)
+                    warmup?
+                    (assoc :generate false)))]
+
+            (record-session-websocket-request! transport-state warmup? cursor)
+            ((:send! socket) payload)
+            (receive-websocket-response!
+              socket
+              {:timeout-ms (or (:idle-timeout-ms opts) (:timeout-ms opts) Long/MAX_VALUE)
+               :semantic-timeout-ms (:semantic-timeout-ms opts)
+               :on-chunk (when-not warmup? (:on-chunk opts))
+               :on-rate-limits rate-limits!
+               :on-turn-state (when-not warmup? #(remember-codex-turn-state! transport-state %))
+               :url (:url socket)})))]
 
     (loop [input
            (cond warmup-continuation? []
@@ -4418,13 +4570,15 @@
                   ;; on the same connection and leave the reconnect budget for real
                   ;; transport failures.
                   (and cursor (previous-response-missing? error) cursor-budget?)
-                  (do (restart! {:reason :cursor-rejected
+                  (do (bump-session-counter! transport-state :cursor-resets)
+                      (restart! {:reason :cursor-rejected
                                  :attempt (inc (long cursor-resets))
                                  :max-retries SESSION_CURSOR_RESET_ALLOWANCE
                                  :error (ex-message error)})
                       (recur full-input nil retries false (inc (long cursor-resets))))
                   (and (websocket-retryable-error? error) budget?)
-                  (do (close-session-socket! transport-state :abort)
+                  (do (bump-session-counter! transport-state :reconnects)
+                      (close-session-socket! transport-state :abort)
                       (session-retry-sleep! attempt opts)
                       (restart! {:reason :reconnect
                                  :attempt attempt
@@ -4451,7 +4605,7 @@
    `Reconnecting... n/N`. Every attempt streams its own cumulative text from
    zero, so without that signal a consumer appending deltas would keep the text
    of an attempt the transport threw away."
-  [transport-state request-body delta-input opts fallback!]
+  [transport-state request-body delta-input opts http-fallback!]
   (let [progress
         (:session-progress opts)
 
@@ -4476,6 +4630,22 @@
                                                                        :done? false}
                                                                       event))))))
 
+        run-http!
+        (fn []
+          (swap! transport-state assoc :last-request-transport :http)
+          (let [turn-state
+                (:turn-state @transport-state)
+
+                result
+                (http-fallback! (cond-> {}
+                                  turn-state
+                                  (assoc CODEX_TURN_STATE_HEADER turn-state)))]
+
+            (when-let [value (header-value-ci (get-in result [:http-response :headers])
+                                              CODEX_TURN_STATE_HEADER)]
+              (remember-codex-turn-state! transport-state value))
+            result))
+
         opts
         (cond-> (assoc opts :session-restart! restart!)
           (and on-chunk progress)
@@ -4488,13 +4658,14 @@
     ;; already fed the caller starts over here too.
     (restart!)
     (if (:http-only? @transport-state)
-      (fallback!)
+      (run-http!)
       (try (responses-websocket-session-completion! transport-state request-body delta-input opts)
            (catch Throwable error
              (if (websocket-retryable-error? error)
                (do (close-session-socket! transport-state :abort)
+                   (bump-session-counter! transport-state :http-fallbacks)
                    (restart! {:reason :http-fallback :error (ex-message error)})
-                   (fallback!))
+                   (run-http!))
                (throw error)))))))
 
 (defn openai-responses-completion
@@ -6466,10 +6637,13 @@
                         :on-chunk on-chunk}]
 
                    (if (and *responses-session-transport* (= :openai-codex provider-id))
-                     (*responses-session-transport* request-body
-                                                    completion-opts
-                                                    #(openai-responses-completion request-body
-                                                                                  completion-opts))
+                     (*responses-session-transport*
+                       request-body
+                       completion-opts
+                       (fn [session-headers]
+                         (openai-responses-completion
+                           request-body
+                           (update completion-opts :headers merge session-headers))))
                      (openai-responses-completion request-body completion-opts))))
 
                ;; Two payload capabilities are sticky per host. Stateless replay:
@@ -6778,6 +6952,12 @@
   "Returns cumulative + windowed stats. Delegates to router/router-stats."
   router/router-stats)
 
+(defn prompt-cache-status
+  "Returns route-local provider prompt-cache telemetry. Delegates to router/prompt-cache-status."
+  ([router] (router/prompt-cache-status router))
+  ([router cache-scope provider-id model]
+   (router/prompt-cache-status router cache-scope provider-id model)))
+
 (def reset-budget!
   "Resets the router's budget counters. Delegates to router/reset-budget!."
   router/reset-budget!)
@@ -6793,30 +6973,37 @@
      - `:reasoning-effort`  → exact provider-native `low|high|max`
      - `:on-format-error`   → enables format-error provider fallback
      - `:format-retry-on`   → customises the format-error type set
+     - `:cache-key`         → scopes Svar's prompt-cache meter without exposing it
      - `:on-chunk`          → surfaced to the router so routing events
                               (`:llm.routing/provider-retry`/`-fallback`/
                               `-format-fallback`) fire live alongside
                               streaming content chunks. Without this
                               passthrough, callers see no progress during
                               multi-second 429 retry sleeps.
-   Returns the augmented `:routing` map. Called by every routed entrypoint
-   before `resolve-routing`."
+   Calls without an explicit cache key use the same stable conversation identity
+   Svar derives for OpenAI caching; the identity is observability-only elsewhere.
+   Returns the augmented `:routing` map. Called by every routed entrypoint before
+   `resolve-routing`."
   [opts]
-  (cond-> (or (:routing opts) {})
-    (:reasoning opts)
-    (assoc :reasoning (:reasoning opts))
+  (let [cache-scope (or (:cache-key opts)
+                        (get-in opts [:extra-body :prompt_cache_key])
+                        (stable-auto-cache-key (:messages opts))
+                        (str "svar-call-" (java.util.UUID/randomUUID)))]
+    (cond-> (assoc (or (:routing opts) {}) :prompt-cache-scope cache-scope)
+      (:reasoning opts)
+      (assoc :reasoning (:reasoning opts))
 
-    (:reasoning-effort opts)
-    (assoc :reasoning-effort (:reasoning-effort opts))
+      (:reasoning-effort opts)
+      (assoc :reasoning-effort (:reasoning-effort opts))
 
-    (:on-format-error opts)
-    (assoc :on-format-error (:on-format-error opts))
+      (:on-format-error opts)
+      (assoc :on-format-error (:on-format-error opts))
 
-    (:format-retry-on opts)
-    (assoc :format-retry-on (:format-retry-on opts))
+      (:format-retry-on opts)
+      (assoc :format-retry-on (:format-retry-on opts))
 
-    (contains? opts :on-chunk)
-    (assoc :on-chunk (:on-chunk opts))))
+      (contains? opts :on-chunk)
+      (assoc :on-chunk (:on-chunk opts)))))
 
 (defn- inject-routed-params
   "Injects router-chosen `[provider model-map]` + caller opts into the opts map
@@ -7029,7 +7216,8 @@
 (defprotocol StatefulSession
   (-ask-session! [session input])
   (-close-session! [session])
-  (-session-history [session]))
+  (-session-history [session])
+  (-session-status [session]))
 
 ;; =============================================================================
 ;; ask!* - Low-level structured output (primitive, no routing)
@@ -8671,6 +8859,21 @@
 ;; Explicit stateful sessions
 ;; =============================================================================
 
+(defn- tool-result-message?
+  "True for one canonical user message containing only tool results."
+  [{:keys [role content]}]
+  (let [blocks (normalize-content content)]
+    (and (= "user"
+            (some-> role
+                    name))
+         (seq blocks)
+         (every? #(= "tool_result" (:type %)) blocks))))
+
+(defn- tool-follow-up-input?
+  "True when every new canonical message continues the current tool turn."
+  [messages]
+  (and (seq messages) (every? tool-result-message? messages)))
+
 (defn- session-turn
   [input]
   (cond (string? input) {:messages [(user input)] :opts {} :replace-history? false}
@@ -8771,8 +8974,23 @@
               [active-model call-opts]
               (session-call-route router base-opts turn-opts provider-id)
 
+              prior-transport
+              @transport-state
+
+              logical-turn-continuation?
+              (and (not replace-history?)
+                   (= active-model (:turn-model prior-transport))
+                   (:awaiting-tool-results? prior-transport)
+                   (tool-follow-up-input? new-messages))
+
               full-messages
-              (if replace-history? new-messages (into @history new-messages))
+              (do (when replace-history? (bump-session-counter! transport-state :history-resets))
+                  (when (and (:turn-model prior-transport)
+                             (not= active-model (:turn-model prior-transport)))
+                    (bump-session-counter! transport-state :model-resets))
+                  (when-not logical-turn-continuation? (swap! transport-state dissoc :turn-state))
+                  (swap! transport-state assoc :turn-model active-model)
+                  (if replace-history? new-messages (into @history new-messages)))
 
               call-opts
               (assoc call-opts :messages full-messages)
@@ -8786,7 +9004,7 @@
               session-opts
               (cond-> (assoc (select-keys call-opts
                                           [:websocket-max-retries :websocket-retry-delay-ms
-                                           :websocket-prewarm?])
+                                           :websocket-max-age-ms :websocket-prewarm?])
                         :session-progress progress
                         ;; Control events go to the caller's OWN callback, not the
                         ;; accumulating text wrapper built by the streaming path.
@@ -8816,6 +9034,10 @@
               (or (:assistant-message result)
                   (when-not (str/blank? (or (:content result) "")) (assistant (:content result))))]
 
+          (swap! transport-state assoc
+            :turn-model active-model
+            :awaiting-tool-results? (boolean (or (= :tool-calls (:stop-reason result))
+                                                 (seq (:tool-calls result)))))
           (reset! history (cond-> full-messages
                             assistant-message
                             (conj assistant-message)))
@@ -8824,6 +9046,18 @@
       (when (compare-and-set! closed? false true) (close-session-socket! transport-state :graceful))
       nil)
     (-session-history [_] @history)
+    (-session-status [_]
+      (let [current
+            @transport-state
+
+            cache-status
+            (when-let [model (:turn-model current)]
+              (router/prompt-cache-status router (:cache-key base-opts) provider-id model))]
+
+        (cond-> {:provider-id provider-id
+                 :transport (session-transport-status transport-state @closed?)}
+          cache-status
+          (assoc :prompt-cache cache-status))))
   Closeable
     (close [this] (-close-session! this)))
 
@@ -8833,9 +9067,14 @@
    WebSocket plus `previous_response_id`. Canonical history remains local and is
    replayed after reconnect. Before its first inference the session prewarms the
    socket with `generate=false`; `:websocket-prewarm? false` disables that
-   optimization. Informational `codex.rate_limits` snapshots are normalized into
-   the result's `:rate-limits` and emitted to `:on-chunk` as
-   `:llm.session/rate-limits`. A socket that keeps failing is left for the rest of
+   optimization. An idle socket is proactively rotated after
+   `:websocket-max-age-ms` (default 3,300,000, or 55 minutes) before Codex's hard
+   60-minute limit; the new socket receives canonical history under the same cache
+   key. Svar captures the opaque `x-codex-turn-state` token and replays it across
+   tool-result follow-ups in the same logical turn, then clears it before the next
+   user turn. Informational `codex.rate_limits` snapshots are normalized into the
+   result's `:rate-limits` and emitted to `:on-chunk` as `:llm.session/rate-limits`. A
+   socket that keeps failing is left for the rest of
    the session, which then runs on HTTP/SSE; `:websocket-max-retries` (default 5)
    and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune that
    ladder. `opts` are ordinary `ask-code!` options and may include initial
@@ -8890,6 +9129,13 @@
   (when-not (satisfies? StatefulSession session)
     (throw (ex-info "Value is not an LLM session." {:type :svar.session/invalid-session})))
   (-session-history session))
+
+(defn session-status
+  "Returns provider-safe transport telemetry for an explicit session."
+  [session]
+  (when-not (satisfies? StatefulSession session)
+    (throw (ex-info "Value is not an LLM session." {:type :svar.session/invalid-session})))
+  (-session-status session))
 
 ;; =============================================================================
 ;; models! - Fetch available models
