@@ -1,9 +1,13 @@
 .PHONY: test test-ff test-readme test-watch clean jar install deploy format format-check lint compile-java prepare test-allure allure-serve allure bench bench-4clojure bench-4clojure-quick bench-humaneval bench-humaneval-quick bench-list refresh-models
 
 # Snapshot models.dev catalog. Bundled at build time; refresh manually per release.
+# Upstream ships one minified line; the loader parses JSON, so layout is free.
+# Sorted and indented, a refresh diffs as the models that actually changed and
+# stays greppable instead of being one multi-megabyte line.
 refresh-models:
 	@echo ">> fetching https://models.dev/api.json"
-	@curl -fsSL https://models.dev/api.json -o resources/models.dev.json
+	@curl -fsSL https://models.dev/api.json -o resources/models.dev.json.tmp
+	@python3 -c "import json, pathlib; tmp = pathlib.Path('resources/models.dev.json.tmp'); pathlib.Path('resources/models.dev.json').write_text(json.dumps(json.loads(tmp.read_text()), indent=2, ensure_ascii=False, sort_keys=True) + chr(10)); tmp.unlink()"
 	@echo ">> $$(wc -c < resources/models.dev.json) bytes, $$(python3 -c "import json;print(len(json.load(open('resources/models.dev.json'))))") providers"
 	@git add resources/models.dev.json
 

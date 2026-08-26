@@ -2,6 +2,7 @@
 **/.cpcache/
 .nrepl-port
 target/
+resources/models.dev.json.tmp
 
 # Editor/tooling caches (recursive)
 **/.clj-kondo/.cache/
