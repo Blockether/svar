@@ -303,6 +303,7 @@
                           :history-resets 0
                           :model-resets 0
                           :http-fallbacks 0
+                          :oversized-http-requests 0
                           :rotations 0}
                          (:counters transport)))
               (expect (not-any? #(contains? transport %) [:socket :cursor :turn-state]))
@@ -1095,6 +1096,135 @@
           (expect (= "done" (:content (svar/ask! session "new user turn"))))
           (expect (= [nil "http-turn-state" nil]
                      (mapv #(get-in % [:headers "x-codex-turn-state"]) @http-opts)))))))
+  (it
+    "routes an oversized full replay through HTTP, then re-enters WebSocket after folding"
+    ;; Regression, Vis session 5b0b851a: a 120k-token cold replay was sent as one
+    ;; uncompressed JDK WebSocket frame, then spent the whole reconnect ladder before
+    ;; HTTP answered. Large canonical history must bypass that doomed frame entirely.
+    (let [opens
+          (atom 0)
+
+          sent
+          (atom [])
+
+          http-bodies
+          (atom [])
+
+          events
+          (atom [(completed-event "resp_ws" "websocket answer")])
+
+          oversized-message
+          (apply str (repeat 2000 "x"))]
+
+      (with-redefs [sut/open-responses-websocket!
+                    (fn [_]
+                      (swap! opens inc)
+                      ((fake-websocket-factory events sent (atom 0)) nil))
+
+                    sut/openai-responses-completion
+                    (fn [body _]
+                      (swap! http-bodies conj body)
+                      {:content "http answer"
+                       :assistant-message {:role "assistant"
+                                           :content [{:type "text" :text "http answer"}]}
+                       :api-usage {}
+                       :http-response {:status 200 :headers {}}})]
+
+        (with-open [session (open-test-session (codex-router)
+                                               {:routing {:provider :openai-codex :model "gpt-5.6"}
+                                                :websocket-max-full-request-bytes 800})]
+          (expect (= "http answer" (:content (svar/ask! session oversized-message))))
+          (expect (zero? @opens))
+          (expect (= 1
+                     (get-in (svar/session-status session)
+                             [:transport :counters :oversized-http-requests])))
+          ;; A fold/history replacement made the canonical replay small again. It may
+          ;; start a fresh WebSocket chain, but never continue the HTTP response id.
+          (expect (= "websocket answer"
+                     (:content (svar/ask! session {:history [{:role "user" :content "tiny"}]}))))))
+      (expect (= 1 @opens))
+      (expect (= 1 (count @http-bodies)))
+      (expect (= 1 (count @sent)))
+      (expect (nil? (:previous_response_id (first @sent))))
+      (expect (= "tiny" (get-in @sent [0 :input 0 :content 0 :text])))))
+  (it "learns a message-too-large ceiling instead of retrying the same replay"
+      ;; Regression, Vis session 5b0b851a: every fresh socket repeated the same rejected
+      ;; full-history frame five times. A server 1009 verdict is deterministic for that
+      ;; payload, so larger replays stay on HTTP until folding makes one smaller.
+      (let [opens
+            (atom 0)
+
+            sent
+            (atom [])
+
+            seen
+            (atom [])
+
+            http-bodies
+            (atom [])
+
+            oversized-message
+            (apply str (repeat 2000 "x"))
+
+            factory
+            (fn [_]
+              (let [n
+                    (swap! opens inc)
+
+                    delivered?
+                    (atom false)]
+
+                {:send! (fn [payload]
+                          (swap! sent conj (json/read-json payload :key-fn keyword)))
+                 :receive!
+                 (fn [_]
+                   (when (compare-and-set! delivered? false true)
+                     (if (= n 1)
+                       {:svar.websocket/closed true :status 1009 :reason "message too large"}
+                       (completed-event "resp_ws" "websocket answer"))))
+                 :close! (fn []
+                           nil)
+                 :abort! (fn []
+                           nil)}))]
+
+        (with-redefs [sut/open-responses-websocket!
+                      factory
+
+                      sut/openai-responses-completion
+                      (fn [body _]
+                        (swap! http-bodies conj body)
+                        {:content "http answer"
+                         :assistant-message {:role "assistant"
+                                             :content [{:type "text" :text "http answer"}]}
+                         :api-usage {}
+                         :http-response {:status 200 :headers {}}})]
+
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :websocket-max-full-request-bytes 1000000
+                                                  :websocket-max-retries 5
+                                                  :websocket-retry-delay-ms 0
+                                                  :on-chunk #(swap! seen conj %)})]
+            (expect (= "http answer" (:content (svar/ask! session oversized-message))))
+            ;; The larger next replay goes straight to HTTP: no second doomed socket.
+            (expect (= "http answer" (:content (svar/ask! session "two"))))
+            (expect (= 1 @opens))
+            ;; A compact replacement is below the learned ceiling and restores WS.
+            (expect (= "websocket answer"
+                       (:content (svar/ask! session {:history [{:role "user" :content "tiny"}]}))))
+            (let [counters (get-in (svar/session-status session) [:transport :counters])]
+              (expect (= 2 (:oversized-http-requests counters)))
+              (expect (zero? (:http-fallbacks counters)))
+              (expect (zero? (:reconnects counters))))))
+        (expect (= 2 @opens))
+        (expect (= 2 (count @http-bodies)))
+        (expect (= 2 (count @sent)))
+        (expect (nil? (:previous_response_id (second @sent))))
+        (expect (= "tiny" (get-in @sent [1 :input 0 :content 0 :text])))
+        (let [restart (first (filter #(= :oversized-http (:reason %)) @seen))]
+          (expect (= 1009 (:close-status restart)))
+          (expect (= "message too large" (:close-reason restart))))))
   (it "falls back to the existing HTTP Responses transport when WebSocket setup fails"
       (let [http-bodies (atom [])]
         (with-redefs [sut/open-responses-websocket! (fn [_]

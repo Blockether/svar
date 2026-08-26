@@ -153,8 +153,10 @@
   llm/cached)
 (def open-session
   "Opens a sequential LLM session. OpenAI Codex uses a persistent Responses
-   WebSocket and server continuation; close it with `close-session!` or
-   `with-open`."
+   WebSocket and server continuation. A cursorless request above
+   `:websocket-max-full-request-bytes` (default 262144 UTF-8 bytes) uses HTTP for
+   that turn, then may re-enter WebSocket after compact history. Close the
+   session with `close-session!` or `with-open`."
   llm/open-session)
 (def close-session!
   "Closes an explicit LLM session; active transport aborts, idle transport closes gracefully. Idempotent."

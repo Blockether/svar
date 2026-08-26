@@ -3730,12 +3730,17 @@
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS
   "Ceiling for a reconnect wait: a transport hiccup is not a rate limit."
   4000)
-
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_AGE_MS
   "Age at which an idle Codex socket is retired before the provider's hard
    60-minute connection limit. The next turn opens a socket and replays canonical
    history under the unchanged prompt-cache key."
   3300000)
+(def ^:private ^:const SESSION_WEBSOCKET_MAX_FULL_REQUEST_BYTES
+  "Largest cursorless Responses request Svar sends through the JDK WebSocket.
+   The JDK client cannot negotiate Codex's permessage-deflate extension, so a
+   larger canonical replay uses HTTP until folding makes it small enough for a
+   fresh WebSocket chain."
+  262144)
 
 (def ^:private SESSION_TRANSPORT_COUNTER_DEFAULTS
   {:websocket-opens 0
@@ -3748,6 +3753,7 @@
    :history-resets 0
    :model-resets 0
    :http-fallbacks 0
+   :oversized-http-requests 0
    :rotations 0})
 
 (defn- bump-session-counter!
@@ -4345,8 +4351,15 @@
         (cond
           (instance? Throwable raw) (throw raw)
           (:svar.websocket/closed raw)
-          (throw (ex-info "Responses WebSocket closed before a terminal response."
-                          {:type :svar.session/transport-closed :close raw}))
+          (let [close-data (cond-> {:close-status (:status raw)}
+                             (not (str/blank? (:reason raw)))
+                             (assoc :close-reason (:reason raw)))]
+            (trove/log! {:level :warn
+                         :id ::websocket-closed-before-terminal
+                         :data (log-data (merge {:url url :transport :websocket} close-data))
+                         :msg "Responses WebSocket closed before terminal response"})
+            (throw (ex-info "Responses WebSocket closed before a terminal response."
+                            (merge {:type :svar.session/transport-closed :close raw} close-data))))
           :else
           (let [event (enrich-responses-reasoning-event current-reasoning-item (json/read-json raw))
                 event-type (get event "type")
@@ -4430,6 +4443,47 @@
             (fn [metadata]
               (assoc (or metadata {}) CODEX_TURN_STATE_HEADER turn-state)))))
 
+(defn- stable-session-request
+  [request-body]
+  (dissoc request-body :input :stream :previous_response_id))
+
+(defn- session-request-payload-bytes
+  "UTF-8 wire size of a cursorless full request, before the optional warmup flag.
+   A few warmup bytes cannot make a guarded request unsafe because the limit is a
+   deliberately conservative boundary, not the server's exact frame ceiling."
+  [request-body turn-state]
+  (let [^String payload
+        (json/write-json-str
+          (session-request-body request-body (:input request-body) nil turn-state))
+
+        ^bytes bytes
+        (.getBytes payload "UTF-8")]
+
+    (alength bytes)))
+
+(defn- websocket-close-details
+  "Non-sensitive close-code metadata carried by a transport exception or cause."
+  [error]
+  (loop [current error]
+    (when current
+      (let [data (ex-data current)
+            close (:close data)
+            status (or (:close-status data) (:status close))
+            reason (or (:close-reason data) (:reason close))]
+
+        (if (or status reason)
+          (cond-> {}
+            status
+            (assoc :close-status status)
+
+            (not (str/blank? reason))
+            (assoc :close-reason reason))
+          (recur (ex-cause current)))))))
+
+(defn- websocket-message-too-large?
+  [error]
+  (= 1009 (:close-status (websocket-close-details error))))
+
 (defn- websocket-transport-error?
   [error]
   (or (instance? java.io.IOException error)
@@ -4501,7 +4555,7 @@
   [transport-state request-body delta-input opts]
   (rotate-aged-session-socket! transport-state opts)
   (let [stable
-        (dissoc request-body :input :stream :previous_response_id)
+        (stable-session-request request-body)
 
         prior
         @transport-state
@@ -4617,6 +4671,11 @@
                   ;; once and preserve the typed outcome for the router/caller.
                   (contains? failure/DELIBERATE_STREAM_ABORT_TYPES (:type (ex-data error)))
                   (do (close-session-socket! transport-state :abort) (throw error))
+                  ;; RFC 6455 status 1009 is a verdict on this exact frame. Replaying
+                  ;; the same cursorless JSON on five fresh sockets cannot change it;
+                  ;; the outer session transport seeds the chain over HTTP instead.
+                  (websocket-message-too-large? error)
+                  (do (close-session-socket! transport-state :abort) (throw error))
                   ;; Codex treats every terminal stream error as poisoning the physical
                   ;; stream. A forgotten cursor is recoverable because canonical history
                   ;; is ours, but its full replay starts on a NEW socket; reusing the
@@ -4633,10 +4692,11 @@
                   (do (bump-session-counter! transport-state :reconnects)
                       (close-session-socket! transport-state :abort)
                       (session-retry-sleep! attempt opts)
-                      (restart! {:reason :reconnect
-                                 :attempt attempt
-                                 :max-retries max-retries
-                                 :error (ex-message error)})
+                      (restart! (merge {:reason :reconnect
+                                        :attempt attempt
+                                        :max-retries max-retries
+                                        :error (ex-message error)}
+                                       (websocket-close-details error)))
                       (recur full-input nil attempt false cursor-resets))
                   (websocket-retryable-error? error)
                   (do (disable-session-websockets! transport-state) (throw error))
@@ -4654,8 +4714,11 @@
                   (do (close-session-socket! transport-state :abort) (throw error)))))))))
 
 (defn- responses-session-completion!
-  "One turn of an explicit session: the socket owns it until the socket gives up,
-   and from then on the session is HTTP/SSE for good.
+  "One turn of an explicit session. Small cursorless requests and every delta use
+   WebSocket. A canonical replay larger than the JDK client's safe uncompressed
+   frame budget uses HTTP for that turn, but the session stays WebSocket-eligible:
+   once folding or history replacement makes the replay smaller, it starts a new
+   socket chain there.
 
    A turn that STARTS OVER says so on the caller's own streaming callback - one
    `{:event/type :llm.session/stream-restarted :restarted? true :content \"\"}`
@@ -4673,6 +4736,34 @@
         on-chunk
         (:on-chunk opts)
 
+        stable
+        (stable-session-request request-body)
+
+        prior
+        @transport-state
+
+        full-request?
+        (or (:session-reset? opts) (nil? (:cursor prior)) (not= stable (:stable prior)))
+
+        configured-max-full-request-bytes
+        (max 0
+             (long (or (:websocket-max-full-request-bytes opts)
+                       SESSION_WEBSOCKET_MAX_FULL_REQUEST_BYTES)))
+
+        learned-max-full-request-bytes
+        (:websocket-full-request-ceiling prior)
+
+        max-full-request-bytes
+        (if (number? learned-max-full-request-bytes)
+          (min configured-max-full-request-bytes (long learned-max-full-request-bytes))
+          configured-max-full-request-bytes)
+
+        canonical-request-bytes
+        (delay (session-request-payload-bytes request-body (:turn-state prior)))
+
+        oversized-full-request?
+        (and full-request? (> (long @canonical-request-bytes) max-full-request-bytes))
+
         restart!
         (fn restart! ([] (restart! nil)) ([event] (let [restarted? (and progress
                                                                         (compare-and-set! progress
@@ -4689,7 +4780,16 @@
                                                                       event))))))
 
         run-http!
-        (fn []
+        (fn [oversized-data]
+          (when oversized-data
+            ;; The old provider cursor describes a different canonical chain. HTTP is
+            ;; intentionally one-turn, but no later delta may continue that old socket.
+            (close-session-socket! transport-state :abort)
+            (bump-session-counter! transport-state :oversized-http-requests)
+            (trove/log! {:level :info
+                         :id ::session-oversized-http
+                         :data (log-data (merge {:transport :http} oversized-data))
+                         :msg "oversized Responses session request sent over HTTP"}))
           (swap! transport-state assoc :last-request-transport :http)
           (let [turn-state
                 (:turn-state @transport-state)
@@ -4715,16 +4815,39 @@
     ;; The router may re-enter this turn after its own ladder slept; a stream it
     ;; already fed the caller starts over here too.
     (restart!)
-    (if (:http-only? @transport-state)
-      (run-http!)
-      (try (responses-websocket-session-completion! transport-state request-body delta-input opts)
-           (catch Throwable error
-             (if (websocket-retryable-error? error)
-               (do (close-session-socket! transport-state :abort)
-                   (bump-session-counter! transport-state :http-fallbacks)
-                   (restart! {:reason :http-fallback :error (ex-message error)})
-                   (run-http!))
-               (throw error)))))))
+    (cond (:http-only? @transport-state) (run-http! nil)
+          oversized-full-request? (run-http! {:reason :oversized-full-request
+                                              :request-bytes @canonical-request-bytes
+                                              :max-request-bytes max-full-request-bytes})
+          :else
+          (try
+            (responses-websocket-session-completion! transport-state request-body delta-input opts)
+            (catch Throwable error
+              (cond
+                (websocket-message-too-large? error)
+                (let [close-data
+                      (websocket-close-details error)
+
+                      learned-ceiling
+                      (max 0 (dec (long @canonical-request-bytes)))]
+
+                  (close-session-socket! transport-state :abort)
+                  (swap! transport-state update
+                    :websocket-full-request-ceiling
+                    (fn [current]
+                      (if (number? current) (min (long current) learned-ceiling) learned-ceiling)))
+                  (restart! (merge {:reason :oversized-http :error (ex-message error)} close-data))
+                  (run-http! (merge {:reason :message-too-large
+                                     :request-bytes @canonical-request-bytes
+                                     :max-request-bytes learned-ceiling}
+                                    close-data)))
+                (websocket-retryable-error? error)
+                (do (close-session-socket! transport-state :abort)
+                    (bump-session-counter! transport-state :http-fallbacks)
+                    (restart! (merge {:reason :http-fallback :error (ex-message error)}
+                                     (websocket-close-details error)))
+                    (run-http! nil))
+                :else (throw error)))))))
 
 (defn openai-responses-completion
   "Low-level OpenAI Responses transport.
@@ -9073,7 +9196,8 @@
               session-opts
               (cond-> (assoc (select-keys call-opts
                                           [:websocket-max-retries :websocket-retry-delay-ms
-                                           :websocket-max-age-ms :websocket-prewarm?])
+                                           :websocket-max-age-ms :websocket-prewarm?
+                                           :websocket-max-full-request-bytes])
                         :session-progress progress
                         ;; Control events go to the caller's OWN callback, not the
                         ;; accumulating text wrapper built by the streaming path.

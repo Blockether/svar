@@ -10,3 +10,5 @@ Svar owns provider transport semantics and observability. Vis may keep an opaque
 - [x] Abort every terminal Responses stream before retry/replay; recover a forgotten cursor only on a fresh socket.
 - [x] Apply caller cancellation to quiet Responses reads and abort, rather than gracefully close, an active session.
 - [x] Run focused and full verification, release Svar, bump Vis, and prove one prewarm plus delta continuation in a real session.
+- [x] Keep oversized cursorless replays off the uncompressed JDK WebSocket; treat close status 1009 as a deterministic one-turn HTTP bridge and preserve later WebSocket re-entry.
+- [ ] Verify, release, bump Vis, and prove oversized HTTP plus compact-history WebSocket re-entry with the real provider.
