@@ -7,4 +7,6 @@ Svar owns provider transport semantics and observability. Vis may keep an opaque
 - [x] Make Svar rotate Responses WebSockets before the provider's 60-minute limit while preserving canonical replay and prompt-cache identity.
 - [x] Expose Svar-owned session transport telemetry: prewarm, delta continuation, full replay, reconnect, cursor reset, history reset, fallback, connection age, and rotation.
 - [x] Correct the cache metric contract: distinguish provider prompt-cache reads from WebSocket continuation, report freshness and request/token views in Svar, and make Vis a thin renderer that does not seed stale cache samples after restart.
+- [x] Abort every terminal Responses stream before retry/replay; recover a forgotten cursor only on a fresh socket.
+- [x] Apply caller cancellation to quiet Responses reads and abort, rather than gracefully close, an active session.
 - [ ] Run focused and full verification, release Svar, bump Vis, and prove one prewarm plus delta continuation in a real session.

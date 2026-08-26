@@ -3561,17 +3561,20 @@
   value)
 (def ^:dynamic *cancel-fn*
   "Optional no-arg predicate for caller-driven cancellation. When bound to
-   a fn that returns truthy, an in-flight streaming call aborts ASAP — a
-   blocking JDK socket read does NOT respond to `Thread.interrupt()`, so
-   the only fast lever post-headers is closing the body `InputStream`. A
-   daemon watchdog polls this predicate and, on fire:
-     - closes the SSE `InputStream` (unblocks a parked `.readLine`), and
-     - interrupts the caller thread (unparks the pre-headers
-       `CompletableFuture.get` and any retry backoff sleep).
-   The reader loop also checks it between lines so an actively-streaming
-   response breaks within one delta. Surfaces `:svar.core/stream-cancelled`.
-   nil = no cancellation hook (default — zero overhead, no watchdog)."
+   a fn that returns truthy, an in-flight streaming call aborts ASAP. SSE uses
+   one shared watchdog to close a parked body stream or interrupt its pre-header
+   future. Responses WebSocket operations check the same predicate while waiting
+   for handshake/send futures, reconnect backoff, and every 50ms of a quiet frame
+   wait. Both transports surface `:svar.core/stream-cancelled`. nil = no
+   cancellation hook (default — zero polling/watchdog overhead)."
   nil)
+
+(def ^:private ^:const watchdog-tick-ms 50)
+
+(defn- caller-cancel-requested?
+  "Read a captured cancellation predicate defensively."
+  [cancel-fn]
+  (boolean (and cancel-fn (try (cancel-fn) (catch Throwable _ false)))))
 
 (def ^:private stream-finalization-error-types
   "Typed stream outcomes that must reach the caller VERBATIM. Re-wrapping one as
@@ -3600,20 +3603,35 @@
           :else http-url)))
 
 (defn- await-websocket-future!
-  "Awaits one WebSocket future and cancels it when we stop waiting. `.get` wraps
-   every failure in an ExecutionException, so the cause is rethrown: the session
-   classifies a lost connection by exception type and must reconnect and replay
-   rather than degrade the turn to the HTTP transport."
+  "Awaits one WebSocket future, polling the caller hook when bound, and cancels
+   the future whenever waiting ends exceptionally. `.get` wraps an operation
+   failure in ExecutionException, so its cause is rethrown for reconnect
+   classification."
   [^CompletableFuture future timeout-ms]
-  (try (.get future (long timeout-ms) TimeUnit/MILLISECONDS)
-       (catch InterruptedException e
-         (.cancel future true)
-         (.interrupt (Thread/currentThread))
-         (throw e))
-       (catch java.util.concurrent.ExecutionException e
-         (.cancel future true)
-         (throw (or (ex-cause e) e)))
-       (catch Throwable e (.cancel future true) (throw e))))
+  (let [cancel-fn *cancel-fn*]
+    (try
+      (loop [remaining (long timeout-ms)]
+        (when (caller-cancel-requested? cancel-fn)
+          (throw (ex-info "Responses WebSocket operation cancelled by caller."
+                          {:type :svar.core/stream-cancelled :stream? true :transport :websocket})))
+        (let [slice
+              (if cancel-fn (max 1 (min (long remaining) (long watchdog-tick-ms))) (long remaining))
+              outcome (try {:value (.get future slice TimeUnit/MILLISECONDS)}
+                           (catch TimeoutException e {:timeout e}))]
+
+          (if (contains? outcome :value)
+            (:value outcome)
+            (if (> (long remaining) slice)
+              (recur (- (long remaining) slice))
+              (throw (:timeout outcome))))))
+      (catch InterruptedException e
+        (.cancel future true)
+        (.interrupt (Thread/currentThread))
+        (throw e))
+      (catch java.util.concurrent.ExecutionException e
+        (.cancel future true)
+        (throw (or (ex-cause e) e)))
+      (catch Throwable e (.cancel future true) (throw e)))))
 
 (defn- abort-websocket! [^WebSocket socket] (try (.abort socket) (catch Throwable _ nil)))
 
@@ -4215,7 +4233,17 @@
    `:svar.core/stream-semantic-timeout` carrying `:safe-to-restart?`, exactly
    like a keepalive-only SSE body. Deciding what happens next is the router's."
   [socket {:keys [timeout-ms semantic-timeout-ms on-chunk on-rate-limits on-turn-state url]}]
-  (let [content
+  (let [cancel-fn
+        *cancel-fn*
+
+        cancel!
+        (fn []
+          (throw
+            (ex-info
+              "Responses WebSocket cancelled by caller."
+              {:type :svar.core/stream-cancelled :stream? true :transport :websocket :url url})))
+
+        content
         (StringBuilder.)
 
         reasoning
@@ -4278,21 +4306,28 @@
 
         receive-frame!
         (fn []
-          ;; Wait no longer than the FIRST of the two deadlines: total silence is
-          ;; the transport's business, a talkative socket carrying no model
-          ;; progress is the semantic watchdog's.
-          (let [wait
-                (if semantic-ms
-                  (max 1
-                       (min (long timeout-ms)
-                            (- (long semantic-ms) (long ((:stalled-ms progress))))))
-                  (long timeout-ms))
+          ;; A cancellation predicate is caller state, not a socket event. Poll the
+          ;; queue in the same 50ms cadence as the SSE watchdog so Stop can abort a
+          ;; completely quiet WebSocket instead of waiting for its idle deadline.
+          (when (caller-cancel-requested? cancel-fn) (cancel!))
+          (let [wait (if semantic-ms
+                       (max 1
+                            (min (long timeout-ms)
+                                 (- (long semantic-ms) (long ((:stalled-ms progress))))))
+                       (long timeout-ms))]
+            (loop [remaining wait]
+              (let [slice (if cancel-fn
+                            (max 1 (min (long remaining) (long watchdog-tick-ms)))
+                            (long remaining))
+                    outcome (try {:frame ((:receive! socket) slice)}
+                                 (catch TimeoutException e {:timeout e}))]
 
-                raw
-                (try ((:receive! socket) wait)
-                     (catch TimeoutException e (if (stalled?) (semantic-timeout!) (throw e))))]
-
-            (if (and (instance? TimeoutException raw) (stalled?)) (semantic-timeout!) raw)))]
+                (when (caller-cancel-requested? cancel-fn) (cancel!))
+                (if (contains? outcome :frame)
+                  (:frame outcome)
+                  (cond (stalled?) (semantic-timeout!)
+                        (> (long remaining) slice) (recur (- (long remaining) slice))
+                        :else (throw (:timeout outcome))))))))]
 
     (loop [output-items
            []
@@ -4425,12 +4460,32 @@
 
 (defn- session-retry-sleep!
   "Waits before reconnect `attempt` (1-based) with the full-jitter shape the HTTP
-   ladder uses. `:websocket-retry-delay-ms` 0 turns the wait off."
+   ladder uses. `:websocket-retry-delay-ms` 0 turns the wait off. A caller cancel
+   interrupts the backoff in at most one 50ms slice."
   [attempt opts]
-  (let [base (long (or (:websocket-retry-delay-ms opts) SESSION_WEBSOCKET_RETRY_DELAY_MS))]
-    (when (pos? base)
-      (Thread/sleep (long (failure/backoff-ms (* base (bit-shift-left 1 (dec (long attempt))))
-                                              SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS))))))
+  (let [base
+        (long (or (:websocket-retry-delay-ms opts) SESSION_WEBSOCKET_RETRY_DELAY_MS))
+
+        delay-ms
+        (if (pos? base)
+          (long (failure/backoff-ms (* base (bit-shift-left 1 (dec (long attempt))))
+                                    SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS))
+          0)
+
+        cancel-fn
+        *cancel-fn*]
+
+    (loop [remaining delay-ms]
+      (when (caller-cancel-requested? cancel-fn)
+        (throw (ex-info "Responses WebSocket reconnect cancelled by caller."
+                        {:type :svar.core/stream-cancelled
+                         :stream? true
+                         :transport :websocket
+                         :phase :reconnect-backoff})))
+      (when (pos? remaining)
+        (let [slice (if cancel-fn (min remaining (long watchdog-tick-ms)) remaining)]
+          (Thread/sleep slice)
+          (recur (- remaining slice)))))))
 
 (defn- responses-websocket-session-completion!
   "Runs ONE turn on the session's socket, with Codex's stream-retry ladder.
@@ -4440,9 +4495,9 @@
    when that budget is spent - or when the endpoint refused the upgrade outright
    - does the session give the WebSocket up (`disable-session-websockets!`), so
    the caller degrades to HTTP/SSE ONCE for the rest of the session instead of
-   paying a doomed handshake on every turn. A rejected continuation cursor costs
-   one ladder step too, but keeps the socket: nothing about the connection is
-   wrong, only the chain the server no longer remembers."
+   paying a doomed handshake on every turn. Like Codex, EVERY terminal stream
+   error aborts that physical socket before either a replay or a later turn can
+   use it; the logical session, canonical history, and prompt-cache key survive."
   [transport-state request-body delta-input opts]
   (rotate-aged-session-socket! transport-state opts)
   (let [stable
@@ -4557,20 +4612,18 @@
 
             (cond (websocket-upgrade-refused? error)
                   (do (disable-session-websockets! transport-state) (throw error))
-                  ;; The MODEL stalled while the socket stayed healthy: the pending
-                  ;; response still owns this connection and the cursor points at a
-                  ;; response that never completed, so drop both and hand the
-                  ;; classified error to the ROUTER - the one layer that knows
-                  ;; whether visible output makes a replay safe. Retrying here would
-                  ;; rebuild the nested ladder we deliberately collapsed.
-                  (= :svar.core/stream-semantic-timeout (:type (ex-data error)))
+                  ;; A caller cancellation or watchdog abort is deliberate, never
+                  ;; a reconnect/fallback signal. Drop the physical stream exactly
+                  ;; once and preserve the typed outcome for the router/caller.
+                  (contains? failure/DELIBERATE_STREAM_ABORT_TYPES (:type (ex-data error)))
                   (do (close-session-socket! transport-state :abort) (throw error))
-                  ;; The server forgot the chain this request continued from. The
-                  ;; SOCKET is healthy and the canonical history is ours, so rewind
-                  ;; on the same connection and leave the reconnect budget for real
-                  ;; transport failures.
+                  ;; Codex treats every terminal stream error as poisoning the physical
+                  ;; stream. A forgotten cursor is recoverable because canonical history
+                  ;; is ours, but its full replay starts on a NEW socket; reusing the
+                  ;; rejected stream is what made ChatGPT reject the replay again.
                   (and cursor (previous-response-missing? error) cursor-budget?)
-                  (do (bump-session-counter! transport-state :cursor-resets)
+                  (do (close-session-socket! transport-state :abort)
+                      (bump-session-counter! transport-state :cursor-resets)
                       (restart! {:reason :cursor-rejected
                                  :attempt (inc (long cursor-resets))
                                  :max-retries SESSION_CURSOR_RESET_ALLOWANCE
@@ -4589,11 +4642,16 @@
                   (do (disable-session-websockets! transport-state) (throw error))
                   warmup?
                   ;; Prewarm is an optimization, never a prerequisite for inference.
-                  ;; A provider verdict about `generate=false` must not suppress the
-                  ;; real request on an otherwise healthy socket.
-                  (do (swap! transport-state assoc :prewarmed? true)
+                  ;; Its terminal error still invalidates the physical stream; mark the
+                  ;; optimization spent, reopen, and send the real full request.
+                  (do (close-session-socket! transport-state :abort)
+                      (swap! transport-state assoc :prewarmed? true)
                       (recur full-input nil retries false cursor-resets))
-                  :else (throw error))))))))
+                  :else
+                  ;; The router may retry a provider verdict (429/5xx), or the next user
+                  ;; may switch models after a terminal 4xx. Neither may inherit the
+                  ;; stream that emitted the terminal frame.
+                  (do (close-session-socket! transport-state :abort) (throw error)))))))))
 
 (defn- responses-session-completion!
   "One turn of an explicit session: the socket owns it until the socket gives up,
@@ -5316,7 +5374,6 @@
 
 (def ^:private watchdog-token-seq (java.util.concurrent.atomic.AtomicLong.))
 
-(def ^:private ^:const watchdog-tick-ms 50)
 
 (defn- watchdog-tick!
   "One scheduler pass: call every registered tick-fn. A fn returning falsey
@@ -8992,8 +9049,20 @@
                   (swap! transport-state assoc :turn-model active-model)
                   (if replace-history? new-messages (into @history new-messages)))
 
+              caller-cancel-fn
+              (:cancel-fn call-opts)
+
               call-opts
-              (assoc call-opts :messages full-messages)
+              (assoc call-opts
+                :messages full-messages
+                ;; Session close is cancellation for an in-flight request. Combine
+                ;; that lifecycle signal with the caller hook rather than creating
+                ;; a second retry/cancellation loop.
+                :cancel-fn (fn []
+                             (or @closed?
+                                 (boolean (and caller-cancel-fn
+                                               (try (caller-cancel-fn)
+                                                    (catch Throwable _ false)))))))
 
               ;; ONE progress flag per turn: every attempt inside it - a socket
               ;; reconnect, the degradation to HTTP, the router's own ladder -
@@ -9014,21 +9083,24 @@
                 (assoc :session-reset? true))
 
               result
-              (binding [*responses-session-transport*
-                        (fn [request-body completion-opts fallback!]
-                          (responses-session-completion!
-                            transport-state
-                            request-body
-                            ;; The endpoint this body was just built for
-                            ;; decides the delta's cache markers too, and a
-                            ;; self-heal retry rebuilds the delta with it.
-                            (messages->responses-input
-                              new-messages
-                              active-model
-                              (responses-explicit-cache? provider-id (:base-url completion-opts)))
-                            (merge completion-opts session-opts)
-                            fallback!))]
-                (ask-code! router call-opts))
+              (do (swap! transport-state assoc :request-active? true)
+                  (try (binding [*responses-session-transport*
+                                 (fn [request-body completion-opts fallback!]
+                                   (responses-session-completion!
+                                     transport-state
+                                     request-body
+                                     ;; The endpoint this body was just built for
+                                     ;; decides the delta's cache markers too, and a
+                                     ;; self-heal retry rebuilds the delta with it.
+                                     (messages->responses-input new-messages
+                                                                active-model
+                                                                (responses-explicit-cache?
+                                                                  provider-id
+                                                                  (:base-url completion-opts)))
+                                     (merge completion-opts session-opts)
+                                     fallback!))]
+                         (ask-code! router call-opts))
+                       (finally (swap! transport-state dissoc :request-active?))))
 
               assistant-message
               (or (:assistant-message result)
@@ -9043,7 +9115,11 @@
                             (conj assistant-message)))
           result)))
     (-close-session! [_]
-      (when (compare-and-set! closed? false true) (close-session-socket! transport-state :graceful))
+      (when (compare-and-set! closed? false true)
+        ;; Idle shutdown is polite; an active response is cancellation and follows
+        ;; Codex by aborting the stream immediately instead of awaiting a close ACK.
+        (close-session-socket! transport-state
+                               (if (:request-active? @transport-state) :abort :graceful)))
       nil)
     (-session-history [_] @history)
     (-session-status [_]
@@ -9117,7 +9193,7 @@
                         (Object.))))
 
 (defn close-session!
-  "Closes an explicit session and its transport. Idempotent."
+  "Closes an explicit session. Idle transports close gracefully; active turns abort. Idempotent."
   [session]
   (when-not (satisfies? StatefulSession session)
     (throw (ex-info "Value is not an LLM session." {:type :svar.session/invalid-session})))

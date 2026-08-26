@@ -7,7 +7,7 @@
             [com.blockether.svar.internal.llm :as sut]
             [lazytest.core :refer [defdescribe expect it]])
   (:import (java.net.http WebSocket)
-           (java.util.concurrent CompletableFuture TimeoutException)))
+           (java.util.concurrent CompletableFuture CountDownLatch TimeUnit TimeoutException)))
 
 (def ^:private await-websocket-future!
   (ns-resolve 'com.blockether.svar.internal.llm 'await-websocket-future!))
@@ -82,6 +82,22 @@
       :abort! (fn []
                 (swap! aborts inc))})))
 
+(defn- quiet-websocket-factory
+  "A socket that emits no frame, while exposing send/close/abort synchronization."
+  [^CountDownLatch sent closes aborts]
+  (fn [_]
+    {:send! (fn [_]
+              (.countDown sent))
+     :receive! (fn [_]
+                 ;; Keep the fake bounded even before the cancellation fix so the
+                 ;; test fails by outcome instead of parking the suite.
+                 (Thread/sleep 25)
+                 (throw (TimeoutException. "quiet socket")))
+     :close! (fn []
+               (swap! closes inc))
+     :abort! (fn []
+               (swap! aborts inc))}))
+
 (defn- test-websocket
   [close-future aborts]
   (reify
@@ -116,6 +132,18 @@
       (let [future (CompletableFuture.)]
         (expect (= TimeoutException
                    (try (await-websocket-future! future 1) nil (catch Throwable e (class e)))))
+        (expect (.isCancelled future))))
+  (it "cancels a pending WebSocket operation from the caller hook"
+      (let [future
+            (CompletableFuture.)
+
+            type
+            (binding [sut/*cancel-fn* (constantly true)]
+              (try (await-websocket-future! future 1000)
+                   nil
+                   (catch Throwable e (:type (ex-data e)))))]
+
+        (expect (= :svar.core/stream-cancelled type))
         (expect (.isCancelled future))))
   (it "aborts the socket when graceful close times out"
       (let [close-future
@@ -406,6 +434,52 @@
               (expect (= "resp_2" (:previous_response_id continued-request)))
               (expect (= 1 (count (:input continued-request)))))))
         (expect (= 1 @opens))))
+  (it "opens a fresh socket when the user changes model after a terminal stream error"
+      ;; Regression, Vis session 78b0c0b5: a terminal Codex frame stayed attached
+      ;; to the logical session, so the next model inherited a poisoned stream.
+      (let [events
+            (atom [(completed-event "resp_1" "first")
+                   (json/write-json-str {"type" "response.failed"
+                                         "response" {"status" "failed"
+                                                     "error" {"code" "invalid_request_error"
+                                                              "status" 400
+                                                              "message" "Request rejected"}}})
+                   (completed-event "resp_2" "switched")])
+
+            sent
+            (atom [])
+
+            opens
+            (atom 0)
+
+            closes
+            (atom 0)
+
+            aborts
+            (atom 0)
+
+            factory
+            (fake-websocket-factory events sent closes aborts)]
+
+        (with-redefs [sut/open-responses-websocket! (fn [opts]
+                                                      (swap! opens inc)
+                                                      (factory opts))]
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (expect (= "first" (:content (svar/ask! session "one"))))
+            (expect (some? (try (svar/ask! session "rejected") nil (catch Throwable e e))))
+            (expect (= "switched"
+                       (:content (svar/ask! session
+                                            {:input "try another model"
+                                             :routing {:model "gpt-5.6-terra"}}))))
+            (let [[_ failed switched] @sent]
+              (expect (= "resp_1" (:previous_response_id failed)))
+              (expect (nil? (:previous_response_id switched)))
+              (expect (= "gpt-5.6-terra" (:model switched)))
+              (expect (= 3 (count (:input switched)))))))
+        (expect (= 2 @opens))
+        (expect (= 1 @aborts))))
   (it
     "replaces canonical history on the same socket and continues from the new chain"
     (let [events
@@ -591,6 +665,88 @@
                                              {:routing {:provider :openai-codex :model "gpt-5.6"}})]
         (expect (= :svar.core/stream-cancelled
                    (try (svar/ask! session "one") nil (catch Throwable e (:type (ex-data e)))))))))
+  (it "aborts a quiet Responses socket when the caller cancels"
+      ;; Regression: `:cancel-fn` protected SSE reads but a Responses WebSocket
+      ;; could remain parked until its idle timeout and keep the turn busy.
+      (let [cancel?
+            (atom false)
+
+            sent
+            (CountDownLatch. 1)
+
+            closes
+            (atom 0)
+
+            aborts
+            (atom 0)
+
+            http-calls
+            (atom 0)]
+
+        (with-redefs [sut/open-responses-websocket!
+                      (quiet-websocket-factory sent closes aborts)
+
+                      sut/openai-responses-completion
+                      (fn [_ _]
+                        (swap! http-calls inc)
+                        {:content "fallback" :api-usage {}})]
+
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :cancel-fn #(deref cancel?)
+                                                  :websocket-max-retries 0})]
+            (let [pending (future (try {:result (svar/ask! session "one")}
+                                       (catch Throwable e {:error e})))]
+              (try (expect (.await sent 1 TimeUnit/SECONDS))
+                   (reset! cancel? true)
+                   (let [outcome (deref pending 2000 ::timeout)]
+                     (expect (not= ::timeout outcome))
+                     (expect (= :svar.core/stream-cancelled (:type (ex-data (:error outcome))))))
+                   (finally (future-cancel pending))))))
+        (expect (= 1 @aborts))
+        (expect (zero? @closes))
+        (expect (zero? @http-calls))))
+  (it "aborts an active socket when its session is closed"
+      ;; Closing an idle session is graceful; closing an in-flight turn is
+      ;; cancellation and must not reconnect or fall through to HTTP.
+      (let [sent
+            (CountDownLatch. 1)
+
+            closes
+            (atom 0)
+
+            aborts
+            (atom 0)
+
+            http-calls
+            (atom 0)]
+
+        (with-redefs [sut/open-responses-websocket!
+                      (quiet-websocket-factory sent closes aborts)
+
+                      sut/openai-responses-completion
+                      (fn [_ _]
+                        (swap! http-calls inc)
+                        {:content "fallback" :api-usage {}})]
+
+          (let [session
+                (open-test-session (codex-router)
+                                   {:routing {:provider :openai-codex :model "gpt-5.6"}
+                                    :websocket-max-retries 0})
+
+                pending
+                (future (try {:result (svar/ask! session "one")} (catch Throwable e {:error e})))]
+
+            (try (expect (.await sent 1 TimeUnit/SECONDS))
+                 (svar/close-session! session)
+                 (let [outcome (deref pending 2000 ::timeout)]
+                   (expect (not= ::timeout outcome))
+                   (expect (= :svar.core/stream-cancelled (:type (ex-data (:error outcome))))))
+                 (finally (future-cancel pending) (svar/close-session! session)))))
+        (expect (= 1 @aborts))
+        (expect (zero? @closes))
+        (expect (zero? @http-calls))))
   (it "replays full history when the server rejects its continuation cursor"
       (let [events
             (atom [(completed-event "resp_1" "first")
@@ -624,10 +780,10 @@
                                                    "message" "Rate limit reached"}})]
         (expect (= 429 (:status (ex-data error))))
         (expect (failure/transient-error? error))))
-  (it "lets the ordinary retry ladder finish a turn a socket rate limit interrupted"
-      ;; Typing the error is only half the contract: the retry has to reach the
-      ;; SAME session - reusing its socket and its continuation cursor - instead of
-      ;; ending the turn or degrading it to a fresh stateless request.
+  (it "lets the ordinary retry ladder finish a turn on a fresh socket"
+      ;; Typing the error is only half the contract: a terminal stream error invalidates
+      ;; the physical stream. The router retry reaches the SAME logical session, but it
+      ;; replays canonical history over a new socket instead of reusing the failed one.
       (let [events
             (atom [(completed-event "resp_1" "first")
                    (json/write-json-str {"type" "error"
@@ -638,8 +794,17 @@
             sent
             (atom [])
 
+            opens
+            (atom 0)
+
             closes
             (atom 0)
+
+            aborts
+            (atom 0)
+
+            factory
+            (fake-websocket-factory events sent closes aborts)
 
             http-calls
             (atom 0)
@@ -655,7 +820,9 @@
                                             :respect-retry-after? false}})]
 
         (with-redefs [sut/open-responses-websocket!
-                      (fake-websocket-factory events sent closes)
+                      (fn [opts]
+                        (swap! opens inc)
+                        (factory opts))
 
                       sut/openai-responses-completion
                       (fn [_ _]
@@ -669,14 +836,16 @@
             (expect (= "second" (:content (svar/ask! session "two"))))
             (let [[_ rejected retried] @sent]
               (expect (= "resp_1" (:previous_response_id rejected)))
-              ;; The retry repeats the same delta on the same cursor.
-              (expect (= "resp_1" (:previous_response_id retried)))
-              (expect (= 1 (count (:input retried)))))))
+              (expect (nil? (:previous_response_id retried)))
+              (expect (= 3 (count (:input retried)))))))
+        (expect (= 2 @opens))
+        (expect (= 1 @aborts))
         (expect (zero? @http-calls))))
-  (it "retries a nested response failure without discarding the healthy socket"
+  (it "retries a nested response failure after aborting its physical socket"
       ;; Regression, vis session 1413beac: `response.failed` nests its error below
       ;; `response`. The WebSocket parser missed it, so the second failure was
       ;; untyped and ended a 66-iteration turn instead of using the retry ladder.
+      ;; Codex also drops the failed physical stream before that ladder retries.
       (let [events
             (atom [(completed-event "resp_1" "first")
                    (json/write-json-str {"type" "response.failed"
@@ -724,10 +893,11 @@
               (expect (= "second" (:content result)))
               (expect (= 500 (get-in result [:routed/trace 0 :status])))
               (expect (= :server-error (get-in result [:routed/trace 0 :reason])))
-              (expect (= ["resp_1" "resp_1"] (mapv :previous_response_id [failed retried])))
-              (expect (= [1 1] (mapv #(count (:input %)) [failed retried]))))))
-        (expect (= 1 @opens))
-        (expect (zero? @aborts))))
+              (expect (= "resp_1" (:previous_response_id failed)))
+              (expect (nil? (:previous_response_id retried)))
+              (expect (= 3 (count (:input retried)))))))
+        (expect (= 2 @opens))
+        (expect (= 1 @aborts))))
   (it "keeps the status the server wrapped into the error event"
       (let [error (websocket-event-error {"type" "error"
                                           "status_code" 503
@@ -809,9 +979,10 @@
               ;; The router never saw it: recovery belongs to the session that
               ;; still holds the canonical history.
               (expect (empty? (:routed/trace result))))))
-        ;; Same socket throughout - a forgotten cursor is not a sick transport.
-        (expect (= 1 @opens))
-        (expect (zero? @aborts))))
+        ;; Codex aborts every physical stream that emitted a terminal error; the
+        ;; canonical replay starts on a fresh socket instead of reusing a poisoned one.
+        (expect (= 2 @opens))
+        (expect (= 1 @aborts))))
   (it "sends a tool result as the next incremental Responses item"
       (let [events
             (atom [(tool-call-event) (completed-event "resp_2" "done")])
@@ -1081,6 +1252,32 @@
               (expect (false? (:generate warmup)))
               (expect (= "resp_warm" (:previous_response_id inference)))
               (expect (= [] (:input inference))))))))
+  (it "does not turn a cancelled prewarm into an inference"
+      (let [events
+            (atom [(ex-info "cancelled" {:type :svar.core/stream-cancelled})
+                   (completed-event "resp_1" "must not run")])
+
+            sent
+            (atom [])
+
+            closes
+            (atom 0)
+
+            aborts
+            (atom 0)]
+
+        (with-redefs [sut/open-responses-websocket!
+                      (fake-websocket-factory events sent closes aborts)]
+          (with-open [session (svar/open-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (expect
+              (= :svar.core/stream-cancelled
+                 (try (svar/ask! session "one") nil (catch Throwable e (:type (ex-data e))))))))
+        (expect (= 1 (count @sent)))
+        (expect (false? (:generate (first @sent))))
+        (expect (= 1 @aborts))
+        (expect (zero? @closes))))
   (it "continues with inference when the optional prewarm is rejected"
       (let [events
             (atom [(json/write-json-str {"type" "error"
@@ -1105,7 +1302,7 @@
               (expect (nil? (:previous_response_id inference)))
               (expect (= 1 (count (:input inference)))))))))
   (it
-    "retries an interrupted first inference from its warmup cursor without duplicating input"
+    "replays the first inference after its warmup socket emits a terminal error"
     (let [events
           (atom [(completed-event "resp_warm" "")
                  (json/write-json-str {"type" "error"
@@ -1116,8 +1313,17 @@
           sent
           (atom [])
 
+          opens
+          (atom 0)
+
           closes
           (atom 0)
+
+          aborts
+          (atom 0)
+
+          factory
+          (fake-websocket-factory events sent closes aborts)
 
           router
           (svar/make-router [{:id :openai-codex
@@ -1129,16 +1335,21 @@
                             {:rate-limit {:same-provider-delays-ms [0 0]
                                           :respect-retry-after? false}})]
 
-      (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
+      (with-redefs [sut/open-responses-websocket! (fn [opts]
+                                                    (swap! opens inc)
+                                                    (factory opts))]
         (with-open [session (svar/open-session router
                                                {:routing {:provider :openai-codex
                                                           :model "gpt-5.6"}})]
           (expect (= "first" (:content (svar/ask! session "one"))))
           (let [[warmup first-attempt retry] @sent]
             (expect (false? (:generate warmup)))
-            (expect (= ["resp_warm" "resp_warm"]
-                       (mapv :previous_response_id [first-attempt retry])))
-            (expect (= [[] []] (mapv :input [first-attempt retry]))))))))
+            (expect (= "resp_warm" (:previous_response_id first-attempt)))
+            (expect (nil? (:previous_response_id retry)))
+            (expect (= [] (:input first-attempt)))
+            (expect (= 1 (count (:input retry)))))))
+      (expect (= 2 @opens))
+      (expect (= 1 @aborts))))
   (it
     "surfaces normalized Codex rate-limit snapshots without ending the response"
     (let [rate-event
@@ -1198,7 +1409,8 @@
                        (try (svar/ask! session "two")
                             nil
                             (catch clojure.lang.ExceptionInfo e (:type (ex-data e))))))
-            (expect (= 1 (count @sent))))))))
+            (expect (= 1 (count @sent)))
+            (expect (= 1 @closes)))))))
 
 (def ^:private receive-websocket-response!
   (ns-resolve 'com.blockether.svar.internal.llm 'receive-websocket-response!))

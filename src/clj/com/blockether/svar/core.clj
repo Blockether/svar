@@ -156,7 +156,9 @@
    WebSocket and server continuation; close it with `close-session!` or
    `with-open`."
   llm/open-session)
-(def close-session! "Closes an explicit LLM session. Idempotent." llm/close-session!)
+(def close-session!
+  "Closes an explicit LLM session; active transport aborts, idle transport closes gracefully. Idempotent."
+  llm/close-session!)
 (def session-history "Returns an explicit session's canonical replay history." llm/session-history)
 (def session-status
   "Returns provider-safe transport telemetry for an explicit session."
