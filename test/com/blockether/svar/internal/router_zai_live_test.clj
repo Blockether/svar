@@ -179,6 +179,22 @@
                                (expect (= :zai-coding (:routed/provider-id result)))
                                (expect (some? (get-in result [:result :answer]))))))))
 
+(defdescribe zai-coding-glm-53-flash-smoke-test
+             (it "uses GLM-5.3-Flash by default and reaches the Coding Plan endpoint"
+                 (when (zai-coding-enabled?)
+                   (let [r
+                         (svar/make-router [{:id :zai-coding :api-key (zai-coding-key)}])
+
+                         result
+                         (svar/ask! r
+                                    (merge reasoning-retry-opts
+                                           {:spec answer-spec
+                                            :messages [(svar/user "Reply with the word 'flash'.")]
+                                            :reasoning :quick}))]
+
+                     (expect (= "glm-5.3-flash" (:routed/model result)))
+                     (expect (= :zai-coding (:routed/provider-id result)))
+                     (expect (some? (get-in result [:result :answer])))))))
 (defdescribe
   zai-coding-reasoning-levels-test
   "Each `:reasoning` level reaches the Coding Plan endpoint and returns a
@@ -309,9 +325,9 @@
   ;; so svar's own overlay is the only source of its pricing, context, output
   ;; cap and effort rungs on every z.ai surface.
   (describe "GLM-5.3"
-            (it "is curated as the default model on every z.ai surface"
+            (it "remains curated on every z.ai surface"
                 (doseq [pid [:zai :zai-coding :zai-coding-plan]]
-                  (expect (= "glm-5.3" (first (router/provider-default-models pid))))))
+                  (expect (contains? (set (router/provider-default-models pid)) "glm-5.3"))))
             (it "carries retail pricing, 1M context and the agentic output cap"
                 (doseq [pid [:zai :zai-coding :zai-coding-plan]]
                   (let [m (router/provider-model-entry pid "glm-5.3")]
@@ -323,4 +339,29 @@
                     (expect (true? (:json-object-mode? m))))))
             (it "advertises the light effort rung GLM-5.2 lacks"
                 (expect (= [{:type "effort" :values ["low" "high" "max"]}]
-                           (:reasoning-options (router/provider-model-entry :zai "glm-5.3")))))))
+                           (:reasoning-options (router/provider-model-entry :zai "glm-5.3"))))))
+  (describe "GLM-5.3-Flash"
+            (it "is the first curated default on every z.ai surface"
+                (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+                  (expect (= "glm-5.3-flash" (first (router/provider-default-models pid))))))
+            (it "carries stable list pricing, 1M context and the agentic output cap"
+                (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+                  (let [m (router/provider-model-entry pid "glm-5.3-flash")]
+                    (expect (= 0.15 (:input (:pricing m))))
+                    (expect (= 0.03 (:cached-input (:pricing m))))
+                    (expect (= 0.50 (:output (:pricing m))))
+                    (expect (= 1000000 (:context m)))
+                    (expect (= 32768 (:output-limit m)))
+                    (expect (true? (:json-object-mode? m))))))
+            (it "is a fast multimodal GLM effort model"
+                (let [metadata
+                      (get router/KNOWN_MODEL_METADATA "glm-5.3-flash")
+
+                      entry
+                      (router/provider-model-entry :zai-coding-plan "glm-5.3-flash")]
+
+                  (expect (= :fast (:speed metadata)))
+                  (expect (= #{:chat :vision} (:capabilities metadata)))
+                  (expect (= :zai-effort (:reasoning-style metadata)))
+                  (expect (= [{:type "effort" :values ["low" "high" "max"]}]
+                             (:reasoning-options entry)))))))

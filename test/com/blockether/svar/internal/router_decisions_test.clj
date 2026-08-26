@@ -2280,10 +2280,10 @@
                               models))
                    (expect (= 262144 (:context large)))
                    (expect (= 262144 (:output-limit large)))))
-             ;; The Z.ai Coding Plan bundles exactly one vision surface (`glm-5v-turbo`);
-             ;; leaving it out of the curated defaults left a coding-plan user with no
-             ;; vision-capable model to switch to at all.
-             (it "curates the z.ai coding-plan vision model, last so cheap picks stay textual"
+             ;; The Coding Plan now has a native multimodal default (`glm-5.3-flash`);
+             ;; keep the older `glm-5v-turbo` last so it remains selectable without
+             ;; outranking the current Flash model on the all-zero plan price table.
+             (it "curates z.ai's current multimodal default and keeps the legacy vision model last"
                  (let [coding
                        (router/provider-default-models :zai-coding-plan)
 
@@ -2293,12 +2293,14 @@
                        by-name
                        (into {} (map (juxt :name identity)) (:models p))]
 
-                   (expect (= "glm-5.3" (first coding)))
+                   (expect (= "glm-5.3-flash" (first coding)))
                    (expect (= "glm-5v-turbo" (last coding)))
-                   ;; Retail `:zai` offers it too, and `:zai-coding` inherits that curated set.
-                   (expect (contains? (set (router/provider-default-models :zai)) "glm-5v-turbo"))
-                   (expect (contains? (set (router/provider-default-models :zai-coding))
-                                      "glm-5v-turbo"))
+                   ;; Retail `:zai` offers both too, and `:zai-coding` inherits that curated set.
+                   (doseq [pid [:zai :zai-coding]]
+                     (let [defaults (set (router/provider-default-models pid))]
+                       (expect (contains? defaults "glm-5.3-flash"))
+                       (expect (contains? defaults "glm-5v-turbo"))))
+                   (expect (contains? (:capabilities (get by-name "glm-5.3-flash")) :vision))
                    (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
                    (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))
 
@@ -2388,9 +2390,10 @@
           (expect (= "pricey-seer" (:name m)))
           (expect (contains? (:capabilities m) :vision))
           (expect (= :seeing (:provider m)))))
-    ;; The z.ai coding plan meters every model at zero, so `:cost` alone ties and
-    ;; the ONE seeing model has to be reachable by capability, not by price.
-    (it "finds the coding plan's only seeing model through prefer-providers"
+    ;; The z.ai coding plan meters every model at zero, so `:cost` alone ties;
+    ;; the curated order must put its current multimodal model ahead of the
+    ;; legacy vision fallback.
+    (it "routes vision work to the coding plan's current multimodal default"
         (let [r
               (llm/make-router [{:id :zai-coding-plan :api-key "k"}])
 
@@ -2400,7 +2403,7 @@
                                        :optimize [:cost :speed]
                                        :capabilities #{:vision}})]
 
-          (expect (= "glm-5v-turbo" (routed-name r prefs)))))
+          (expect (= "glm-5.3-flash" (routed-name r prefs)))))
     (it "reaches ask!'s provider selection end to end"
         (let [captured
               (atom nil)

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- z.ai **GLM-5.3-Flash** on `:zai`, `:zai-coding`, and `:zai-coding-plan`: the first curated default, native vision, 1M context, fast routing, `low`/`high`/`max` effort, the deliberate 32768 agentic output cap, and stable retail list pricing. The temporary launch discount is intentionally excluded so budget accounting stays correct after it ends.
+
 ## [v0.7.145] - 2026-08-26
 
 ### Changed
