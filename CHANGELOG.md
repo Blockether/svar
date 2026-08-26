@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.145] - 2026-08-26
+
+### Changed
+- fix(network): preserve first-byte timeout classification
+- fix(llm): bypass oversized Codex websocket replays
+- docs(llm): complete Codex session checklist
+- release: update version files for v0.7.144, bump to next dev version
+
+
 ### Changed
 - fix(network): preserve first-byte timeout precedence and classification across public ask paths
 
@@ -2405,7 +2414,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.144...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.145...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2584,3 +2593,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.142]: https://github.com/Blockether/svar/releases/tag/v0.7.142
 [v0.7.143]: https://github.com/Blockether/svar/releases/tag/v0.7.143
 [v0.7.144]: https://github.com/Blockether/svar/releases/tag/v0.7.144
+[v0.7.145]: https://github.com/Blockether/svar/releases/tag/v0.7.145
