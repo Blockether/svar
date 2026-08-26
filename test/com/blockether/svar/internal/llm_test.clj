@@ -59,6 +59,19 @@
                                                          {:first-byte-timeout-ms 600000}
                                                          :first-byte-timeout-ms
                                                          120000))))
+             (it "uses the same precedence in ask! and ask-code! option resolution"
+                 (let [resolve-opts
+                       @#'sut/resolve-opts
+
+                       router
+                       {:network {:first-byte-timeout-ms 600000}}]
+
+                   (expect (= 900000
+                              (:first-byte-timeout-ms
+                                (resolve-opts router {:first-byte-timeout-ms 900000}))))
+                   (expect (= 600000 (:first-byte-timeout-ms (resolve-opts router {}))))
+                   (expect (nil? (:first-byte-timeout-ms
+                                   (resolve-opts router {:first-byte-timeout-ms nil}))))))
              (it "rejects invalid values clearly"
                  (let [error (try (resolved-network-timeout {:first-byte-timeout-ms "slow"}
                                                             {}

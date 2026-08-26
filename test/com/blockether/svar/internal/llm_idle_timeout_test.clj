@@ -27,6 +27,7 @@
            (java.util.concurrent.atomic AtomicBoolean)))
 
 (def ^:private start-watchdog @#'sut/start-idle-stream-watchdog!)
+(def ^:private start-semantic-watchdog @#'sut/start-semantic-stream-watchdog!)
 (def ^:private start-ttft-watchdog @#'sut/start-ttft-watchdog!)
 (def ^:private deregister-watchdog @#'sut/deregister-watchdog!)
 (def ^:private watchdog-registry @#'sut/watchdog-registry)
@@ -266,7 +267,58 @@
         (deregister-watchdog t)
         (expect (.get closed?))
         (expect (= 200 (:threshold @fired)))
-        (expect (true? (:first-byte? @fired))))))
+        (expect (true? (:first-byte? @fired)))))
+    (it
+      "keeps semantic timeout from stealing first-byte classification"
+      (let [closed?
+            (AtomicBoolean. false)
+
+            stream
+            (close-tracking-stream (ByteArrayInputStream. (byte-array 0)) closed?)
+
+            started-ns
+            (atom (System/nanoTime))
+
+            bytes-seen?
+            (atom false)
+
+            alive?
+            (atom true)
+
+            first-byte-fired?
+            (atom false)
+
+            semantic-fired?
+            (atom false)
+
+            idle-handle
+            (start-watchdog stream
+                            5000
+                            300
+                            started-ns
+                            bytes-seen?
+                            alive?
+                            (fn [_ _ first-byte?]
+                              (reset! first-byte-fired? first-byte?)))
+
+            semantic-handle
+            (start-semantic-watchdog stream
+                                     150
+                                     started-ns
+                                     bytes-seen?
+                                     300
+                                     alive?
+                                     (fn [_]
+                                       (reset! semantic-fired? true)))]
+
+        (loop [waited 0]
+          (when (and (not (.get closed?)) (< waited 1500)) (Thread/sleep 25) (recur (+ waited 25))))
+        (reset! alive? false)
+        (deregister-watchdog idle-handle)
+        (deregister-watchdog semantic-handle)
+        (expect (.get closed?))
+        (expect (true? @first-byte-fired?))
+        (expect (false? @semantic-fired?)))))
   (describe
     "exits cleanly on alive? false"
     (it

@@ -5650,13 +5650,19 @@
 (defn- start-semantic-stream-watchdog!
   "Arms a semantic check on the shared scheduler: closes `stream` if
    model/progress events stop while transport may still emit pings/comments.
+   While a first-byte watchdog owns the pre-body phase, semantic timeout is
+   ineligible until the transport has produced a byte.
    Returns a handle token for shutdown."
-  [^java.io.InputStream stream semantic-timeout-ms last-semantic-ns-atom alive?-atom on-fire]
+  [^java.io.InputStream stream semantic-timeout-ms last-semantic-ns-atom bytes-seen?-atom
+   first-byte-timeout-ms alive?-atom on-fire]
   (register-watchdog!
     (fn []
       (if @alive?-atom
         (let [elapsed-ms (long (/ (- (System/nanoTime) (long @last-semantic-ns-atom)) 1000000))]
-          (if (>= elapsed-ms (long semantic-timeout-ms))
+          (if (and (>= elapsed-ms (long semantic-timeout-ms))
+                   (or @bytes-seen?-atom
+                       (not (and (number? first-byte-timeout-ms)
+                                 (pos? (long first-byte-timeout-ms))))))
             (do (try (on-fire elapsed-ms) (catch Throwable _ nil))
                 (try (.close stream) (catch Throwable _ nil))
                 false)
@@ -6054,6 +6060,8 @@
             input-stream
             semantic-timeout-ms
             last-semantic-ns
+            bytes-seen?
+            first-byte-timeout-ms
             watchdog-alive?
             (fn [elapsed-ms]
               (reset! semantic-fired? true)

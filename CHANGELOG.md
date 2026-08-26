@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- fix(network): preserve first-byte timeout precedence and classification across public ask paths
+
 ## [v0.7.144] - 2026-08-26
 
 ### Changed
@@ -33,7 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - feat(network): expose first-byte timeout policy
 - release: update version files for v0.7.140, bump to next dev version
-
 
 ## [v0.7.140] - 2026-08-25
 
