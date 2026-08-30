@@ -810,6 +810,20 @@
               (fn [eb]
                 (assoc (or eb {}) :prompt_cache_key k))))))
 
+(defn- prepare-llm-opts
+  "Pure wire-affecting transformation shared by calls and cache preflight."
+  [messages opts]
+  (let [msgs0
+        (-> messages
+            vec
+            (->> (mapv normalize-role))
+            (merge-top-level-system (:system opts)))
+
+        msgs
+        (auto-cache-last-system-block msgs0)]
+
+    [msgs0 msgs (apply-cache-key-opt msgs opts)]))
+
 (defn apply-llm-opts
   "Single chokepoint where caller opts that affect the WIRE BODY get
    applied to the messages vec + opts map. Called once per direct LLM
@@ -824,18 +838,7 @@
    cache-bisection debugging — read the log handler output instead
    of adding ad-hoc prints."
   [messages opts]
-  (let [msgs0
-        (-> messages
-            vec
-            (->> (mapv normalize-role))
-            (merge-top-level-system (:system opts)))
-
-        msgs
-        (auto-cache-last-system-block msgs0)
-
-        opts'
-        (apply-cache-key-opt msgs opts)]
-
+  (let [[msgs0 msgs opts'] (prepare-llm-opts messages opts)]
     (trove/log! {:level :debug
                  :id ::cache-decision
                  :data {:api-style (:api-style opts')
@@ -1265,10 +1268,18 @@
 
 (defn- tool-quirk-key [opts] (str (:model opts)))
 
-(defn- apply-known-tool-quirk
-  "Apply the same remembered gateway schema repair used by [[ask-code!]]."
+(defn- codex-tool-field-quirk?
+  "True for the ChatGPT Codex adapter, whose accepted tool schema must not
+   depend on a process-local repair learned by an earlier request. Both shapes
+   occur here: routed opts carry `:provider-id`; public callers carry `:routing`."
   [opts]
-  (if-let [tools (and (contains? @gateway-tool-field-quirks (tool-quirk-key opts))
+  (or (= :openai-codex (:provider-id opts)) (= :openai-codex (get-in opts [:routing :provider]))))
+
+(defn- apply-known-tool-quirk
+  "Apply the deterministic Codex repair or one remembered by [[ask-code!]]."
+  [opts]
+  (if-let [tools (and (or (codex-tool-field-quirk? opts)
+                          (contains? @gateway-tool-field-quirks (tool-quirk-key opts)))
                       (sanitize-tools-for-gateway (:tools opts)))]
     (assoc opts :tools tools)
     opts))
@@ -1321,6 +1332,29 @@
         (symbol? value) [:symbol (namespace value) (name value)]
         :else value))
 
+(defn- canonical-cache-str
+  "Serialize cache identity without inheriting a caller's printer limits."
+  [value]
+  (binding [*print-length*
+            nil
+
+            *print-level*
+            nil
+
+            *print-meta*
+            false
+
+            *print-dup*
+            false
+
+            *print-readably*
+            true
+
+            *print-namespace-maps*
+            false]
+
+    (pr-str (canonical-cache-value value))))
+
 (defn- sha256-hex
   "Lowercase SHA-256 of one canonical string."
   [value]
@@ -1372,11 +1406,11 @@
           oauth-preamble
           (conj [:system-preamble oauth-preamble]))
 
-        canonical-fixed
-        (canonical-cache-value fixed-components)
+        fixed-str
+        (canonical-cache-str fixed-components)
 
-        material
-        (canonical-cache-value
+        material-str
+        (canonical-cache-str
           {:adapter-generation PROMPT_CACHE_CONTEXT_GENERATION
            :provider-id (:provider-id opts)
            :model (str (:model opts))
@@ -1394,8 +1428,8 @@
            :fixed-prefix fixed-components
            :prompt-cache-policy (:prompt-cache-policy opts)})]
 
-    {:id (str "pcctx-v1-" (sha256-hex (pr-str material)))
-     :fixed-prefix-weight (long (count (pr-str canonical-fixed)))}))
+    {:id (str "pcctx-v1-" (sha256-hex material-str))
+     :fixed-prefix-weight (long (count fixed-str))}))
 
 (defn- decode-tool-arguments
   "Tool-call arguments reach svar either already parsed (anthropic
@@ -7445,8 +7479,11 @@
             (throw (ex-info "No provider is available for prompt-cache context."
                             {:type :svar.llm/no-provider})))
 
+        [_ _ cache-opts]
+        (prepare-llm-opts (:messages opts) opts)
+
         routed-opts
-        (-> (inject-routed-params opts provider model-map)
+        (-> (inject-routed-params cache-opts provider model-map)
             apply-known-tool-quirk)]
 
     (prompt-cache-context-for-opts routed-opts)))

@@ -122,6 +122,96 @@
       (expect (not= (:id context) (:id other-model)))
       (expect (not (str/includes? (pr-str context) secret-a)))
       (expect (not (str/includes? (pr-str context) "acct-a")))))
+  (it
+    "ignores caller printer limits when fingerprinting a cache context"
+    (let [router
+          (svar/make-router [{:id :openai-codex
+                              :api-key "secret"
+                              :base-url "https://chatgpt.com/backend-api/codex"
+                              :api-style :openai-compatible-responses
+                              :models [{:name "gpt-5.6-sol"}]}])
+
+          opts
+          {:routing {:provider :openai-codex :model "gpt-5.6-sol"}
+           :tools [{:name "python_execution"
+                    :description "Run Python"
+                    :schema
+                    {:type "object" :properties {"code" {:type "string"}} :required ["code"]}}]
+           :tool-choice :auto
+           :cache-key "session-a"}
+
+          unrestricted
+          (binding [*print-length*
+                    nil
+
+                    *print-level*
+                    nil]
+
+            (svar/prompt-cache-context router opts))
+
+          restricted
+          (binding [*print-length*
+                    1
+
+                    *print-level*
+                    1]
+
+            (svar/prompt-cache-context router opts))]
+
+      (expect (= unrestricted restricted))))
+  ;; Regression: Codex learned a tool-schema repair in one process, persisted
+  ;; the repaired cache identity, then a fresh process preflighted the unrepaired
+  ;; schema and refused an otherwise exact prompt prefix.
+  (it
+    "keeps Codex cache identity stable across a process restart"
+    (let [router
+          (svar/make-router [{:id :openai-codex
+                              :api-key "secret"
+                              :base-url "https://chatgpt.com/backend-api/codex"
+                              :api-style :openai-compatible-responses
+                              :models [{:name "gpt-5.6-sol"}]}])
+
+          opts
+          {:routing {:provider :openai-codex :model "gpt-5.6-sol"}
+           :tools [{:name "python_execution"
+                    :description "Run Python"
+                    :schema {:type "object"
+                             :properties {"code" {:type "string"}}
+                             :required ["code"]
+                             :additionalProperties false}}]
+           :tool-choice :auto
+           :prompt-cache-policy {:system-anchor :last-system :transcript-anchors 3 :ttl :5m}}
+
+          sent
+          (atom nil)]
+
+      (with-redefs-fn {#'sut/gateway-tool-field-quirks (atom #{})
+                       #'sut/ask-code!* (fn [_router routed-opts]
+                                          (reset! sent routed-opts)
+                                          {:prompt-cache-context
+                                           ((deref #'sut/prompt-cache-context-for-opts)
+                                             routed-opts)})}
+        (fn []
+          (let [fresh
+                (svar/prompt-cache-context router opts)
+
+                actual
+                (:prompt-cache-context (svar/ask-code! router opts))
+
+                _
+                (swap! @#'sut/gateway-tool-field-quirks conj "gpt-5.6-sol")
+
+                repaired
+                (svar/prompt-cache-context router opts)
+
+                _
+                (reset! @#'sut/gateway-tool-field-quirks #{})
+
+                restarted
+                (svar/prompt-cache-context router opts)]
+
+            (expect (= repaired fresh actual restarted))
+            (expect (nil? (get-in @sent [:tools 0 :schema :additionalProperties]))))))))
   (it "returns the helper identity from the tool-calling request that was actually sent"
       (let [router
             (svar/make-router [{:id :provider-a
@@ -137,6 +227,7 @@
                       :description "Run Python"
                       :schema {:type "object" :properties {"code" {:type "string"}}}}]
              :tool-choice :auto
+             :cache-key "session-a"
              :prompt-cache-policy {:system-anchor :last-system :transcript-anchors 3 :ttl :5m}
              :check-context? false}
 
