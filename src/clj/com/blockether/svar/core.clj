@@ -151,6 +151,9 @@
    GPT-5.6+ Responses emits explicit prompt-cache breakpoints, including a
    rolling prior-turn boundary; older OpenAI-compatible styles strip the marker."
   llm/cached)
+(def prompt-cache-context
+  "Returns Svar's opaque fixed-prefix/cache-namespace identity for routed tool calls."
+  llm/prompt-cache-context)
 (def open-session
   "Opens a sequential LLM session. OpenAI Codex uses a persistent Responses
    WebSocket and server continuation. A cursorless request above
@@ -175,8 +178,8 @@
    The model takes action by calling a `:tool`; no tool call ⇒ its text is the
    final answer (`:stop-reason :end`). Returns {:stop-reason :tool-calls|:end
    :tool-calls :content :assistant-message :reasoning :tokens :cost :duration-ms
-   :rate-limit}. `:rate-limit` (when the provider sent quota headers) carries
-   `{:resets-at-ms <epoch-ms> :remaining :limit :windows}` — the effective reset
-   clock a status view can render."
+   :rate-limit :prompt-cache-context}. `:rate-limit` (when the provider sent quota
+   headers) carries `{:resets-at-ms <epoch-ms> :remaining :limit :windows}` — the
+   effective reset clock a status view can render."
   llm/ask-code!)
 (def models! "Fetches available models from the LLM API." llm/models!)

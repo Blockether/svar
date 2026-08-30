@@ -308,6 +308,10 @@
   [token]
   (boolean (and (string? token) (str/includes? token "sk-ant-oat"))))
 
+(def ^:private anthropic-oauth-identity
+  "System identity injected before caller messages on Anthropic's subscription OAuth path."
+  "You are Claude Code, Anthropic's official CLI for Claude.")
+
 (def ^:private claude-cli-version
   "Version string sent as `claude-cli/<v>` in the OAuth-path user-agent,
    mirroring the officially-installed Claude Code CLI. Bump toward the
@@ -1261,6 +1265,14 @@
 
 (defn- tool-quirk-key [opts] (str (:model opts)))
 
+(defn- apply-known-tool-quirk
+  "Apply the same remembered gateway schema repair used by [[ask-code!]]."
+  [opts]
+  (if-let [tools (and (contains? @gateway-tool-field-quirks (tool-quirk-key opts))
+                      (sanitize-tools-for-gateway (:tools opts)))]
+    (assoc opts :tools tools)
+    opts))
+
 (defn- tool-choice->wire
   "Shape a canonical tool-choice for `api-style`.
    Canonical: :auto | :required | :none | {:name \"x\"} | \"x\" (force a tool)."
@@ -1285,6 +1297,105 @@
   [extra-body]
   [(:svar/tools extra-body) (:svar/tool-choice extra-body)
    (dissoc extra-body :svar/tools :svar/tool-choice)])
+
+(def ^:private PROMPT_CACHE_CONTEXT_GENERATION
+  "Bump when Svar changes provider prefix shaping in a way the material below cannot express."
+  1)
+
+(defn- canonical-cache-value
+  "Order-insensitive canonical data for deterministic cache-context hashing."
+  [value]
+  (cond (map? value) [:map
+                      (->> value
+                           (map (fn [[k v]]
+                                  [(canonical-cache-value k) (canonical-cache-value v)]))
+                           (sort-by pr-str)
+                           vec)]
+        (set? value) [:set
+                      (->> value
+                           (map canonical-cache-value)
+                           (sort-by pr-str)
+                           vec)]
+        (sequential? value) [:seq (mapv canonical-cache-value value)]
+        (keyword? value) [:keyword (namespace value) (name value)]
+        (symbol? value) [:symbol (namespace value) (name value)]
+        :else value))
+
+(defn- sha256-hex
+  "Lowercase SHA-256 of one canonical string."
+  [value]
+  (let [bytes
+        (.getBytes ^String value java.nio.charset.StandardCharsets/UTF_8)
+
+        md
+        (doto (java.security.MessageDigest/getInstance "SHA-256") (.update bytes))]
+
+    (apply str (map #(format "%02x" (bit-and (long %) 0xff)) (vec (.digest md))))))
+
+(defn- prompt-cache-namespace-headers
+  "Normalizes only headers that can select an account-scoped provider cache."
+  [headers]
+  (->> headers
+       (keep (fn [[header value]]
+               (let [header-name (-> (if (keyword? header) (name header) (str header))
+                                     str/lower-case)]
+                 (when (re-find #"(?:account|organization|project)" header-name)
+                   [header-name value]))))
+       (sort-by pr-str)
+       vec))
+
+(defn- prompt-cache-context-for-opts
+  "Opaque identity of the provider-owned fixed request prefix for resolved `opts`."
+  [opts]
+  (let [api-style
+        (or (:api-style opts) :openai-compatible-chat)
+
+        tools
+        (when (seq (:tools opts)) (tools->wire api-style (:tools opts)))
+
+        tool-choice
+        (when (and (seq tools) (:tool-choice opts))
+          (tool-choice->wire api-style (:tool-choice opts)))
+
+        oauth-preamble
+        (when (and (= api-style :anthropic) (anthropic-oauth-token? (:api-key opts)))
+          [{:type "text" :text anthropic-oauth-identity}])
+
+        fixed-components
+        (cond-> []
+          (seq tools)
+          (conj [:tools tools])
+
+          tool-choice
+          (conj [:tool-choice tool-choice])
+
+          oauth-preamble
+          (conj [:system-preamble oauth-preamble]))
+
+        canonical-fixed
+        (canonical-cache-value fixed-components)
+
+        material
+        (canonical-cache-value
+          {:adapter-generation PROMPT_CACHE_CONTEXT_GENERATION
+           :provider-id (:provider-id opts)
+           :model (str (:model opts))
+           :api-style api-style
+           :base-url (:base-url opts)
+           :responses-path (:responses-path opts)
+           ;; Credentials, account headers and explicit cache keys select a provider
+           ;; cache namespace. Dynamic transport headers (for example Copilot's
+           ;; X-Initiator and User-Agent) do not alter provider cache identity.
+           ;; Namespace values enter only this digest and are never returned.
+           :cache-namespace {:api-key (:api-key opts)
+                             :account-headers (prompt-cache-namespace-headers (:llm-headers opts))
+                             :cache-key (:cache-key opts)
+                             :prompt-cache-key (get-in opts [:extra-body :prompt_cache_key])}
+           :fixed-prefix fixed-components
+           :prompt-cache-policy (:prompt-cache-policy opts)})]
+
+    {:id (str "pcctx-v1-" (sha256-hex (pr-str material)))
+     :fixed-prefix-weight (long (count (pr-str canonical-fixed)))}))
 
 (defn- decode-tool-arguments
   "Tool-call arguments reach svar either already parsed (anthropic
@@ -1551,12 +1662,24 @@
               (some-> (:role m)
                       name)))
 
+         ;; The injected identity block is ~14 tokens - far under Anthropic's
+         ;; minimum cacheable prefix - so a `cache_control` on it can never
+         ;; cache anything by itself. It only costs: Anthropic caps a request at
+         ;; FOUR cache_control blocks (400 "A maximum of 4 blocks with
+         ;; cache_control may be provided") and reads them in the order tools ->
+         ;; system -> messages, refusing a `ttl: "1h"` block placed after a
+         ;; 5-minute one (400 "must not come after a ttl='5m' cache_control
+         ;; block"). Marking this block therefore burned one of the caller's
+         ;; four breakpoints AND pinned the whole request to the 5-minute tier.
+         ;; Any breakpoint the caller (or `auto-cache-last-system-block`) placed
+         ;; sits LATER in the prefix and already covers this block, so we only
+         ;; mark it when nothing else is marked.
          sys-blocks
          (cond-> (vec (mapcat #(normalize-content (:content %)) (filter system-role? messages)))
            anthropic-oauth?
-           (->> (into [{:type "text"
-                        :text "You are Claude Code, Anthropic's official CLI for Claude."
-                        :svar/cache true}])
+           (->> (into [(cond-> {:type "text" :text anthropic-oauth-identity}
+                         (not (any-block-marker? messages))
+                         (assoc :svar/cache true))])
                 vec))
 
          any-cache?
@@ -7303,6 +7426,31 @@
           merged-headers
           (assoc :llm-headers merged-headers)))))
 
+(defn prompt-cache-context
+  "Returns an opaque deterministic identity for the exact provider cache namespace
+   and fixed prefix selected by `router` + `opts`:
+   `{:id pcctx-v1-<sha256> :fixed-prefix-weight n}`.
+
+   `opts` accepts the same `:routing`, `:tools`, `:tool-choice`, `:cache-key` and
+   `:prompt-cache-policy` values as [[ask-code!]]. The identifier includes the
+   resolved provider/model/endpoint/account namespace, final wire-shaped tools,
+   provider-injected preamble and cache policy. Credentials never leave the digest.
+   `:fixed-prefix-weight` is a serialized-size proxy, not a token count."
+  [router opts]
+  (let [resolved
+        (router/resolve-routing router (routing-opts-with-reasoning opts))
+
+        [provider model-map]
+        (or (router/select-provider router (:prefs resolved))
+            (throw (ex-info "No provider is available for prompt-cache context."
+                            {:type :svar.llm/no-provider})))
+
+        routed-opts
+        (-> (inject-routed-params opts provider model-map)
+            apply-known-tool-quirk)]
+
+    (prompt-cache-context-for-opts routed-opts)))
+
 (defn- resolved-network-timeout
   "Single point of truth for the streaming-timeout precedence chain:
    caller > router > package-default. `contains?` (not `or`) at each
@@ -8568,7 +8716,7 @@
       :tool-calls  [{:id :name :input}]    ; [] when :end
       :content     <text or nil>
       :reasoning :assistant-message :provider-state :api-usage
-      :tokens :cost :duration-ms :http-response}
+      :prompt-cache-context :tokens :cost :duration-ms :http-response}
 
    `:assistant-message` MUST be appended to `:messages` on the next call so the
    tool_use blocks round-trip; append matching `tool_result` user blocks too."
@@ -8590,6 +8738,17 @@
 
      provider-id
      (:provider-id opts)
+
+     cache-context
+     (prompt-cache-context-for-opts (assoc opts
+                                      :model model
+                                      :api-key api-key
+                                      :base-url base-url
+                                      :api-style api-style
+                                      :responses-path responses-path
+                                      :llm-headers llm-headers
+                                      :tools tools
+                                      :tool-choice tool-choice))
 
      chat-url
      (make-chat-url base-url api-style)
@@ -8825,7 +8984,8 @@
                :content content
                :tokens tokens
                :cost cost
-               :duration-ms duration-ms}
+               :duration-ms duration-ms
+               :prompt-cache-context cache-context}
         reasoning
         (assoc :reasoning reasoning)
 
@@ -8932,11 +9092,8 @@
        ;; check runs fresh for whichever model is being tried.
        run-healed
        (fn [opts]
-         (let [quirk (tool-quirk-key opts)
-               opts (if-let [tools (and (contains? @gateway-tool-field-quirks quirk)
-                                        (sanitize-tools-for-gateway (:tools opts)))]
-                      (assoc opts :tools tools)
-                      opts)]
+         (let [opts (apply-known-tool-quirk opts)
+               quirk (tool-quirk-key opts)]
 
            (try
              (run opts)

@@ -42,6 +42,116 @@
 
 (def ^:private resolved-network-timeout @#'sut/resolved-network-timeout)
 
+(defdescribe
+  prompt-cache-context-test
+  (it
+    "fingerprints the resolved fixed prefix without exposing its cache namespace"
+    (let [secret-a
+          "sk-ant-oat01-private-a"
+
+          secret-b
+          "sk-ant-oat01-private-b"
+
+          provider
+          (fn [secret account]
+            {:id :anthropic-coding-plan
+             :api-key secret
+             :base-url "https://api.anthropic.com/v1"
+             :api-style :anthropic
+             :llm-headers {"x-account-namespace" account}
+             :models [{:name "claude-a"} {:name "claude-b"}]})
+
+          provider-router
+          (fn [secret account]
+            (svar/make-router [(provider secret account)]))
+
+          opts
+          {:routing {:provider :anthropic-coding-plan :model "claude-a"}
+           :tools [{:name "python_execution"
+                    :description "Run Python"
+                    :schema
+                    {:type "object" :properties {"code" {:type "string"}} :required ["code"]}}]
+           :tool-choice :auto
+           :prompt-cache-policy {:system-anchor :last :transcript-anchors 3 :ttl :1h}}
+
+          context
+          (svar/prompt-cache-context (provider-router secret-a "acct-a") opts)
+
+          reordered
+          (svar/prompt-cache-context (provider-router secret-a "acct-a")
+                                     (assoc-in opts
+                                       [:tools 0 :schema]
+                                       (array-map :required ["code"]
+                                                  :properties (array-map "code"
+                                                                         (array-map :type "string"))
+                                                  :type "object")))
+
+          transport-header-context
+          (svar/prompt-cache-context
+            (provider-router secret-a "acct-a")
+            (assoc opts :llm-headers {"X-Initiator" "agent" "User-Agent" "VisCopilot/0.1"}))
+
+          other-tool
+          (svar/prompt-cache-context
+            (provider-router secret-a "acct-a")
+            (assoc-in opts [:tools 0 :description] "Run one Python program"))
+
+          other-policy
+          (svar/prompt-cache-context (provider-router secret-a "acct-a")
+                                     (assoc-in opts [:prompt-cache-policy :ttl] :5m))
+
+          other-credential
+          (svar/prompt-cache-context (provider-router secret-b "acct-a") opts)
+
+          other-account
+          (svar/prompt-cache-context (provider-router secret-a "acct-b") opts)
+
+          other-model
+          (svar/prompt-cache-context
+            (provider-router secret-a "acct-a")
+            (assoc opts :routing {:provider :anthropic-coding-plan :model "claude-b"}))]
+
+      (expect (= #{:id :fixed-prefix-weight} (set (keys context))))
+      (expect (boolean (re-matches #"pcctx-v1-[0-9a-f]{64}" (:id context))))
+      (expect (pos? (:fixed-prefix-weight context)))
+      (expect (= context reordered transport-header-context))
+      (expect (not= (:id context) (:id other-tool)))
+      (expect (not= (:id context) (:id other-policy)))
+      (expect (not= (:id context) (:id other-credential)))
+      (expect (not= (:id context) (:id other-account)))
+      (expect (not= (:id context) (:id other-model)))
+      (expect (not (str/includes? (pr-str context) secret-a)))
+      (expect (not (str/includes? (pr-str context) "acct-a")))))
+  (it "returns the helper identity from the tool-calling request that was actually sent"
+      (let [router
+            (svar/make-router [{:id :provider-a
+                                :api-key "secret"
+                                :base-url "https://example.invalid/v1"
+                                :api-style :openai-compatible-chat
+                                :models [{:name "model-a"}]}])
+
+            opts
+            {:routing {:provider :provider-a :model "model-a"}
+             :messages [(svar/user "hi")]
+             :tools [{:name "python_execution"
+                      :description "Run Python"
+                      :schema {:type "object" :properties {"code" {:type "string"}}}}]
+             :tool-choice :auto
+             :prompt-cache-policy {:system-anchor :last-system :transcript-anchors 3 :ttl :5m}
+             :check-context? false}
+
+            expected
+            (svar/prompt-cache-context router opts)]
+
+        (with-redefs [sut/chat-completion (fn [_messages _model _api-key _chat-url _retry-opts]
+                                            {:content "done"
+                                             :tool-calls []
+                                             :api-usage
+                                             {:input-tokens 10 :output-tokens 1 :total-tokens 11}
+                                             :http-response {:headers {}}
+                                             :stream-finalization {:finish-reason "stop"}})]
+          (expect (= expected (:prompt-cache-context (svar/ask-code! router opts))))))))
+
 (defdescribe first-byte-timeout-resolution-test
              (it "resolves call, router, and package values in precedence order"
                  (expect (= 900000
@@ -443,9 +553,46 @@
               (expect (nil? (get headers "x-anthropic-billing-header")))
               (expect (= "You are Claude Code, Anthropic's official CLI for Claude."
                          (get-in body [:system 0 :text])))
+              ;; Nothing else here is marked, so the identity block keeps the
+              ;; auto-marker. A caller that places its OWN breakpoints gets this
+              ;; block left bare — see the 4-slot / TTL-order regression below.
               (expect (= {:type "ephemeral"} (get-in body [:system 0 :cache_control])))
               (expect (= "Follow project rules." (get-in body [:system 1 :text])))
               (expect (= [{:role "user" :content "hi"}] (:messages body))))))))
+    ;; Regression: two live Anthropic 400s, both caused by the injected Claude
+    ;; Code identity block carrying a `cache_control` of its own —
+    ;; "system.5.cache_control.ttl: a ttl='1h' cache_control block must not come
+    ;; after a ttl='5m' cache_control block" and "A maximum of 4 blocks with
+    ;; cache_control may be provided. Found 5."
+    (it "chat-completion leaves the injected identity block unmarked when the caller marks"
+        (let [seen
+              (atom nil)
+
+              messages
+              [{:role "system"
+                :content
+                [{:type "text" :text "Follow project rules." :svar/cache true :svar/cache-ttl :1h}]}
+               (svar/user "hi")]]
+
+          (with-redefs-fn {#'sut/http-post! (fn [_url body headers _timeout-ms]
+                                              (reset! seen {:body body :headers headers})
+                                              {:parsed {:content [{:type "text" :text "ok"}]
+                                                        :usage {:input_tokens 10 :output_tokens 1}}
+                                               :raw-body "{}"
+                                               :url "https://api.anthropic.com/v1/messages"
+                                               :status 200})}
+            (fn []
+              (sut/chat-completion messages
+                                   "claude-sonnet-4-5" "sk-ant-oat01-test"
+                                   "https://api.anthropic.com/v1" {:api-style :anthropic})
+              (let [{:keys [body headers]} @seen]
+                (expect (= "You are Claude Code, Anthropic's official CLI for Claude."
+                           (get-in body [:system 0 :text])))
+                (expect (nil? (get-in body [:system 0 :cache_control])))
+                (expect (= {:type "ephemeral" :ttl "1h"} (get-in body [:system 1 :cache_control])))
+                (expect (= 1 (count (keep :cache_control (:system body)))))
+                (expect (str/includes? (get headers "anthropic-beta")
+                                       "extended-cache-ttl-2025-04-11")))))))
     (it "chat-completion adds GitHub Copilot dynamic headers without replacing static headers"
         (let [seen
               (atom nil)
