@@ -6463,14 +6463,11 @@
       (when-let [incomplete @incomplete-response]
         ;; A Responses stream that ends `incomplete` (reason max_output_tokens /
         ;; content_filter / — on some proxies, notably GitHub Copilot — NULL) is
-        ;; a HARD stream error, consistent with the OpenAI Codex CLI: it never
-        ;; uses the partial output, it raises and RETRIES (stream_max_retries).
-        ;; The reason is null-checked with an "unknown" fallback (Codex does the
-        ;; same via `unwrap_or("unknown")`). Retry is driven by
-        ;; `router-transient-error?` treating `:svar.core/stream-incomplete` as
-        ;; transient (see router.clj) so the call is re-attempted rather than
-        ;; failing the turn outright — early-close/incomplete usually succeeds
-        ;; on retry.
+        ;; a hard stream error: partial output is never returned as a completed
+        ;; answer. Unknown/content-filter incompletes may retry before any output,
+        ;; but max_output_tokens surfaces immediately because replaying the same
+        ;; request cannot change the provider's output cap. The reason is
+        ;; null-checked with an "unknown" fallback, matching the OpenAI Codex CLI.
         (let [stream-finalization (stream-finalization-summary {:terminal @terminal-event
                                                                 :incomplete incomplete
                                                                 :last-event-type @last-event-type

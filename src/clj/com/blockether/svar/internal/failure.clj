@@ -451,7 +451,8 @@
    failure — did anything run, and can I safely send this again?"
   #{:auth :quota-exhausted :rate-limited :transport-drop :connect-timeout :upstream-timeout
     :gateway-unavailable :model-unavailable :resource-mismatch :tool-schema-unsupported
-    :context-length-exceeded :stream-interrupted :invalid-request :unknown})
+    :context-length-exceeded :output-budget-exhausted :stream-interrupted :invalid-request
+    :unknown})
 
 (defn- connect-phase-exception?
   [^Throwable e]
@@ -473,6 +474,10 @@
 (def ^:private WATCHDOG_TYPES
   #{:svar.core/stream-ttft-timeout :svar.core/stream-idle-timeout :svar.core/stream-semantic-timeout
     :svar.core/stream-truncated :svar.core/stream-incomplete})
+
+(defn- output-budget-exhausted?
+  [data]
+  (and (= :svar.core/stream-incomplete (:type data)) (= "max_output_tokens" (:reason data))))
 
 (declare classify)
 
@@ -612,6 +617,12 @@
       (answer :auth
               false false
               "the provider rejected the credentials" "check the API key/token for this provider")
+      (output-budget-exhausted? data)
+      (answer
+        :output-budget-exhausted
+        false true
+        "the provider ended the response after exhausting its output token budget"
+        "split the work into smaller requests or choose a provider/model with a larger output limit")
       (any-substring? hay RESOURCE_MISMATCH_PATTERNS)
       (answer
         :resource-mismatch
@@ -829,9 +840,9 @@
 
 (def STREAM_INCOMPLETE_TYPES
   "SSE ended before the provider's terminal marker (`stream-truncated`) or the
-   provider explicitly said `response.incomplete` (`stream-incomplete`). Both
-   are transport/provider failures rather than a model answer, and retry (as in
-   the OpenAI Codex CLI) usually succeeds — but only before visible output."
+   provider explicitly said `response.incomplete` (`stream-incomplete`). Generic
+   incomplete streams retry before visible output because early close often clears;
+   `max_output_tokens` is explicitly excluded as a deterministic output cap."
   #{:svar.core/stream-truncated :svar.core/stream-incomplete})
 
 ;; -----------------------------------------------------------------------------
@@ -1071,10 +1082,11 @@
 
      (boolean
        (and
-         ;; Credential expiry and subscription/quota/billing exhaustion are hard
-         ;; account states, never transient throttles.
+         ;; Credential expiry, subscription/quota/billing exhaustion, and a
+         ;; provider-declared output cap are deterministic for an unchanged request.
          (not (auth-error? hay))
          (not (provider-limit-failure? status hay))
+         (not (output-budget-exhausted? data))
          (or (and (contains? STREAM_WATCHDOG_ERROR_TYPES etype)
                   (or (not started?)
                       (and (= etype :svar.core/stream-semantic-timeout)
@@ -1121,7 +1133,8 @@
          ;; A known hard canonical category vetoes every generic retry path.
          hard-category?
          (contains? #{:auth :quota-exhausted :resource-mismatch :tool-schema-unsupported
-                      :context-length-exceeded :model-unavailable :invalid-request}
+                      :context-length-exceeded :output-budget-exhausted :model-unavailable
+                      :invalid-request}
                     category)
 
          transport-candidate?

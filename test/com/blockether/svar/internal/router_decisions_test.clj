@@ -987,6 +987,46 @@
                  (expect (= :svar.llm/provider-unavailable (:type (ex-data e))))
                  (expect (= status (:status (ex-data e))))))))))
 
+;; Regression, issue #162 (Blockether/vis): max_output_tokens was treated as a
+;; transient stream failure, so the router sent the identical request four times.
+(defdescribe
+  with-provider-fallback-output-cap-not-retried-test
+  (it
+    "surfaces a provider-declared output cap after one call"
+    (let [[clock _]
+          (mock-clock)
+
+          r
+          (llm/make-router [{:id :solo :api-key "k" :base-url "http://solo" :models [{:name "m1"}]}]
+                           {:clock clock
+                            :rate-limit {:same-provider-delays-ms [0 0 0]
+                                         :fallback-after-ms 60000
+                                         :respect-retry-after? true
+                                         :fallback-provider? true}})
+
+          calls
+          (atom 0)
+
+          thrown
+          (try (router/with-provider-fallback
+                 r
+                 {}
+                 (fn [_ _]
+                   (swap! calls inc)
+                   (throw (ex-info
+                            "Stream ended with incomplete response, reason: max_output_tokens"
+                            {:type :svar.core/stream-incomplete
+                             :stream? true
+                             :reason "max_output_tokens"
+                             :content-acc-len 0
+                             :reasoning-acc-len 0}))))
+               nil
+               (catch clojure.lang.ExceptionInfo e e))]
+
+      (expect (= 1 @calls))
+      (expect (= :svar.core/stream-incomplete (:type (ex-data thrown))))
+      (expect (= "max_output_tokens" (:reason (ex-data thrown)))))))
+
 (defdescribe
   with-provider-fallback-524-cloudflare-retried-test
   "pi parity: Cloudflare 524 (origin connection timeout) is a transient upstream
