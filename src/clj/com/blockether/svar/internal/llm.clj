@@ -316,7 +316,7 @@
   "Version string sent as `claude-cli/<v>` in the OAuth-path user-agent,
    mirroring the officially-installed Claude Code CLI. Bump toward the
    current official CLI over time."
-  "2.1.202")
+  "2.1.251")
 
 (defn- anthropic-oauth-headers
   "Headers for a Claude subscription OAuth token (`sk-ant-oat-*`): the Claude
