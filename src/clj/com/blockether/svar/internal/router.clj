@@ -4,7 +4,8 @@
 
    Extracted from defaults.clj (provider/model metadata) and llm.clj (routing logic)
    to provide a single cohesive namespace for all routing concerns."
-  (:require [clojure.string :as str]
+  (:require [charred.api :as json]
+            [clojure.string :as str]
             [com.blockether.anomaly.core :as anomaly]
             [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.modelsdev :as modelsdev]
@@ -3798,27 +3799,55 @@
 ;; Content Extraction for Token Counting
 ;; =============================================================================
 
-(defn- extract-text-from-content
-  "Extracts text content and image token counts from a message content field."
-  [content]
-  (cond (string? content) {:text content :image-tokens 0}
-        (vector? content)
-        (let [{:keys [texts image-tokens]}
-              (reduce (fn [{:keys [texts ^long image-tokens]} block]
-                        (cond (and (map? block) (= "text" (:type block)))
-                              {:texts (conj texts (:text block)) :image-tokens image-tokens}
-                              (and (map? block) (= "image_url" (:type block)))
-                              {:texts texts
-                               :image-tokens (+ image-tokens
-                                                (long (estimate-image-block-tokens block)))}
-                              :else {:texts texts :image-tokens image-tokens}))
-                      {:texts [] :image-tokens 0}
-                      content)]
-          {:text (str/join "\n" texts) :image-tokens image-tokens})
-        :else {:text "" :image-tokens 0}))
+(defn- encoded-tokens
+  ^long [^Encoding encoding value]
+  (long (.countTokens encoding (str (or value "")))))
+
+(defn- block-field [block k] (if (contains? block k) (get block k) (get block (name k))))
+
+(defn- content-tokens
+  "Counts canonical message content without mistaking image base64 for text.
+
+   Text and images retain their native estimates. Structured blocks are counted from
+   the payload that survives provider wire shaping: prior thinking/signatures,
+   tool-call identifiers/names/JSON arguments, and recursively nested tool results."
+  ^long [^Encoding encoding content]
+  (letfn
+    [(json-tokens ^long [value] (encoded-tokens encoding (json/write-json-str value)))
+     (tokens ^long [value]
+       (cond (string? value) (encoded-tokens encoding value)
+             (sequential? value) (long (reduce + 0 (map tokens value)))
+             (not (map? value)) 0
+             :else (let [kind (some-> (block-field value :type)
+                                      name)]
+                     (case kind
+                       ("text" "input_text")
+                       (encoded-tokens encoding (block-field value :text))
+
+                       "image_url"
+                       (long (estimate-image-block-tokens value))
+
+                       "thinking"
+                       (+ (encoded-tokens encoding (block-field value :thinking))
+                          (encoded-tokens encoding (block-field value :thinking-signature)))
+
+                       "tool_use"
+                       (json-tokens {:id (block-field value :id)
+                                     :name (block-field value :name)
+                                     :input (or (block-field value :input) {})})
+
+                       "tool_result"
+                       (long (+ (long (json-tokens {:tool_use_id (block-field value :tool_use_id)
+                                                    :is_error (boolean (block-field value
+                                                                                    :is_error))}))
+                                (long (tokens (block-field value :content)))))
+
+                       (json-tokens value)))))]
+    (tokens content)))
 
 (defn count-messages
-  "Counts tokens for a chat completion message array."
+  "Estimates tokens for a canonical chat message array, including structured
+   thinking, tool-use and tool-result content as well as text and images."
   ^long [^String model messages]
   (let [encoding
         (model->encoding model)
@@ -3831,16 +3860,13 @@
 
         message-tokens
         (reduce (fn [^long acc {:keys [role content name] :as _message}]
-                  (let [{:keys [text image-tokens]} (extract-text-from-content content)]
-                    (+ acc
-                       (long tpm)
-                       (long (.countTokens encoding
-                                           (or (some-> role
-                                                       clojure.core/name)
-                                               "")))
-                       (long (.countTokens encoding (or text "")))
-                       (long image-tokens)
-                       (if name (+ (long tpn) (long (.countTokens encoding name))) 0))))
+                  (+ acc
+                     (long tpm)
+                     (encoded-tokens encoding
+                                     (some-> role
+                                             clojure.core/name))
+                     (content-tokens encoding content)
+                     (if name (+ (long tpn) (encoded-tokens encoding name)) 0)))
                 0
                 messages)
 

@@ -110,41 +110,81 @@
 ;; Message Counting Tests
 ;; =============================================================================
 
-(defdescribe count-messages-test
-             "Tests for count-messages function"
-             (it "counts tokens for simple message array"
-                 (let [messages
-                       [{:role "user" :content "Hello!"}]
+(defdescribe
+  count-messages-test
+  "Tests for count-messages function"
+  (it "counts tokens for simple message array"
+      (let [messages
+            [{:role "user" :content "Hello!"}]
 
-                       tokens
-                       (sut/count-messages "gpt-4o" messages)]
+            tokens
+            (sut/count-messages "gpt-4o" messages)]
 
-                   (expect (pos? tokens))))
-             (it "includes overhead for multiple messages"
-                 (let [single
-                       [{:role "user" :content "Hello"}]
+        (expect (pos? tokens))))
+  (it "includes overhead for multiple messages"
+      (let [single
+            [{:role "user" :content "Hello"}]
 
-                       multiple
-                       [{:role "system" :content "You are helpful."}
-                        {:role "user" :content "Hello"}]
+            multiple
+            [{:role "system" :content "You are helpful."} {:role "user" :content "Hello"}]
 
-                       single-tokens
-                       (sut/count-messages "gpt-4o" single)
+            single-tokens
+            (sut/count-messages "gpt-4o" single)
 
-                       multiple-tokens
-                       (sut/count-messages "gpt-4o" multiple)]
+            multiple-tokens
+            (sut/count-messages "gpt-4o" multiple)]
 
-                   ;; Multiple messages should have more tokens due to overhead
-                   (expect (< single-tokens multiple-tokens))))
-             (it "handles system and user roles"
-                 (let [messages
-                       [{:role "system" :content "Be helpful."}
-                        {:role "user" :content "What is 2+2?"} {:role "assistant" :content "4"}]
+        ;; Multiple messages should have more tokens due to overhead
+        (expect (< single-tokens multiple-tokens))))
+  (it "handles system and user roles"
+      (let [messages
+            [{:role "system" :content "Be helpful."} {:role "user" :content "What is 2+2?"}
+             {:role "assistant" :content "4"}]
 
-                       tokens
-                       (sut/count-messages "gpt-4o" messages)]
+            tokens
+            (sut/count-messages "gpt-4o" messages)]
 
-                   (expect (pos? tokens)))))
+        (expect (pos? tokens))))
+  (it "counts canonical tool calls and their results"
+      (let [payload
+            (apply str (repeat 4000 "x"))
+
+            tool-use
+            [{:role "assistant"
+              :content
+              [{:type "tool_use" :id "call-1" :name "python_execution" :input {"code" payload}}]}]
+
+            tool-result
+            [{:role "user"
+              :content [{:type "tool_result"
+                         :tool_use_id "call-1"
+                         :content [{:type "text" :text payload}]}]}]]
+
+        (expect (< 500 (sut/count-messages "gpt-4o" tool-use)))
+        (expect (< 500 (sut/count-messages "gpt-4o" tool-result)))))
+  (it "counts preserved thinking and its signature"
+      (let [payload (apply str (repeat 4000 "x"))]
+        (expect (< 500
+                   (sut/count-messages "gpt-4o"
+                                       [{:role "assistant"
+                                         :content [{:type "thinking"
+                                                    :thinking payload
+                                                    :thinking-signature "signature"}]}])))))
+  (it "prices an image by geometry instead of its base64 length"
+      (let [short
+            "data:image/png;base64,eA=="
+
+            long
+            (str "data:image/png;base64," (apply str (repeat 40000 "e")))]
+
+        (expect (= (sut/count-messages "gpt-4o"
+                                       [{:role "user"
+                                         :content [{:type "image_url"
+                                                    :image_url {:url short :detail "low"}}]}])
+                   (sut/count-messages "gpt-4o"
+                                       [{:role "user"
+                                         :content [{:type "image_url"
+                                                    :image_url {:url long :detail "low"}}]}]))))))
 
 ;; =============================================================================
 ;; Cost Estimation Tests
