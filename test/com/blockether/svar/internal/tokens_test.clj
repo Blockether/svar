@@ -40,12 +40,9 @@
                    (expect (= 1050000 (sut/provider-model-context :openai "gpt-5.5")))
                    (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.5"))))
                (it "uses Codex catalog prompt windows for current GPT coding models"
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.3-codex")))
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4")))
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.4-mini")))
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-luna")))
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-sol")))
-                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.6-terra"))))
+                   (doseq [name ["gpt-6-astra" "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini"
+                                 "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]]
+                     (expect (= 272000 (sut/provider-model-context :openai-codex name)))))
                (it "uses Copilot prompt budgets for visible GPT reasoning coding models"
                    (doseq [name ["gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5"]]
                      (expect (= 272000 (sut/provider-model-context :github-copilot name))))))

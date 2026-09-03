@@ -143,8 +143,9 @@
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys []
                   :api-style :openai-compatible-responses
-                  :default-models [{:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.5"}
-                                   {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
+                  :default-models [{:name "gpt-6-astra"} {:name "gpt-5.6-luna"}
+                                   {:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"}
+                                   {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
@@ -280,6 +281,11 @@
                    :reasoning? true
                    :reasoning-style :openai-effort}
    "gpt-5.6-sol" {:intelligence :frontier
+                  :speed :medium
+                  :capabilities #{:chat :vision}
+                  :reasoning? true
+                  :reasoning-style :openai-effort}
+   "gpt-6-astra" {:intelligence :frontier
                   :speed :medium
                   :capabilities #{:chat :vision}
                   :reasoning? true
@@ -988,6 +994,9 @@
    {"gpt-5" {:context 400000}
     "gpt-5.1" {:context 128000}
     "gpt-5.3-codex" {:context 272000}
+    "gpt-6-astra" {:context 272000
+                   :reasoning-options [{:type "effort"
+                                        :values ["low" "medium" "high" "xhigh" "max" "ultra"]}]}
     "gpt-5.4" {:context 272000
                :pricing
                {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}

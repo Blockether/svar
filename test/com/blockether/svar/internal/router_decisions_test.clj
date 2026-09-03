@@ -2315,51 +2315,58 @@
     ;; GPT/glm dotted ids resolve as-is first (their catalog keys are dotted).
     (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
 
-(defdescribe known-provider-default-models-test
-             (it "uses curated OpenAI Codex defaults when caller omits :models"
-                 (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
-                   (expect (= ["gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
-                              (mapv :name (:models p))))))
-             (it "uses curated Mistral defaults when caller omits :models"
-                 (let [p
-                       (router/normalize-provider 0 {:id :mistral :api-key "x"})
+(defdescribe
+  known-provider-default-models-test
+  (it "uses curated OpenAI Codex defaults when caller omits :models"
+      (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
+        (expect (= ["gpt-6-astra" "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
+                   (mapv :name (:models p))))
+        (let [astra (first (:models p))]
+          (expect (= 272000 (:context astra)))
+          (expect (= :frontier (:intelligence astra)))
+          (expect (:reasoning? astra))
+          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max" "ultra"]}]
+                     (:reasoning-options astra))))))
+  (it "uses curated Mistral defaults when caller omits :models"
+      (let [p
+            (router/normalize-provider 0 {:id :mistral :api-key "x"})
 
-                       models
-                       (mapv :name (:models p))
+            models
+            (mapv :name (:models p))
 
-                       large
-                       (first (:models p))]
+            large
+            (first (:models p))]
 
-                   (expect (= :mistral (:id p)))
-                   (expect (= :openai-compatible-chat (:api-style p)))
-                   (expect (= ["mistral-large-latest" "mistral-medium-latest" "mistral-small-latest"
-                               "codestral-latest"]
-                              models))
-                   (expect (= 262144 (:context large)))
-                   (expect (= 262144 (:output-limit large)))))
-             ;; The Coding Plan now has a native multimodal default (`glm-5.3-flash`);
-             ;; keep the older `glm-5v-turbo` last so it remains selectable without
-             ;; outranking the current Flash model on the all-zero plan price table.
-             (it "curates z.ai's current multimodal default and keeps the legacy vision model last"
-                 (let [coding
-                       (router/provider-default-models :zai-coding-plan)
+        (expect (= :mistral (:id p)))
+        (expect (= :openai-compatible-chat (:api-style p)))
+        (expect (= ["mistral-large-latest" "mistral-medium-latest" "mistral-small-latest"
+                    "codestral-latest"]
+                   models))
+        (expect (= 262144 (:context large)))
+        (expect (= 262144 (:output-limit large)))))
+  ;; The Coding Plan now has a native multimodal default (`glm-5.3-flash`);
+  ;; keep the older `glm-5v-turbo` last so it remains selectable without
+  ;; outranking the current Flash model on the all-zero plan price table.
+  (it "curates z.ai's current multimodal default and keeps the legacy vision model last"
+      (let [coding
+            (router/provider-default-models :zai-coding-plan)
 
-                       p
-                       (router/normalize-provider 0 {:id :zai-coding-plan :api-key "x"})
+            p
+            (router/normalize-provider 0 {:id :zai-coding-plan :api-key "x"})
 
-                       by-name
-                       (into {} (map (juxt :name identity)) (:models p))]
+            by-name
+            (into {} (map (juxt :name identity)) (:models p))]
 
-                   (expect (= "glm-5.3-flash" (first coding)))
-                   (expect (= "glm-5v-turbo" (last coding)))
-                   ;; Retail `:zai` offers both too, and `:zai-coding` inherits that curated set.
-                   (doseq [pid [:zai :zai-coding]]
-                     (let [defaults (set (router/provider-default-models pid))]
-                       (expect (contains? defaults "glm-5.3-flash"))
-                       (expect (contains? defaults "glm-5v-turbo"))))
-                   (expect (contains? (:capabilities (get by-name "glm-5.3-flash")) :vision))
-                   (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
-                   (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))
+        (expect (= "glm-5.3-flash" (first coding)))
+        (expect (= "glm-5v-turbo" (last coding)))
+        ;; Retail `:zai` offers both too, and `:zai-coding` inherits that curated set.
+        (doseq [pid [:zai :zai-coding]]
+          (let [defaults (set (router/provider-default-models pid))]
+            (expect (contains? defaults "glm-5.3-flash"))
+            (expect (contains? defaults "glm-5v-turbo"))))
+        (expect (contains? (:capabilities (get by-name "glm-5.3-flash")) :vision))
+        (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
+        (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))
 
 ;; =============================================================================
 ;; Capability routing (`:capabilities` — the HARD filter)
