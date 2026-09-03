@@ -27,10 +27,10 @@
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
-               :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"}
-                                {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
-                                {:name "claude-fable-5"} {:name "claude-sonnet-5"}
-                                {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+               :default-models
+               [{:name "claude-opus-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
+                {:name "claude-opus-4-6"} {:name "claude-fable-5-1"} {:name "claude-fable-5"}
+                {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
                            :env-keys []
                            :api-style :anthropic
@@ -40,8 +40,9 @@
                            :pricing-source :anthropic
                            :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"}
                                             {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
-                                            {:name "claude-fable-5"} {:name "claude-sonnet-5"}
-                                            {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
+                                            {:name "claude-fable-5-1"} {:name "claude-fable-5"}
+                                            {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"}
+                                            {:name "claude-haiku-4-5"}]
                            :prepend-default-models? true}
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
@@ -283,6 +284,11 @@
                   :reasoning? true
                   :reasoning-style :openai-effort}
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
+   "claude-fable-5-1" {:intelligence :frontier
+                       :speed :slow
+                       :capabilities #{:chat :vision}
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
    "claude-fable-5" {:intelligence :frontier
                      :speed :slow
                      :capabilities #{:chat :vision}
@@ -710,8 +716,8 @@
 (def ^:private ANTHROPIC_ADAPTIVE_THINKING
   "The thinking config every Claude adaptive-thinking request carries.
 
-   `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5 /
-   Mythos 5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, and an omitted block
+   `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5.1 /
+   Fable 5 / Mythos 5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, and an omitted block
    arrives with an EMPTY `thinking` field and no `thinking_delta` events at all
    (docs.claude.com /en/docs/build-with-claude/thinking, \"Controlling thinking
    display\"). Callers that render reasoning would show a silent, empty block
@@ -721,12 +727,12 @@
 (def ^:private ANTHROPIC_ADAPTIVE_NAME_PATTERN
   "Claude families that take ADAPTIVE thinking, by name.
 
-   Fable 5 / Mythos 5 / Sonnet 5 / Opus 5 / Opus 4.8–4.7 reject manual
-   budget_tokens; Opus 4.6 and Sonnet 4.6 still accept it but Anthropic marks it
+   Fable 5.1 / Fable 5 / Mythos 5 / Sonnet 5 / Opus 5 / Opus 4.8–4.7 reject
+   manual budget_tokens; Opus 4.6 and Sonnet 4.6 still accept it but Anthropic marks it
    deprecated. Dot and dash aliases both match so Copilot-style ids
    (`claude-opus-4.8`) do not regress. This is the FALLBACK — `models.dev`
    decides first, see `anthropic-adaptive-thinking-model?`."
-  #"(?i)^claude-(?:fable-5|mythos-5|sonnet-5|opus-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
+  #"(?i)^claude-(?:fable-5(?:[-.]1)?|mythos-5|sonnet-5|opus-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
 
 (defn- anthropic-adaptive-thinking-model?
   "Does this Claude model take ADAPTIVE thinking (`output_config.effort`) rather
@@ -789,8 +795,8 @@
              {:reasoning_effort effective}
 
              ;; `output_config.effort` is the Opus 4.5+ control; the
-             ;; adaptive `thinking` block only belongs to families
-             ;; that actually take it (Opus 4.6+ / Sonnet 5 / Fable 5).
+             ;; adaptive `thinking` block only belongs to families that actually
+             ;; take it (Opus 4.6+ / Sonnet 5 / Fable 5.1 / Fable 5).
              :anthropic-thinking
              (cond-> {:output_config {:effort effective}}
                (anthropic-adaptive-thinking-model? model-map)
@@ -1012,7 +1018,8 @@
    ;; sonnets' 1M beta vs the 200K we enforce). FULL pricing stays only for models
    ;; the catalog lacks (mythos-5, sonnet-4, sonnet-4-20250514) or where the
    ;; catalog drifts from our metered retail rate (sonnet-5 → catalog 2/10 vs 3/15).
-   {"claude-fable-5" {:pricing {:cache-write-1h 20.00} :context 1000000}
+   {"claude-fable-5-1" {:pricing {:cache-write-1h 20.00} :context 1000000}
+    "claude-fable-5" {:pricing {:cache-write-1h 20.00} :context 1000000}
     "claude-mythos-5"
     {:pricing
      {:input 10.00 :cached-input 1.00 :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00}

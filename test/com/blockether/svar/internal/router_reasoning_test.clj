@@ -83,6 +83,15 @@
             (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
             (expect (= {:effort effort} (:output_config out)))
             (expect (nil? (get-in out [:thinking :budget_tokens]))))))
+    (it "uses adaptive thinking for dashed and dotted Fable 5.1 ids"
+        (doseq [model ["claude-fable-5-1" "claude-fable-5.1"]]
+          (let [out (router/reasoning-extra-body
+                      :anthropic
+                      {:name model :reasoning? true :reasoning-style :anthropic-thinking}
+                      :deep)]
+            (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
+            (expect (= {:effort "max"} (:output_config out)))
+            (expect (nil? (get-in out [:thinking :budget_tokens]))))))
     (it "climbs Anthropic's own effort ladder, not OpenAI's"
         ;; docs.claude.com /en/docs/build-with-claude/adaptive-thinking:
         ;; max > xhigh > high (default) > medium > low.
@@ -550,6 +559,7 @@
       (expect (nil? (get router/KNOWN_MODEL_METADATA "o3-mini")))
       (expect (nil? (get router/KNOWN_MODEL_METADATA "o4-mini"))))
   (it "flags Claude 5 / 4.x families as reasoning-capable"
+      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-fable-5-1"))))
       (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-5"))))
       (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-8"))))
       (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-5"))))

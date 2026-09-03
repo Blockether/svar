@@ -1352,12 +1352,29 @@
         ;; `:anthropic-coding-plan` prepends its FULL default catalog,
         ;; deduped against the caller's configured models.
         (expect (= ["claude-opus-5" "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
-                    "claude-fable-5" "claude-sonnet-5" "claude-sonnet-4-6" "claude-haiku-4-5"]
+                    "claude-fable-5-1" "claude-fable-5" "claude-sonnet-5" "claude-sonnet-4-6"
+                    "claude-haiku-4-5"]
                    (mapv :name (:models provider))))
         (expect (= :anthropic (:api-style provider)))
         (expect
           (= {:input 5.0 :cached-input 0.5 :cache-write-5m 6.25 :cache-write-1h 10.0 :output 25.0}
              (select-keys (get-in provider [:models 0 :pricing])
+                          [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
+  (it "surfaces Claude Fable 5.1 catalog and pricing metadata"
+      (let [entry
+            (router/provider-model-entry :anthropic-coding-plan "claude-fable-5-1")
+
+            model
+            (router/provider-model-metadata :anthropic-coding-plan {:name "claude-fable-5-1"})]
+
+        (expect (= 1000000 (:context entry)))
+        (expect (= :frontier (:intelligence model)))
+        (expect (= :anthropic-thinking (:reasoning-style model)))
+        (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                   (:reasoning-options entry)))
+        (expect
+          (= {:input 10.0 :cached-input 0.25 :cache-write-5m 12.5 :cache-write-1h 20.0 :output 50.0}
+             (select-keys (:pricing entry)
                           [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
   (it "does not claim nonexistent Claude Sonnet 4.8 catalog metadata"
       (expect (nil? (router/provider-model-entry :anthropic-coding-plan "claude-sonnet-4-8")))))
