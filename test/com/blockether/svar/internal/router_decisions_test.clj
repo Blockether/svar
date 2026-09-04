@@ -957,6 +957,48 @@
           (expect (= [:server-error :server-error :transient-error] (mapv :reason trace)))
           (expect (= status (:status (last trace)))))))))
 
+;; Regression, Vis session ff83edc9-247d-4f04-9fab-3dd7072d5a34: an exhausted
+;; account stopped the fleet instead of skipping that provider.
+(defdescribe
+  provider-limit-fallback-test
+  (it
+    "does not retry the exhausted account and falls over to the next provider"
+    (let [[clock _]
+          (mock-clock)
+
+          r
+          (llm/make-router
+            [{:id :anthropic :api-key "k" :base-url "http://p1" :models [{:name "fable"}]}
+             {:id :openai :api-key "k" :base-url "http://p2" :models [{:name "sol"}]}]
+            {:clock clock})
+
+          calls
+          (atom [])
+
+          result
+          (router/with-provider-fallback
+            r
+            {:on-transient-error :hybrid}
+            (fn [provider _model]
+              (swap! calls conj (:id provider))
+              (if (= :anthropic (:id provider))
+                (throw (ex-info "Exceptional status code: 400"
+                                {:type :svar.core/http-error
+                                 :status 400
+                                 :body
+                                 (str "{\"type\":\"error\",\"error\":{\"type\":"
+                                      "\"invalid_request_error\",\"message\":"
+                                      "\"Third-party apps now draw from your extra usage.\"}}")}))
+                (success-result 100))))]
+
+      (expect (= [:anthropic :openai] @calls))
+      (expect (= :openai (:routed/provider-id result)))
+      (expect (= :quota-exhausted
+                 (-> result
+                     :routed/trace
+                     first
+                     :reason))))))
+
 (defdescribe
   with-provider-fallback-single-provider-transient-retries-test
   "The core Vis symptom: a SINGLE (pinned / only) provider hitting a transient

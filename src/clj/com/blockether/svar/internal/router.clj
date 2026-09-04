@@ -3066,6 +3066,12 @@
         last-unsupported-error
         (atom nil)
 
+        provider-limited
+        (atom #{})
+
+        last-provider-limit-error
+        (atom nil)
+
         last-transient-error
         (atom nil)
 
@@ -3096,6 +3102,9 @@
             iter-prefs (cond-> (if auth-fallback? (dissoc prefs :force-provider :force-model) prefs)
                          (seq @format-failed)
                          (update :exclude-providers (fnil into #{}) @format-failed)
+
+                         (seq @provider-limited)
+                         (update :exclude-providers (fnil into #{}) @provider-limited)
 
                          (seq @rate-limited)
                          (update :exclude-providers (fnil into #{}) @rate-limited)
@@ -3138,50 +3147,53 @@
                                                       (some? elapsed-ms)
                                                       (assoc :elapsed-ms (long elapsed-ms)))))
               (reset! pending-fallback nil))
-            (let [result (try
-                           {:success (f provider model-map)}
-                           (catch Exception e
-                             ;; Cancellation MUST escape — see propagate-interrupt!.
-                             (propagate-interrupt! e)
-                             (cond (and (or (router-transient-error? router e)
-                                            (stream-watchdog-error? e)
-                                            (and (= :fallback-provider (:on-auth-error prefs))
-                                                 (= :auth (:category (classify-failure e)))))
-                                        (stream-content-started? e))
-                                   (throw e)
-                                   ;; The MODEL stalled while the transport stayed
-                                   ;; healthy and only rewindable output was painted:
-                                   ;; announce the reset and re-issue on the provider
-                                   ;; whose cache is warm, before spending a fallback
-                                   ;; on a request that never produced an answer.
-                                   (stall-restart-safe? e) (handle-stalled-stream-restart
-                                                             router
-                                                             prefs
-                                                             trace
-                                                             provider
-                                                             model-map
-                                                             f
-                                                             e
-                                                             start-ms)
-                                   ;; Watchdog spent its wait budget. Cross providers now.
-                                   (stream-watchdog-error? e)
-                                   {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
-                                   (router-transient-error? router e) (handle-rate-limit-retries
-                                                                        router
-                                                                        prefs
-                                                                        trace
-                                                                        provider
-                                                                        model-map
-                                                                        f
-                                                                        e
-                                                                        start-ms)
-                                   (format-error? prefs e) {:format-error e}
-                                   (and (= :fallback-provider (:on-auth-error prefs))
-                                        (= :auth (:category (classify-failure e))))
-                                   {:auth-error e}
-                                   (= :model-unavailable (:category (classify-failure e)))
-                                   {:model-unsupported e}
-                                   :else (throw e))))]
+            (let [result
+                  (try
+                    {:success (f provider model-map)}
+                    (catch Exception e
+                      ;; Cancellation MUST escape — see propagate-interrupt!.
+                      (propagate-interrupt! e)
+                      (cond (and (or (router-transient-error? router e)
+                                     (stream-watchdog-error? e)
+                                     (= :quota-exhausted (:category (classify-failure e)))
+                                     (and (= :fallback-provider (:on-auth-error prefs))
+                                          (= :auth (:category (classify-failure e)))))
+                                 (stream-content-started? e))
+                            (throw e)
+                            ;; The MODEL stalled while the transport stayed
+                            ;; healthy and only rewindable output was painted:
+                            ;; announce the reset and re-issue on the provider
+                            ;; whose cache is warm, before spending a fallback
+                            ;; on a request that never produced an answer.
+                            (stall-restart-safe? e) (handle-stalled-stream-restart router
+                                                                                   prefs
+                                                                                   trace
+                                                                                   provider
+                                                                                   model-map
+                                                                                   f
+                                                                                   e
+                                                                                   start-ms)
+                            ;; Watchdog spent its wait budget. Cross providers now.
+                            (stream-watchdog-error? e)
+                            {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
+                            (router-transient-error? router e) (handle-rate-limit-retries
+                                                                 router
+                                                                 prefs
+                                                                 trace
+                                                                 provider
+                                                                 model-map
+                                                                 f
+                                                                 e
+                                                                 start-ms)
+                            (= :quota-exhausted (:category (classify-failure e)))
+                            {:provider-limit-error e}
+                            (format-error? prefs e) {:format-error e}
+                            (and (= :fallback-provider (:on-auth-error prefs))
+                                 (= :auth (:category (classify-failure e))))
+                            {:auth-error e}
+                            (= :model-unavailable (:category (classify-failure e)))
+                            {:model-unsupported e}
+                            :else (throw e))))]
               (cond
                 (:success result)
                 (let [result (:success result)
@@ -3254,6 +3266,24 @@
                                             :reason :format-error
                                             :error (ex-message e)})
                                          (recur (inc attempts)))
+                (:provider-limit-error result) (let [e (:provider-limit-error result)
+                                                     status (:status (ex-data e))]
+
+                                                 (swap! provider-limited conj pid)
+                                                 (reset! last-provider-limit-error e)
+                                                 (reset! pending-fallback {:from-provider pid
+                                                                           :from-model (:name
+                                                                                         model-map)
+                                                                           :status status
+                                                                           :reason :quota-exhausted
+                                                                           :error (ex-message e)})
+                                                 (swap! failed-attempts conj
+                                                   {:provider pid
+                                                    :model (:name model-map)
+                                                    :status status
+                                                    :reason :quota-exhausted
+                                                    :error (ex-message e)})
+                                                 (recur (inc attempts)))
                 (:auth-error result)
                 (let [e (:auth-error result)
                       status (:status (ex-data e))]
@@ -3344,6 +3374,17 @@
                                          {:routed/trace @trace
                                           :tried @tried
                                           :format-failed @format-failed
+                                          :attempts @failed-attempts})
+                                  e)))
+                ;; Account exhaustion is final for one provider, not for the fleet.
+                (and @last-provider-limit-error
+                     (= :quota-exhausted (:reason (peek @failed-attempts))))
+                (let [e @last-provider-limit-error]
+                  (throw (ex-info (ex-message e)
+                                  (merge (ex-data e)
+                                         {:routed/trace @trace
+                                          :tried @tried
+                                          :provider-limited @provider-limited
                                           :attempts @failed-attempts})
                                   e)))
                 ;; Preserve concrete auth rejection after the auth-fallback fleet ends.

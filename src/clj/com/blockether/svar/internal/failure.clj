@@ -96,8 +96,8 @@
   #{402})
 
 (defn provider-limit-failure?
-  "The single hard-account-state question: does this status or body mean the
-   account is out of quota/credit/budget? Never retryable, never re-routable."
+  "Does this status or body mean the account is out of quota/credit/budget?
+   Never retry the same account; a router may continue on another provider."
   [status hay]
   (boolean (or (contains? PROVIDER_LIMIT_STATUS_CODES
                           (some-> status
