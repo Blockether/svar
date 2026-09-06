@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.159] - 2026-09-06
+
+### Changed
+- fix(llm): type host interrupts and bound Responses WebSocket handshakes
+- release: update version files for v0.7.157, bump to next dev version
+
+
 ## [v0.7.157] - 2026-09-06
 
 ### Changed
@@ -2494,7 +2501,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.157...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.159...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2685,3 +2692,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.155]: https://github.com/Blockether/svar/releases/tag/v0.7.155
 [v0.7.156]: https://github.com/Blockether/svar/releases/tag/v0.7.156
 [v0.7.157]: https://github.com/Blockether/svar/releases/tag/v0.7.157
+[v0.7.159]: https://github.com/Blockether/svar/releases/tag/v0.7.159
