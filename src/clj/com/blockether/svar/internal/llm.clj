@@ -3803,18 +3803,50 @@
                                  timeout-ms)
         (catch Throwable _ (abort-websocket! socket)))))
 
+(def ^:private ^:const SESSION_WEBSOCKET_HANDSHAKE_TIMEOUT_MS
+  "Upper bound on one Responses WebSocket handshake. The request timeout is the
+   wrong budget here: TCP + TLS + upgrade completes in well under a second on a
+   healthy path and in a couple of seconds on a poor one, so a handshake still
+   pending after 5s is a wedged shared HttpClient (one interrupted exchange can
+   stall its selector for every later `buildAsync`), and every turn waiting the
+   full request timeout on it is a stall, not a slow provider."
+  5000)
+
+(defn- websocket-handshake-timeout-error
+  "Types a handshake that never completed as `:svar.session/transport-unavailable`
+   with `:handshake-timeout? true`, after retiring the shared HttpClient that
+   owned it - the selector that wedged this handshake wedges the next one too,
+   so the reconnect ladder must start on a fresh client."
+  [holder url timeout-ms ^Throwable cause]
+  (when (compare-and-set! shared-http-client* holder nil)
+    (trove/log! {:level :warn
+                 :id ::websocket-handshake-timeout
+                 :data {:url url :timeout-ms timeout-ms}
+                 :msg "Responses WebSocket handshake timed out; retiring the shared HttpClient"}))
+  (ex-info (str "Responses WebSocket handshake timed out after " timeout-ms "ms.")
+           {:type :svar.session/transport-unavailable
+            :handshake-timeout? true
+            :cause-class (.getName (class cause))
+            :url url}
+           cause))
+
 (defn open-responses-websocket!
   "Opens one Responses WebSocket and returns the small transport map used by
    explicit sessions: `:send!`, `:receive!`, an idempotent `:close!` that sends a
    close frame, and an `:abort!` that drops the connection at once. This is
    public only as a deterministic transport seam for tests."
-  [{:keys [base-url responses-path api-key headers timeout-ms]
-    :or {responses-path "/responses" timeout-ms router/DEFAULT_TIMEOUT_MS}}]
+  [{:keys [base-url responses-path api-key headers timeout-ms websocket-handshake-timeout-ms]
+    :or {responses-path "/responses"
+         timeout-ms router/DEFAULT_TIMEOUT_MS
+         websocket-handshake-timeout-ms SESSION_WEBSOCKET_HANDSHAKE_TIMEOUT_MS}}]
   (let [url
         (responses-websocket-url base-url responses-path)
 
         operation-timeout-ms
         (long (or timeout-ms Long/MAX_VALUE))
+
+        handshake-timeout-ms
+        (min operation-timeout-ms (long websocket-handshake-timeout-ms))
 
         inbox
         (LinkedBlockingQueue.)
@@ -3836,8 +3868,11 @@
               (.put inbox {:svar.websocket/closed true :status status :reason reason})
               (CompletableFuture/completedFuture nil)))
 
+        holder
+        (current-http-client)
+
         client
-        ^HttpClient (:client (current-http-client))
+        ^HttpClient (:client holder)
 
         builder
         (.newWebSocketBuilder client)
@@ -3859,7 +3894,9 @@
         (.buildAsync builder (URI/create url) listener)
 
         socket
-        (await-websocket-future! handshake operation-timeout-ms)
+        (try (await-websocket-future! handshake handshake-timeout-ms)
+             (catch TimeoutException e
+               (throw (websocket-handshake-timeout-error holder url handshake-timeout-ms e))))
 
         closed?
         (atom false)]
@@ -3915,7 +3952,8 @@
    :model-resets 0
    :http-fallbacks 0
    :oversized-http-requests 0
-   :rotations 0})
+   :rotations 0
+   :handshake-timeouts 0})
 
 (defn- bump-session-counter!
   [transport-state counter]
@@ -4030,6 +4068,25 @@
   (close-session-socket! transport-state :abort)
   (swap! transport-state assoc :http-only? true))
 
+(defn- websocket-interrupt-error!
+  "Turns a raw `InterruptedException` from a socket wait into the session's
+   typed outcome. The host cancels a turn by interrupting its worker, so a
+   caller cancellation (the bound `*cancel-fn*` fires) becomes
+   `:svar.core/stream-cancelled` with the flag cleared - the deliberate branch
+   then aborts the socket exactly once. Any other interrupt is not ours: the
+   socket is dropped, the flag restored and the exception rethrown untouched."
+  [transport-state ^InterruptedException e]
+  (if (caller-cancel-requested? *cancel-fn*)
+    (do (Thread/interrupted)
+        (ex-info "Responses WebSocket operation cancelled by caller."
+                 {:type :svar.core/stream-cancelled
+                  :stream? true
+                  :transport :websocket
+                  :url (:url (:socket @transport-state))}
+                 e))
+    (do (close-session-socket! transport-state :abort)
+        (.interrupt (Thread/currentThread))
+        (throw e))))
 (defn- session-socket!
   "The session's live socket, opening one when it has none.
 
@@ -4044,19 +4101,20 @@
    cancellation is never masked - it is the caller asking to stop."
   [transport-state connect-opts]
   (or (:socket @transport-state)
-      (let [socket (try (open-responses-websocket! connect-opts)
-                        (catch InterruptedException e (throw e))
-                        (catch Throwable e
-                          (if (contains? failure/DELIBERATE_STREAM_ABORT_TYPES (:type (ex-data e)))
-                            (throw e)
-                            (let [status (websocket-handshake-status e)]
-                              (throw (ex-info (str "Responses WebSocket unavailable: "
-                                                   (ex-message e))
-                                              (cond-> {:type :svar.session/transport-unavailable
-                                                       :cause-class (.getName (class e))}
-                                                status
-                                                (assoc :status status))
-                                              e))))))]
+      (let [socket (try
+                     (open-responses-websocket! connect-opts)
+                     (catch InterruptedException e (throw e))
+                     (catch Throwable e
+                       (if (or (contains? failure/DELIBERATE_STREAM_ABORT_TYPES (:type (ex-data e)))
+                               (= :svar.session/transport-unavailable (:type (ex-data e))))
+                         (throw e)
+                         (let [status (websocket-handshake-status e)]
+                           (throw (ex-info (str "Responses WebSocket unavailable: " (ex-message e))
+                                           (cond-> {:type :svar.session/transport-unavailable
+                                                    :cause-class (.getName (class e))}
+                                             status
+                                             (assoc :status status))
+                                           e))))))]
         (swap! transport-state (fn [state]
                                  (-> state
                                      (assoc :socket socket
@@ -4664,6 +4722,12 @@
   (or (= "websocket_connection_limit_reached" (:code (ex-data error)))
       (websocket-transport-error? error)))
 
+(defn- websocket-handshake-timeout?
+  "True when the socket could not be opened because its handshake never
+   completed within `SESSION_WEBSOCKET_HANDSHAKE_TIMEOUT_MS`."
+  [error]
+  (boolean (:handshake-timeout? (ex-data error))))
+
 (defn- websocket-upgrade-refused?
   "True when the handshake was refused with 426 Upgrade Required: this endpoint
    serves no WebSocket at all, so every later handshake of this session would be
@@ -4737,7 +4801,9 @@
              (nil? (:warmup-input prior)))
 
         connect-opts
-        (select-keys opts [:base-url :responses-path :api-key :headers :timeout-ms])
+        (select-keys opts
+                     [:base-url :responses-path :api-key :headers :timeout-ms
+                      :websocket-handshake-timeout-ms])
 
         max-retries
         (long (or (:websocket-max-retries opts) SESSION_WEBSOCKET_MAX_RETRIES))
@@ -4801,6 +4867,8 @@
       (let [outcome
             (try {:result
                   (perform! (session-socket! transport-state connect-opts) input cursor warmup?)}
+                 (catch InterruptedException e
+                   {:error (websocket-interrupt-error! transport-state e)})
                  (catch Throwable e {:error e}))]
         (if-let [result (:result outcome)]
           (let [response-id (get-in result [:http-response :parsed "id"])]
@@ -4849,6 +4917,25 @@
                                  :max-retries SESSION_CURSOR_RESET_ALLOWANCE
                                  :error (ex-message error)})
                       (recur full-input nil retries false (inc (long cursor-resets))))
+                  ;; A handshake that never completes is a wedged shared client, not a
+                  ;; slow provider. The client was already retired; the FIRST timeout in
+                  ;; a session earns one reconnect on the fresh client, a second one
+                  ;; proves the WebSocket path is dead here and the session stays on
+                  ;; HTTP instead of burning the whole ladder at 20s per rung.
+                  (websocket-handshake-timeout? error)
+                  (do (bump-session-counter! transport-state :handshake-timeouts)
+                      (close-session-socket! transport-state :abort)
+                      (if (and budget?
+                               (= 1
+                                  (get-in @transport-state
+                                          [:transport-counters :handshake-timeouts])))
+                        (do (bump-session-counter! transport-state :reconnects)
+                            (restart! {:reason :reconnect
+                                       :attempt attempt
+                                       :max-retries max-retries
+                                       :error (ex-message error)})
+                            (recur full-input nil attempt false cursor-resets))
+                        (do (disable-session-websockets! transport-state) (throw error))))
                   (and (websocket-retryable-error? error) budget?)
                   (do (bump-session-counter! transport-state :reconnects)
                       (close-session-socket! transport-state :abort)
