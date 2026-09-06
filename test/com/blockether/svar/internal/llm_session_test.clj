@@ -304,7 +304,8 @@
                           :model-resets 0
                           :http-fallbacks 0
                           :oversized-http-requests 0
-                          :rotations 0}
+                          :rotations 0
+                          :handshake-timeouts 0}
                          (:counters transport)))
               (expect (not-any? #(contains? transport %) [:socket :cursor :turn-state]))
               (expect (= :provider-prompt-cache (:kind prompt-cache)))
@@ -708,6 +709,152 @@
         (expect (= 1 @aborts))
         (expect (zero? @closes))
         (expect (zero? @http-calls))))
+  (it "types a host interrupt during a socket wait as the caller's cancellation"
+      ;; Regression: the host cancels a turn by interrupting its worker while it
+      ;; parks in `:receive!`. The raw InterruptedException escaped the session
+      ;; loop untyped, and the socket that received it was reused by the next turn.
+      (let [aborts
+            (atom 0)
+
+            http-calls
+            (atom 0)
+
+            factory
+            (fn [_]
+              {:send! (fn [_])
+               :receive! (fn [_]
+                           (.interrupt (Thread/currentThread))
+                           (throw (InterruptedException. "worker interrupted")))
+               :close! (fn [])
+               :abort! (fn []
+                         (swap! aborts inc))})]
+
+        (with-redefs [sut/open-responses-websocket!
+                      factory
+
+                      sut/openai-responses-completion
+                      (fn [_ _]
+                        (swap! http-calls inc)
+                        {:content "fallback" :api-usage {}})]
+
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :cancel-fn (constantly true)
+                                                  :websocket-max-retries 1
+                                                  :websocket-retry-delay-ms 0})]
+            (let [outcome (try (svar/ask! session "one") nil (catch Throwable e e))
+                  interrupted? (Thread/interrupted)]
+
+              (expect (= :svar.core/stream-cancelled (:type (ex-data outcome))))
+              (expect (= :websocket (:transport (ex-data outcome))))
+              (expect (true? (:stream? (ex-data outcome))))
+              (expect (not interrupted?)))))
+        (expect (= 1 @aborts))
+        (expect (zero? @http-calls))))
+  (it "propagates a foreign interrupt with its flag restored and the socket dropped"
+      (let [aborts
+            (atom 0)
+
+            factory
+            (fn [_]
+              {:send! (fn [_])
+               :receive! (fn [_]
+                           (.interrupt (Thread/currentThread))
+                           (throw (InterruptedException. "foreign interrupt")))
+               :close! (fn [])
+               :abort! (fn []
+                         (swap! aborts inc))})]
+
+        (with-redefs [sut/open-responses-websocket!
+                      factory
+
+                      sut/openai-responses-completion
+                      (fn [_ _]
+                        {:content "fallback" :api-usage {}})]
+
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :cancel-fn (constantly false)
+                                                  :websocket-max-retries 1
+                                                  :websocket-retry-delay-ms 0})]
+            (let [outcome (try (svar/ask! session "one") nil (catch Throwable e e))
+                  interrupted? (Thread/interrupted)]
+
+              (expect (instance? InterruptedException outcome))
+              (expect interrupted?))))
+        (expect (= 1 @aborts))))
+  (it "bounds a Responses handshake that never completes and retires the shared client"
+      ;; Regression: a wedged shared HttpClient parked every later handshake for the
+      ;; whole request timeout, so every new turn stalled instead of degrading.
+      (let [current-http-client
+            (ns-resolve 'com.blockether.svar.internal.llm 'current-http-client)
+
+            server
+            (java.net.ServerSocket. 0 1 (java.net.InetAddress/getLoopbackAddress))
+
+            before
+            (current-http-client)
+
+            started
+            (System/nanoTime)
+
+            outcome
+            (try (with-open [_ server]
+                   (sut/open-responses-websocket! {:base-url (str "http://127.0.0.1:"
+                                                                  (.getLocalPort server))
+                                                   :responses-path "/codex/responses"
+                                                   :api-key "test-key"
+                                                   :websocket-handshake-timeout-ms 100})
+                   nil)
+                 (catch Throwable e e))
+
+            elapsed-ms
+            (/ (- (System/nanoTime) started) 1e6)]
+
+        (expect (= :svar.session/transport-unavailable (:type (ex-data outcome))))
+        (expect (true? (:handshake-timeout? (ex-data outcome))))
+        (expect (instance? TimeoutException (ex-cause outcome)))
+        (expect (< elapsed-ms 5000))
+        (expect (not (identical? before (current-http-client))))))
+  (it
+    "reconnects once after a handshake timeout, then keeps the session on HTTP"
+    (let [opens
+          (atom 0)
+
+          http-calls
+          (atom 0)
+
+          status-fn
+          (ns-resolve 'com.blockether.svar.core 'session-status)]
+
+      (with-redefs [sut/open-responses-websocket!
+                    (fn [_]
+                      (swap! opens inc)
+                      (throw (ex-info "handshake timed out"
+                                      {:type :svar.session/transport-unavailable
+                                       :handshake-timeout? true}
+                                      (TimeoutException. "handshake"))))
+
+                    sut/openai-responses-completion
+                    (fn [_ _]
+                      (swap! http-calls inc)
+                      {:content "http answer" :api-usage {}})]
+
+        (with-open [session (open-test-session (codex-router)
+                                               {:routing {:provider :openai-codex :model "gpt-5.6"}
+                                                :websocket-max-retries 5
+                                                :websocket-retry-delay-ms 0})]
+          (expect (= "http answer" (:content (svar/ask! session "one"))))
+          ;; One rung on the fresh client, then HTTP - not five 20s handshakes.
+          (expect (= 2 @opens))
+          (expect (= 1 @http-calls))
+          (expect (= "http answer" (:content (svar/ask! session "two"))))
+          (expect (= 2 @opens))
+          (let [counters (get-in (status-fn session) [:transport :counters])]
+            (expect (= 2 (:handshake-timeouts counters)))
+            (expect (= 1 (:reconnects counters))))))))
   (it "aborts an active socket when its session is closed"
       ;; Closing an idle session is graceful; closing an in-flight turn is
       ;; cancellation and must not reconnect or fall through to HTTP.
