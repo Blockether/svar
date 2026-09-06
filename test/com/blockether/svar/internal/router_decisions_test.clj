@@ -2369,6 +2369,26 @@
           (expect (:reasoning? astra))
           (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max" "ultra"]}]
                      (:reasoning-options astra))))))
+  (it "uses curated GitHub Copilot defaults when caller omits :models"
+      (let [p (router/normalize-provider 0 {:id :github-copilot :api-key "x"})]
+        (expect (= ["claude-opus-5" "claude-fable-5" "claude-sonnet-5" "gpt-6-astra" "gpt-5.6-luna"
+                    "gpt-5.6-sol" "gpt-5.6-terra"]
+                   (mapv :name (:models p))))
+        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
+          (expect (= 272000 (:context astra)))
+          (expect (= :frontier (:intelligence astra)))
+          (expect (= :openai-compatible-responses (:api-style astra)))
+          (expect (= :openai-effort (:reasoning-style astra))))))
+  (it "uses curated plain OpenAI defaults when caller omits :models"
+      (let [p (router/normalize-provider 0 {:id :openai :api-key "x"})]
+        (expect (= ["gpt-6-astra" "gpt-5" "gpt-5-mini" "gpt-4o" "gpt-4o-mini" "o3-mini"]
+                   (mapv :name (:models p))))
+        (let [astra (first (:models p))]
+          (expect (= 400000 (:context astra)))
+          (expect (= :frontier (:intelligence astra)))
+          (expect (:reasoning? astra))
+          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max" "ultra"]}]
+                     (:reasoning-options astra))))))
   (it "uses curated Mistral defaults when caller omits :models"
       (let [p
             (router/normalize-provider 0 {:id :mistral :api-key "x"})

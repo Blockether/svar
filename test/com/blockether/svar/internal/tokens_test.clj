@@ -39,12 +39,16 @@
                (it "keeps provider-scoped GPT-5.5 contexts exact"
                    (expect (= 1050000 (sut/provider-model-context :openai "gpt-5.5")))
                    (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-5.5"))))
+               (it "keeps provider-scoped GPT-6 Astra contexts exact"
+                   (expect (= 400000 (sut/provider-model-context :openai "gpt-6-astra")))
+                   (expect (= 272000 (sut/provider-model-context :openai-codex "gpt-6-astra")))
+                   (expect (= 272000 (sut/provider-model-context :github-copilot "gpt-6-astra"))))
                (it "uses Codex catalog prompt windows for current GPT coding models"
                    (doseq [name ["gpt-6-astra" "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini"
                                  "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]]
                      (expect (= 272000 (sut/provider-model-context :openai-codex name)))))
                (it "uses Copilot prompt budgets for visible GPT reasoning coding models"
-                   (doseq [name ["gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5"]]
+                   (doseq [name ["gpt-6-astra" "gpt-5.3-codex" "gpt-5.4" "gpt-5.4-mini" "gpt-5.5"]]
                      (expect (= 272000 (sut/provider-model-context :github-copilot name))))))
              (describe "unknown models"
                        (it "returns default for unknown model"
