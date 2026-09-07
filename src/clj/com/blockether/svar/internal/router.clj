@@ -1535,6 +1535,7 @@
    disable it. The inter-chunk `DEFAULT_IDLE_TIMEOUT_MS` takes over after the
    first byte."
   120000)
+
 (def DEFAULT_IDLE_TIMEOUT_MS
   "Default idle-stream timeout (ms) for streaming HTTP responses. If no
    SSE bytes arrive for this long the underlying `InputStream` is closed
@@ -3876,12 +3877,28 @@
 
 (defn- block-field [block k] (if (contains? block k) (get block k) (get block (name k))))
 
+(defn- responses-reasoning-tokens
+  "Coarse hidden-reasoning estimate for Svar's serialized Responses reasoning item.
+   Like Codex, approximate base64 decoded bytes minus the 650-byte envelope, then
+   ceil(bytes / 4). Other providers' signatures are not this format. Usage or a
+   provider's exact counter remains authoritative; never BPE-tokenize ciphertext."
+  ^long [signature]
+  (let [item
+        (when (and (string? signature) (str/starts-with? (str/trim signature) "{"))
+          (try (json/read-json signature) (catch Exception _ nil)))
+
+        encrypted
+        (when (and (map? item) (= "reasoning" (block-field item :type)))
+          (block-field item :encrypted_content))]
+
+    (if (string? encrypted) (quot (+ (max 0 (- (quot (* 3 (count encrypted)) 4) 650)) 3) 4) 0)))
+
 (defn- content-tokens
   "Counts canonical message content without mistaking image base64 for text.
 
-   Text and images retain their native estimates. Structured blocks are counted from
-   the payload that survives provider wire shaping: prior thinking/signatures,
-   tool-call identifiers/names/JSON arguments, and recursively nested tool results."
+   Text and images retain their native estimates. Thinking counts the larger of
+   readable text and the Responses hidden-reasoning estimate, not both. Ordinary
+   signatures and text echoes add no tokens. Tool payloads and nested results count normally."
   ^long [^Encoding encoding content]
   (letfn
     [(json-tokens ^long [value] (encoded-tokens encoding (json/write-json-str value)))
@@ -3899,8 +3916,8 @@
                        (long (estimate-image-block-tokens value))
 
                        "thinking"
-                       (+ (encoded-tokens encoding (block-field value :thinking))
-                          (encoded-tokens encoding (block-field value :thinking-signature)))
+                       (max (encoded-tokens encoding (block-field value :thinking))
+                            (responses-reasoning-tokens (block-field value :thinking-signature)))
 
                        "tool_use"
                        (json-tokens {:id (block-field value :id)
@@ -3917,8 +3934,9 @@
     (tokens content)))
 
 (defn count-messages
-  "Estimates tokens for a canonical chat message array, including structured
-   thinking, tool-use and tool-result content as well as text and images."
+  "Estimates canonical message tokens, including Responses hidden reasoning,
+   readable thinking, tool payloads, text and images. Replay signatures are not text;
+   provider usage or exact counting remains authoritative."
   ^long [^String model messages]
   (let [encoding
         (model->encoding model)

@@ -163,7 +163,7 @@
 
         (expect (< 500 (sut/count-messages "gpt-4o" tool-use)))
         (expect (< 500 (sut/count-messages "gpt-4o" tool-result)))))
-  (it "counts preserved thinking and its signature"
+  (it "counts readable preserved thinking"
       (let [payload (apply str (repeat 4000 "x"))]
         (expect (< 500
                    (sut/count-messages "gpt-4o"
@@ -186,6 +186,126 @@
                                        [{:role "user"
                                          :content [{:type "image_url"
                                                     :image_url {:url long :detail "low"}}]}]))))))
+
+(defdescribe
+  thinking-signature-token-count-test
+  ;; Regression: replay signatures are not ordinary text. Responses encrypted
+  ;; reasoning has a hidden-context cost; text-echo providers must not count twice.
+  (it "counts readable thinking once, independently of opaque replay metadata"
+      (let [thinking
+            "Inspect the failing request before changing recovery."
+
+            count-block
+            (fn [block]
+              (sut/count-messages "gpt-4o" [{:role "assistant" :content [block]}]))
+
+            plain
+            {:type "thinking" :thinking thinking}
+
+            expected
+            (count-block plain)
+
+            opaque
+            (apply str (repeat 2000 "Ab3De5Fg7Hi9JkLmNoPqRsTuVwXyZ0123456789+/"))]
+
+        (expect (= expected (count-block {:type "text" :text thinking})))
+        (doseq [signature ["short-signature" opaque thinking]]
+          (expect (= expected (count-block (assoc plain :thinking-signature signature))))
+          (expect (= expected
+                     (count-block
+                       {"type" "thinking" "thinking" thinking "thinking-signature" signature}))))))
+  (it
+    "estimates Responses hidden reasoning without tokenizing ciphertext or double-counting its summary"
+    (let [count-block
+          (fn [block]
+            (sut/count-messages "gpt-4o" [{:role "assistant" :content [block]}]))
+
+          empty-count
+          (count-block {:type "thinking" :thinking ""})]
+
+      (doseq [[length expected] [[0 0] [100 0] [864 0] [900 7] [1000 25] [10000 1713]]]
+        (let [signature (str "{\"type\":\"reasoning\",\"encrypted_content\":\""
+                             (apply str (repeat length "A"))
+                             "\"}")
+              block {:type "thinking" :thinking "" :thinking-signature signature}]
+
+          (expect (= (+ empty-count expected) (count-block block)))
+          (expect (= (count-block block)
+                     (count-block
+                       {"type" "thinking" "thinking" "" "thinking-signature" signature})))))))
+  (it "keeps the larger of visible thinking and hidden reasoning, not their sum"
+      (let [signature
+            (str "{\"type\":\"reasoning\",\"encrypted_content\":\""
+                 (apply str (repeat 1000 "A"))
+                 "\"}")
+
+            count-thinking
+            (fn [thinking signature]
+              (sut/count-messages
+                "gpt-4o"
+                [{:role "assistant"
+                  :content [{:type "thinking" :thinking thinking :thinking-signature signature}]}]))
+
+            long-thinking
+            (apply str (repeat 100 "visible reasoning "))]
+
+        (expect (= (count-thinking "" signature) (count-thinking "short summary" signature)))
+        (expect (= (count-thinking long-thinking nil) (count-thinking long-thinking signature)))))
+  (it
+    "does not infer Responses reasoning from malformed or differently shaped signatures"
+    (let [count-signature
+          (fn [signature]
+            (sut/count-messages
+              "gpt-4o"
+              [{:role "assistant"
+                :content [{:type "thinking" :thinking "visible" :thinking-signature signature}]}]))
+
+          opaque
+          (apply str (repeat 10000 "A"))]
+
+      (doseq [signature [nil "{" "[]" "null" 42 "{\"type\":\"reasoning\",\"encrypted_content\":42}"
+                         (str "{\"encrypted_content\":\"" opaque "\"}")
+                         (str "{\"type\":\"text\",\"encrypted_content\":\"" opaque "\"}")]]
+        (expect (= (count-signature nil) (count-signature signature))))))
+  (it "still rejects a request whose estimated hidden reasoning exceeds the context limit"
+      (let [signature
+            (str "{\"type\":\"reasoning\",\"encrypted_content\":\""
+                 (apply str (repeat 10000 "A"))
+                 "\"}")
+
+            result
+            (sut/check-context-limit "gpt-4o"
+                                     [{:role "user" :content "Continue"}
+                                      {:role "assistant"
+                                       :content [{:type "thinking"
+                                                  :thinking "Short summary"
+                                                  :thinking-signature signature}]}]
+                                     {:context-limits {"gpt-4o" 1000}})]
+
+        (expect (false? (:ok? result)))
+        (expect (> (:input-tokens result) 1000))))
+  (it "does not reject a small request solely because its signature is large"
+      (let [messages
+            [{:role "user" :content "Continue"}
+             {:role "assistant"
+              :content [{:type "thinking"
+                         :thinking "Check the result."
+                         :thinking-signature (apply str (repeat 5000 "opaque-payload-"))}]}]
+
+            result
+            (sut/check-context-limit "gpt-4o" messages {:context-limits {"gpt-4o" 1000}})]
+
+        (expect (:ok? result))
+        (expect (< (:input-tokens result) 1000))))
+  (it "does not treat redacted reasoning ciphertext as readable text"
+      (let [messages
+            (fn [signature]
+              [{:role "assistant"
+                :content
+                [{:type "thinking" :thinking "" :redacted? true :thinking-signature signature}]}])]
+        (expect (= (sut/count-messages "claude-opus-4-8" (messages ""))
+                   (sut/count-messages "claude-opus-4-8"
+                                       (messages (apply str (repeat 1000 "encrypted")))))))))
 
 ;; =============================================================================
 ;; Cost Estimation Tests
