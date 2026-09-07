@@ -1627,6 +1627,68 @@
             (expect (= 1 (count (:input retry)))))))
       (expect (= 2 @opens))
       (expect (= 1 @aborts))))
+  (it "replays the first inference when its prewarmed continuation never starts"
+      ;; vis session 3e6d4d85 (2026-09-07): the warmup completed in 1.1s, the
+      ;; continuation riding its cursor never sent a frame, and only the caller's
+      ;; 120s watchdog ended the turn. The continuation now carries its own
+      ;; first-token deadline; when it fires the warmup is spent and the full
+      ;; request goes out on a fresh socket.
+      (let [opens
+            (atom 0)
+
+            aborts
+            (atom 0)
+
+            sent
+            (atom [])
+
+            seen
+            (atom [])
+
+            factory
+            (fn [_]
+              (let [n
+                    (swap! opens inc)
+
+                    receives
+                    (atom (if (= n 1)
+                            [(completed-event "resp_warm" "")]
+                            [(completed-event "resp_1" "first")]))]
+
+                {:send! (fn [payload]
+                          (swap! sent conj (json/read-json payload :key-fn keyword)))
+                 :receive! (fn [slice-ms]
+                             (if-let [event (first @receives)]
+                               (do (swap! receives subvec 1) event)
+                               ;; Silence: the socket stays open for the whole slice the
+                               ;; reader asked for and never speaks.
+                               (do (Thread/sleep (max 1 (min (long slice-ms) 50)))
+                                   (throw (TimeoutException. "quiet continuation")))))
+                 :close! (fn []
+                           nil)
+                 :abort! (fn []
+                           (swap! aborts inc))}))]
+
+        (with-redefs [sut/open-responses-websocket! factory]
+          (with-open [session (svar/open-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :websocket-warmup-first-token-timeout-ms 100
+                                                  :on-chunk (fn [event]
+                                                              (swap! seen conj event))})]
+            (expect (= "first" (:content (svar/ask! session "one"))))
+            (let [[warmup continuation retry] @sent]
+              (expect (false? (:generate warmup)))
+              (expect (= "resp_warm" (:previous_response_id continuation)))
+              (expect (= [] (:input continuation)))
+              (expect (nil? (:previous_response_id retry)))
+              (expect (= 1 (count (:input retry)))))))
+        (expect (= 3 (count @sent)))
+        (expect (= 2 @opens))
+        (expect (= 1 @aborts))
+        (let [restart (first (filter :restarted? @seen))]
+          (expect (= :llm.session/stream-restarted (:event/type restart)))
+          (expect (= :warmup-stalled (:reason restart))))))
   (it
     "surfaces normalized Codex rate-limit snapshots without ending the response"
     (let [rate-event

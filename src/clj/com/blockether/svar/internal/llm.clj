@@ -3925,6 +3925,15 @@
   "Un-jittered wait before the first reconnect; each further attempt doubles it."
   250)
 
+(def ^:private ^:const SESSION_WARMUP_FIRST_TOKEN_TIMEOUT_MS
+  "Silence ONE turn tolerates between continuing a prewarmed response and the
+   first model event before it abandons the prewarm and replays the full request
+   on a fresh socket. Healthy continuations answer within 4-10s; the general
+   `:semantic-timeout-ms` is sized for a model mid-answer, not for a cursor the
+   server silently dropped. Measured (vis session 3e6d4d85, 2026-09-07): the
+   warmup completed in 1.1s, its continuation never sent a frame, and the
+   caller's 120s watchdog was the first thing to notice."
+  30000)
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS
   "Ceiling for a reconnect wait: a transport hiccup is not a rate limit."
   4000)
@@ -4367,6 +4376,8 @@
                 :else :pre-first-token))]
 
     {:last-semantic-ns last-semantic-ns
+     :first-semantic-seen? (fn []
+                             (some? @first-semantic-ns))
      :phase phase
      :stalled-ms (fn []
                    (quot (- (System/nanoTime) (long @last-semantic-ns)) 1000000))
@@ -4457,7 +4468,9 @@
    keeps talking while the model emits nothing raises
    `:svar.core/stream-semantic-timeout` carrying `:safe-to-restart?`, exactly
    like a keepalive-only SSE body. Deciding what happens next is the router's."
-  [socket {:keys [timeout-ms semantic-timeout-ms on-chunk on-rate-limits on-turn-state url]}]
+  [socket
+   {:keys [timeout-ms semantic-timeout-ms first-token-timeout-ms on-chunk on-rate-limits
+           on-turn-state url]}]
   (let [cancel-fn
         *cancel-fn*
 
@@ -4497,37 +4510,70 @@
         (when (and (number? semantic-timeout-ms) (pos? (long semantic-timeout-ms)))
           (long semantic-timeout-ms))
 
+        ;; A tighter deadline that lives only until the first semantic event: the
+        ;; caller passes it when this request continues a prewarmed response, so
+        ;; a server that never starts generating is a dropped cursor, not a model
+        ;; mid-thought. Once the model speaks, `semantic-ms` alone governs.
+        first-token-ms
+        (when (and (number? first-token-timeout-ms) (pos? (long first-token-timeout-ms)))
+          (long first-token-timeout-ms))
+
+        first-token-window?
+        (fn []
+          (boolean (and first-token-ms (not ((:first-semantic-seen? progress))))))
+
+        active-semantic-ms
+        (fn []
+          (if (first-token-window?)
+            (if semantic-ms (min (long semantic-ms) (long first-token-ms)) first-token-ms)
+            semantic-ms))
+
         stalled?
         (fn []
-          (boolean (and semantic-ms (>= (long ((:stalled-ms progress))) (long semantic-ms)))))
+          (let [limit (active-semantic-ms)]
+            (boolean (and limit (>= (long ((:stalled-ms progress))) (long limit))))))
 
         semantic-timeout!
         (fn []
-          (let [profile ((:profile progress))]
+          (let [profile
+                ((:profile progress))
+
+                limit
+                (active-semantic-ms)
+
+                first-token?
+                (first-token-window?)]
+
             (trove/log! {:level :warn
                          :id ::stream-semantic-timeout
                          :data (log-data (assoc profile
                                            :url url
                                            :transport :websocket
-                                           :semantic-timeout-ms semantic-ms
+                                           :semantic-timeout-ms limit
+                                           :first-token-timeout? first-token?
                                            :phase ((:phase progress))))
                          :msg "stream semantic timeout, closing"})
             (throw
-              (ex-info
-                (str "Stream semantic timeout (" semantic-ms "ms without model/progress event).")
-                {:type :svar.core/stream-semantic-timeout
-                 :stream? true
-                 :transport :websocket
-                 :url url
-                 :semantic-timeout-ms semantic-ms
-                 :progress profile
-                 :phase ((:phase progress))
-                 :content-acc-len (.length content)
-                 :reasoning-acc-len (.length reasoning)
-                 :tool-args-acc-len (.length tool-args)
-                 :safe-to-restart? (semantic-restart-safe? content tool-args @tool-call-preview-acc)
-                 :partial-content (when (pos? (.length content)) (str content))
-                 :reasoning (when (pos? (.length reasoning)) (str reasoning))}))))
+              (ex-info (str "Stream semantic timeout ("
+                            limit
+                            "ms without model/progress event"
+                            (when first-token? " before the first one")
+                            ").")
+                       {:type :svar.core/stream-semantic-timeout
+                        :stream? true
+                        :transport :websocket
+                        :url url
+                        :semantic-timeout-ms limit
+                        :first-token-timeout? first-token?
+                        :progress profile
+                        :phase ((:phase progress))
+                        :content-acc-len (.length content)
+                        :reasoning-acc-len (.length reasoning)
+                        :tool-args-acc-len (.length tool-args)
+                        :safe-to-restart?
+                        (semantic-restart-safe? content tool-args @tool-call-preview-acc)
+                        :partial-content (when (pos? (.length content)) (str content))
+                        :reasoning (when (pos? (.length reasoning)) (str reasoning))}))))
 
         receive-frame!
         (fn []
@@ -4535,11 +4581,14 @@
           ;; queue in the same 50ms cadence as the SSE watchdog so Stop can abort a
           ;; completely quiet WebSocket instead of waiting for its idle deadline.
           (when (caller-cancel-requested? cancel-fn) (cancel!))
-          (let [wait (if semantic-ms
-                       (max 1
-                            (min (long timeout-ms)
-                                 (- (long semantic-ms) (long ((:stalled-ms progress))))))
-                       (long timeout-ms))]
+          (let [limit
+                (active-semantic-ms)
+
+                wait
+                (if limit
+                  (max 1 (min (long timeout-ms) (- (long limit) (long ((:stalled-ms progress))))))
+                  (long timeout-ms))]
+
             (loop [remaining wait]
               (let [slice (if cancel-fn
                             (max 1 (min (long remaining) (long watchdog-tick-ms)))
@@ -4728,6 +4777,13 @@
   [error]
   (boolean (:handshake-timeout? (ex-data error))))
 
+(defn- warmup-continuation-stalled?
+  "True when the first-token deadline of a prewarmed continuation fired: a
+   semantic timeout raised before ANY model event, never one that cut a model
+   mid-answer. Nothing was streamed, so a full replay cannot duplicate output."
+  [error]
+  (let [data (ex-data error)]
+    (and (= :svar.core/stream-semantic-timeout (:type data)) (true? (:first-token-timeout? data)))))
 (defn- websocket-upgrade-refused?
   "True when the handshake was refused with 426 Upgrade Required: this endpoint
    serves no WebSocket at all, so every later handshake of this session would be
@@ -4826,7 +4882,7 @@
                       :done? false})))
 
         perform!
-        (fn [socket input cursor warmup?]
+        (fn [socket input cursor warmup? continuation?]
           (let [turn-state
                 (:turn-state @transport-state)
 
@@ -4842,6 +4898,9 @@
               socket
               {:timeout-ms (or (:idle-timeout-ms opts) (:timeout-ms opts) Long/MAX_VALUE)
                :semantic-timeout-ms (:semantic-timeout-ms opts)
+               :first-token-timeout-ms (when continuation?
+                                         (long (or (:websocket-warmup-first-token-timeout-ms opts)
+                                                   SESSION_WARMUP_FIRST_TOKEN_TIMEOUT_MS)))
                :on-chunk (when-not warmup? (:on-chunk opts))
                :on-rate-limits rate-limits!
                :on-turn-state (when-not warmup? #(remember-codex-turn-state! transport-state %))
@@ -4862,11 +4921,20 @@
            prewarm?
 
            cursor-resets
-           0]
+           0
+
+           ;; True while the attempt continues a prewarmed response with an
+           ;; empty delta - the one request that gets a first-token deadline.
+           continuation?
+           warmup-continuation?]
 
       (let [outcome
             (try {:result
-                  (perform! (session-socket! transport-state connect-opts) input cursor warmup?)}
+                  (perform! (session-socket! transport-state connect-opts)
+                            input
+                            cursor
+                            warmup?
+                            continuation?)}
                  (catch InterruptedException e
                    {:error (websocket-interrupt-error! transport-state e)})
                  (catch Throwable e {:error e}))]
@@ -4880,7 +4948,12 @@
                     :warmup-input full-input)
                   ;; The warmup already supplied the full first request. The inference
                   ;; continues that response with an empty input delta.
-                  (recur (if response-id [] full-input) response-id retries false cursor-resets))
+                  (recur (if response-id [] full-input)
+                         response-id
+                         retries
+                         false
+                         cursor-resets
+                         (some? response-id)))
               (do (swap! transport-state #(-> %
                                               (assoc :stable stable
                                                      :cursor response-id)
@@ -4895,6 +4968,18 @@
 
             (cond (websocket-upgrade-refused? error)
                   (do (disable-session-websockets! transport-state) (throw error))
+                  ;; The prewarmed response never started generating. Nothing was
+                  ;; streamed, so the replay is free of duplicates; the warmup is
+                  ;; spent and the full request goes out on a fresh socket, the way
+                  ;; a warmup that errored does (vis session 3e6d4d85, 2026-09-07:
+                  ;; without this only the caller's 120s watchdog ended the turn).
+                  (and continuation? (warmup-continuation-stalled? error))
+                  (do
+                    (close-session-socket! transport-state :abort)
+                    (swap! transport-state assoc :prewarmed? true)
+                    (restart!
+                      {:reason :warmup-stalled :attempt 1 :max-retries 1 :error (ex-message error)})
+                    (recur full-input nil retries false cursor-resets false))
                   ;; A caller cancellation or watchdog abort is deliberate, never
                   ;; a reconnect/fallback signal. Drop the physical stream exactly
                   ;; once and preserve the typed outcome for the router/caller.
@@ -4916,7 +5001,7 @@
                                  :attempt (inc (long cursor-resets))
                                  :max-retries SESSION_CURSOR_RESET_ALLOWANCE
                                  :error (ex-message error)})
-                      (recur full-input nil retries false (inc (long cursor-resets))))
+                      (recur full-input nil retries false (inc (long cursor-resets)) false))
                   ;; A handshake that never completes is a wedged shared client, not a
                   ;; slow provider. The client was already retired; the FIRST timeout in
                   ;; a session earns one reconnect on the fresh client, a second one
@@ -4934,7 +5019,7 @@
                                        :attempt attempt
                                        :max-retries max-retries
                                        :error (ex-message error)})
-                            (recur full-input nil attempt false cursor-resets))
+                            (recur full-input nil attempt false cursor-resets false))
                         (do (disable-session-websockets! transport-state) (throw error))))
                   (and (websocket-retryable-error? error) budget?)
                   (do (bump-session-counter! transport-state :reconnects)
@@ -4945,7 +5030,7 @@
                                         :max-retries max-retries
                                         :error (ex-message error)}
                                        (websocket-close-details error)))
-                      (recur full-input nil attempt false cursor-resets))
+                      (recur full-input nil attempt false cursor-resets false))
                   (websocket-retryable-error? error)
                   (do (disable-session-websockets! transport-state) (throw error))
                   warmup?
@@ -4954,7 +5039,7 @@
                   ;; optimization spent, reopen, and send the real full request.
                   (do (close-session-socket! transport-state :abort)
                       (swap! transport-state assoc :prewarmed? true)
-                      (recur full-input nil retries false cursor-resets))
+                      (recur full-input nil retries false cursor-resets false))
                   :else
                   ;; The router may retry a provider verdict (429/5xx), or the next user
                   ;; may switch models after a terminal 4xx. Neither may inherit the
@@ -9487,6 +9572,7 @@
               (cond-> (assoc (select-keys call-opts
                                           [:websocket-max-retries :websocket-retry-delay-ms
                                            :websocket-max-age-ms :websocket-prewarm?
+                                           :websocket-warmup-first-token-timeout-ms
                                            :websocket-max-full-request-bytes])
                         :session-progress progress
                         ;; Control events go to the caller's OWN callback, not the
@@ -9565,9 +9651,11 @@
    user turn. Informational `codex.rate_limits` snapshots are normalized into the
    result's `:rate-limits` and emitted to `:on-chunk` as `:llm.session/rate-limits`. A
    socket that keeps failing is left for the rest of
-   the session, which then runs on HTTP/SSE; `:websocket-max-retries` (default 5)
-   and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune that
-   ladder. `opts` are ordinary `ask-code!` options and may include initial
+    the session, which then runs on HTTP/SSE; `:websocket-max-retries` (default 5)
+    and `:websocket-retry-delay-ms` (default 250, 0 to reconnect at once) tune that
+    ladder. A prewarmed continuation that emits no model event within
+    `:websocket-warmup-first-token-timeout-ms` (default 30,000) is abandoned once and
+    the full request replayed on a fresh socket. `opts` are ordinary `ask-code!` options and may include initial
    `:messages`. A turn may pass `{:history [...]}` to atomically replace the
    canonical replay history and start a fresh logical chain without replacing the
    socket. A per-turn `:routing :model` likewise resets the logical chain and
