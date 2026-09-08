@@ -3679,8 +3679,8 @@
 ;; =============================================================================
 
 (def ^:private ^EncodingRegistry registry
-  "Shared encoding registry instance."
-  (Encodings/newDefaultEncodingRegistry))
+  "Shared registry; load only the encoding requested by the first token count."
+  (Encodings/newLazyEncodingRegistry))
 
 (defn- model->encoding
   "Gets the encoding for a given model name.
