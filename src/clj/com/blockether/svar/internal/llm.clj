@@ -2360,47 +2360,11 @@
       (get item "encrypted_content")
       (assoc :encrypted-content (get item "encrypted_content")))))
 
-(defn- reasoning-item-state-key
-  [item]
-  (or (:id item)
-      (:encrypted-content item)
-      (get-in item [:raw-item "id"])
-      (get-in item [:raw-item "encrypted_content"])
-      (:summary-text item)
-      (:content-text item)
-      (pr-str item)))
-
-(defn- merge-reasoning-item-state
-  [a b]
-  (cond (nil? a) b
-        (nil? b) a
-        :else (let [raw (merge (:raw-item a) (:raw-item b))]
-                (cond-> (merge a b)
-                  (seq raw)
-                  (assoc :raw-item raw)))))
-
-(defn- dedupe-reasoning-items
-  [items]
-  (let [{:keys [order by-key]} (reduce (fn [{:keys [order by-key]} item]
-                                         (if item
-                                           (let [k (reasoning-item-state-key item)]
-                                             {:order (cond-> order
-                                                       (not (contains? by-key k))
-                                                       (conj k))
-                                              :by-key
-                                              (update by-key k merge-reasoning-item-state item)})
-                                           {:order order :by-key by-key}))
-                                       {:order [] :by-key {}}
-                                       items)]
-    (mapv by-key order)))
-
-(declare dedupe-tool-calls)
-
 (defn- merge-provider-state
   "Provider-aware aggregator. The streaming pipeline merges every
    `:provider-state` event coming out of `delta-fn` into a single
    running map; the merge strategy depends on which provider populated
-   it. OpenAI Responses dedupes `:reasoning-items` by id; Anthropic
+   it. OpenAI Responses appends completed output items in arrival order; Anthropic
    appends finished content blocks to `:blocks` (one block per
    `content_block_stop` event); plain providers fall back to a flat
    merge."
@@ -2410,12 +2374,10 @@
         :else (let [provider (or (:provider b) (:provider a))]
                 (case provider
                   :openai-responses
-                  (let [items (dedupe-reasoning-items (concat (:reasoning-items a)
-                                                              (:reasoning-items b)))
-                        ;; Tool calls arrive one-per-`output_item.done`; concat across
-                        ;; events (parallel calls) and dedupe vs the terminal
-                        ;; `response.completed` output.
-                        tcs (dedupe-tool-calls (concat (:tool-calls a) (:tool-calls b)))]
+                  ;; Every completed output item arrives exactly once on
+                  ;; `output_item.done`, in output order: append, never reconcile.
+                  (let [items (vec (concat (:reasoning-items a) (:reasoning-items b)))
+                        tcs (vec (concat (:tool-calls a) (:tool-calls b)))]
 
                     (cond-> (merge a b)
                       (seq items)
@@ -2455,13 +2417,12 @@
    `:provider-state` for diagnostic / fallback uses; the canonical
    replay path lifts each reasoning item into a `{:type \"thinking\"}`
    block on `:assistant-message` so callers don't have to touch this
-   shape directly. Also carries any `function_call` items as `:tool-calls`
-   so the streaming finalizer (whose only handle on the response is this
-   provider-state) can surface them — the terminal `response.completed`
-   event delivers the full output array with complete arguments."
+   shape directly. Also carries the `function_call` items as `:tool-calls`.
+   Only the non-streaming path builds it: a stream delivers every item once
+   on `response.output_item.done` and ignores the terminal snapshot."
   [response]
   (let [items
-        (dedupe-reasoning-items (keep reasoning-item-state (get response "output")))
+        (vec (keep reasoning-item-state (get response "output")))
 
         tool-calls
         (response-output-tool-calls response)]
@@ -2648,17 +2609,6 @@
     {:id (responses-tool-call-id item)
      :name (get item "name")
      :input (decode-tool-arguments (get item "arguments"))}))
-
-(defn- dedupe-tool-calls
-  "Dedupe canonical tool calls by `:id`, preserving first-seen order. Guards
-   against the same Responses function_call arriving via both an
-   `output_item.done` event AND the terminal `response.completed` output."
-  [tool-calls]
-  (->> tool-calls
-       (reduce (fn [acc tc]
-                 (if (some #(= (:id tc) (:id %)) acc) acc (conj acc tc)))
-               [])
-       vec))
 
 (defn- assemble-chat-tool-call-fragments
   "Reassemble streamed OpenAI chat `delta.tool_calls[]` fragments into canonical
@@ -4941,16 +4891,14 @@
            continuation?
            warmup-continuation?]
 
-      (let [outcome
-            (try {:result
-                  (perform! (session-socket! transport-state connect-opts)
-                            input
-                            cursor
-                            warmup?
-                            continuation?)}
-                 (catch InterruptedException e
-                   {:error (websocket-interrupt-error! transport-state e)})
-                 (catch Throwable e {:error e}))]
+      (let [outcome (try {:result (perform! (session-socket! transport-state connect-opts)
+                                            input
+                                            cursor
+                                            warmup?
+                                            continuation?)}
+                         (catch InterruptedException e
+                           {:error (websocket-interrupt-error! transport-state e)})
+                         (catch Throwable e {:error e}))]
         (if-let [result (:result outcome)]
           (let [response-id (get-in result [:http-response :parsed "id"])]
             (if warmup?
@@ -5716,7 +5664,9 @@
              :reasoning-delta nil
              :content-fallback (response-output-text response)
              :reasoning-fallback (response-output-reasoning response)
-             :provider-state (openai-responses-state response)
+             ;; Output items already arrived on `output_item.done`; the snapshot
+             ;; only names the provider and carries usage and status.
+             :provider-state {:provider :openai-responses}
              :api-usage (normalize-openai-usage (or (get response "usage") (get chunk "usage")))
              :terminal? true
              :incomplete? (= "response.incomplete" event-type)

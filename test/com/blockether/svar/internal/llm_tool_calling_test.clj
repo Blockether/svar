@@ -1,7 +1,8 @@
 (ns com.blockether.svar.internal.llm-tool-calling-test
   "Native tool calling: per-wire tool/tool-choice shaping, request-body
    injection, response tool_use extraction, and the anthropic round-trip."
-  (:require [charred.api :as json]
+  (:require [babashka.http-client :as http]
+            [charred.api :as json]
             [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.internal.llm :as sut]))
 
@@ -537,18 +538,18 @@
                  (fn-item->tool-call
                    {"type" "function_call" "call_id" "c" "name" "f" "arguments" "{\"x\":1}"})))
       (expect (nil? (fn-item->tool-call {"type" "reasoning"}))))
-  (it "merge-provider-state concats + dedupes responses tool calls across output_item.done events"
+  (it "merge-provider-state appends responses tool calls across output_item.done events"
       (let [a
             {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
 
             b
             {:provider :openai-responses :tool-calls [{:id "c2" :name "g" :input {}}]}
 
-            dup
-            {:provider :openai-responses :tool-calls [{:id "c1" :name "f" :input {}}]}
+            terminal
+            {:provider :openai-responses}
 
             m
-            (merge-provider-state (merge-provider-state a b) dup)]
+            (merge-provider-state (merge-provider-state a b) terminal)]
 
         (expect (= ["c1" "c2"] (mapv :id (:tool-calls m))))))
   (it "propagates native-call identity through the public streaming callback"
@@ -576,6 +577,122 @@
         ;; `:reasoning` IS blank-normalized, hence nil here.
         (expect (= "" (:content @seen)))
         (expect (nil? (:reasoning @seen))))))
+
+(defn- responses-event-result
+  "Run synthetic Responses frames through the real HTTP/SSE completion path."
+  [events]
+  (let [stream (apply str (map #(str "data: " (json/write-json-str %) "\n\n") events))]
+    (with-redefs [http/post (fn [_ _]
+                              {:status 200
+                               :body (java.io.ByteArrayInputStream. (.getBytes stream "UTF-8"))})]
+      (sut/openai-responses-completion
+        {:model "test-model" :input [{:role "user" :content "test"}]}
+        {:api-key "test" :base-url "https://gateway.example.com/v1" :on-chunk (constantly nil)}))))
+
+(defdescribe
+  responses-single-source-test
+  ;; Vis #173: a stream delivers each output item exactly once on
+  ;; `response.output_item.done`. The terminal snapshot may repeat items under
+  ;; new ids or with other arguments; it is never a second source of items.
+  (let [reasoning
+        {"type" "reasoning"
+         "id" "rs_stream"
+         "summary" [{"type" "summary_text" "text" "Check result."}]
+         "encrypted_content" "synthetic-stream"}
+
+        call
+        {"type" "function_call"
+         "id" "fc_stream"
+         "call_id" "call_one"
+         "name" "python_execution"
+         "arguments" "{\"code\":\"print(123)\"}"}
+
+        done
+        (fn [index item]
+          {"type" "response.output_item.done" "output_index" index "item" item})
+
+        completed
+        (fn [output]
+          {"type" "response.completed"
+           "response" {"output" output
+                       "usage" {"input_tokens" 120
+                                "output_tokens" 8
+                                "total_tokens" 128
+                                "input_tokens_details" {"cached_tokens" 100}}}})]
+
+    (doseq [event-type
+            ["response.completed" "response.done"]
+
+            [label snapshot]
+            [["repeats the items under new ids and arguments"
+              [(assoc reasoning
+                 "id" "rs_final"
+                 "encrypted_content" "synthetic-final")
+               (assoc call
+                 "id" "fc_final"
+                 "arguments" "{\"code\":\"print(456)\"}")]] ["omits its output" []]]]
+
+      (it (str "surfaces each streamed item once when " event-type " " label)
+          (let [result
+                (responses-event-result [{"type" "response.output_item.added"
+                                          "output_index" 1
+                                          "item" (assoc call "arguments" "")} (done 0 reasoning)
+                                         (done 1 call)
+                                         (assoc (completed snapshot) "type" event-type)])
+
+                expected
+                (extract-openai {:parsed {"output" [reasoning call]}})]
+
+            (expect
+              (= [{:id "call_one|fc_stream" :name "python_execution" :input {"code" "print(123)"}}]
+                 (:tool-calls result)))
+            (expect (= [reasoning]
+                       (mapv :raw-item (get-in result [:provider-state :reasoning-items]))))
+            (expect (= (:assistant-message expected) (:assistant-message result)))
+            (expect (= 120 (get-in result [:api-usage :input-tokens])))
+            (expect (= 100 (get-in result [:api-usage :input-tokens-details :cache-read])))
+            (expect (= 1
+                       (count (filter #(= "function_call" (:type %))
+                                      (responses-input (:assistant-message result)))))))))
+    (it "rejects an incomplete stream instead of returning executable calls"
+        (let [failure (try (responses-event-result [(done 0 call)
+                                                    {"type" "response.incomplete"
+                                                     "response" {"output" [call]
+                                                                 "incomplete_details"
+                                                                 {"reason" "max_output_tokens"}}}])
+                           nil
+                           (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+          (expect (= :svar.core/stream-incomplete (:type failure)))
+          (expect (= "max_output_tokens" (:reason failure)))))
+    (it "keeps separate same-program calls and same-text reasoning items"
+        (let [other-reasoning
+              (dissoc reasoning "id" "encrypted_content")
+
+              other-call
+              (assoc call
+                "call_id" "call_two"
+                "id" "fc_two")
+
+              output
+              [other-reasoning call other-reasoning other-call]
+
+              result
+              (responses-event-result (conj (mapv done (range) output) (completed output)))]
+
+          (expect (= ["call_one|fc_stream" "call_two|fc_two"] (mapv :id (:tool-calls result))))
+          (expect (= 2 (count (get-in result [:provider-state :reasoning-items]))))))
+    (it "surfaces a non-streaming snapshot's function calls in output order"
+        (let [other-call
+              (assoc call
+                "call_id" "call_two"
+                "id" "fc_two")
+
+              result
+              (extract-openai {:parsed {"output" [call other-call]}})]
+
+          (expect (= ["call_one|fc_stream" "call_two|fc_two"] (mapv :id (:tool-calls result))))
+          (expect (= ["call_one|fc_stream" "call_two|fc_two"]
+                     (mapv :id (get-in result [:assistant-message :content]))))))))
 
 (defdescribe
   streaming-tool-args-delta-test
