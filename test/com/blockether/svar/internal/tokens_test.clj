@@ -163,6 +163,20 @@
 
         (expect (< 500 (sut/count-messages "gpt-4o" tool-use)))
         (expect (< 500 (sut/count-messages "gpt-4o" tool-result)))))
+  ;; Blockether/vis#174: keep dense nested results in tokenizer units, not chars/4.
+  (it "counts the full tokenized growth of dense nested tool results"
+      (doseq [model ["gpt-4o" "claude-opus-5"]]
+        (let [payload (apply str (repeat 1000 "ą中42={x:17};\n"))
+              messages (fn [text]
+                         [{:role "user"
+                           :content [{:type "tool_result"
+                                      :tool_use_id "call-1"
+                                      :content [{:type "text" :text text}]}]}])
+              delta (- (sut/count-messages model (messages payload))
+                       (sut/count-messages model (messages "")))]
+
+          (expect (= (sut/count-tokens model payload) delta))
+          (expect (> delta (quot (count payload) 4))))))
   (it "counts readable preserved thinking"
       (let [payload (apply str (repeat 4000 "x"))]
         (expect (< 500
