@@ -11,9 +11,12 @@
 
 (def ^:private await-websocket-future!
   (ns-resolve 'com.blockether.svar.internal.llm 'await-websocket-future!))
+
 (def ^:private close-websocket! (ns-resolve 'com.blockether.svar.internal.llm 'close-websocket!))
+
 (def ^:private websocket-event-error
   (ns-resolve 'com.blockether.svar.internal.llm 'websocket-event-error))
+
 (def ^:private previous-response-missing?
   (ns-resolve 'com.blockether.svar.internal.llm 'previous-response-missing?))
 
@@ -49,6 +52,7 @@
                                           "role" "assistant"
                                           "content" [{"type" "output_text" "text" text}]}])
                          "usage" {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}))
+
 (defn- tool-call-event
   ([] (tool-call-event "resp_tool" "fc_1" "call_1"))
   ([response-id item-id call-id]
@@ -126,6 +130,7 @@
 (defn- open-test-session
   [router opts]
   (svar/open-session router (assoc opts :websocket-prewarm? false)))
+
 (defdescribe
   websocket-resource-cleanup-test
   (it "cancels an unfinished WebSocket operation after its timeout"
@@ -1786,6 +1791,71 @@
                         "status" "completed"
                         "output" []
                         "usage" {"input_tokens" 10 "output_tokens" 2 "total_tokens" 12}}}])))
+
+(defdescribe websocket-empty-slice-test
+             ;; Regression: empty transport polls return nil, not TimeoutException.
+             ;; Record the requested waits instead of sleeping so deadline tests are deterministic.
+             (it "continues through empty slices until a response frame arrives"
+                 (let [frames
+                       (atom [nil nil (completed-event "resp_after_silence" "answer")])
+
+                       waits
+                       (atom [])
+
+                       socket
+                       {:receive! (fn [wait-ms]
+                                    (swap! waits conj wait-ms)
+                                    (let [frame (first @frames)]
+                                      (swap! frames subvec 1)
+                                      frame))}
+
+                       result
+                       (binding [sut/*cancel-fn* (constantly false)]
+                         (receive-websocket-response! socket {:timeout-ms 125}))]
+
+                   (expect (= "answer" (:content result)))
+                   (expect (= [50 50 25] @waits))
+                   (expect (empty? @frames))))
+             (it "throws only after empty slices exhaust the whole timeout budget"
+                 (let [waits
+                       (atom [])
+
+                       socket
+                       {:receive! (fn [wait-ms]
+                                    (swap! waits conj wait-ms)
+                                    nil)}
+
+                       outcome
+                       (binding [sut/*cancel-fn* (constantly false)]
+                         (try (receive-websocket-response! socket {:timeout-ms 125})
+                              nil
+                              (catch TimeoutException e e)))]
+
+                   (expect (instance? TimeoutException outcome))
+                   (expect (= [50 50 25] @waits))
+                   (expect (= "Responses WebSocket timed out after 125ms." (ex-message outcome)))))
+             (it "honors cancellation immediately after an empty slice"
+                 (let [cancel?
+                       (atom false)
+
+                       waits
+                       (atom [])
+
+                       socket
+                       {:receive! (fn [wait-ms]
+                                    (swap! waits conj wait-ms)
+                                    (reset! cancel? true)
+                                    nil)}
+
+                       outcome
+                       (binding [sut/*cancel-fn* #(deref cancel?)]
+                         (try (receive-websocket-response! socket {:timeout-ms 125})
+                              nil
+                              (catch clojure.lang.ExceptionInfo e e)))]
+
+                   (expect (= :svar.core/stream-cancelled (:type (ex-data outcome))))
+                   (expect (= :websocket (:transport (ex-data outcome))))
+                   (expect (= [50] @waits)))))
 
 (defdescribe
   websocket-reasoning-boundary-test

@@ -3911,7 +3911,8 @@
      ;; per open stream, for the ordinary state of a socket between tokens - the
      ;; single largest allocation site in a profile of the host gateway. The
      ;; reader owns the deadline and throws ONCE, when the whole wait is spent.
-     :receive! (fn [wait-ms] (.poll inbox (long wait-ms) TimeUnit/MILLISECONDS))
+     :receive! (fn [wait-ms]
+                 (.poll inbox (long wait-ms) TimeUnit/MILLISECONDS))
      :close! (fn []
                (when (compare-and-set! closed? false true) (close-websocket! socket)))
      :abort! (fn []
@@ -4610,10 +4611,10 @@
                   (cond (stalled?) (semantic-timeout!)
                         (> (long remaining) slice) (recur (- (long remaining) slice))
                         :else (throw (or (:timeout outcome)
-                                         (TimeoutException.
-                                           (str "Responses WebSocket timed out after "
-                                                wait
-                                                "ms."))))))))))]
+                                         (TimeoutException. (str
+                                                              "Responses WebSocket timed out after "
+                                                              wait
+                                                              "ms."))))))))))]
 
     (loop [output-items
            []
