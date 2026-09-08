@@ -3832,9 +3832,10 @@
 
 (defn open-responses-websocket!
   "Opens one Responses WebSocket and returns the small transport map used by
-   explicit sessions: `:send!`, `:receive!`, an idempotent `:close!` that sends a
-   close frame, and an `:abort!` that drops the connection at once. This is
-   public only as a deterministic transport seam for tests."
+   explicit sessions: `:send!`, `:receive!` (a frame, or nil when none arrived
+   within its wait), an idempotent `:close!` that sends a close frame, and an
+   `:abort!` that drops the connection at once. This is public only as a
+   deterministic transport seam for tests."
   [{:keys [base-url responses-path api-key headers timeout-ms websocket-handshake-timeout-ms]
     :or {responses-path "/responses"
          timeout-ms router/DEFAULT_TIMEOUT_MS
@@ -3904,10 +3905,13 @@
     {:send! (fn [payload]
               (await-websocket-future! (.sendText ^WebSocket socket ^CharSequence payload true)
                                        operation-timeout-ms))
-     :receive! (fn [wait-ms]
-                 (or (.poll inbox (long wait-ms) TimeUnit/MILLISECONDS)
-                     (throw (TimeoutException.
-                              (str "Responses WebSocket timed out after " wait-ms "ms.")))))
+     ;; nil = nothing arrived within `wait-ms`. The reader polls in 50 ms slices
+     ;; so Stop can interrupt a quiet socket, and this used to THROW a
+     ;; TimeoutException per empty slice: twenty-odd stack-trace fills a second
+     ;; per open stream, for the ordinary state of a socket between tokens - the
+     ;; single largest allocation site in a profile of the host gateway. The
+     ;; reader owns the deadline and throws ONCE, when the whole wait is spent.
+     :receive! (fn [wait-ms] (.poll inbox (long wait-ms) TimeUnit/MILLISECONDS))
      :close! (fn []
                (when (compare-and-set! closed? false true) (close-websocket! socket)))
      :abort! (fn []
@@ -4593,7 +4597,11 @@
               (let [slice (if cancel-fn
                             (max 1 (min (long remaining) (long watchdog-tick-ms)))
                             (long remaining))
-                    outcome (try {:frame ((:receive! socket) slice)}
+                    ;; A live socket answers an empty slice with nil; a test seam may
+                    ;; still throw the TimeoutException the transport once did.
+                    outcome (try (if-some [frame ((:receive! socket) slice)]
+                                   {:frame frame}
+                                   {:timeout nil})
                                  (catch TimeoutException e {:timeout e}))]
 
                 (when (caller-cancel-requested? cancel-fn) (cancel!))
@@ -4601,7 +4609,11 @@
                   (:frame outcome)
                   (cond (stalled?) (semantic-timeout!)
                         (> (long remaining) slice) (recur (- (long remaining) slice))
-                        :else (throw (:timeout outcome))))))))]
+                        :else (throw (or (:timeout outcome)
+                                         (TimeoutException.
+                                           (str "Responses WebSocket timed out after "
+                                                wait
+                                                "ms."))))))))))]
 
     (loop [output-items
            []
