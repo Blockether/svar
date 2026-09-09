@@ -3897,12 +3897,6 @@
    60-minute connection limit. The next turn opens a socket and replays canonical
    history under the unchanged prompt-cache key."
   3300000)
-(def ^:private ^:const SESSION_WEBSOCKET_MAX_FULL_REQUEST_BYTES
-  "Largest cursorless Responses request Svar sends through the JDK WebSocket.
-   The JDK client cannot negotiate Codex's permessage-deflate extension, so a
-   larger canonical replay uses HTTP until folding makes it small enough for a
-   fresh WebSocket chain."
-  262144)
 
 (def ^:private SESSION_TRANSPORT_COUNTER_DEFAULTS
   {:websocket-opens 0
@@ -5039,24 +5033,29 @@
         full-request?
         (or (:session-reset? opts) (nil? (:cursor prior)) (not= stable (:stable prior)))
 
+        ;; Live JDK probes above 262144 bytes reached provider request validation.
+        ;; Lack of permessage-deflate is not evidence of a payload ceiling: only
+        ;; an explicit limit or a server 1009 close justifies size-based HTTP routing.
         configured-max-full-request-bytes
-        (max 0
-             (long (or (:websocket-max-full-request-bytes opts)
-                       SESSION_WEBSOCKET_MAX_FULL_REQUEST_BYTES)))
+        (when-some [ceiling (:websocket-max-full-request-bytes opts)]
+          (max 0 (long ceiling)))
 
         learned-max-full-request-bytes
         (:websocket-full-request-ceiling prior)
 
         max-full-request-bytes
-        (if (number? learned-max-full-request-bytes)
-          (min configured-max-full-request-bytes (long learned-max-full-request-bytes))
-          configured-max-full-request-bytes)
+        (cond (and configured-max-full-request-bytes (number? learned-max-full-request-bytes))
+              (min (long configured-max-full-request-bytes) (long learned-max-full-request-bytes))
+              (number? learned-max-full-request-bytes) (long learned-max-full-request-bytes)
+              :else configured-max-full-request-bytes)
 
         canonical-request-bytes
         (delay (session-request-payload-bytes request-body (:turn-state prior)))
 
         oversized-full-request?
-        (and full-request? (> (long @canonical-request-bytes) max-full-request-bytes))
+        (boolean (and full-request?
+                      max-full-request-bytes
+                      (> (long @canonical-request-bytes) (long max-full-request-bytes))))
 
         restart!
         (fn restart! ([] (restart! nil)) ([event] (let [restarted? (and progress
