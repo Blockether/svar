@@ -191,6 +191,7 @@
 ;; Register a JVM shutdown hook so the executor is always closed on normal exit.
 ;; Users don't need to call shutdown-http-client! manually in typical usage.
 #_{:clj-kondo/ignore [:unused-private-var]}
+
 (defonce ^:private http-shutdown-hook-registered?
   (do (.addShutdownHook (Runtime/getRuntime)
                         (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
@@ -3035,6 +3036,11 @@
                   (dissoc item :id))))
         input))
 
+(defn- responses-build-options
+  [base-url {:keys [provider-id stateless-items?]}]
+  {:stateless-items? (boolean (or stateless-items? (failure/stateless-items-host? base-url)))
+   :explicit-cache? (responses-explicit-cache? provider-id base-url)})
+
 (defn- build-openai-responses-request-body
   ([messages model extra-body] (build-openai-responses-request-body messages model extra-body nil))
   ([messages model extra-body {:keys [stateless-items? explicit-cache?] :or {explicit-cache? true}}]
@@ -3138,6 +3144,18 @@
        (merge (cond-> base-extra*
                 text-format
                 (dissoc :text)))))))
+
+(defn- responses-input-tokens
+  "Count the same prepared Responses projection as transport. Other wires retain
+   their existing local estimate/provider-counter policy."
+  [messages model {:keys [api-style base-url extra-body] :as opts}]
+  (when (= :openai-compatible-responses api-style)
+    (router/count-responses-request model
+                                    (build-openai-responses-request-body
+                                      messages
+                                      model
+                                      extra-body
+                                      (responses-build-options base-url opts)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Google Gemini wire — generateContent / streamGenerateContent
@@ -3670,6 +3688,7 @@
              ":first-byte-timeout-ms must be nil or a non-negative number"
              {:type :svar/invalid-network-timeout :key :first-byte-timeout-ms :value value})))
   value)
+
 (def ^:dynamic *cancel-fn*
   "Optional no-arg predicate for caller-driven cancellation. When bound to
    a fn that returns truthy, an in-flight streaming call aborts ASAP. SSE uses
@@ -3889,9 +3908,11 @@
    warmup completed in 1.1s, its continuation never sent a frame, and the
    caller's 120s watchdog was the first thing to notice."
   30000)
+
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_RETRY_DELAY_MS
   "Ceiling for a reconnect wait: a transport hiccup is not a rate limit."
   4000)
+
 (def ^:private ^:const SESSION_WEBSOCKET_MAX_AGE_MS
   "Age at which an idle Codex socket is retired before the provider's hard
    60-minute connection limit. The next turn opens a socket and replays canonical
@@ -4045,6 +4066,7 @@
     (do (close-session-socket! transport-state :abort)
         (.interrupt (Thread/currentThread))
         (throw e))))
+
 (defn- session-socket!
   "The session's live socket, opening one when it has none.
 
@@ -4366,6 +4388,7 @@
                    :max-gap-phase (if open-widest? (phase) @max-gap-phase)
                    :semantic-events @semantic-events
                    :quiet-events @quiet-events}))}))
+
 (def ^:private CODEX_TURN_STATE_HEADER "x-codex-turn-state")
 
 (defn- scalar-header-value
@@ -4741,6 +4764,7 @@
   [error]
   (let [data (ex-data error)]
     (and (= :svar.core/stream-semantic-timeout (:type data)) (true? (:first-token-timeout? data)))))
+
 (defn- websocket-upgrade-refused?
   "True when the handshake was refused with 426 Upgrade Required: this endpoint
    serves no WebSocket at all, so every later handshake of this session would be
@@ -5514,7 +5538,6 @@
 
 (def ^:private nonterminal-stream-statuses #{"in_progress" "queued" "running"})
 
-
 (defn- stream-semantic-event?
   "True only when a parsed event advances model output or terminates the response.
    Transport notices, rate-limit snapshots and repeated provider state are liveness,
@@ -5791,7 +5814,6 @@
   (java.util.concurrent.ConcurrentHashMap.))
 
 (def ^:private watchdog-token-seq (java.util.concurrent.atomic.AtomicLong.))
-
 
 (defn- watchdog-tick!
   "One scheduler pass: call every registered tick-fn. A fn returning falsey
@@ -7147,9 +7169,7 @@
                                   (attempt (assoc build-opts :explicit-cache? false)))
                               :else (throw e)))))]
 
-           (attempt {:stateless-items? (boolean (or (:stateless-items? opts)
-                                                    (failure/stateless-items-host? base-url)))
-                     :explicit-cache? (responses-explicit-cache? provider-id base-url)}))
+           (attempt (responses-build-options base-url opts)))
          :else (if on-chunk
                  (chat-completion-streaming messages
                                             model
@@ -7836,6 +7856,7 @@
           (:prefs resolved)
           (fn [provider model-map]
             (ask!* router (inject-routed-params opts provider model-map))))))))
+
 ;; =============================================================================
 ;; ask!* - Main structured output function (primitive)
 ;; =============================================================================
@@ -8161,9 +8182,27 @@
      base-messages
      with-tail
 
+     ;; Count the same output-format declaration that transport receives.
+     caller-extra-body
+     (or (:extra-body opts) {})
+
+     extra-body
+     (cond-> caller-extra-body
+       (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
+            (:json-object-mode? opts)
+            (not (contains? caller-extra-body :response_format)))
+       (assoc :response_format {:type "json_object"}))
+
      ;; Pre-flight context check (also counts input tokens for reuse)
      check-opts
      (cond-> {:context-limits context-limits
+              :input-tokens (when check-context?
+                              (responses-input-tokens base-messages
+                                                      model
+                                                      (assoc opts
+                                                        :api-style api-style
+                                                        :base-url base-url
+                                                        :extra-body extra-body)))
               :exact-count-fn (anthropic-exact-count-fn base-messages
                                                         model
                                                         {:api-style api-style
@@ -8226,22 +8265,6 @@
                         :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                         :done? false})))))
 
-     ;; `:json-object-mode?` auto-injection - caller's `:extra-body
-     ;; :response_format` always wins. OpenAI chat-completions and
-     ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
-     ;; `:json-object-mode?` auto-injection - caller's `:extra-body
-     ;; :response_format` always wins. OpenAI chat-completions and
-     ;; OpenAI Responses both support JSON mode; Anthropic ignores it.
-     caller-extra-body
-     (or (:extra-body opts) {})
-
-     extra-body
-     (cond-> caller-extra-body
-       (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
-            (:json-object-mode? opts)
-            (not (contains? caller-extra-body :response_format)))
-       (assoc :response_format {:type "json_object"}))
-
      retry-opts
      (cond-> (merge network
                     {:timeout-ms timeout-ms
@@ -8254,6 +8277,9 @@
                      :semantic-timeout-ms semantic-timeout-ms})
        provider-id
        (assoc :provider-id provider-id)
+
+       (some? (:stateless-items? opts))
+       (assoc :stateless-items? (:stateless-items? opts))
 
        ;; The low-level HTTP ladder heals inside ONE call; route its
        ;; retries to the caller's RAW `on-chunk` (the same seam the
@@ -8928,8 +8954,27 @@
      in-msgs
      (vec messages)
 
+     caller-extra-body
+     (or (:extra-body opts) {})
+
+     ;; Tools must be shaped before counting, just as they are before transport.
+     extra-body
+     (cond-> caller-extra-body
+       (seq tools)
+       (assoc :svar/tools (vec tools))
+
+       tool-choice
+       (assoc :svar/tool-choice tool-choice))
+
      check-opts
      (cond-> {:context-limits context-limits
+              :input-tokens (when check-context?
+                              (responses-input-tokens in-msgs
+                                                      model
+                                                      (assoc opts
+                                                        :api-style api-style
+                                                        :base-url base-url
+                                                        :extra-body extra-body)))
               :exact-count-fn (anthropic-exact-count-fn in-msgs
                                                         model
                                                         {:api-style api-style
@@ -8940,7 +8985,7 @@
        output-reserve
        (assoc :output-reserve output-reserve))
 
-     _context-check
+     context-check
      (when check-context?
        (let [check (router/check-context-limit model in-msgs check-opts)]
          (when-not (:ok? check)
@@ -8987,19 +9032,6 @@
                         :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
                         :done? false})))))
 
-     caller-extra-body
-     (or (:extra-body opts) {})
-
-     ;; Tools ride in extra-body under :svar/* (the universal passthrough);
-     ;; each request-body builder strips + shapes them per wire.
-     extra-body
-     (cond-> caller-extra-body
-       (seq tools)
-       (assoc :svar/tools (vec tools))
-
-       tool-choice
-       (assoc :svar/tool-choice tool-choice))
-
      retry-opts
      (cond-> (merge network
                     {:timeout-ms timeout-ms
@@ -9010,6 +9042,9 @@
                      :semantic-timeout-ms semantic-timeout-ms})
        provider-id
        (assoc :provider-id provider-id)
+
+       (some? (:stateless-items? opts))
+       (assoc :stateless-items? (:stateless-items? opts))
 
        ;; The low-level HTTP ladder heals inside ONE call; route its
        ;; retries to the caller's RAW `on-chunk` (the same seam the
@@ -9108,7 +9143,10 @@
           (router/count-and-estimate model
                                      in-msgs
                                      (or content "")
-                                     {:pricing pricing :api-usage api-usage :api-style api-style})
+                                     {:pricing pricing
+                                      :api-usage api-usage
+                                      :api-style api-style
+                                      :input-tokens (:input-tokens context-check)})
 
           ;; Burned empty-reply re-sends are billed by the provider - cost is
           ;; recomputed over the SUMMED usage so :cost stays honest, while

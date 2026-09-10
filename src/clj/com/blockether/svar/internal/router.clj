@@ -3878,14 +3878,16 @@
 (defn- block-field [block k] (if (contains? block k) (get block k) (get block (name k))))
 
 (defn- responses-reasoning-tokens
-  "Coarse hidden-reasoning estimate for Svar's serialized Responses reasoning item.
+  "Coarse hidden-reasoning estimate for a serialized or prepared Responses item.
    Like Codex, approximate base64 decoded bytes minus the 650-byte envelope, then
    ceil(bytes / 4). Other providers' signatures are not this format. Usage or a
    provider's exact counter remains authoritative; never BPE-tokenize ciphertext."
   ^long [signature]
   (let [item
-        (when (and (string? signature) (str/starts-with? (str/trim signature) "{"))
-          (try (json/read-json signature) (catch Exception _ nil)))
+        (if (map? signature)
+          signature
+          (when (and (string? signature) (str/starts-with? (str/trim signature) "{"))
+            (try (json/read-json signature) (catch Exception _ nil))))
 
         encrypted
         (when (and (map? item) (= "reasoning" (block-field item :type)))
@@ -3909,11 +3911,30 @@
              :else (let [kind (some-> (block-field value :type)
                                       name)]
                      (case kind
-                       ("text" "input_text")
+                       ("text" "input_text" "output_text" "summary_text" "reasoning_text")
                        (encoded-tokens encoding (block-field value :text))
 
                        "image_url"
                        (long (estimate-image-block-tokens value))
+
+                       "input_image"
+                       (long (estimate-image-block-tokens {:image_url
+                                                           {:url (block-field value :image_url)
+                                                            :detail (block-field value :detail)}}))
+
+                       "reasoning"
+                       (max (long (tokens (block-field value :summary)))
+                            (long (tokens (block-field value :content)))
+                            (responses-reasoning-tokens value))
+
+                       "function_call"
+                       (+ (long (json-tokens {:call_id (block-field value :call_id)
+                                              :name (block-field value :name)}))
+                          (encoded-tokens encoding (block-field value :arguments)))
+
+                       "function_call_output"
+                       (+ (long (json-tokens {:call_id (block-field value :call_id)}))
+                          (long (tokens (block-field value :output))))
 
                        "thinking"
                        (max (encoded-tokens encoding (block-field value :thinking))
@@ -3963,6 +3984,52 @@
         3]
 
     (+ (long message-tokens) reply-priming)))
+
+(defn count-responses-request
+  "Estimate a prepared Responses request, after replay filtering and wire shaping.
+
+   Counts input, instructions, tool declarations and output-format schemas with the
+   model tokenizer and estimated framing. Generation/cache controls are not input.
+   Opaque reasoning uses the hidden-token heuristic, never ciphertext BPE. Provider
+   usage or an exact provider counter remains authoritative."
+  ^long [^String model body]
+  (let [input
+        (block-field body :input)
+
+        items
+        (if (string? input) [{:role "user" :content input}] input)
+
+        messages
+        (mapv (fn [item]
+                {:role
+                 (or (block-field item :role)
+                     (if (= "function_call_output" (block-field item :type)) "tool" "assistant"))
+                 :content (if (or (= "message" (block-field item :type)) (block-field item :role))
+                            (block-field item :content)
+                            item)})
+              items)
+
+        instructions
+        (block-field body :instructions)
+
+        messages
+        (cond-> messages
+          (seq instructions)
+          (conj {:role "system" :content instructions}))
+
+        encoding
+        (model->encoding model)
+
+        tools
+        (block-field body :tools)
+
+        format
+        (some-> (block-field body :text)
+                (block-field :format))]
+
+    (+ (count-messages model messages)
+       (if (seq tools) (encoded-tokens encoding (json/write-json-str tools)) 0)
+       (if (seq format) (encoded-tokens encoding (json/write-json-str format)) 0))))
 
 ;; =============================================================================
 ;; Cost Estimation

@@ -14,15 +14,23 @@
       item, half-written tool calls) is exactly what OpenAI rejects with
       'reasoning without following item', so such turns are skipped entirely."
   (:require [clojure.string :as str]
+            [com.blockether.svar.core :as svar]
             [com.blockether.svar.internal.llm :as sut]
+            [com.blockether.svar.internal.router :as router]
             [lazytest.core :refer [defdescribe expect it]]))
 
 (def ^:private build-responses @#'sut/build-openai-responses-request-body)
+
 (def ^:private build-anthropic @#'sut/build-anthropic-request-body)
+
 (def ^:private sanitize @#'sut/sanitize-replayed-messages)
+
 (def ^:private stamp @#'sut/stamp-assistant-model)
+
 (def ^:private build-chat @#'sut/build-request-body)
+
 (def ^:private chat-with-retry @#'sut/chat-completion-with-retry)
+
 (def ^:private chat-streaming @#'sut/chat-completion-streaming)
 
 (def ^:private sig-A
@@ -206,6 +214,7 @@
         (expect (some #(and (= "tool_result" (:type %)) (true? (:is_error %))) blocks)))))
 
 (def ^:private responses-id @#'sut/responses-tool-call-id)
+
 (def ^:private normalize-id3 @#'sut/normalize-tool-call-id)
 
 (defdescribe
@@ -456,6 +465,144 @@
 
         (expect (not-any? #(= "reasoning" (:type %)) input))
         (expect (some #(and (= "message" (:type %)) (= "assistant" (:role %))) input)))))
+
+(defn- context-replay-messages
+  [encrypted-size assistant-extra reasoning-id]
+  [{:role "system" :content "agent"} {:role "user" :content "fix"}
+   (merge {:role "assistant"
+           :model "gpt-6-astra"
+           :content [{:type "thinking"
+                      :thinking ""
+                      :thinking-signature (str "{\"type\":\"reasoning\",\"id\":\""
+                                               reasoning-id
+                                               "\",\"encrypted_content\":\""
+                                               (apply str (repeat encrypted-size "A"))
+                                               "\",\"summary\":[]}")} {:type "text" :text "done"}]}
+          assistant-extra) {:role "user" :content "continue"}])
+
+(def ^:private preflight-answer-spec
+  (svar/spec (svar/field svar/NAME
+                         :answer
+                         svar/TYPE
+                         svar/TYPE_STRING
+                         svar/CARDINALITY
+                         svar/CARDINALITY_ONE
+                         svar/DESCRIPTION
+                         "The answer")))
+
+(defn- responses-preflight-result
+  ([messages opts] (responses-preflight-result messages opts {:input-tokens 23 :output-tokens 1}))
+  ([messages opts api-usage]
+   (let [sent
+         (atom [])
+
+         ask-fn
+         (if (:spec opts) sut/ask!* sut/ask-code!*)
+
+         result
+         (with-redefs [sut/openai-responses-completion
+                       (fn [body _opts]
+                         (swap! sent conj body)
+                         {:content "{\"answer\":\"ok\"}"
+                          :assistant-message {:role "assistant"
+                                              :content [{:type "text" :text "{\"answer\":\"ok\"}"}]}
+                          :api-usage api-usage})]
+           (try {:response (ask-fn {}
+                                   (merge {:messages messages
+                                           :model "gpt-6-astra"
+                                           :provider-id :github-copilot-enterprise
+                                           :api-style :openai-compatible-responses
+                                           :api-key "test"
+                                           :base-url "http://127.0.0.1:1"
+                                           :context 1000
+                                           :output-reserve 0}
+                                          opts))}
+                (catch Exception e {:error (ex-data e)})))]
+
+     (assoc result :sent @sent))))
+
+(defdescribe
+  responses-preflight-projection-test
+  ;; Blockether/vis#186: preflight must count the adapted request, not rejected
+  ;; replay metadata. Exercise the actual body builder through both entrypoints.
+  (it "accepts equivalent wire requests regardless of discarded reasoning size"
+      (doseq [entry-opts
+              [{} {:spec preflight-answer-spec}]
+
+              [assistant-extra reasoning-id replay-opts]
+              [[{} "not_rs" {}] [{:model "gpt-5.6-sol"} "rs_ok" {}] [{:status :aborted} "rs_ok" {}]
+               [{} "rs_ok" {:stateless-items? true}]]
+
+              :let [opts
+                    (merge entry-opts replay-opts)]]
+
+        (let [small
+              (responses-preflight-result (context-replay-messages 0 assistant-extra reasoning-id)
+                                          opts)
+
+              large
+              (responses-preflight-result
+                (context-replay-messages 10000 assistant-extra reasoning-id)
+                opts)]
+
+          (expect (nil? (:error small)))
+          (expect (nil? (:error large)))
+          (expect (= 1 (count (:sent large))))
+          (expect (true? (= (:sent small) (:sent large))))
+          (expect (= 23 (get-in large [:response :tokens :input]))))))
+  (it "still rejects hidden reasoning retained on the wire"
+      (let [result (responses-preflight-result (context-replay-messages 10000 {} "rs_ok") {})]
+        (expect (= :svar.core/context-overflow (get-in result [:error :type])))
+        (expect (empty? (:sent result)))))
+  (it "counts tool declarations from the prepared body"
+      (let [result (responses-preflight-result
+                     [{:role "user" :content "go"}]
+                     {:tools [{:name "run"
+                               :description (apply str (repeat 2000 "description "))
+                               :schema {:type "object" :properties {}}}]})]
+        (expect (= :svar.core/context-overflow (get-in result [:error :type])))
+        (expect (empty? (:sent result)))))
+  (it "uses the final input override rather than the replaced logical messages"
+      (let [result (responses-preflight-result
+                     [{:role "user" :content (apply str (repeat 2000 "large "))}]
+                     {:extra-body {:input [{:type "message"
+                                            :role "user"
+                                            :content [{:type "input_text" :text "go"}]}]}})]
+        (expect (nil? (:error result)))
+        (expect (= 1 (count (:sent result))))))
+  (it "counts structured output-format schemas in preflight"
+      (let [result (responses-preflight-result
+                     [{:role "user" :content "go"}]
+                     {:spec preflight-answer-spec
+                      :extra-body {:text {:format {:type "json_schema"
+                                                   :name "answer"
+                                                   :schema {:type "object"
+                                                            :description (apply str
+                                                                           (repeat 2000 "schema "))
+                                                            :properties {}}}}}})]
+        (expect (= :svar.core/context-overflow (get-in result [:error :type])))
+        (expect (empty? (:sent result)))))
+  (it "reuses the prepared count when provider usage is absent"
+      (doseq [opts
+              [{} {:spec preflight-answer-spec}]
+
+              api-usage
+              [nil {}]]
+
+        (let [result (responses-preflight-result (context-replay-messages 10000 {} "not_rs")
+                                                 opts
+                                                 api-usage)]
+          (expect (nil? (:error result)))
+          (expect (= 1 (count (:sent result))))
+          (expect (= (router/count-responses-request "gpt-6-astra" (first (:sent result)))
+                     (get-in result [:response :tokens :input]))))))
+  (it "still allows callers to disable preflight and trusts provider usage"
+      (doseq [opts [{} {:spec preflight-answer-spec}]]
+        (let [result (responses-preflight-result (context-replay-messages 10000 {} "rs_ok")
+                                                 (assoc opts :check-context? false))]
+          (expect (nil? (:error result)))
+          (expect (= 1 (count (:sent result))))
+          (expect (= 23 (get-in result [:response :tokens :input])))))))
 
 (defdescribe persisted-wire-thinking-replay-test
              (it "normalizes Vis JSON-restored thinking without leaking canonical metadata"

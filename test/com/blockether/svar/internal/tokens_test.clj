@@ -525,6 +525,81 @@
 
                              (expect (< (count result) (count text)))))))
 
+(defdescribe
+  count-responses-request-test
+  ;; Blockether/vis#186: estimates consume the final wire projection, not its
+  ;; JSON envelope or logical replay metadata.
+  (it "counts native text and tool payloads with the tokenizer"
+      (let [model
+            "gpt-6-astra"
+
+            text
+            (apply str (repeat 100 "λ := x => [é, 你好]\n"))
+
+            input-count
+            (fn [item]
+              (sut/count-responses-request model {:input [item]}))]
+
+        (doseq [kind ["input_text" "output_text"]]
+          (let [message (fn [s]
+                          {:type "message" :role "user" :content [{:type kind :text s}]})]
+            (expect (= (sut/count-tokens model text)
+                       (- (input-count (message text)) (input-count (message "")))))))
+        (doseq [[kind field] [["function_call" :arguments] ["function_call_output" :output]]]
+          (let [item {:type kind :call_id "c1" :name "run"}]
+            (expect (= (sut/count-tokens model text)
+                       (- (input-count (assoc item field text))
+                          (input-count (assoc item field "")))))))))
+  (it "estimates retained reasoning without tokenizing its ciphertext"
+      (let [count-item
+            (fn [cipher summary]
+              (sut/count-responses-request "gpt-6-astra"
+                                           {:input [{:type "reasoning"
+                                                     :id "rs_ok"
+                                                     :encrypted_content cipher
+                                                     :summary [{:type "summary_text"
+                                                                :text summary}]}]}))
+
+            base
+            (count-item "" "")]
+
+        (expect (= 1713 (- (count-item (apply str (repeat 10000 "A")) "") base)))
+        (expect (= (count-item (apply str (repeat 10000 "A")) "")
+                   (count-item (apply str (repeat 10000 "B")) "brief")))
+        (expect (< 2000 (count-item "" (apply str (repeat 2000 "reasoning ")))))))
+  (it "counts input images rather than their base64 characters"
+      (let [count-image (fn [url]
+                          (sut/count-responses-request "gpt-6-astra"
+                                                       {:input [{:type "message"
+                                                                 :role "user"
+                                                                 :content [{:type "input_image"
+                                                                            :image_url url
+                                                                            :detail "low"}]}]}))]
+        (expect (= (count-image "data:image/png;base64,AA==")
+                   (count-image (str "data:image/png;base64," (apply str (repeat 10000 "A"))))))))
+  (it "includes instructions, tools and schemas, but excludes generation/cache controls"
+      (let [model
+            "gpt-6-astra"
+
+            body
+            {:input "go"}
+
+            large
+            (apply str (repeat 2000 "instruction "))
+
+            base
+            (sut/count-responses-request model body)]
+
+        (doseq [extra [{:instructions large}
+                       {:tools [{:type "function" :name "run" :description large}]}
+                       {:text {:format {:type "json_schema" :schema {:description large}}}}]]
+          (expect (< (+ base 1000) (sut/count-responses-request model (merge body extra)))))
+        (expect (= base
+                   (sut/count-responses-request model
+                                                (assoc body
+                                                  :max_output_tokens 100000
+                                                  :prompt_cache_key large)))))))
+
 ;; =============================================================================
 ;; Context Limit Check Tests
 ;; =============================================================================
