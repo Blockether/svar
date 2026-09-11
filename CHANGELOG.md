@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.167] - 2026-09-11
+
+### Changed
+- fix(tokens): expose request accounting (Blockether/vis#186)
+- release: update version files for v0.7.166, bump to next dev version
+
+
 ## [v0.7.166] - 2026-09-10
 
 ### Changed
@@ -2552,7 +2559,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.166...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.167...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2751,3 +2758,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.164]: https://github.com/Blockether/svar/releases/tag/v0.7.164
 [v0.7.165]: https://github.com/Blockether/svar/releases/tag/v0.7.165
 [v0.7.166]: https://github.com/Blockether/svar/releases/tag/v0.7.166
+[v0.7.167]: https://github.com/Blockether/svar/releases/tag/v0.7.167
