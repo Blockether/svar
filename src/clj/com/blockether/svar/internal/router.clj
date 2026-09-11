@@ -3985,14 +3985,14 @@
 
     (+ (long message-tokens) reply-priming)))
 
-(defn count-responses-request
-  "Estimate a prepared Responses request, after replay filtering and wire shaping.
+(defn responses-request-accounting
+  "Content-free estimate of a prepared Responses request, after replay filtering.
 
-   Counts input, instructions, tool declarations and output-format schemas with the
-   model tokenizer and estimated framing. Generation/cache controls are not input.
-   Opaque reasoning uses the hidden-token heuristic, never ciphertext BPE. Provider
-   usage or an exact provider counter remains authoritative."
-  ^long [^String model body]
+   Components sum to :input-tokens. Messages/instructions include their framing;
+   reply priming is charged once. Tools and output formats use their wire schemas.
+   Generation/cache controls are not input. Opaque reasoning uses the hidden-token
+   heuristic, never ciphertext BPE. Provider usage remains authoritative."
+  [^String model body]
   (let [input
         (block-field body :input)
 
@@ -4012,11 +4012,6 @@
         instructions
         (block-field body :instructions)
 
-        messages
-        (cond-> messages
-          (seq instructions)
-          (conj {:role "system" :content instructions}))
-
         encoding
         (model->encoding model)
 
@@ -4025,11 +4020,32 @@
 
         format
         (some-> (block-field body :text)
-                (block-field :format))]
+                (block-field :format))
 
-    (+ (count-messages model messages)
-       (if (seq tools) (encoded-tokens encoding (json/write-json-str tools)) 0)
-       (if (seq format) (encoded-tokens encoding (json/write-json-str format)) 0))))
+        priming
+        (count-messages model [])
+
+        components
+        {:messages (- (count-messages model messages) priming)
+         :instructions (if (seq instructions)
+                         (- (count-messages model [{:role "system" :content instructions}]) priming)
+                         0)
+         :tools (if (seq tools) (encoded-tokens encoding (json/write-json-str tools)) 0)
+         :output-format (if (seq format) (encoded-tokens encoding (json/write-json-str format)) 0)
+         :reply-priming priming}]
+
+    {:source :svar-estimate
+     :projection :prepared-request
+     :model model
+     :api-style :openai-compatible-responses
+     :input-tokens (reduce + 0 (vals components))
+     :components components}))
+
+(defn count-responses-request
+  "Estimate a prepared Responses request. See `responses-request-accounting` for
+   the component counts and their scope. Provider usage remains authoritative."
+  ^long [^String model body]
+  (long (:input-tokens (responses-request-accounting model body))))
 
 ;; =============================================================================
 ;; Cost Estimation

@@ -15,6 +15,7 @@
       'reasoning without following item', so such turns are skipped entirely."
   (:require [clojure.string :as str]
             [com.blockether.svar.core :as svar]
+            [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.llm :as sut]
             [com.blockether.svar.internal.router :as router]
             [lazytest.core :refer [defdescribe expect it]]))
@@ -493,6 +494,15 @@
 (defn- responses-preflight-result
   ([messages opts] (responses-preflight-result messages opts {:input-tokens 23 :output-tokens 1}))
   ([messages opts api-usage]
+   (responses-preflight-result
+     messages
+     opts
+     api-usage
+     (fn [_ _]
+       {:content "{\"answer\":\"ok\"}"
+        :assistant-message {:role "assistant" :content [{:type "text" :text "{\"answer\":\"ok\"}"}]}
+        :api-usage api-usage})))
+  ([messages opts _api-usage respond]
    (let [sent
          (atom [])
 
@@ -500,13 +510,9 @@
          (if (:spec opts) sut/ask!* sut/ask-code!*)
 
          result
-         (with-redefs [sut/openai-responses-completion
-                       (fn [body _opts]
-                         (swap! sent conj body)
-                         {:content "{\"answer\":\"ok\"}"
-                          :assistant-message {:role "assistant"
-                                              :content [{:type "text" :text "{\"answer\":\"ok\"}"}]}
-                          :api-usage api-usage})]
+         (with-redefs [sut/openai-responses-completion (fn [body completion-opts]
+                                                         (swap! sent conj body)
+                                                         (respond body completion-opts))]
            (try {:response (ask-fn {}
                                    (merge {:messages messages
                                            :model "gpt-6-astra"
@@ -603,6 +609,142 @@
           (expect (nil? (:error result)))
           (expect (= 1 (count (:sent result))))
           (expect (= 23 (get-in result [:response :tokens :input])))))))
+
+(defdescribe
+  responses-request-accounting-test
+  ;; Blockether/vis#186: return the final prepared count alongside, not instead of,
+  ;; the same attempt's provider usage. Never expose prompts or replay signatures.
+  (it
+    "returns content-free prepared accounting with and without preflight or usage"
+    (doseq [entry-opts
+            [{} {:spec preflight-answer-spec}]
+
+            check?
+            [true false]
+
+            usage
+            [{:input-tokens 23 :output-tokens 1} nil {}]]
+
+      (let [result
+            (responses-preflight-result (context-replay-messages 10000 {} "not_rs")
+                                        (assoc entry-opts :check-context? check?)
+                                        usage)
+
+            response
+            (:response result)
+
+            accounting
+            (:request-accounting response)
+
+            expected
+            (router/count-responses-request "gpt-6-astra" (first (:sent result)))
+
+            chunks
+            (atom [])]
+
+        (expect (nil? (:error result)))
+        (expect (= {:source :svar-estimate
+                    :projection :prepared-request
+                    :model "gpt-6-astra"
+                    :api-style :openai-compatible-responses}
+                   (select-keys accounting [:source :projection :model :api-style])))
+        (expect (= expected (:input-tokens accounting)))
+        (expect (= expected (reduce + 0 (vals (:components accounting)))))
+        (expect (= #{:input-tokens :components :source :projection :model :api-style}
+                   (set (keys accounting))))
+        (expect (= #{:messages :instructions :tools :output-format :reply-priming}
+                   (set (keys (:components accounting)))))
+        (expect (= (if (seq usage) 23 expected) (get-in response [:tokens :input])))
+        (let [streamed (responses-preflight-result (context-replay-messages 10000 {} "not_rs")
+                                                   (assoc entry-opts
+                                                     :check-context? check?
+                                                     :on-chunk #(swap! chunks conj %))
+                                                   usage)]
+          (expect (= accounting (get-in streamed [:response :request-accounting])))
+          (expect (= accounting (:request-accounting (last @chunks))))))))
+  (it "attaches the same prepared accounting to local overflow without sending"
+      (doseq [opts [{} {:spec preflight-answer-spec}]]
+        (let [result (responses-preflight-result (context-replay-messages 10000 {} "rs_ok") opts)
+              data (:error result)
+              accounting (:request-accounting data)]
+
+          (expect (= :svar.core/context-overflow (:type data)))
+          (expect (= :prepared-request (:projection accounting)))
+          (expect (= (:input-tokens data) (:input-tokens accounting)))
+          (expect (= (:input-tokens accounting) (reduce + 0 (vals (:components accounting)))))
+          (expect (empty? (:sent result))))))
+  (it "keeps each request independent across growth, model changes and a folded replay"
+      (doseq [messages
+              [(context-replay-messages 1000 {} "rs_ok") (context-replay-messages 2000 {} "rs_ok")
+               (context-replay-messages 2000 {:model "gpt-5.6-sol"} "rs_ok")
+               [{:role "system" :content "Fold checkpoint"} {:role "user" :content "Resume work"}]]]
+        (let [result (responses-preflight-result messages {:context 100000})
+              accounting (get-in result [:response :request-accounting])]
+
+          (expect (nil? (:error result)))
+          (expect (= (router/count-responses-request "gpt-6-astra" (first (:sent result)))
+                     (:input-tokens accounting)))
+          (expect (= 23 (get-in result [:response :tokens :input]))))))
+  (it "counts the healed body rather than the rejected stateful replay"
+      (doseq [opts [{} {:spec preflight-answer-spec}]]
+        (with-redefs [failure/stateless-item-hosts* (atom #{})]
+          (let [calls (atom 0)
+                result (responses-preflight-result
+                         (context-replay-messages 10000 {} "rs_ok")
+                         (assoc opts :check-context? false)
+                         nil
+                         (fn [_ _]
+                           (if (= 1 (swap! calls inc))
+                             (throw (ex-info
+                                      "Item was created under a different Azure OpenAI resource"
+                                      {:status 400}))
+                             {:content "{\"answer\":\"ok\"}"})))
+                [before after] (:sent result)
+                accounting (get-in result [:response :request-accounting])]
+
+            (expect (nil? (:error result)))
+            (expect (= 2 (count (:sent result))))
+            (expect (> (router/count-responses-request "gpt-6-astra" before)
+                       (router/count-responses-request "gpt-6-astra" after)))
+            (expect (= (router/count-responses-request "gpt-6-astra" after)
+                       (:input-tokens accounting)
+                       (get-in result [:response :tokens :input])))))))
+  (it "attaches the final prepared count to provider context rejection"
+      (doseq [opts [{} {:spec preflight-answer-spec}]]
+        (let [result (responses-preflight-result
+                       (context-replay-messages 1000 {} "rs_ok")
+                       opts
+                       nil
+                       (fn [_ _]
+                         (throw (ex-info "Context length exceeded"
+                                         {:type :svar.core/context-overflow :status 400}))))]
+          (expect (= :svar.core/context-overflow (get-in result [:error :type])))
+          (expect (= 1 (count (:sent result))))
+          (expect (= (router/count-responses-request "gpt-6-astra" (first (:sent result)))
+                     (get-in result [:error :request-accounting :input-tokens]))))))
+  (it "counts the final structured repair request, not the first attempt"
+      (let [calls
+            (atom 0)
+
+            result
+            (responses-preflight-result [{:role "user" :content "Answer"}]
+                                        {:spec preflight-answer-spec :format-retries 1}
+                                        nil
+                                        (fn [_ _]
+                                          {:content (if (= 1 (swap! calls inc))
+                                                      "I need to consider the answer."
+                                                      "{\"answer\":\"ok\"}")}))
+
+            [before after]
+            (:sent result)]
+
+        (expect (nil? (:error result)))
+        (expect (= 2 (count (:sent result))))
+        (expect (< (router/count-responses-request "gpt-6-astra" before)
+                   (router/count-responses-request "gpt-6-astra" after)))
+        (expect (= (router/count-responses-request "gpt-6-astra" after)
+                   (get-in result [:response :request-accounting :input-tokens])
+                   (get-in result [:response :tokens :input]))))))
 
 (defdescribe persisted-wire-thinking-replay-test
              (it "normalizes Vis JSON-restored thinking without leaking canonical metadata"

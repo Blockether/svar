@@ -5,6 +5,7 @@
             [com.blockether.svar.core :as svar]
             [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.llm :as sut]
+            [com.blockether.svar.internal.router :as router]
             [lazytest.core :refer [defdescribe expect it]])
   (:import (java.net.http WebSocket)
            (java.util.concurrent CompletableFuture CountDownLatch TimeUnit TimeoutException)))
@@ -184,32 +185,44 @@
 
 (defdescribe
   codex-responses-session-test
-  (it "continues a second turn with only its delta and previous response id"
-      (let [events
-            (atom [(completed-event "resp_1" "first") (completed-event "resp_2" "second")])
+  (it
+    "continues a second turn with only its delta and previous response id"
+    (let [events
+          (atom [(completed-event "resp_1" "first") (completed-event "resp_2" "second")])
 
-            sent
-            (atom [])
+          sent
+          (atom [])
 
-            closes
-            (atom 0)]
+          closes
+          (atom 0)]
 
-        (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
-          (with-open [session (open-test-session (codex-router)
-                                                 {:routing {:provider :openai-codex
-                                                            :model "gpt-5.6"}})]
-            (expect (= "first" (:content (svar/ask! session "one"))))
-            (expect (= "second" (:content (svar/ask! session "two"))))
-            (let [[first-request second-request] @sent]
-              (expect (= "response.create" (:type first-request)))
-              (expect (true? (:stream first-request)))
-              (expect (nil? (:previous_response_id first-request)))
-              (expect (string? (:prompt_cache_key first-request)))
-              (expect (= (:prompt_cache_key first-request) (:prompt_cache_key second-request)))
-              (expect (= "resp_1" (:previous_response_id second-request)))
-              (expect (= 1 (count (:input second-request))))
-              (expect (= "two" (get-in second-request [:input 0 :content 0 :text])))))
-          (expect (= 1 @closes)))))
+      (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
+        (with-open [session (open-test-session (codex-router)
+                                               {:routing {:provider :openai-codex
+                                                          :model "gpt-5.6"}})]
+          (let [first-result (svar/ask! session "one")
+                second-result (svar/ask! session "two")
+                [first-request second-request] @sent]
+
+            (expect (= "first" (:content first-result)))
+            (expect (= "second" (:content second-result)))
+            ;; Blockether/vis#186: context accounting includes server-retained
+            ;; history, not just the WebSocket delta. Usage remains independent.
+            (expect (= (router/count-responses-request "gpt-5.6" first-request)
+                       (get-in first-result [:request-accounting :input-tokens])))
+            (expect (< (router/count-responses-request "gpt-5.6" second-request)
+                       (get-in second-result [:request-accounting :input-tokens])))
+            (expect (= "gpt-5.6" (get-in second-result [:request-accounting :model])))
+            (expect (= 10 (get-in second-result [:tokens :input])))
+            (expect (= "response.create" (:type first-request)))
+            (expect (true? (:stream first-request)))
+            (expect (nil? (:previous_response_id first-request)))
+            (expect (string? (:prompt_cache_key first-request)))
+            (expect (= (:prompt_cache_key first-request) (:prompt_cache_key second-request)))
+            (expect (= "resp_1" (:previous_response_id second-request)))
+            (expect (= 1 (count (:input second-request))))
+            (expect (= "two" (get-in second-request [:input 0 :content 0 :text])))))
+        (expect (= 1 @closes)))))
   (it
     "rotates an aged socket and replays canonical history with the same cache key"
     (let [opens

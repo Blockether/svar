@@ -3145,17 +3145,17 @@
                 text-format
                 (dissoc :text)))))))
 
-(defn- responses-input-tokens
+(defn- responses-accounting
   "Count the same prepared Responses projection as transport. Other wires retain
    their existing local estimate/provider-counter policy."
   [messages model {:keys [api-style base-url extra-body] :as opts}]
   (when (= :openai-compatible-responses api-style)
-    (router/count-responses-request model
-                                    (build-openai-responses-request-body
-                                      messages
-                                      model
-                                      extra-body
-                                      (responses-build-options base-url opts)))))
+    (router/responses-request-accounting model
+                                         (build-openai-responses-request-body
+                                           messages
+                                           model
+                                           extra-body
+                                           (responses-build-options base-url opts)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Google Gemini wire — generateContent / streamGenerateContent
@@ -7136,17 +7136,25 @@
                         :first-byte-timeout-ms first-byte-timeout-ms
                         :idle-timeout-ms idle-timeout-ms
                         :semantic-timeout-ms semantic-timeout-ms
-                        :on-chunk on-chunk}]
+                        :on-chunk on-chunk}
 
-                   (if (and *responses-session-transport* (= :openai-codex provider-id))
-                     (*responses-session-transport*
-                       request-body
-                       completion-opts
-                       (fn [session-headers]
-                         (openai-responses-completion
-                           request-body
-                           (update completion-opts :headers merge session-headers))))
-                     (openai-responses-completion request-body completion-opts))))
+                       accounting
+                       (router/responses-request-accounting model request-body)]
+
+                   (try (assoc (if (and *responses-session-transport* (= :openai-codex provider-id))
+                                 (*responses-session-transport*
+                                   request-body
+                                   completion-opts
+                                   (fn [session-headers]
+                                     (openai-responses-completion
+                                       request-body
+                                       (update completion-opts :headers merge session-headers))))
+                                 (openai-responses-completion request-body completion-opts))
+                          :request-accounting accounting)
+                        (catch clojure.lang.ExceptionInfo e
+                          (throw (ex-info (ex-message e)
+                                          (assoc (ex-data e) :request-accounting accounting)
+                                          e))))))
 
                ;; Two payload capabilities are sticky per host. Stateless replay:
                ;; an explicit provider opt, or a host that already rejected a
@@ -8193,16 +8201,19 @@
             (not (contains? caller-extra-body :response_format)))
        (assoc :response_format {:type "json_object"}))
 
-     ;; Pre-flight context check (also counts input tokens for reuse)
+     ;; Pre-flight and transport share the prepared accounting implementation.
+     preflight-accounting
+     (when check-context?
+       (responses-accounting base-messages
+                             model
+                             (assoc opts
+                               :api-style api-style
+                               :base-url base-url
+                               :extra-body extra-body)))
+
      check-opts
      (cond-> {:context-limits context-limits
-              :input-tokens (when check-context?
-                              (responses-input-tokens base-messages
-                                                      model
-                                                      (assoc opts
-                                                        :api-style api-style
-                                                        :base-url base-url
-                                                        :extra-body extra-body)))
+              :input-tokens (:input-tokens preflight-accounting)
               :exact-count-fn (anthropic-exact-count-fn base-messages
                                                         model
                                                         {:api-style api-style
@@ -8218,15 +8229,18 @@
        (let [check (router/check-context-limit model base-messages check-opts)]
          (when-not (:ok? check)
            (anomaly/incorrect! (:error check)
-                               {:type :svar.core/context-overflow
-                                :model model
-                                :input-tokens (:input-tokens check)
-                                :max-input-tokens (:max-input-tokens check)
-                                :overflow (:overflow check)
-                                :utilization (:utilization check)
-                                :suggestion (str "Reduce task content by ~"
-                                                 (int (* (double (:overflow check)) 0.75))
-                                                 " words, " "or use a larger context model.")}))
+                               (cond-> {:type :svar.core/context-overflow
+                                        :model model
+                                        :input-tokens (:input-tokens check)
+                                        :max-input-tokens (:max-input-tokens check)
+                                        :overflow (:overflow check)
+                                        :utilization (:utilization check)
+                                        :suggestion (str "Reduce task content by ~"
+                                                         (int (* (double (:overflow check)) 0.75))
+                                                         " words, "
+                                                         "or use a larger context model.")}
+                                 preflight-accounting
+                                 (assoc :request-accounting preflight-accounting))))
          check))
 
      ;; API call - streaming if :on-chunk provided
@@ -8316,8 +8330,8 @@
 
      do-attempt
      (fn do-attempt [msgs attempt-n]
-       (let [[{:keys [content reasoning provider-state api-usage http-response stream-finalization]}
-              attempt-duration-ms]
+       (let [[{:keys [content reasoning provider-state api-usage http-response stream-finalization
+                      request-accounting]} attempt-duration-ms]
              (util/with-elapsed (chat-completion msgs model api-key chat-url retry-opts))
 
              stream-finalization
@@ -8395,6 +8409,7 @@
                    stop-details
                    (assoc :stop-details stop-details))))))
          {:content content
+          :request-accounting request-accounting
           :reasoning reasoning
           :provider-state provider-state
           :api-usage api-usage
@@ -8446,19 +8461,21 @@
 
             ;; If HTTP succeeded, attempt the parse. Bind envelope first so
             ;; it's in scope for both success and parse-failure branches.
-            {:keys [content reasoning provider-state api-usage http-response duration-ms]}
+            {:keys [content reasoning provider-state api-usage http-response duration-ms
+                    request-accounting]}
             http-outcome
 
             parse-outcome
             (when (:ok? http-outcome)
-              (try (let [token-stats
-                         (router/count-and-estimate
-                           model
-                           msgs
-                           content
-                           (cond-> {:pricing pricing :api-usage api-usage :api-style api-style}
-                             context-check
-                             (assoc :input-tokens (:input-tokens context-check))))]
+              (try (let [token-stats (router/count-and-estimate
+                                       model
+                                       msgs
+                                       content
+                                       {:pricing pricing
+                                        :api-usage api-usage
+                                        :api-style api-style
+                                        :input-tokens (or (:input-tokens request-accounting)
+                                                          (:input-tokens context-check))})]
                      {:ok? true
                       :result (spec/str->data-with-spec content spec)
                       :token-stats token-stats})
@@ -8545,17 +8562,22 @@
                                  :api-usage api-usage
                                  :duration-ms duration-ms})
             (when on-chunk
-              (on-chunk {:result final-result
-                         :reasoning reasoning
-                         :provider-state provider-state
-                         :tokens (token-stats->tokens token-stats)
-                         :cost (select-keys (:cost cost-stats)
-                                            [:input-cost :output-cost :total-cost])
-                         :done? true}))
+              (on-chunk (cond-> {:result final-result
+                                 :reasoning reasoning
+                                 :provider-state provider-state
+                                 :tokens (token-stats->tokens token-stats)
+                                 :cost (select-keys (:cost cost-stats)
+                                                    [:input-cost :output-cost :total-cost])
+                                 :done? true}
+                          request-accounting
+                          (assoc :request-accounting request-accounting))))
             (cond-> {:result final-result
                      :tokens (token-stats->tokens token-stats)
                      :cost (select-keys (:cost cost-stats) [:input-cost :output-cost :total-cost])
                      :duration-ms duration-ms}
+              request-accounting
+              (assoc :request-accounting request-accounting)
+
               reasoning
               (assoc :reasoning reasoning)
 
@@ -8966,15 +8988,18 @@
        tool-choice
        (assoc :svar/tool-choice tool-choice))
 
+     preflight-accounting
+     (when check-context?
+       (responses-accounting in-msgs
+                             model
+                             (assoc opts
+                               :api-style api-style
+                               :base-url base-url
+                               :extra-body extra-body)))
+
      check-opts
      (cond-> {:context-limits context-limits
-              :input-tokens (when check-context?
-                              (responses-input-tokens in-msgs
-                                                      model
-                                                      (assoc opts
-                                                        :api-style api-style
-                                                        :base-url base-url
-                                                        :extra-body extra-body)))
+              :input-tokens (:input-tokens preflight-accounting)
               :exact-count-fn (anthropic-exact-count-fn in-msgs
                                                         model
                                                         {:api-style api-style
@@ -8990,15 +9015,18 @@
        (let [check (router/check-context-limit model in-msgs check-opts)]
          (when-not (:ok? check)
            (anomaly/incorrect! (:error check)
-                               {:type :svar.core/context-overflow
-                                :model model
-                                :input-tokens (:input-tokens check)
-                                :max-input-tokens (:max-input-tokens check)
-                                :overflow (:overflow check)
-                                :utilization (:utilization check)
-                                :suggestion (str "Reduce task content by ~"
-                                                 (int (* (double (:overflow check)) 0.75))
-                                                 " words, " "or use a larger context model.")}))
+                               (cond-> {:type :svar.core/context-overflow
+                                        :model model
+                                        :input-tokens (:input-tokens check)
+                                        :max-input-tokens (:max-input-tokens check)
+                                        :overflow (:overflow check)
+                                        :utilization (:utilization check)
+                                        :suggestion (str "Reduce task content by ~"
+                                                         (int (* (double (:overflow check)) 0.75))
+                                                         " words, "
+                                                         "or use a larger context model.")}
+                                 preflight-accounting
+                                 (assoc :request-accounting preflight-accounting))))
          check))
 
      streaming-on-chunk
@@ -9131,7 +9159,7 @@
 
      {:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
              rate-limits stream-finalization duration-ms empty-reply-resends
-             empty-reply-resend-usage]}
+             empty-reply-resend-usage request-accounting]}
      (call-with-empty-reply-resend
        {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
        send-once!)]
@@ -9146,7 +9174,8 @@
                                      {:pricing pricing
                                       :api-usage api-usage
                                       :api-style api-style
-                                      :input-tokens (:input-tokens context-check)})
+                                      :input-tokens (or (:input-tokens request-accounting)
+                                                        (:input-tokens context-check))})
 
           ;; Burned empty-reply re-sends are billed by the provider - cost is
           ;; recomputed over the SUMMED usage so :cost stays honest, while
@@ -9181,14 +9210,16 @@
                            :api-usage api-usage
                            :duration-ms duration-ms})
       (when on-chunk
-        (on-chunk {:content content
-                   :reasoning reasoning
-                   :tool-calls tool-calls
-                   :stop-reason stop-reason
-                   :provider-state provider-state
-                   :tokens tokens
-                   :cost cost
-                   :done? true}))
+        (on-chunk (cond-> {:content content
+                           :reasoning reasoning
+                           :tool-calls tool-calls
+                           :stop-reason stop-reason
+                           :provider-state provider-state
+                           :tokens tokens
+                           :cost cost
+                           :done? true}
+                    request-accounting
+                    (assoc :request-accounting request-accounting))))
       (cond-> {:stop-reason stop-reason
                :tool-calls tool-calls
                :content content
@@ -9196,6 +9227,9 @@
                :cost cost
                :duration-ms duration-ms
                :prompt-cache-context cache-context}
+        request-accounting
+        (assoc :request-accounting request-accounting)
+
         reasoning
         (assoc :reasoning reasoning)
 

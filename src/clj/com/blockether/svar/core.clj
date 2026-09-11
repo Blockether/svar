@@ -29,13 +29,17 @@
 ;; =============================================================================
 
 (def make-router "Creates a router from a vector of provider maps." llm/make-router)
+
 (def router-stats "Returns cumulative + windowed stats for the router." llm/router-stats)
+
 (defn prompt-cache-status
   "Returns Svar-owned, route-local provider prompt-cache telemetry."
   ([router] (llm/prompt-cache-status router))
   ([router cache-scope provider-id model]
    (llm/prompt-cache-status router cache-scope provider-id model)))
+
 (def reset-budget! "Resets the router's token/cost budget counters to zero." llm/reset-budget!)
+
 (def reset-provider! "Manually resets a provider's circuit breaker to :closed." llm/reset-provider!)
 
 ;; =============================================================================
@@ -84,12 +88,19 @@
 ;; =============================================================================
 
 (def field "Creates a field definition for a spec." spec/field)
+
 (def spec "Creates a spec definition from field definitions." spec/spec)
+
 (def build-ref-registry "Builds a registry of referenced specs." spec/build-ref-registry)
+
 (def str->data "Parses LLM response string to Clojure data." spec/str->data)
+
 (def str->data-with-spec "Parses LLM response with spec validation." spec/str->data-with-spec)
+
 (def data->str "Serializes Clojure data to LLM-compatible string." spec/data->str)
+
 (def validate-data "Validates parsed data against a spec." spec/validate-data)
+
 (def spec->prompt "Generates LLM prompt from a spec." spec/spec->prompt)
 
 ;; =============================================================================
@@ -97,23 +108,38 @@
 ;; =============================================================================
 
 (def NAME "Field option: Field name as Datomic-style keyword." ::spec/name)
+
 (def TYPE "Field option: Field type." ::spec/type)
+
 (def CARDINALITY "Field option: Field cardinality." ::spec/cardinality)
+
 (def DESCRIPTION "Field option: Human-readable field description." ::spec/description)
+
 (def REQUIRED "Field option: Whether field is required (default: true)." ::spec/required)
+
 (def VALUES "Field option: Enum values as map {value description}." ::spec/values)
+
 (def TARGET "Field option: Reference target for :spec.type/ref fields." ::spec/target)
+
 (def UNION "Field option: Set of allowed nil types." ::spec/union)
+
 (def KEY-NS "Spec option: Namespace prefix to add to keys during parsing." ::spec/key-ns)
 
 ;; Base types
 (def TYPE_STRING "Type: String value." :spec.type/string)
+
 (def TYPE_INT "Type: Integer value." :spec.type/int)
+
 (def TYPE_FLOAT "Type: Floating point value." :spec.type/float)
+
 (def TYPE_BOOL "Type: Boolean value." :spec.type/bool)
+
 (def TYPE_DATE "Type: ISO date (YYYY-MM-DD)." :spec.type/date)
+
 (def TYPE_DATETIME "Type: ISO datetime." :spec.type/datetime)
+
 (def TYPE_REF "Type: Reference to another spec." :spec.type/ref)
+
 (def TYPE_KEYWORD "Type: Clojure keyword." :spec.type/keyword)
 
 ;; Fixed-size vector types (generated — 36 defs for INT/STRING/DOUBLE × 1..12)
@@ -136,6 +162,7 @@
 
 ;; Cardinality
 (def CARDINALITY_ONE "Cardinality: Single value." :spec.cardinality/one)
+
 (def CARDINALITY_MANY "Cardinality: Vector of values." :spec.cardinality/many)
 
 ;; =============================================================================
@@ -143,17 +170,23 @@
 ;; =============================================================================
 
 (def image "Creates an image attachment for use with `user` messages." llm/image)
+
 (def system "Creates a system message." llm/system)
+
 (def user "Creates a user message, optionally with images." llm/user)
+
 (def assistant "Creates an assistant message." llm/assistant)
+
 (def cached
   "Wraps text in a cacheable content block. Anthropic emits `cache_control`.
    GPT-5.6+ Responses emits explicit prompt-cache breakpoints, including a
    rolling prior-turn boundary; older OpenAI-compatible styles strip the marker."
   llm/cached)
+
 (def prompt-cache-context
   "Returns Svar's opaque fixed-prefix/cache-namespace identity for routed tool calls."
   llm/prompt-cache-context)
+
 (def open-session
   "Opens a sequential LLM session. OpenAI Codex uses a persistent Responses
    WebSocket and server continuation, with no default request byte ceiling.
@@ -162,25 +195,46 @@
    Smaller replays can re-enter WebSocket. Close the session with
    `close-session!` or `with-open`."
   llm/open-session)
+
 (def close-session!
   "Closes an explicit LLM session; active transport aborts, idle transport closes gracefully. Idempotent."
   llm/close-session!)
+
 (def session-history "Returns an explicit session's canonical replay history." llm/session-history)
+
 (def session-status
   "Returns provider-safe transport telemetry for an explicit session."
   llm/session-status)
+
 (def ask!
-  "Asks the LLM and returns structured Clojure data with token usage and cost. With
-   an explicit session, appends one native completion turn; `{:history [...]}`
+  "Asks the LLM and returns structured Clojure data with token usage and cost.
+   Responses calls also return :request-accounting; see `ask-code!`.
+   With an explicit session, appends one native completion turn; `{:history [...]}`
    replaces canonical history while retaining the physical provider connection."
   llm/ask!)
+
 (def ask-code!
   "Native tool-calling completion. Sibling of `ask!` (structured `:spec`).
    The model takes action by calling a `:tool`; no tool call ⇒ its text is the
    final answer (`:stop-reason :end`). Returns {:stop-reason :tool-calls|:end
    :tool-calls :content :assistant-message :reasoning :tokens :cost :duration-ms
    :rate-limit :prompt-cache-context}. `:rate-limit` (when the provider sent quota
-   headers) carries `{:resets-at-ms <epoch-ms> :remaining :limit :windows}` — the
-   effective reset clock a status view can render."
+   headers) carries `{:resets-at-ms <epoch-ms> :remaining :limit :windows}`.
+
+   Responses calls also return content-free :request-accounting on the result and
+   final :on-chunk callback, even with :check-context? false or missing usage:
+   {:source :svar-estimate :projection :prepared-request :model <actual model>
+    :api-style :openai-compatible-responses :input-tokens N
+    :components {:messages N :instructions N :tools N :output-format N :reply-priming N}}.
+   Components sum to :input-tokens; messages/instructions include their framing.
+   Counts cover the final attempt after replay filtering, tool shaping and body
+   overrides, not discarded retries. For WebSocket continuation this is the full
+   prepared context, not just the transmitted delta. Preflight and provider
+   context-overflow ex-data carry the rejected request's :request-accounting.
+   Other API styles omit it. No prompt, tool payload, signature or credential is
+   included. Text/schema tokens use the model tokenizer; images, opaque reasoning
+   and framing remain estimates. Provider usage (including cached input) stays
+   authoritative; this API neither rescales usage nor sums retries."
   llm/ask-code!)
+
 (def models! "Fetches available models from the LLM API." llm/models!)
