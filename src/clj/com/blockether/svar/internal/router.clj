@@ -2819,14 +2819,18 @@
    that defeats user cancellation (Vis `Esc`), turning an explicit
    abort into another retry slot. The `catch Exception` clauses below
    call this first so cancellation walks the stack cleanly instead of
-   being mistaken for a transient provider failure."
+   being mistaken for a transient provider failure. Typed stream watchdogs
+   have already consumed their transport interrupt; their historical cause
+   must not re-arm it. A currently pending interrupt still wins over a timeout."
   [^Throwable e]
-  (when (or (instance? InterruptedException e)
-            (some #(instance? InterruptedException %)
-                  (take-while some?
-                              (iterate (fn [^Throwable t]
-                                         (.getCause t))
-                                       (.getCause e)))))
+  (when (or (.isInterrupted (Thread/currentThread))
+            (and (not (stream-watchdog-error? e))
+                 (or (instance? InterruptedException e)
+                     (some #(instance? InterruptedException %)
+                           (take-while some?
+                                       (iterate (fn [^Throwable t]
+                                                  (.getCause t))
+                                                (.getCause e)))))))
     ;; Restore interrupt status — we caught it once; the next blocking
     ;; call up the stack should see the flag again so its own
     ;; cancellation paths fire.
@@ -3466,7 +3470,8 @@
                                        (assoc :status (:status te-data))
 
                                        (and single? (:body te-data))
-                                       (assoc :body (:body te-data))))))))))))))
+                                       (assoc :body (:body te-data)))
+                                     te)))))))))))
 
 ;; =============================================================================
 ;; Router creation

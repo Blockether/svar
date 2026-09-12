@@ -374,39 +374,42 @@
   with-provider-fallback-stream-watchdog-test
   "Stream watchdogs already spent their wait budget. Route to the next provider
    immediately and visibly instead of multiplying the stall with hidden local retries."
-  (it "falls back once for TTFT, idle, and semantic watchdogs"
-      (doseq [timeout-type [:svar.core/stream-ttft-timeout :svar.core/stream-idle-timeout
-                            :svar.core/stream-semantic-timeout]]
-        (let [[clock _] (mock-clock)
-              r (llm/make-router
-                  [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
-                   {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
-                  {:clock clock
-                   :failure-threshold 1
-                   :rate-limit {:same-provider-delays-ms [0 0] :fallback-after-ms 1000}})
-              calls (atom [])
-              live (atom [])
-              result (router/with-provider-fallback r
-                                                    {:on-chunk #(swap! live conj %)}
-                                                    (fn [provider _model]
-                                                      (swap! calls conj (:id provider))
-                                                      (case (:id provider)
-                                                        :p1
-                                                        (throw (ex-info "stream watchdog fired"
-                                                                        {:type timeout-type
-                                                                         :stream? true
-                                                                         :content-acc-len 0
-                                                                         :reasoning-acc-len 0}))
+  (it
+    "falls back once for TTFT, idle, and semantic watchdogs"
+    (doseq [timeout-type [:svar.core/stream-ttft-timeout :svar.core/stream-idle-timeout
+                          :svar.core/stream-semantic-timeout]]
+      (let [[clock _] (mock-clock)
+            r (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                                {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                               {:clock clock
+                                :failure-threshold 1
+                                :rate-limit {:same-provider-delays-ms [0 0]
+                                             :fallback-after-ms 1000}})
+            calls (atom [])
+            live (atom [])
+            result (router/with-provider-fallback r
+                                                  {:on-chunk #(swap! live conj %)}
+                                                  (fn [provider _model]
+                                                    (swap! calls conj (:id provider))
+                                                    (case (:id provider)
+                                                      :p1
+                                                      (throw (ex-info "stream watchdog fired"
+                                                                      {:type timeout-type
+                                                                       :stream? true
+                                                                       :content-acc-len 0
+                                                                       :reasoning-acc-len 0}
+                                                                      (InterruptedException.
+                                                                        "watchdog")))
 
-                                                        :p2
-                                                        (success-result 100))))
-              trace (:routed/trace result)]
+                                                      :p2
+                                                      (success-result 100))))
+            trace (:routed/trace result)]
 
-          (expect (= [:p1 :p2] @calls))
-          (expect (= :p2 (:routed/provider-id result)))
-          (expect (= [:llm.routing/provider-fallback] (mapv :event/type trace)))
-          (expect (= :stream-timeout (get-in trace [0 :reason])))
-          (expect (= [:llm.routing/provider-fallback] (mapv :event/type @live))))))
+        (expect (= [:p1 :p2] @calls))
+        (expect (= :p2 (:routed/provider-id result)))
+        (expect (= [:llm.routing/provider-fallback] (mapv :event/type trace)))
+        (expect (= :stream-timeout (get-in trace [0 :reason])))
+        (expect (= [:llm.routing/provider-fallback] (mapv :event/type @live))))))
   ;; Regression, vis session 907a20a8-877c-4395-9cba-1450317dbd38: a reasoning-phase stall
   ;; crossed straight to provider fallback, so the only provider able to serve the
   ;; request never got the replay the watchdog had just made safe. The turn died 816 s
@@ -497,7 +500,8 @@
               calls (atom [])
               failure (ex-info
                         "stream watchdog fired after output"
-                        {:type timeout-type :stream? true :content-acc-len 1 :reasoning-acc-len 0})
+                        {:type timeout-type :stream? true :content-acc-len 1 :reasoning-acc-len 0}
+                        (InterruptedException. "watchdog"))
               caught (try (router/with-provider-fallback r
                                                          {}
                                                          (fn [provider _model]
@@ -2639,6 +2643,7 @@
                                                        :optimize :cost
                                                        :exclude-models #{"seer-mini"
                                                                          "seer-max"}})))))))
+
 ;; =============================================================================
 ;; Provider-scoped capabilities
 ;; =============================================================================

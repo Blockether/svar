@@ -6125,71 +6125,37 @@
 
         response
         (try
-          (with-http-client-heal (fn [client]
-                                   (http/post url
-                                              {:client client
-                                               ;; STREAMING PIN - never let the transport compress an
-                                               ;; SSE body. babashka.http-client's defaults advertise
-                                               ;; `accept-encoding: gzip, deflate` and wrap the body in
-                                               ;; a GZIPInputStream; a gzip stream cannot yield its
-                                               ;; first line until a whole deflate block is buffered,
-                                               ;; so upstreams that honour it (api.anthropic.com does)
-                                               ;; turn a live token stream into one burst at the end.
-                                               :headers (assoc headers "accept-encoding" "identity")
-                                               :body (json/write-json-str body)
-                                               :timeout timeout-ms
-                                               :as :stream})))
-          (catch clojure.lang.ExceptionInfo e
-            ;; If the TTFT watchdog fired, the interrupt may
-            ;; surface as ExceptionInfo wrapping IOException.
-            ;; Reclassify before propagating; otherwise convert
-            ;; InputStream body to string and re-throw as today.
-            (when @cancel-fired?
-              (Thread/interrupted)
-              (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                              {:type :svar.core/stream-cancelled :stream? true :url url}
-                              e)))
-            (if @ttft-fired?
-              (do
-                ;; Consume any leftover interrupt so we don't
-                ;; poison unrelated code further up the stack.
+          (try
+            (with-http-client-heal (fn [client]
+                                     (http/post url
+                                                {:client client
+                                                 ;; STREAMING PIN - never let the transport compress an
+                                                 ;; SSE body. babashka.http-client's defaults advertise
+                                                 ;; `accept-encoding: gzip, deflate` and wrap the body in
+                                                 ;; a GZIPInputStream; a gzip stream cannot yield its
+                                                 ;; first line until a whole deflate block is buffered,
+                                                 ;; so upstreams that honour it (api.anthropic.com does)
+                                                 ;; turn a live token stream into one burst at the end.
+                                                 :headers (assoc headers
+                                                            "accept-encoding" "identity")
+                                                 :body (json/write-json-str body)
+                                                 :timeout timeout-ms
+                                                 :as :stream})))
+            (catch clojure.lang.ExceptionInfo e
+              ;; If the TTFT watchdog fired, the interrupt may
+              ;; surface as ExceptionInfo wrapping IOException.
+              ;; Reclassify before propagating; otherwise convert
+              ;; InputStream body to string and re-throw as today.
+              (when @cancel-fired?
                 (Thread/interrupted)
-                (trove/log! {:level :warn
-                             :id ::stream-ttft-timeout
-                             :data (log-data {:url url :ttft-timeout-ms ttft-timeout-ms})
-                             :msg "TTFT timeout, no headers received"})
-                (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
-                                     "ms with no response headers): " (ex-message e))
-                                {:type :svar.core/stream-ttft-timeout
-                                 :stream? true
-                                 :url url
-                                 :ttft-timeout-ms ttft-timeout-ms
-                                 :cause-class (.getName (class e))}
+                (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                                {:type :svar.core/stream-cancelled :stream? true :url url}
                                 e)))
-              (if (connection-error? e)
-                (throw (connection-error->ex-info e url))
-                (let [ed
-                      (ex-data e)
-
-                      body-str
-                      (when (instance? java.io.InputStream (:body ed))
-                        (slurp-input-stream (:body ed)))]
-
-                  (throw (ex-info (ex-message e)
-                                  (cond-> (dissoc ed :body)
-                                    body-str
-                                    (assoc :body body-str))
-                                  (ex-cause e)))))))
-          (catch java.io.IOException e
-            ;; Same reclassification for raw IOExceptions (the
-            ;; JDK may surface InterruptedIOException here).
-            (when @cancel-fired?
-              (Thread/interrupted)
-              (throw (ex-info "Stream cancelled by caller (pre-headers)."
-                              {:type :svar.core/stream-cancelled :stream? true :url url}
-                              e)))
-            (if @ttft-fired?
-              (do (Thread/interrupted)
+              (if @ttft-fired?
+                (do
+                  ;; Consume any leftover interrupt so we don't
+                  ;; poison unrelated code further up the stack.
+                  (Thread/interrupted)
                   (trove/log! {:level :warn
                                :id ::stream-ttft-timeout
                                :data (log-data {:url url :ttft-timeout-ms ttft-timeout-ms})
@@ -6202,26 +6168,68 @@
                                    :ttft-timeout-ms ttft-timeout-ms
                                    :cause-class (.getName (class e))}
                                   e)))
-              (if (connection-error? e) (throw (connection-error->ex-info e url)) (throw e))))
-          (catch InterruptedException e
-            ;; The JDK `HttpClient.send` is declared
-            ;; `throws InterruptedException` and CAN surface the
-            ;; caller interrupt RAW (unwrapped) — our TTFT/cancel
-            ;; watchdog lever, or a genuinely external interrupt.
-            ;; Neither the ExceptionInfo nor the IOException clause
-            ;; above catches it, so without this it escapes as a BARE
-            ;; `InterruptedException` — which downstream retry layers
-            ;; mistake for a spurious blip and re-send, doubling the
-            ;; effective stall. Reclassify OUR OWN watchdog fires into
-            ;; the same typed errors as the wrapped paths; propagate a
-            ;; genuinely external interrupt verbatim (flag restored).
-            (reclassify-pre-headers-interrupt! e cancel-fired? ttft-fired? url ttft-timeout-ms))
-          (finally
-            ;; Order matters: flip the flag BEFORE deregistering so
-            ;; a racing tick sees the success and never fires. Then
-            ;; deregister so the shared scheduler drops this check.
-            (reset! headers-received? true)
-            (deregister-watchdog! ttft-watchdog)))
+                (if (connection-error? e)
+                  (throw (connection-error->ex-info e url))
+                  (let [ed
+                        (ex-data e)
+
+                        body-str
+                        (when (instance? java.io.InputStream (:body ed))
+                          (slurp-input-stream (:body ed)))]
+
+                    (throw (ex-info (ex-message e)
+                                    (cond-> (dissoc ed :body)
+                                      body-str
+                                      (assoc :body body-str))
+                                    (ex-cause e)))))))
+            (catch java.io.IOException e
+              ;; Same reclassification for raw IOExceptions (the
+              ;; JDK may surface InterruptedIOException here).
+              (when @cancel-fired?
+                (Thread/interrupted)
+                (throw (ex-info "Stream cancelled by caller (pre-headers)."
+                                {:type :svar.core/stream-cancelled :stream? true :url url}
+                                e)))
+              (if @ttft-fired?
+                (do (Thread/interrupted)
+                    (trove/log! {:level :warn
+                                 :id ::stream-ttft-timeout
+                                 :data (log-data {:url url :ttft-timeout-ms ttft-timeout-ms})
+                                 :msg "TTFT timeout, no headers received"})
+                    (throw (ex-info (str "Stream TTFT timeout (" ttft-timeout-ms
+                                         "ms with no response headers): " (ex-message e))
+                                    {:type :svar.core/stream-ttft-timeout
+                                     :stream? true
+                                     :url url
+                                     :ttft-timeout-ms ttft-timeout-ms
+                                     :cause-class (.getName (class e))}
+                                    e)))
+                (if (connection-error? e) (throw (connection-error->ex-info e url)) (throw e))))
+            (catch InterruptedException e
+              ;; The JDK `HttpClient.send` is declared
+              ;; `throws InterruptedException` and CAN surface the
+              ;; caller interrupt RAW (unwrapped) — our TTFT/cancel
+              ;; watchdog lever, or a genuinely external interrupt.
+              ;; Neither the ExceptionInfo nor the IOException clause
+              ;; above catches it, so without this it escapes as a BARE
+              ;; `InterruptedException` — which downstream retry layers
+              ;; mistake for a spurious blip and re-send, doubling the
+              ;; effective stall. Reclassify OUR OWN watchdog fires into
+              ;; the same typed errors as the wrapped paths; propagate a
+              ;; genuinely external interrupt verbatim (flag restored).
+              (reclassify-pre-headers-interrupt! e cancel-fired? ttft-fired? url ttft-timeout-ms))
+            (finally
+              ;; Order matters: flip the flag BEFORE deregistering so
+              ;; a racing tick sees the success and never fires. Then
+              ;; deregister so the shared scheduler drops this check.
+              (reset! headers-received? true)
+              (deregister-watchdog! ttft-watchdog)))
+          (catch Throwable error
+            ;; No body-reader finally runs when acquiring headers fails. Retire
+            ;; the cancellation poll before returning this abandoned request.
+            (reset! cancel-alive? false)
+            (deregister-watchdog! cancel-watchdog)
+            (throw error)))
 
         _
         (mark-connection-healthy! url)
