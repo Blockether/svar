@@ -628,7 +628,7 @@
         (doseq [model ["gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]]
           (expect (= :openai-compatible-responses (:api-style (get by-name model))))
           (expect (= :openai-effort (:reasoning-style (get by-name model))))
-          (expect (= 922000 (:context (get by-name model))))
+          (expect (= (if (= model "gpt-5.6-luna") 200000 922000) (:context (get by-name model))))
           (expect (= {:effort "medium" :summary "detailed"}
                      (get-in by-name [model :extra-body :reasoning]))))
         (expect (nil? (get by-name "gpt-5.2")))

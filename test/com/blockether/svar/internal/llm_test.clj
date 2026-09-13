@@ -8,6 +8,49 @@
             [com.blockether.svar.internal.llm :as sut])
   (:import (java.io ByteArrayInputStream)))
 
+(defdescribe
+  copilot-endpoints
+  (it
+    "uses host-root endpoints for every Copilot tier and configured base path"
+    (doseq [provider-id
+            [:github-copilot :github-copilot-individual :github-copilot-business
+             :github-copilot-enterprise]
+
+            base
+            ["https://gateway.example.com" "https://gateway.example.com/v1"]]
+
+      (let [calls
+            (atom [])
+
+            router
+            (svar/make-router
+              [{:id provider-id :base-url base :api-key "test" :models [{:name "gpt-6-astra"}]}])]
+
+        (sut/clear-models-cache!)
+        (with-redefs-fn {#'sut/http-post-stream!
+                         (fn [url _body _headers & _args]
+                           (swap! calls conj url)
+                           {:content "ok"
+                            :api-usage {:input-tokens 1 :output-tokens 1 :total-tokens 2}
+                            :http-response {:status 200}})
+                         #'sut/http-get! (fn [url & _args]
+                                           (swap! calls conj url)
+                                           {"data" [{"id" "gpt-6-astra"}]})}
+          (fn []
+            (doseq [[style model endpoint] [[:openai-compatible-responses "gpt-6-astra"
+                                             "/responses"]
+                                            [:openai-compatible-chat "gpt-5.3" "/chat/completions"]
+                                            [:anthropic "claude-sonnet-5" "/v1/messages"]]]
+              (sut/chat-completion
+                [{:role "user" :content "ok"}]
+                model
+                "test"
+                base
+                {:provider-id provider-id :api-style style :on-chunk (constantly nil)})
+              (expect (= (str "https://gateway.example.com" endpoint) (last @calls))))
+            (expect (= ["gpt-6-astra"] (mapv :id (svar/models! router))))
+            (expect (= "https://gateway.example.com/models" (last @calls)))))))))
+
 ;;; ── Test fixtures ──────────────────────────────────────────────────────
 
 (def test-providers
@@ -557,8 +600,10 @@
             (atom [])
 
             router
-            (svar/make-router
-              [{:id :github-copilot :api-key "sk-test" :models [{:name "gpt-5.5"}]}])
+            (svar/make-router [{:id :github-copilot
+                                :base-url "https://api.individual.githubcopilot.com/v1"
+                                :api-key "sk-test"
+                                :models [{:name "gpt-5.5"}]}])
 
             answer-spec
             (svar/spec (svar/field svar/NAME

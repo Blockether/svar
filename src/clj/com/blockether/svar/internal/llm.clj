@@ -456,6 +456,20 @@
     :always
     (merge llm-headers)))
 
+(defn- host-root
+  "Return scheme://authority, without a provider-specific API path."
+  [base-url]
+  (try (let [u (URI. base-url)]
+         (str (.getScheme u) "://" (.getAuthority u)))
+       (catch Exception _ base-url)))
+
+(defn- provider-api-base
+  "Copilot serves OpenAI wires at host root and Anthropic under /v1."
+  [base-url provider-id api-style]
+  (if (and base-url (copilot-provider-id? provider-id))
+    (str (host-root base-url) (when (= :anthropic api-style) "/v1"))
+    base-url))
+
 (defn- make-chat-url
   "Builds the chat endpoint URL for the given API style.
    Returns nil when base-url is nil (provider not configured)."
@@ -7064,7 +7078,10 @@
    Map with :content, :reasoning (may be nil), :api-usage."
   ([messages model api-key base-url] (chat-completion messages model api-key base-url {}))
   ([messages model api-key base-url opts]
-   (let [timeout-ms
+   (let [base-url
+         (provider-api-base base-url (:provider-id opts) (:api-style opts))
+
+         timeout-ms
          (get opts :timeout-ms router/DEFAULT_TIMEOUT_MS)
 
          ;; `contains?` (not `get` with default) so a caller can explicitly
@@ -9773,16 +9790,6 @@
     (filterv #(router/provider-model-visible? provider-id (provider-model-id %)) models)
     (vec models)))
 
-(defn- host-root
-  "scheme://authority of a URL — drops path/query. `http://h:1234/v1` → `http://h:1234`.
-   Used when a provider's models endpoint lives at host root, not under the
-   chat base path (LM Studio: `/api/v0/...`). Returns base-url unchanged when
-   it can't be parsed."
-  [base-url]
-  (try (let [u (URI. base-url)]
-         (str (.getScheme u) "://" (.getAuthority u)))
-       (catch Exception _ base-url)))
-
 (defn- models-endpoint-url
   "Build the models-listing URL for a provider. With `:models-base :host` the
    `:models-path` hangs off the host root (LM Studio's native REST); otherwise
@@ -9993,7 +10000,7 @@
          ;; OpenAI `/models`, Codex `/codex/models?client_version=...`,
          ;; Z.ai `/models`, ...). Caller-supplied opts override.
          known-provider
-         (when provider-id (get router/KNOWN_PROVIDERS provider-id))
+         (when provider-id (router/known-provider provider-id))
 
          models-path
          (or (:models-path opts) (:models-path known-provider) "/models")

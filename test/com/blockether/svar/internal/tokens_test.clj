@@ -54,6 +54,29 @@
                        (it "returns default for unknown model"
                            (expect (= 8192 (sut/context-limit "unknown-model-xyz"))))))
 
+(defdescribe copilot-luna-prompt-budget-test
+             "Copilot Luna uses the authenticated catalog's prompt cap, not its product window."
+             (it "keeps the 200K input cap across all Copilot account tiers"
+                 ;; Live /models advertises 200K input, 328K total and 128K output.
+                 ;; The previous 922K overlay let Vis delay folding beyond the input cap.
+                 (doseq [provider-id [:github-copilot :github-copilot-individual
+                                      :github-copilot-business :github-copilot-enterprise]]
+                   (let [model (first (:models (sut/normalize-provider
+                                                 0
+                                                 {:id provider-id
+                                                  :api-key "test"
+                                                  :models [{:name "gpt-5.6-luna"}]})))]
+                     (expect (= 200000 (sut/provider-model-context provider-id "gpt-5.6-luna")))
+                     (expect (= 200000 (:context model)))
+                     (expect (= 200000 (:input-limit model)))
+                     (expect (= 128000 (:output-limit model))))))
+             (it "uses the conservative input cap for preflight boundaries"
+                 (expect (= 200000 (sut/context-limit "gpt-5.6-luna")))
+                 (expect (:ok? (sut/check-context-limit "gpt-5.6-luna" [] {:input-tokens 200000})))
+                 (let [overflow (sut/check-context-limit "gpt-5.6-luna" [] {:input-tokens 200001})]
+                   (expect (false? (:ok? overflow)))
+                   (expect (= 1 (:overflow overflow))))))
+
 ;; =============================================================================
 ;; Max Input Tokens Tests
 ;; =============================================================================

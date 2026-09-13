@@ -101,6 +101,7 @@
                               {:name "mistral-small-latest"} {:name "codestral-latest"}]}
    :github-copilot
    {:base-url "https://api.individual.githubcopilot.com"
+    :models-base :host
     :default-models [{:name "claude-opus-5"} {:name "claude-fable-5"} {:name "claude-sonnet-5"}
                      {:name "gpt-6-astra"} {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"}
                      {:name "gpt-5.6-terra"}]
@@ -1267,10 +1268,11 @@
                :extra-body {:store false
                             :include ["reasoning.encrypted_content"]
                             :reasoning {:effort "medium" :summary "detailed"}}}
-    ;; Current Copilot GPT fleet. models.dev supplies provider metadata; 922K is
-    ;; the actual input budget (the 1.05M product window reserves 128K output).
+    ;; Copilot's authenticated /models catalog caps Luna at 200K input;
+    ;; its 328K total window includes up to 128K output.
     "gpt-5.6-luna" {:pricing {:input 0.0 :output 0.0}
-                    :context 922000
+                    :context 200000
+                    :input-limit 200000
                     :api-style :openai-compatible-responses
                     :reasoning-style :openai-effort
                     :extra-body {:store false
@@ -1357,7 +1359,7 @@
 ;; Derived compatibility maps
 ;; =============================================================================
 
-(defn- known-provider
+(defn known-provider
   "Resolve a runtime provider id to its `KNOWN_PROVIDERS` config,
    following the `:provider-model-source` redirect so plan-tier
    providers (`:github-copilot-individual` / `-business` / `-enterprise`
