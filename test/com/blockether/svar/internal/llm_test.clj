@@ -85,6 +85,40 @@
 
 (def ^:private resolved-network-timeout @#'sut/resolved-network-timeout)
 
+(defdescribe canonical-cache-sort-test
+             (it "renders each canonical map entry or set member only once while sorting"
+                 ;; JVM gateway profiling found repeated serialization in the sort comparator.
+                 (let [entries
+                       (mapv (fn [n]
+                               [(str "key-" n) n])
+                             (range 32))
+
+                       values
+                       [(into {} entries) (set (range 32))]]
+
+                   (doseq [value values]
+                     (let [members (if (map? value) (mapv vec value) value)
+                           expected [(if (map? value) :map :set) (vec (sort-by pr-str members))]
+                           renders (atom 0)
+                           original-pr-str pr-str
+                           actual (with-redefs [pr-str (fn [& args]
+                                                         (swap! renders inc)
+                                                         (apply original-pr-str args))]
+                                    (@#'sut/canonical-cache-value value))]
+
+                       (expect (= expected actual))
+                       (expect (= (count value) @renders))))))
+             (it "preserves canonical bytes for empty, singleton and nested mixed data"
+                 (doseq [value [{} #{} {:only "value"} #{"only"}
+                                {nil #{:b :a "z" 1 [1 2]}
+                                 :tools [{:name "compute" :schema {"type" "object"}}]
+                                 "nested" {'symbol '(true false nil) :text "Zażółć"}}]]
+                   (let [expected (with-redefs-fn {#'sut/sort-cache-values
+                                                   (fn [values]
+                                                     (vec (sort-by pr-str values)))}
+                                    #(@#'sut/canonical-cache-str value))]
+                     (expect (= expected (@#'sut/canonical-cache-str value)))))))
+
 (defdescribe
   prompt-cache-context-test
   (it

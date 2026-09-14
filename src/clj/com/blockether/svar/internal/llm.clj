@@ -1328,6 +1328,15 @@
   "Bump when Svar changes provider prefix shaping in a way the material below cannot express."
   1)
 
+(defn- sort-cache-values
+  "Render canonical sort keys once, preserving their serialized ordering."
+  [values]
+  (->> values
+       (mapv (fn [value]
+               [(pr-str value) value]))
+       (sort-by first)
+       (mapv second)))
+
 (defn- canonical-cache-value
   "Order-insensitive canonical data for deterministic cache-context hashing."
   [value]
@@ -1335,13 +1344,11 @@
                       (->> value
                            (map (fn [[k v]]
                                   [(canonical-cache-value k) (canonical-cache-value v)]))
-                           (sort-by pr-str)
-                           vec)]
+                           sort-cache-values)]
         (set? value) [:set
                       (->> value
                            (map canonical-cache-value)
-                           (sort-by pr-str)
-                           vec)]
+                           sort-cache-values)]
         (sequential? value) [:seq (mapv canonical-cache-value value)]
         (keyword? value) [:keyword (namespace value) (name value)]
         (symbol? value) [:symbol (namespace value) (name value)]
