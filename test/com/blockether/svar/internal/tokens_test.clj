@@ -653,3 +653,36 @@
 
                              ;; gpt-4 has 8192 context, should exceed
                              (expect (not (:ok? result)))))))
+
+;; =============================================================================
+;; Special Tokens
+;; =============================================================================
+
+(defdescribe special-tokens-test
+             "Text that QUOTES a tokenizer's special tokens is still just text.
+
+              A real incident: an agent read a tiktoken vocabulary table, so the
+              tool result carried the literal `<|endoftext|>`. jtokkit's
+              special-token-aware `countTokens`/`encode` throw on it, and since
+              every later turn re-counts the whole conversation, the session was
+              dead for good — `Encoding special tokens is not supported.`"
+             (describe
+               "counting"
+               (it "counts a quoted special token instead of throwing"
+                   (expect (pos? (sut/count-tokens "gpt-4o" "see <|endoftext|> here"))))
+               (it "counts the other o200k special token too"
+                   (expect (pos? (sut/count-tokens "gpt-4o" "<|endofprompt|>"))))
+               (it "counts a whole vocabulary table"
+                   (expect (pos? (sut/count-tokens
+                                   "claude-opus-5"
+                                   "\"<|startoftext|>\": 199998,\n\"<|endoftext|>\": 199999"))))
+               (it "counts messages carrying one"
+                   (expect (pos? (:input-tokens
+                                   (sut/check-context-limit
+                                     "gpt-4o"
+                                     [{:role "user" :content "explain <|endoftext|>"}]))))))
+             (describe
+               "truncation"
+               (it "truncates text carrying one instead of throwing"
+                   (let [text (apply str (repeat 200 "<|endoftext|> padding "))]
+                     (expect (> (count text) (count (sut/truncate-text "gpt-4o" text 20))))))))

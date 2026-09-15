@@ -3743,10 +3743,20 @@
 ;; =============================================================================
 
 (defn count-tokens
-  "Counts tokens for a given text string using the specified model's encoding."
+  "Counts tokens for a given text string using the specified model's encoding.
+
+   Counts ORDINARY: a tokenizer's own special tokens (`<|endoftext|>`,
+   `<|endofprompt|>` in o200k) are counted as the plain text they are. The
+   special-token-aware `countTokens` THROWS on them — and a conversation quotes
+   such a string the moment an agent reads a tiktoken vocabulary table or a
+   harmony prompt. That killed whole sessions: once a tool result carried the
+   literal, every later turn re-counted it and the turn worker died, so the
+   session could never be continued. Counting is an ESTIMATE for pre-flight
+   context checks; nothing here encodes text for a model, so there is nothing
+   these tokens could confuse."
   ^long [^String model ^String text]
   (let [encoding (model->encoding model)]
-    (.countTokens encoding text)))
+    (.countTokensOrdinary encoding text)))
 
 (defn- tokens-per-message
   "Returns the number of overhead tokens per message for a model."
@@ -3880,7 +3890,8 @@
 
 (defn- encoded-tokens
   ^long [^Encoding encoding value]
-  (long (.countTokens encoding (str (or value "")))))
+  ;; ordinary, for the reason in `count-tokens`
+  (long (.countTokensOrdinary encoding (str (or value "")))))
 
 (defn- block-field [block k] (if (contains? block k) (get block k) (get block (name k))))
 
@@ -4270,7 +4281,9 @@
          (model->encoding model)
 
          ^IntArrayList tokens
-         (.encode encoding text)
+         ;; ordinary, for the reason in `count-tokens`: text carrying a literal
+         ;; `<|endoftext|>` must truncate, not throw
+         (.encodeOrdinary encoding text)
 
          token-count
          (.size tokens)]
@@ -4278,7 +4291,7 @@
      (if (<= token-count max-tokens)
        text
        (let [marker-tokens
-             (if truncation-marker (.size (.encode encoding ^String truncation-marker)) 0)
+             (if truncation-marker (.size (.encodeOrdinary encoding ^String truncation-marker)) 0)
 
              effective-max
              (int (- max-tokens (long marker-tokens)))
