@@ -121,27 +121,6 @@
                       ;; cost routing until endpoint support is real.
                       "grok-code-fast-1"}
     :env-keys ["COPILOT_GITHUB_TOKEN" "GH_TOKEN" "GITHUB_TOKEN"]}
-   ;; Copilot plan tiers — runtime provider IDs (one per OAuth plan) that
-   ;; INHERIT policy from `:github-copilot` via `:provider-model-source`.
-   ;; `known-provider` merges the base entry under each tier-specific
-   ;; override so `:exclude-models`, `:min-gpt-version`, `:llm-headers`,
-   ;; etc. apply uniformly; only `:base-url` differs per tier so token
-   ;; exchange points at the right host. Without these aliases the
-   ;; model catalog (`KNOWN_PROVIDER_MODELS :github-copilot`) was
-   ;; invisible to plan-tier providers — every registration fell back
-   ;; to bare `KNOWN_MODEL_METADATA` (capabilities + intelligence only),
-   ;; lost `:context` / `:api-style` / `:reasoning-style`, and
-   ;; `auto-params` produced `max_tokens = 0.25 * 8192 = 2048` per
-   ;; request. Observed symptom on session 52983a42 (2026-05-20):
-   ;; claude-sonnet-4.6 burning the whole 2048-token budget on hidden
-   ;; reasoning and surfacing `:svar.llm/empty-content` /
-   ;; `:vis/comment-only-block` errors mid-turn.
-   :github-copilot-individual {:base-url "https://api.individual.githubcopilot.com"
-                               :provider-model-source :github-copilot}
-   :github-copilot-business {:base-url "https://api.business.githubcopilot.com"
-                             :provider-model-source :github-copilot}
-   :github-copilot-enterprise {:base-url "https://api.enterprise.githubcopilot.com"
-                               :provider-model-source :github-copilot}
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys []
                   :api-style :openai-compatible-responses
@@ -1361,24 +1340,22 @@
 
 (defn known-provider
   "Resolve a runtime provider id to its `KNOWN_PROVIDERS` config,
-   following the `:provider-model-source` redirect so plan-tier
-   providers (`:github-copilot-individual` / `-business` / `-enterprise`
-   of `:github-copilot`; `:anthropic-coding-plan` of `:anthropic`;
-   `:zai-coding-plan` / `:zai-coding` of `:zai` for model catalog) all
-   pick up `:exclude-models`, `:min-gpt-version`, `:llm-headers`,
-   etc. from the shared base entry instead of having
-   the tier alias re-state them.
+   following the `:provider-model-source` redirect so plan aliases
+   (`:anthropic-coding-plan` of `:anthropic`; `:zai-coding-plan` /
+   `:zai-coding` of `:zai` for model catalog) pick up `:exclude-models`,
+   `:min-gpt-version`, `:llm-headers`, etc. from the shared base entry
+   instead of re-stating them.
 
-   Merge order: the source entry sits UNDER the alias entry so an
-   alias may override a single field (e.g. unique `:base-url` per
-   Copilot tier) without dropping the rest of the shared policy.
+   Merge order: the source entry sits UNDER the alias entry so an alias
+   may override a single field (e.g. its own `:base-url`) without
+   dropping the rest of the shared policy.
 
    Without this resolver, alias entries that only carry a
    `:provider-model-source` pointer would silently lose every
    `(get KNOWN_PROVIDERS pid)` lookup result outside the explicit
    `provider-model-source` / `provider-pricing-source` accessors
    below — the exact failure mode behind session 52983a42's looping
-   claude-sonnet-4.6 turn: tier registration found no `:context`, fell
+   claude-sonnet-4.6 turn: alias registration found no `:context`, fell
    back to the 8192 default, and capped `max_tokens` at 2048.
 
    Returns nil when `provider-id` is unknown so callers can still
@@ -1733,9 +1710,8 @@
   "True when a provider-scoped catalog marks a model unavailable.
    Provider config may add `:exclude-models` as exact model names and/or
    `:min-gpt-version` such as [5 3] to hide older GPT family models.
-   Uses `known-provider` so plan-tier aliases inherit exclusion lists
-   from their base entry (e.g. all three Copilot tiers honour the same
-   `:exclude-models #{gpt-4o ...}` defined on `:github-copilot`)."
+   Uses `known-provider` so plan aliases inherit exclusion lists from
+   the base entry they redirect to."
   [provider-id model-name]
   (let [known
         (known-provider provider-id)

@@ -56,20 +56,18 @@
 
 (defdescribe copilot-luna-prompt-budget-test
              "Copilot Luna uses the authenticated catalog's prompt cap, not its product window."
-             (it "keeps the 200K input cap across all Copilot account tiers"
+             (it "keeps the 200K input cap for every Copilot seat"
                  ;; Live /models advertises 200K input, 328K total and 128K output.
                  ;; The previous 922K overlay let Vis delay folding beyond the input cap.
-                 (doseq [provider-id [:github-copilot :github-copilot-individual
-                                      :github-copilot-business :github-copilot-enterprise]]
-                   (let [model (first (:models (sut/normalize-provider
-                                                 0
-                                                 {:id provider-id
-                                                  :api-key "test"
-                                                  :models [{:name "gpt-5.6-luna"}]})))]
-                     (expect (= 200000 (sut/provider-model-context provider-id "gpt-5.6-luna")))
-                     (expect (= 200000 (:context model)))
-                     (expect (= 200000 (:input-limit model)))
-                     (expect (= 128000 (:output-limit model))))))
+                 (let [model (first (:models (sut/normalize-provider 0
+                                                                     {:id :github-copilot
+                                                                      :api-key "test"
+                                                                      :models
+                                                                      [{:name "gpt-5.6-luna"}]})))]
+                   (expect (= 200000 (sut/provider-model-context :github-copilot "gpt-5.6-luna")))
+                   (expect (= 200000 (:context model)))
+                   (expect (= 200000 (:input-limit model)))
+                   (expect (= 128000 (:output-limit model)))))
              (it "uses the conservative input cap for preflight boundaries"
                  (expect (= 200000 (sut/context-limit "gpt-5.6-luna")))
                  (expect (:ok? (sut/check-context-limit "gpt-5.6-luna" [] {:input-tokens 200000})))
@@ -658,31 +656,30 @@
 ;; Special Tokens
 ;; =============================================================================
 
-(defdescribe special-tokens-test
-             "Text that QUOTES a tokenizer's special tokens is still just text.
+(defdescribe
+  special-tokens-test
+  "Text that QUOTES a tokenizer's special tokens is still just text.
 
               A real incident: an agent read a tiktoken vocabulary table, so the
               tool result carried the literal `<|endoftext|>`. jtokkit's
               special-token-aware `countTokens`/`encode` throw on it, and since
               every later turn re-counts the whole conversation, the session was
               dead for good — `Encoding special tokens is not supported.`"
-             (describe
-               "counting"
-               (it "counts a quoted special token instead of throwing"
-                   (expect (pos? (sut/count-tokens "gpt-4o" "see <|endoftext|> here"))))
-               (it "counts the other o200k special token too"
-                   (expect (pos? (sut/count-tokens "gpt-4o" "<|endofprompt|>"))))
-               (it "counts a whole vocabulary table"
-                   (expect (pos? (sut/count-tokens
-                                   "claude-opus-5"
-                                   "\"<|startoftext|>\": 199998,\n\"<|endoftext|>\": 199999"))))
-               (it "counts messages carrying one"
-                   (expect (pos? (:input-tokens
-                                   (sut/check-context-limit
-                                     "gpt-4o"
-                                     [{:role "user" :content "explain <|endoftext|>"}]))))))
-             (describe
-               "truncation"
-               (it "truncates text carrying one instead of throwing"
-                   (let [text (apply str (repeat 200 "<|endoftext|> padding "))]
-                     (expect (> (count text) (count (sut/truncate-text "gpt-4o" text 20))))))))
+  (describe "counting"
+            (it "counts a quoted special token instead of throwing"
+                (expect (pos? (sut/count-tokens "gpt-4o" "see <|endoftext|> here"))))
+            (it "counts the other o200k special token too"
+                (expect (pos? (sut/count-tokens "gpt-4o" "<|endofprompt|>"))))
+            (it "counts a whole vocabulary table"
+                (expect (pos? (sut/count-tokens
+                                "claude-opus-5"
+                                "\"<|startoftext|>\": 199998,\n\"<|endoftext|>\": 199999"))))
+            (it "counts messages carrying one"
+                (expect (pos? (:input-tokens (sut/check-context-limit
+                                               "gpt-4o"
+                                               [{:role "user"
+                                                 :content "explain <|endoftext|>"}]))))))
+  (describe "truncation"
+            (it "truncates text carrying one instead of throwing"
+                (let [text (apply str (repeat 200 "<|endoftext|> padding "))]
+                  (expect (> (count text) (count (sut/truncate-text "gpt-4o" text 20))))))))

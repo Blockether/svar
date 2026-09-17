@@ -347,14 +347,14 @@
    "x-app" "cli"})
 
 (defn- copilot-provider-id?
-  "True for ANY GitHub Copilot provider id — the bare `:github-copilot` and the
-   plan-scoped `:github-copilot-individual/-business/-enterprise`, plus
-   split-by-wire variants a config may declare (Claude on `/v1/messages`
-   alongside GPT on `/responses` and Gemini/Grok on `/chat/completions`, all
-   sharing one Copilot token). Copilot's auth + required headers
-   (Copilot-Integration-Id, Editor-Version, X-Initiator, Openai-Intent) are
-   identical across plans AND api-styles, so they must apply to every Copilot
-   id on every wire — not just the bare `:github-copilot` on chat-completions."
+  "True for ANY GitHub Copilot provider id — the bare `:github-copilot` svar
+   ships, plus split-by-wire variants a config may declare (Claude on
+   `/v1/messages` alongside GPT on `/responses` and Gemini/Grok on
+   `/chat/completions`, all sharing one Copilot token). Copilot's auth +
+   required headers (Copilot-Integration-Id, Editor-Version, X-Initiator,
+   Openai-Intent) are identical across seat tiers AND api-styles, so they must
+   apply to every Copilot id on every wire — not just the bare
+   `:github-copilot` on chat-completions."
   [provider-id]
   (boolean (and provider-id (str/starts-with? (name provider-id) "github-copilot"))))
 

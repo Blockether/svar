@@ -516,7 +516,7 @@
            (try {:response (ask-fn {}
                                    (merge {:messages messages
                                            :model "gpt-6-astra"
-                                           :provider-id :github-copilot-enterprise
+                                           :provider-id :github-copilot
                                            :api-style :openai-compatible-responses
                                            :api-key "test"
                                            :base-url "http://127.0.0.1:1"

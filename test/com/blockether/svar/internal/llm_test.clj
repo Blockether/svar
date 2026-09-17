@@ -11,10 +11,9 @@
 (defdescribe
   copilot-endpoints
   (it
-    "uses host-root endpoints for every Copilot tier and configured base path"
+    "uses host-root endpoints for any github-copilot id and configured base path"
     (doseq [provider-id
-            [:github-copilot :github-copilot-individual :github-copilot-business
-             :github-copilot-enterprise]
+            [:github-copilot :github-copilot-business]
 
             base
             ["https://gateway.example.com" "https://gateway.example.com/v1"]]
@@ -48,8 +47,12 @@
                 base
                 {:provider-id provider-id :api-style style :on-chunk (constantly nil)})
               (expect (= (str "https://gateway.example.com" endpoint) (last @calls))))
-            (expect (= ["gpt-6-astra"] (mapv :id (svar/models! router))))
-            (expect (= "https://gateway.example.com/models" (last @calls)))))))))
+            (when (= :github-copilot provider-id)
+              ;; `:models-base :host` ships on `:github-copilot` itself. An id a
+              ;; config declares gets Copilot auth and the host-root chat wires,
+              ;; but keeps its own configured base path for the catalog call.
+              (expect (= ["gpt-6-astra"] (mapv :id (svar/models! router))))
+              (expect (= "https://gateway.example.com/models" (last @calls))))))))))
 
 ;;; ── Test fixtures ──────────────────────────────────────────────────────
 

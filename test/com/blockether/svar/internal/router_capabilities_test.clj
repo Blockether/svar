@@ -172,25 +172,30 @@
         (expect (nil? (:verbosity-style info))))))
 
 (defdescribe
-  seat-scoped-copilot-capabilities-test
-  "A Copilot SEAT is its own provider id that inherits the catalog by
-   `:provider-model-source`, and that inheritance is where a capability stamp
-   goes missing: the seat a company actually buys is `-enterprise`, never the
-   bare `:github-copilot` every unit test reaches for."
-  (doseq [seat [:github-copilot-individual :github-copilot-business :github-copilot-enterprise]]
-    (it (str "stamps " (name seat) " from the wire, not from its provider id")
-        (let [router (router/make-router [{:id seat :api-key "test-key"}])
-              by-name (into {} (map (juxt :name identity)) (:models (first (:providers router))))
-              gpt (some by-name ["gpt-5.6-sol" "gpt-5.5"])
-              claude (some by-name ["claude-opus-5" "claude-sonnet-4.6"])]
+  copilot-capabilities-test
+  "ONE `:github-copilot` provider covers every seat tier, and its capability
+   stamps come from the wire each catalog model names — never from the provider
+   id, which is where a stamp used to go missing."
+  (it "stamps github-copilot from the wire, not from its provider id"
+      (let [router
+            (router/make-router [{:id :github-copilot :api-key "test-key"}])
 
-          ;; The seat inherits a catalog at all.
-          (expect (seq by-name))
-          ;; GPT rides the Responses wire: a caller may pick both knobs.
-          (expect (true? (:reasoning-effort? gpt)))
-          (expect (= :openai-effort (:reasoning-style gpt)))
-          (expect (= :openai-text (:verbosity-style gpt)))
-          ;; Claude rides the native Anthropic wire: depth yes, verbosity no.
-          (expect (true? (:reasoning-effort? claude)))
-          (expect (= :anthropic-thinking (:reasoning-style claude)))
-          (expect (nil? (:verbosity-style claude)))))))
+            by-name
+            (into {} (map (juxt :name identity)) (:models (first (:providers router))))
+
+            gpt
+            (some by-name ["gpt-5.6-sol" "gpt-5.5"])
+
+            claude
+            (some by-name ["claude-opus-5" "claude-sonnet-4.6"])]
+
+        ;; The provider inherits a catalog at all.
+        (expect (seq by-name))
+        ;; GPT rides the Responses wire: a caller may pick both knobs.
+        (expect (true? (:reasoning-effort? gpt)))
+        (expect (= :openai-effort (:reasoning-style gpt)))
+        (expect (= :openai-text (:verbosity-style gpt)))
+        ;; Claude rides the native Anthropic wire: depth yes, verbosity no.
+        (expect (true? (:reasoning-effort? claude)))
+        (expect (= :anthropic-thinking (:reasoning-style claude)))
+        (expect (nil? (:verbosity-style claude))))))
