@@ -364,4 +364,38 @@
                   (expect (= #{:chat :vision} (:capabilities metadata)))
                   (expect (= :zai-effort (:reasoning-style metadata)))
                   (expect (= [{:type "effort" :values ["low" "high" "max"]}]
-                             (:reasoning-options entry)))))))
+                             (:reasoning-options entry))))))
+  (describe
+    "GLM-5.3-FlashX"
+    (it "is curated on every z.ai surface without displacing Flash"
+        (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+          (let [defaults (router/provider-default-models pid)]
+            (expect (contains? (set defaults) "glm-5.3-flashx"))
+            (expect (= "glm-5.3-flash" (first defaults))))))
+    (it "carries 2.5x the Flash rate, 1M context and the agentic output cap"
+        (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+          (let [flash (:pricing (router/provider-model-entry pid "glm-5.3-flash"))
+                entry (router/provider-model-entry pid "glm-5.3-flashx")
+                flashx (:pricing entry)]
+
+            (expect (= 0.375 (:input flashx)))
+            (expect (= 0.075 (:cached-input flashx)))
+            (expect (= 1.25 (:output flashx)))
+            (doseq [k [:input :cached-input :output]]
+              (expect (> 1e-9 (Math/abs (- (* 2.5 (double (k flash))) (double (k flashx)))))))
+            (expect (= 1000000 (:context entry)))
+            (expect (= 32768 (:output-limit entry)))
+            (expect (true? (:json-object-mode? entry))))))
+    (it "is the same fast multimodal effort model as Flash"
+        (let [flash
+              (get router/KNOWN_MODEL_METADATA "glm-5.3-flash")
+
+              flashx
+              (get router/KNOWN_MODEL_METADATA "glm-5.3-flashx")]
+
+          (expect (= flash flashx))
+          (expect (= :fast (:speed flashx)))
+          (expect (= #{:chat :vision} (:capabilities flashx)))
+          (expect (= :zai-effort (:reasoning-style flashx)))
+          (expect (= [{:type "effort" :values ["low" "high" "max"]}]
+                     (:reasoning-options (router/provider-model-entry :zai "glm-5.3-flashx"))))))))

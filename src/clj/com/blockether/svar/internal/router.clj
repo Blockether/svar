@@ -48,9 +48,12 @@
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
          :env-keys ["ZAI_API_KEY"]
-         :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"} {:name "glm-5.2"}
-                          {:name "glm-5-turbo"} {:name "glm-5.1"} {:name "glm-4.7"}
-                          {:name "glm-5v-turbo"} {:name "glm-4.6v"}]}
+         ;; `glm-5.3-flashx` is the SAME model as `glm-5.3-flash` on z.ai's fast lane
+         ;; (up to ~200 tok/s) at 2.5x the per-token rate. Flash stays FIRST so the
+         ;; quicker lane is an explicit pick, never the automatic default.
+         :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3-flashx"} {:name "glm-5.3"}
+                          {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"}
+                          {:name "glm-4.7"} {:name "glm-5v-turbo"} {:name "glm-4.6v"}]}
    :zai-coding {:base-url "https://api.z.ai/api/anthropic/v1"
                 :api-style :anthropic
                 ;; Coding Plan endpoint, but for budget accounting we use
@@ -74,9 +77,12 @@
                      ;; consumes one third of GLM-5.3's quota. Keep the legacy vision model
                      ;; `glm-5v-turbo` LAST so an all-zero coding-plan price table never
                      ;; lets it outrank Flash on a `:cost` / `:speed` side-channel.
-                     :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"} {:name "glm-5.2"}
-                                      {:name "glm-5-turbo"} {:name "glm-4.7"} {:name "glm-5.1"}
-                                      {:name "glm-5v-turbo"}]}
+                     ;; `glm-5.3-flashx` is curated here as well — the plan opens it by
+                     ;; application order, which is an account entitlement rather than a
+                     ;; catalog fact — but never ahead of Flash.
+                     :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3-flashx"}
+                                      {:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"}
+                                      {:name "glm-4.7"} {:name "glm-5.1"} {:name "glm-5v-turbo"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
@@ -414,6 +420,13 @@
                     :capabilities #{:chat :vision}
                     :reasoning? true
                     :reasoning-style :zai-effort}
+   ;; GLM-5.3-FlashX is GLM-5.3-Flash on the fast serving lane (up to ~200
+   ;; tok/s), so every capability mirrors Flash — only the price differs.
+   "glm-5.3-flashx" {:intelligence :high
+                     :speed :fast
+                     :capabilities #{:chat :vision}
+                     :reasoning? true
+                     :reasoning-style :zai-effort}
    "glm-5-turbo" {:intelligence :high
                   :speed :fast
                   :capabilities #{:chat}
@@ -1086,6 +1099,16 @@
                      :output-limit 32768
                      :json-object-mode? true
                      :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
+    ;; GLM-5.3-FlashX is the same model on z.ai's fast lane at 2.5x the Flash
+    ;; per-token rate, on the direct API and the Coding Plan alike. The catalog
+    ;; has no row for it (it has none for glm-5.3-flash either), so this overlay
+    ;; is its only source on every z.ai surface; every field but pricing mirrors
+    ;; Flash.
+    "glm-5.3-flashx" {:pricing {:input 0.375 :cached-input 0.075 :output 1.25}
+                      :context 1000000
+                      :output-limit 32768
+                      :json-object-mode? true
+                      :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
     "glm-5-turbo" {:context 200000 :output-limit 32768 :json-object-mode? true}
     "glm-5v-turbo" {:context 200000 :output-limit 32768 :json-object-mode? true}
     "minimax-m2.7:cloud" {:pricing {:input 0.30 :output 1.20} :context 200000}
