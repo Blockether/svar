@@ -67,15 +67,15 @@
                      (router/reasoning-extra-body :anthropic claude :balanced)))
           (expect (= {:thinking {:type "enabled" :budget_tokens 24000}}
                      (router/reasoning-extra-body :anthropic claude :deep)))))
-    (it "uses adaptive thinking for Claude Opus 5 / Opus 4.8–4.6 / Sonnet 4.6"
+    (it "uses adaptive thinking for Claude Opus 5.5 / Opus 5 / Opus 4.8–4.6 / Sonnet 4.6"
         ;; Regression: these efforts came from the OpenAI column, so `:balanced`
         ;; asked for "medium" — one rung BELOW Anthropic's default — and `:deep`
         ;; asked for "high", which IS the default. Turns that requested deep
         ;; thinking came back with two-word summaries.
         (doseq [[model level effort]
-                [["claude-opus-5" :balanced "high"] ["claude-opus-4-8" :balanced "high"]
-                 ["claude-opus-4-7" :balanced "high"] ["claude-opus-4-6" :deep "max"]
-                 ["claude-sonnet-4-6" :low "low"]]]
+                [["claude-opus-5-5" :balanced "high"] ["claude-opus-5" :balanced "high"]
+                 ["claude-opus-4-8" :balanced "high"] ["claude-opus-4-7" :balanced "high"]
+                 ["claude-opus-4-6" :deep "max"] ["claude-sonnet-4-6" :low "low"]]]
           (let [out (router/reasoning-extra-body
                       :anthropic
                       {:name model :reasoning? true :reasoning-style :anthropic-thinking}
@@ -85,6 +85,15 @@
             (expect (nil? (get-in out [:thinking :budget_tokens]))))))
     (it "uses adaptive thinking for dashed and dotted Fable 5.1 ids"
         (doseq [model ["claude-fable-5-1" "claude-fable-5.1"]]
+          (let [out (router/reasoning-extra-body
+                      :anthropic
+                      {:name model :reasoning? true :reasoning-style :anthropic-thinking}
+                      :deep)]
+            (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
+            (expect (= {:effort "max"} (:output_config out)))
+            (expect (nil? (get-in out [:thinking :budget_tokens]))))))
+    (it "uses adaptive thinking for dashed and dotted Opus 5.5 ids"
+        (doseq [model ["claude-opus-5-5" "claude-opus-5.5"]]
           (let [out (router/reasoning-extra-body
                       :anthropic
                       {:name model :reasoning? true :reasoning-style :anthropic-thinking}
@@ -560,6 +569,7 @@
       (expect (nil? (get router/KNOWN_MODEL_METADATA "o4-mini"))))
   (it "flags Claude 5 / 4.x families as reasoning-capable"
       (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-fable-5-1"))))
+      (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-5-5"))))
       (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-5"))))
       (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-8"))))
       (expect (true? (:reasoning? (get router/KNOWN_MODEL_METADATA "claude-opus-4-5"))))

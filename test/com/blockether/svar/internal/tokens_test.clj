@@ -30,6 +30,8 @@
                    (expect (= 200000 (sut/context-limit "claude-sonnet-4-6"))))
                (it "returns 1000000 for claude-opus-5"
                    (expect (= 1000000 (sut/context-limit "claude-opus-5"))))
+               (it "returns 1000000 for claude-opus-5-5"
+                   (expect (= 1000000 (sut/context-limit "claude-opus-5-5"))))
                (it "returns 1000000 for claude-opus-4-8"
                    (expect (= 1000000 (sut/context-limit "claude-opus-4-8"))))
                (it "returns 1000000 for claude-opus-4-6"
@@ -414,6 +416,10 @@
         (= {:input 5.00 :cached-input 0.50 :cache-write-5m 6.25 :cache-write-1h 10.00 :output 25.00}
            (select-keys (:pricing (sut/estimate-cost model 1 1))
                         [:input :cached-input :cache-write-5m :cache-write-1h :output]))))
+    (expect
+      (= {:input 4.00 :cached-input 0.20 :cache-write-5m 5.00 :cache-write-1h 8.00 :output 20.00}
+         (select-keys (:pricing (sut/estimate-cost "claude-opus-5-5" 1 1))
+                      [:input :cached-input :cache-write-5m :cache-write-1h :output])))
     (expect (= {:input 1.25
                 :cached-input 0.125
                 :output 10.00

@@ -1385,7 +1385,7 @@
 
 (defdescribe
   anthropic-coding-plan-default-model-test
-  (it "prepends Claude Opus 5 to existing subscription provider configs"
+  (it "prepends Claude Opus 5.5 to existing subscription provider configs"
       (let [r
             (llm/make-router [{:id :anthropic-coding-plan
                                :api-key "sk-ant-oat01-test"
@@ -1394,16 +1394,16 @@
             provider
             (first (:providers r))]
 
-        (expect (= "claude-opus-5" (:root provider)))
+        (expect (= "claude-opus-5-5" (:root provider)))
         ;; `:anthropic-coding-plan` prepends its FULL default catalog,
         ;; deduped against the caller's configured models.
-        (expect (= ["claude-opus-5" "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
-                    "claude-fable-5-1" "claude-fable-5" "claude-sonnet-5" "claude-sonnet-4-6"
-                    "claude-haiku-4-5"]
+        (expect (= ["claude-opus-5-5" "claude-opus-5" "claude-opus-4-8" "claude-opus-4-7"
+                    "claude-opus-4-6" "claude-fable-5-1" "claude-fable-5" "claude-sonnet-5"
+                    "claude-sonnet-4-6" "claude-haiku-4-5"]
                    (mapv :name (:models provider))))
         (expect (= :anthropic (:api-style provider)))
         (expect
-          (= {:input 5.0 :cached-input 0.5 :cache-write-5m 6.25 :cache-write-1h 10.0 :output 25.0}
+          (= {:input 4.0 :cached-input 0.2 :cache-write-5m 5.0 :cache-write-1h 8.0 :output 20.0}
              (select-keys (get-in provider [:models 0 :pricing])
                           [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
   (it "surfaces Claude Fable 5.1 catalog and pricing metadata"
@@ -1420,6 +1420,22 @@
                    (:reasoning-options entry)))
         (expect
           (= {:input 10.0 :cached-input 0.25 :cache-write-5m 12.5 :cache-write-1h 20.0 :output 50.0}
+             (select-keys (:pricing entry)
+                          [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
+  (it "surfaces Claude Opus 5.5 catalog and pricing metadata"
+      (let [entry
+            (router/provider-model-entry :anthropic-coding-plan "claude-opus-5-5")
+
+            model
+            (router/provider-model-metadata :anthropic-coding-plan {:name "claude-opus-5-5"})]
+
+        (expect (= 1000000 (:context entry)))
+        (expect (= :frontier (:intelligence model)))
+        (expect (= :anthropic-thinking (:reasoning-style model)))
+        (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                   (:reasoning-options entry)))
+        (expect
+          (= {:input 4.0 :cached-input 0.2 :cache-write-5m 5.0 :cache-write-1h 8.0 :output 20.0}
              (select-keys (:pricing entry)
                           [:input :cached-input :cache-write-5m :cache-write-1h :output])))))
   (it "does not claim nonexistent Claude Sonnet 4.8 catalog metadata"
@@ -2680,24 +2696,33 @@
           (expect (contains? (:capabilities (router/provider-model-metadata pid {:name model}))
                              :vision)
                   (str pid "/" model " takes image input per models.dev"))))
-    ;; Regression: `gpt-4o-search-preview` matches the `gpt-4o` vision pattern but
-    ;; serves text only. Vis gated image blocks on the name, so the whole fleet's
-    ;; one search model answered a picture with a 400 — and attachments replay, so
-    ;; the same 400 came back on every later turn of that session.
-    (it "removes the vision a name heuristic invents"
-        (let [model "openai/gpt-4o-search-preview"]
-          (expect (contains? (:capabilities (router/infer-model-metadata {:name model})) :vision))
-          (expect (= #{:text}
-                     (get-in (router/provider-model-entry :openrouter model) [:modalities :input])))
+    ;; Regression: `gpt-4o(-mini)?-search-preview` matches the `gpt-4o` vision
+    ;; pattern but served text only. Vis gated image blocks on the name, so the whole
+    ;; fleet's one search model answered a picture with a 400 — and attachments replay,
+    ;; so the same 400 came back on every later turn of that session. models.dev
+    ;; dropped the rows on 2026-09-22, so the NAME heuristic carries the guard itself
+    ;; now; the catalog-denies direction lives on in `gpt-4o-transcribe`.
+    (it "keeps search-preview variants text-only without a catalog row"
+        (doseq [model ["openai/gpt-4o-search-preview" "openai/gpt-4o-mini-search-preview"]]
+          (expect (not (contains? (:capabilities (router/infer-model-metadata {:name model}))
+                                  :vision)))
           (expect (not (contains? (:capabilities (router/provider-model-metadata :openrouter
                                                                                  {:name model}))
                                   :vision)))))
+    (it "removes the vision a name heuristic invents"
+        (let [model "gpt-4o-transcribe"]
+          (expect (contains? (:capabilities (router/infer-model-metadata {:name model})) :vision))
+          (expect (= #{:text :audio}
+                     (get-in (router/provider-model-entry :llmgateway model) [:modalities :input])))
+          (expect (not (contains? (:capabilities (router/provider-model-metadata :llmgateway
+                                                                                 {:name model}))
+                                  :vision)))))
     (it "answers per PROVIDER, so the same name can differ"
-        (let [model "openai/gpt-4o-search-preview"]
+        (let [model "gpt-4o-transcribe"]
           ;; No provider id (or one the catalog never heard of) leaves only the name.
           (expect (contains? (:capabilities (router/provider-model-metadata nil {:name model}))
                              :vision))
-          (expect (not (contains? (:capabilities (router/provider-model-metadata :openrouter
+          (expect (not (contains? (:capabilities (router/provider-model-metadata :llmgateway
                                                                                  {:name model}))
                                   :vision)))))
     (it "reaches the same verdict the router's own normalization reaches"

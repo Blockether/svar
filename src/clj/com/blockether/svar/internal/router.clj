@@ -28,10 +28,11 @@
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
-               :default-models
-               [{:name "claude-opus-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                {:name "claude-opus-4-6"} {:name "claude-fable-5-1"} {:name "claude-fable-5"}
-                {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+               :default-models [{:name "claude-opus-5-5"} {:name "claude-opus-5"}
+                                {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
+                                {:name "claude-opus-4-6"} {:name "claude-fable-5-1"}
+                                {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                                {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
                            :env-keys []
                            :api-style :anthropic
@@ -39,11 +40,11 @@
                            ;; OAuth coding plan: use retail Anthropic pricing for honest metering
                            ;; once the included quota is exhausted (see internal/modelsdev).
                            :pricing-source :anthropic
-                           :default-models [{:name "claude-opus-5"} {:name "claude-opus-4-8"}
-                                            {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
-                                            {:name "claude-fable-5-1"} {:name "claude-fable-5"}
-                                            {:name "claude-sonnet-5"} {:name "claude-sonnet-4-6"}
-                                            {:name "claude-haiku-4-5"}]
+                           :default-models [{:name "claude-opus-5-5"} {:name "claude-opus-5"}
+                                            {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
+                                            {:name "claude-opus-4-6"} {:name "claude-fable-5-1"}
+                                            {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                                            {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
                            :prepend-default-models? true}
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
@@ -293,6 +294,11 @@
                       :capabilities #{:chat :vision}
                       :reasoning? true
                       :reasoning-style :anthropic-thinking}
+   "claude-opus-5-5" {:intelligence :frontier
+                      :speed :slow
+                      :capabilities #{:chat :vision}
+                      :reasoning? true
+                      :reasoning-style :anthropic-thinking}
    "claude-opus-5" {:intelligence :frontier
                     :speed :slow
                     :capabilities #{:chat :vision}
@@ -482,8 +488,8 @@
                              like every effort here, to the values models.dev
                              advertises for the exact model (`clamp-effort`).
      `:anthropic-thinking` → Claude thinking controls.
-                             Claude Opus 5 / Opus 4.8 / Opus 4.7 / Opus 4.6 /
-                             Sonnet 4.6 use adaptive thinking + output_config.effort.
+                              Claude Opus 5.5 / Opus 5 / Opus 4.8 / Opus 4.7 /
+                              Opus 4.6 / Sonnet 4.6 use adaptive thinking + output_config.effort.
                              Older Claude 4 models use manual budget_tokens.
      `:zai-thinking`       → binary `:thinking {:type \"enabled\"|\"disabled\"}` on
                              Z.ai / GLM-4.6+. No budget_tokens — thinking is on/off.
@@ -718,7 +724,7 @@
   "The thinking config every Claude adaptive-thinking request carries.
 
    `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5.1 /
-   Fable 5 / Mythos 5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, and an omitted block
+   Fable 5 / Mythos 5 / Opus 5.5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, and an omitted block
    arrives with an EMPTY `thinking` field and no `thinking_delta` events at all
    (docs.claude.com /en/docs/build-with-claude/thinking, \"Controlling thinking
    display\"). Callers that render reasoning would show a silent, empty block
@@ -728,12 +734,12 @@
 (def ^:private ANTHROPIC_ADAPTIVE_NAME_PATTERN
   "Claude families that take ADAPTIVE thinking, by name.
 
-   Fable 5.1 / Fable 5 / Mythos 5 / Sonnet 5 / Opus 5 / Opus 4.8–4.7 reject
+   Fable 5.1 / Fable 5 / Mythos 5 / Sonnet 5 / Opus 5.5 / Opus 5 / Opus 4.8–4.7 reject
    manual budget_tokens; Opus 4.6 and Sonnet 4.6 still accept it but Anthropic marks it
    deprecated. Dot and dash aliases both match so Copilot-style ids
    (`claude-opus-4.8`) do not regress. This is the FALLBACK — `models.dev`
    decides first, see `anthropic-adaptive-thinking-model?`."
-  #"(?i)^claude-(?:fable-5(?:[-.]1)?|mythos-5|sonnet-5|opus-5|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
+  #"(?i)^claude-(?:fable-5(?:[-.]1)?|mythos-5|sonnet-5|opus-5(?:[-.]5)?|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
 
 (defn- anthropic-adaptive-thinking-model?
   "Does this Claude model take ADAPTIVE thinking (`output_config.effort`) rather
@@ -1035,6 +1041,7 @@
     {:pricing
      {:input 10.00 :cached-input 1.00 :cache-write-5m 12.50 :cache-write-1h 20.00 :output 50.00}
      :context 1000000}
+    "claude-opus-5-5" {:pricing {:cache-write-1h 8.00} :context 1000000}
     "claude-opus-5" {:pricing {:cache-write-1h 10.00} :context 1000000}
     "claude-opus-4-8" {:pricing {:cache-write-1h 10.00} :context 1000000}
     "claude-opus-4-7" {:pricing {:cache-write-1h 10.00} :context 1000000}
@@ -1636,6 +1643,16 @@
 ;; Model metadata lookup + fallback inference
 ;; =============================================================================
 
+(defn- name-suggests-vision?
+  "Name-only vision guess, with the one trap the catalog taught us: OpenAI's
+   `gpt-4o(-mini)?-search-preview` ids match the `gpt-4o` vision pattern but
+   served text only. models.dev dropped their rows on 2026-09-22, so without
+   this guard the name re-invents the vision the catalog used to deny — and
+   an image block sent there is a 400 that repeats on every replay of that
+   attachment (see router_decisions_test)."
+  [m vision-pattern]
+  (and (not (re-find #"search-preview" m)) (boolean (re-find vision-pattern m))))
+
 (defn- regex-infer-metadata
   [model-name]
   (let [m (str/lower-case (or model-name ""))]
@@ -1643,7 +1660,7 @@
           {:intelligence :medium
            :speed :fast
            :capabilities (cond-> #{:chat}
-                           (re-find #"vision|claude|gemini|gpt-4o|glm.*v|pixtral" m)
+                           (name-suggests-vision? m #"vision|claude|gemini|gpt-4o|glm.*v|pixtral")
                            (conj :vision))}
           (re-find #"reasoner|thinking" m)
           {:intelligence :frontier :speed :slow :capabilities #{:chat}}
@@ -1655,9 +1672,10 @@
           (re-find #"sonnet|gpt-4o|gpt-5|pro|large|gemini-2\.[0-9]-pro|gemini-2\.5" m)
           {:intelligence :high
            :speed :medium
-           :capabilities (cond-> #{:chat}
-                           (re-find #"vision|claude|gemini|gpt-4o|gpt-5|pixtral|glm.*v" m)
-                           (conj :vision))}
+           :capabilities
+           (cond-> #{:chat}
+             (name-suggests-vision? m #"vision|claude|gemini|gpt-4o|gpt-5|pixtral|glm.*v")
+             (conj :vision))}
           :else {:intelligence :medium
                  :speed :medium
                  :capabilities (cond-> #{:chat}
@@ -1865,9 +1883,9 @@
      3. models.dev `:modalities :input`, authoritative BOTH ways whenever the catalog
         carries the row. It ADDS the vision the name heuristic misses (Copilot's
         proxied Claude/GPT, every OpenRouter slug, `mistral-medium-latest`, `o3`) and
-        REMOVES the vision the name heuristic invents: `gpt-4o-search-preview` matches
-        the `gpt-4o` pattern but takes text only, and an image block sent there is a
-        400 that repeats on every replay of that attachment.
+         REMOVES the vision the name heuristic invents (`gpt-4o-transcribe` matches
+         the `gpt-4o` pattern but takes no images), so an image block sent there is
+         a 400 that repeats on every replay of that attachment.
      4. Whatever KNOWN_MODEL_METADATA or the name regex guessed — the only evidence
         left for a provider the catalog does not carry (Ollama, LM Studio, a custom
         base-url), where a wrong guess is the caller's to override via 1."
