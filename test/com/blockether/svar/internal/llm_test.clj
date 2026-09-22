@@ -1397,6 +1397,66 @@
                         :reasoning {:effort "medium" :summary "detailed"}}
                        (select-keys (:extra-body opts) [:store :include :reasoning]))))))))
 
+(defdescribe
+  gpt6-sol-luna-budgets-test
+  (it
+    "routes Sol and Luna with explicit input/output budgets and Responses replay"
+    (doseq [model-name
+            ["gpt-6-sol" "gpt-6-luna"]
+
+            [provider-id input-budget output-budget]
+            [[:openai 922000 128000] [:openai-codex 272000 68000] [:github-copilot 922000 128000]]]
+
+      (let [provider
+            (router/normalize-provider
+              0
+              {:id provider-id :api-key "test" :models [{:name model-name}]})
+
+            model
+            (first (:models provider))
+
+            opts
+            (#'sut/inject-routed-params {} provider model)
+
+            resolved
+            (#'sut/resolve-opts {} opts)
+
+            check-opts
+            {:context-limits (:context-limits resolved) :input-tokens input-budget}
+
+            efforts
+            (cond-> ["low" "medium" "high" "xhigh" "max"]
+              (not= :openai-codex provider-id)
+              (->> (into ["none"])))]
+
+        (expect (= input-budget (:context model) (:input-limit model) (:context opts)))
+        (expect (= 128000 (:output-limit model)))
+        (expect (= output-budget (get-in opts [:extra-body :max_tokens])))
+        (expect (= :openai-compatible-responses (:api-style opts)))
+        (expect (= :openai-effort (:reasoning-style model)))
+        (expect (= [{:type "effort" :values efforts}] (:reasoning-options model)))
+        (expect (= #{:chat :vision} (:capabilities model)))
+        (expect (:tool-call? model))
+        (expect (= {:store false
+                    :include ["reasoning.encrypted_content"]
+                    :reasoning {:effort "medium" :summary "detailed"}}
+                   (select-keys (:extra-body opts) [:store :include :reasoning])))
+        (expect (:ok? (router/check-context-limit model-name [] check-opts)))
+        (expect (not (:ok? (router/check-context-limit model-name
+                                                       []
+                                                       (update check-opts :input-tokens inc)))))
+        (doseq [effort ["low" "high" "max"]]
+          (expect (= effort
+                     (get-in (#'sut/inject-routed-params {:reasoning-effort effort} provider model)
+                             [:extra-body :reasoning_effort]))))
+        (doseq [effort efforts]
+          (expect (= effort
+                     (get-in (#'sut/inject-routed-params
+                              {:extra-body {:reasoning {:effort effort}}}
+                              provider
+                              model)
+                             [:extra-body :reasoning :effort]))))))))
+
 (defdescribe routed-provider-native-reasoning-effort-test
              (let [inject
                    (var-get #'sut/inject-routed-params)

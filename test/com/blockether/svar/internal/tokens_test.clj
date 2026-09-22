@@ -56,6 +56,39 @@
                        (it "returns default for unknown model"
                            (expect (= 8192 (sut/context-limit "unknown-model-xyz"))))))
 
+(defdescribe
+  gpt6-sol-luna-pricing-test
+  (it
+    "meters published standard and long-input rates on every provider"
+    ;; OpenAI model docs, 2026-09-22: long prompts double input/cache rates
+    ;; and multiply output by 1.5; the tier applies to the full request.
+    (doseq [[model input cached write output]
+            [["gpt-6-sol" 2.0 0.2 2.5 10.0] ["gpt-6-luna" 0.1 0.01 0.125 0.5]]
+
+            provider
+            [:openai :openai-codex :github-copilot]]
+
+      (let [pricing (sut/provider-model-pricing provider model)]
+        (expect
+          (=
+            {:input input :cached-input cached :cache-read cached :cache-write write :output output}
+            (select-keys pricing [:input :cached-input :cache-read :cache-write :output])))
+        (doseq [[input-tokens input-factor output-factor] [[272000 1.0 1.0] [272001 2.0 1.5]]]
+          (let [cost (sut/estimate-cost model
+                                        input-tokens
+                                        100000
+                                        {model pricing}
+                                        {:cached-tokens 100000 :cache-creation-tokens 100000})]
+            (expect (< (Math/abs (- (:input-uncached-cost cost)
+                                    (/ (* (- input-tokens 200000) input input-factor) 1000000.0)))
+                       1.0e-10))
+            (expect (< (Math/abs (- (:input-cached-cost cost) (* 0.1 cached input-factor)))
+                       1.0e-10))
+            (expect (< (Math/abs (- (:input-cache-write-cost cost) (* 0.1 write input-factor)))
+                       1.0e-10))
+            (expect (< (Math/abs (- (:output-cost cost) (* 0.1 output output-factor)))
+                       1.0e-10))))))))
+
 (defdescribe copilot-luna-prompt-budget-test
              "Copilot Luna uses the authenticated catalog's prompt cap, not its product window."
              (it "keeps the 200K input cap for every Copilot seat"

@@ -23,8 +23,9 @@
 (def KNOWN_PROVIDERS
   {:openai {:base-url "https://api.openai.com/v1"
             :env-keys ["OPENAI_API_KEY"]
-            :default-models [{:name "gpt-6-astra"} {:name "gpt-5"} {:name "gpt-5-mini"}
-                             {:name "gpt-4o"} {:name "gpt-4o-mini"} {:name "o3-mini"}]}
+            :default-models [{:name "gpt-6-astra"} {:name "gpt-6-sol"} {:name "gpt-6-luna"}
+                             {:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"}
+                             {:name "gpt-4o-mini"} {:name "o3-mini"}]}
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
@@ -110,8 +111,8 @@
    {:base-url "https://api.individual.githubcopilot.com"
     :models-base :host
     :default-models [{:name "claude-opus-5"} {:name "claude-fable-5"} {:name "claude-sonnet-5"}
-                     {:name "gpt-6-astra"} {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"}
-                     {:name "gpt-5.6-terra"}]
+                     {:name "gpt-6-astra"} {:name "gpt-6-sol"} {:name "gpt-6-luna"}
+                     {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -131,9 +132,9 @@
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys []
                   :api-style :openai-compatible-responses
-                  :default-models [{:name "gpt-6-astra"} {:name "gpt-5.6-luna"}
-                                   {:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"}
-                                   {:name "gpt-5.3-codex"}]
+                  :default-models [{:name "gpt-6-astra"} {:name "gpt-6-sol"} {:name "gpt-6-luna"}
+                                   {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.5"}
+                                   {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
@@ -278,6 +279,16 @@
                   :capabilities #{:chat :vision}
                   :reasoning? true
                   :reasoning-style :openai-effort}
+   "gpt-6-sol" {:intelligence :frontier
+                :speed :medium
+                :capabilities #{:chat :vision}
+                :reasoning? true
+                :reasoning-style :openai-effort}
+   "gpt-6-luna" {:intelligence :high
+                 :speed :fast
+                 :capabilities #{:chat :vision}
+                 :reasoning? true
+                 :reasoning-style :openai-effort}
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
    "claude-fable-5-1" {:intelligence :frontier
                        :speed :slow
@@ -960,6 +971,49 @@
 ;; Provider-scoped model availability, pricing, and context limits
 ;; =============================================================================
 
+(def ^:private GPT6_SOL_LUNA_MODELS
+  ;; models.dev has no Sol/Luna rows at launch (2026-09-22). Use published API
+  ;; metadata until the catalog catches up, shared across the three surfaces:
+  ;; https://developers.openai.com/api/docs/models/gpt-6-sol
+  ;; https://developers.openai.com/api/docs/models/gpt-6-luna
+  (let [common {:context 922000
+                ;; 1.05M total includes 128K output; enforce the input ceiling.
+                :input-limit 922000
+                :output-limit 128000
+                :modalities {:input #{:text :image} :output #{:text}}
+                :tool-call? true
+                :attachment? true
+                :reasoning-options [{:type "effort"
+                                     :values ["none" "low" "medium" "high" "xhigh" "max"]}]
+                ;; Chat Completions cannot combine tools with reasoning on these models.
+                :api-style :openai-compatible-responses
+                :reasoning-style :openai-effort
+                :extra-body {:store false
+                             :include ["reasoning.encrypted_content"]
+                             :reasoning {:effort "medium" :summary "detailed"}}}]
+    {"gpt-6-sol" (assoc common
+                   :display-name "GPT-6 Sol"
+                   :pricing {:input 2.00
+                             :cached-input 0.20
+                             :cache-read 0.20
+                             :cache-write 2.50
+                             :output 10.00
+                             :input-over-272k 4.00
+                             :cached-input-over-272k 0.40
+                             :cache-write-over-272k 5.00
+                             :output-over-272k 15.00})
+     "gpt-6-luna" (assoc common
+                    :display-name "GPT-6 Luna"
+                    :pricing {:input 0.10
+                              :cached-input 0.01
+                              :cache-read 0.01
+                              :cache-write 0.125
+                              :output 0.50
+                              :input-over-272k 0.20
+                              :cached-input-over-272k 0.02
+                              :cache-write-over-272k 0.25
+                              :output-over-272k 0.75})}))
+
 ;; Pricing data last verified: 2026-04-12.
 ;; USD per million tokens. Values drift — re-audit quarterly.
 ;; Authoritative sources:
@@ -982,7 +1036,9 @@
   ;; express — OpenAI long-context tiers (`:input-over-272k`), Anthropic
   ;; 5m/1h cache tiers, GLM `:json-object-mode?`, Copilot per-model wire
   ;; overrides (`:extra-body`, `:reasoning-style`).
-  {:openai {;; Long-context tier pricing (>272k tokens) — not in models.dev.
+  {:openai {"gpt-6-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
+            "gpt-6-luna" (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
+            ;; Long-context tier pricing (>272k tokens) — not in models.dev.
             "gpt-5.4" {:pricing
                        {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
             "gpt-5.5" {:pricing {:input-over-272k 10.00
@@ -995,6 +1051,19 @@
     "gpt-5.1" {:context 128000}
     "gpt-5.3-codex" {:context 272000}
     "gpt-6-astra" {:context 272000 :input-limit 272000}
+    ;; Codex's bundled catalog keeps a 272K default. Ultra is a client-side
+    ;; subagent workflow, not an effort this single-inference client implements.
+    ;; https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
+    "gpt-6-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
+                  :context 272000
+                  :input-limit 272000
+                  :reasoning-options [{:type "effort"
+                                       :values ["low" "medium" "high" "xhigh" "max"]}])
+    "gpt-6-luna" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
+                   :context 272000
+                   :input-limit 272000
+                   :reasoning-options [{:type "effort"
+                                        :values ["low" "medium" "high" "xhigh" "max"]}])
     "gpt-5.4" {:context 272000
                :pricing
                {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
@@ -1301,6 +1370,10 @@
                    :extra-body {:store false
                                 :include ["reasoning.encrypted_content"]
                                 :reasoning {:effort "medium" :summary "detailed"}}}
+    ;; Upstream metadata while Copilot's catalog rolls out these IDs; this does
+    ;; not establish account availability or a separately verified Copilot cap.
+    "gpt-6-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
+    "gpt-6-luna" (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
     "gpt-4.1" {:pricing {:input 0.0 :output 0.0} :context 128000}
     "gpt-4o" {:pricing {:input 0.0 :output 0.0} :context 128000}
     ;; Gemini + Grok on Copilot also gate reasoning server-side
@@ -4106,12 +4179,10 @@
         (get pricing k))))
 
 (defn- cache-write-rate
-  [pricing ttl]
-  (case ttl
-    :1h
-    (or (:cache-write-1h pricing) (:cache-write pricing) (:input pricing))
-
-    (or (:cache-write-5m pricing) (:cache-write pricing) (:input pricing))))
+  [pricing ttl input-tokens]
+  (or (tier-rate pricing (if (= :1h ttl) :cache-write-1h :cache-write-5m) input-tokens)
+      (tier-rate pricing :cache-write input-tokens)
+      (tier-rate pricing :input input-tokens)))
 
 (defn- usage-cache-tokens
   "Pull cache-read / cache-write tokens out of the Phase A canonical
@@ -4164,7 +4235,7 @@
          (tier-rate pricing :output input-tokens)
 
          cache-write-rate
-         (cache-write-rate pricing (or (:cache-creation-ttl opts) :5min))
+         (cache-write-rate pricing (or (:cache-creation-ttl opts) :5min) input-tokens)
 
          input-uncached-cost
          (double (million-cost input-uncached-tokens input-rate))
