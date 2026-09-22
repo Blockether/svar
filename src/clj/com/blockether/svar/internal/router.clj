@@ -1987,7 +1987,7 @@
         entry
         (when provider-id (provider-model-entry provider-id (:name normalized)))]
 
-    (with-vision-capability (explicit-capabilities model-map) (merge normalized entry))))
+    (with-vision-capability (explicit-capabilities model-map) (merge normalized entry model-map))))
 
 (defn- apply-image-input-policy
   "Provider-level VETO on image input: `:image-input? false` strips `:vision` from
@@ -3794,26 +3794,64 @@
    shifted 1.0-1.35×), so any hard-coded factor goes stale. Callers who
    need exact Claude/Gemini counts should use the provider count_tokens
    API; this fallback is a fast, dependency-free, version-stable estimate."
-  ^Encoding [^String model-name]
-  (try (let [^ModelType model-type (.orElseThrow (ModelType/fromName model-name))]
-         (.getEncodingForModel registry model-type))
-       (catch Exception _ (.getEncoding registry EncodingType/O200K_BASE))))
+  (^Encoding [^String model-name] (model->encoding model-name nil))
+  (^Encoding [^String model-name tokenizer]
+   (case tokenizer
+     "o200k_base"
+     (.getEncoding registry EncodingType/O200K_BASE)
+
+     "cl100k_base"
+     (.getEncoding registry EncodingType/CL100K_BASE)
+
+     (try (let [^ModelType model-type (.orElseThrow (ModelType/fromName model-name))]
+            (.getEncodingForModel registry model-type))
+          (catch Exception _ (.getEncoding registry EncodingType/O200K_BASE))))))
 
 ;; =============================================================================
 ;; Token Input Limits
 ;; =============================================================================
 
+(defn model-input-budget
+  "Usable input tokens: the independent input cap, bounded also by a known total
+   window minus output. An input-only cap is never reduced by output again."
+  ^long [{:keys [context input-limit]} output-reserve]
+  (let [window-budget (when context (max 0 (- (long context) (long output-reserve))))]
+    (long (cond (and input-limit window-budget) (min (long input-limit) (long window-budget))
+                input-limit input-limit
+                window-budget window-budget
+                :else (max 0 (- (long DEFAULT_CONTEXT_LIMIT) (long output-reserve)))))))
+
+(defn model-output-budget
+  "Default generation budget, bounded by the model's independent output cap."
+  ^long [{:keys [context input-limit output-limit]}]
+  (let [window
+        (long (or context input-limit DEFAULT_CONTEXT_LIMIT))
+
+        input
+        (if input-limit (min window (long input-limit)) window)
+
+        quarter
+        (max 1 (quot input 4))]
+
+    (if output-limit (min quarter (long output-limit)) quarter)))
+
 (defn max-input-tokens
-  "Calculates maximum input tokens for a model, reserving space for output."
+  "Input budget respecting independent prompt and total-window limits."
   (^long [^String model] (max-input-tokens model {}))
-  (^long [^String model {:keys [output-reserve trim-ratio context-limits]}]
-   (let [limit
-         (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
+  (^long [^String model {:keys [output-reserve trim-ratio context-limits input-limit]}]
+   (let [limits
+         (or context-limits MODEL_CONTEXT_LIMITS)
 
-         effective-reserve
-         (or output-reserve DEFAULT_OUTPUT_RESERVE)]
+         limit
+         (when (or (nil? input-limit) (contains? limits model)) (context-limit model limits))
 
-     (if trim-ratio (long (* limit (double trim-ratio))) (- limit (long effective-reserve))))))
+         budget
+         (model-input-budget {:context limit :input-limit input-limit}
+                             (or output-reserve DEFAULT_OUTPUT_RESERVE))]
+
+     (if trim-ratio
+       (min budget (long (* (long (or limit input-limit)) (double trim-ratio))))
+       budget))))
 
 ;; =============================================================================
 ;; Token Counting
@@ -3831,9 +3869,10 @@
    session could never be continued. Counting is an ESTIMATE for pre-flight
    context checks; nothing here encodes text for a model, so there is nothing
    these tokens could confuse."
-  ^long [^String model ^String text]
-  (let [encoding (model->encoding model)]
-    (.countTokensOrdinary encoding text)))
+  (^long [^String model ^String text] (count-tokens model text {}))
+  (^long [^String model ^String text {:keys [tokenizer]}]
+   (let [encoding (model->encoding model tokenizer)]
+     (.countTokensOrdinary encoding text))))
 
 (defn- tokens-per-message
   "Returns the number of overhead tokens per message for a model."
@@ -4053,32 +4092,33 @@
   "Estimates canonical message tokens, including Responses hidden reasoning,
    readable thinking, tool payloads, text and images. Replay signatures are not text;
    provider usage or exact counting remains authoritative."
-  ^long [^String model messages]
-  (let [encoding
-        (model->encoding model)
+  (^long [^String model messages] (count-messages model messages {}))
+  (^long [^String model messages {:keys [tokenizer]}]
+   (let [encoding
+         (model->encoding model tokenizer)
 
-        tpm
-        (tokens-per-message model)
+         tpm
+         (tokens-per-message model)
 
-        tpn
-        (tokens-per-name model)
+         tpn
+         (tokens-per-name model)
 
-        message-tokens
-        (reduce (fn [^long acc {:keys [role content name] :as _message}]
-                  (+ acc
-                     (long tpm)
-                     (encoded-tokens encoding
-                                     (some-> role
-                                             clojure.core/name))
-                     (content-tokens encoding content)
-                     (if name (+ (long tpn) (encoded-tokens encoding name)) 0)))
-                0
-                messages)
+         message-tokens
+         (reduce (fn [^long acc {:keys [role content name] :as _message}]
+                   (+ acc
+                      (long tpm)
+                      (encoded-tokens encoding
+                                      (some-> role
+                                              clojure.core/name))
+                      (content-tokens encoding content)
+                      (if name (+ (long tpn) (encoded-tokens encoding name)) 0)))
+                 0
+                 messages)
 
-        reply-priming
-        3]
+         reply-priming
+         3]
 
-    (+ (long message-tokens) reply-priming)))
+     (+ (long message-tokens) reply-priming))))
 
 (defn responses-request-accounting
   "Content-free estimate of a prepared Responses request, after replay filtering.
@@ -4087,54 +4127,56 @@
    reply priming is charged once. Tools and output formats use their wire schemas.
    Generation/cache controls are not input. Opaque reasoning uses the hidden-token
    heuristic, never ciphertext BPE. Provider usage remains authoritative."
-  [^String model body]
-  (let [input
-        (block-field body :input)
+  ([^String model body] (responses-request-accounting model body {}))
+  ([^String model body {:keys [tokenizer] :as opts}]
+   (let [input
+         (block-field body :input)
 
-        items
-        (if (string? input) [{:role "user" :content input}] input)
+         items
+         (if (string? input) [{:role "user" :content input}] input)
 
-        messages
-        (mapv (fn [item]
-                {:role
-                 (or (block-field item :role)
-                     (if (= "function_call_output" (block-field item :type)) "tool" "assistant"))
-                 :content (if (or (= "message" (block-field item :type)) (block-field item :role))
-                            (block-field item :content)
-                            item)})
-              items)
+         messages
+         (mapv (fn [item]
+                 {:role
+                  (or (block-field item :role)
+                      (if (= "function_call_output" (block-field item :type)) "tool" "assistant"))
+                  :content (if (or (= "message" (block-field item :type)) (block-field item :role))
+                             (block-field item :content)
+                             item)})
+               items)
 
-        instructions
-        (block-field body :instructions)
+         instructions
+         (block-field body :instructions)
 
-        encoding
-        (model->encoding model)
+         encoding
+         (model->encoding model tokenizer)
 
-        tools
-        (block-field body :tools)
+         tools
+         (block-field body :tools)
 
-        format
-        (some-> (block-field body :text)
-                (block-field :format))
+         format
+         (some-> (block-field body :text)
+                 (block-field :format))
 
-        priming
-        (count-messages model [])
+         priming
+         (count-messages model [] opts)
 
-        components
-        {:messages (- (count-messages model messages) priming)
-         :instructions (if (seq instructions)
-                         (- (count-messages model [{:role "system" :content instructions}]) priming)
-                         0)
-         :tools (if (seq tools) (encoded-tokens encoding (json/write-json-str tools)) 0)
-         :output-format (if (seq format) (encoded-tokens encoding (json/write-json-str format)) 0)
-         :reply-priming priming}]
+         components
+         {:messages (- (count-messages model messages opts) priming)
+          :instructions (if (seq instructions)
+                          (- (count-messages model [{:role "system" :content instructions}] opts)
+                             priming)
+                          0)
+          :tools (if (seq tools) (encoded-tokens encoding (json/write-json-str tools)) 0)
+          :output-format (if (seq format) (encoded-tokens encoding (json/write-json-str format)) 0)
+          :reply-priming priming}]
 
-    {:source :svar-estimate
-     :projection :prepared-request
-     :model model
-     :api-style :openai-compatible-responses
-     :input-tokens (reduce + 0 (vals components))
-     :components components}))
+     {:source :svar-estimate
+      :projection :prepared-request
+      :model model
+      :api-style :openai-compatible-responses
+      :input-tokens (reduce + 0 (vals components))
+      :components components})))
 
 (defn count-responses-request
   "Estimate a prepared Responses request. See `responses-request-accounting` for
@@ -4450,8 +4492,9 @@
    3. Offline `count-messages` tiktoken estimate."
   ([^String model messages] (check-context-limit model messages {}))
   ([^String model messages
-    {:keys [output-reserve throw? context-limits input-tokens exact-count-fn]
-     :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}}]
+    {:keys [output-reserve throw? context-limits input-tokens exact-count-fn tokenizer]
+     :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}
+     :as opts}]
    (let
      [ctx-limit
       (context-limit model (or context-limits MODEL_CONTEXT_LIMITS))
@@ -4460,17 +4503,18 @@
       (long output-reserve)
 
       max-input
-      (- ctx-limit effective-reserve)
+      (max-input-tokens model opts)
 
       offline-tokens
-      (long (or input-tokens (count-messages model messages)))
+      (long (or input-tokens (count-messages model messages {:tokenizer tokenizer})))
 
       ;; Refine near the limit: only when the cheap estimate says we're
       ;; close enough that its imprecision could change ok?/overflow.
       refine?
       (and exact-count-fn
            (nil? input-tokens)
-           (>= (/ (double offline-tokens) (double max-input)) CONTEXT_REFINE_UTILIZATION))
+           (>= (/ (double offline-tokens) (double (max 1 max-input)))
+               (double CONTEXT_REFINE_UTILIZATION)))
 
       input-tokens
       (long (or (when refine? (exact-count-fn)) offline-tokens))
@@ -4488,7 +4532,7 @@
        :context-limit ctx-limit
        :output-reserve effective-reserve
        :overflow overflow
-       :utilization (double (/ input-tokens max-input))
+       :utilization (double (/ input-tokens (max 1 max-input)))
        :error
        (when-not ok?
          (format

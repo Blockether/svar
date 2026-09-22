@@ -722,3 +722,33 @@
             (it "truncates text carrying one instead of throwing"
                 (let [text (apply str (repeat 200 "<|endoftext|> padding "))]
                   (expect (> (count text) (count (sut/truncate-text "gpt-4o" text 20))))))))
+
+(defdescribe
+  independent-input-budget-test
+  (it "enforces a separate input ceiling without reserving output twice"
+      (let [opts {:context-limits {"m" 100000} :input-limit 70000 :output-reserve 20000}]
+        (expect (= 70000 (sut/max-input-tokens "m" opts)))
+        (expect (:ok? (sut/check-context-limit "m" [] (assoc opts :input-tokens 70000))))
+        (expect (not (:ok? (sut/check-context-limit "m" [] (assoc opts :input-tokens 70001)))))))
+  (it "also enforces input plus output against the total window"
+      (expect (= 60000
+                 (sut/max-input-tokens
+                   "m"
+                   {:context-limits {"m" 100000} :input-limit 70000 :output-reserve 40000}))))
+  (it "never reports a negative input budget or divides by zero"
+      (let [opts {:context-limits {"m" 1000} :output-reserve 2000}]
+        (expect (= 0 (sut/max-input-tokens "m" opts)))
+        (expect (not (:ok? (sut/check-context-limit "m" [] (assoc opts :input-tokens 1)))))))
+  (it "uses a supported tokenizer declaration, with an honest unknown fallback"
+      (let [text
+            "Zażółć gęślą jaźń — 你好世界 👋"
+
+            messages
+            [{:role "user" :content text}]]
+
+        (expect (= (sut/count-tokens "gpt-4" text)
+                   (sut/count-tokens "gpt-6-test" text {:tokenizer "cl100k_base"})))
+        (expect (= (sut/count-messages "gpt-6-test" messages)
+                   (sut/count-messages "gpt-6-test" messages {:tokenizer "unknown-vocabulary"})))
+        (expect (not= (sut/count-messages "gpt-6-test" messages {:tokenizer "cl100k_base"})
+                      (sut/count-messages "gpt-6-test" messages {:tokenizer "o200k_base"}))))))

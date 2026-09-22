@@ -1438,6 +1438,7 @@
            :model (str (:model opts))
            :api-style api-style
            :base-url (:base-url opts)
+           :tokenizer (:tokenizer opts)
            :responses-path (:responses-path opts)
            ;; Credentials, account headers and explicit cache keys select a provider
            ;; cache namespace. Dynamic transport headers (for example Copilot's
@@ -3176,7 +3177,8 @@
                                            messages
                                            model
                                            extra-body
-                                           (responses-build-options base-url opts)))))
+                                           (responses-build-options base-url opts))
+                                         (select-keys opts [:tokenizer]))))
 
 ;; ---------------------------------------------------------------------------
 ;; Google Gemini wire — generateContent / streamGenerateContent
@@ -7171,7 +7173,9 @@
                         :on-chunk on-chunk}
 
                        accounting
-                       (router/responses-request-accounting model request-body)]
+                       (router/responses-request-accounting model
+                                                            request-body
+                                                            (select-keys opts [:tokenizer]))]
 
                    (try (assoc (if (and *responses-session-transport* (= :openai-codex provider-id))
                                  (*responses-session-transport*
@@ -7390,7 +7394,11 @@
         ;; static catalog lookup, which knows nothing about runtime-configured
         ;; local models and would fall back to DEFAULT_CONTEXT_LIMIT.
         model-context
-        (or context (when provider-id (router/provider-model-context provider-id model)))
+        (or context
+            (when provider-id
+              (if (:input-limit opts)
+                (:context (router/provider-model-entry provider-id model))
+                (router/provider-model-context provider-id model))))
 
         context-limits
         (cond-> default-context-limits
@@ -7422,7 +7430,12 @@
              (if (some? check-context?)
                check-context?
                (if (contains? tokens :check-context?) (:check-context? tokens) true))
-             :output-reserve (or output-reserve (:output-reserve tokens))
+             :output-reserve (or output-reserve
+                                 (:output-reserve tokens)
+                                 (:max_output_tokens extra-body)
+                                 (:max_tokens extra-body))
+             :input-limit (:input-limit opts)
+             :tokenizer (:tokenizer opts)
              :api-key api-key
              :base-url base-url
              :api-style (or api-style :openai-compatible-chat)
@@ -7467,6 +7480,21 @@
 
       (some? stateless-items?)
       (assoc :stateless-items? stateless-items?))))
+
+(defn- preflight-input-tokens
+  "Ask the host for a route-validated usage estimate; nil keeps local/exact counting.
+   The callback sees canonical messages and an opaque account/request identity, never
+   credentials. Counts include cached input. It must decline changed prefixes/routes."
+  [model messages opts accounting]
+  (let [estimate (when-let [f (:input-token-estimator opts)]
+                   (f {:provider-id (:provider-id opts)
+                       :model model
+                       :messages messages
+                       :prompt-cache-context (prompt-cache-context-for-opts opts)
+                       :tokenizer (:tokenizer opts)
+                       :local-input-tokens (:input-tokens accounting)}))]
+    (or (when (and (integer? estimate) (<= 0 estimate Long/MAX_VALUE)) estimate)
+        (:input-tokens accounting))))
 
 ;; =============================================================================
 ;; Provider Router (fallback, rate limiting, provider selection)
@@ -7568,29 +7596,8 @@
    - routed primitives carry `:router-handles-transients?`, making the router
      the sole owner of retry schedule, budget, telemetry, and fallback."
   [opts provider model-map]
-  (let [ctx
-        (long (or (:context model-map) router/DEFAULT_CONTEXT_LIMIT))
-
-        ;; Quarter of the input context is a reasonable headroom for a
-        ;; single response; the rest stays for the prompt + tool
-        ;; outputs. But some providers cap output independently of
-        ;; context (Copilot caps Claude-sonnet-4.6 at 32K output even
-        ;; though context is 200K, models.dev `:limit.output`). When
-        ;; the merged model-map carries an explicit `:output-limit`,
-        ;; clamp the auto budget to it so requests do not advertise a
-        ;; max_tokens the provider will silently truncate — that's the
-        ;; failure mode behind the empty-content / comment-only loop
-        ;; in session 52983a42 once `auto-params` started producing
-        ;; >output-cap budgets.
-        output-cap
-        (some-> (:output-limit model-map)
-                long)
-
-        quarter
-        (long (* 0.25 ctx))
-
-        auto-params
-        {:max_tokens (if output-cap (min quarter (long output-cap)) quarter)}
+  (let [auto-params
+        {:max_tokens (router/model-output-budget model-map)}
 
         api-style
         (or (:api-style model-map) (:api-style provider))
@@ -7642,9 +7649,7 @@
         ;; the static catalog (which has nothing for runtime-configured local
         ;; models → DEFAULT_CONTEXT_LIMIT). This is what carries LM Studio's
         ;; detected window into the overflow check.
-        (cond->
-          (:context model-map)
-          (assoc :context (:context model-map)))
+        (merge (select-keys model-map [:context :input-limit :output-limit :tokenizer]))
         (cond->
           (some? (:responses-path provider))
           (assoc :responses-path (:responses-path provider)))
@@ -7682,6 +7687,31 @@
             apply-known-tool-quirk)]
 
     (prompt-cache-context-for-opts routed-opts)))
+
+(defn context-budget
+  "Resolve the SAME input/output budget used by routed preflight, without inference.
+   Returns provider/model identity, declared limits/tokenizer, requested output reserve
+   and :max-input-tokens. Explicit output controls participate in the total-window bound."
+  [router opts]
+  (let [resolved
+        (router/resolve-routing router (routing-opts-with-reasoning opts))
+
+        [provider model-map]
+        (or (router/select-provider router (:prefs resolved))
+            (throw (ex-info "No provider is available for context budget."
+                            {:type :svar.llm/no-provider})))
+
+        routed
+        (inject-routed-params opts provider model-map)
+
+        budget-opts
+        (resolve-opts router routed)]
+
+    (merge (select-keys model-map [:context :input-limit :output-limit :tokenizer])
+           {:provider-id (:id provider)
+            :model (:name model-map)
+            :output-reserve (or (:output-reserve budget-opts) router/DEFAULT_OUTPUT_RESERVE)
+            :max-input-tokens (router/max-input-tokens (:name model-map) budget-opts)})))
 
 (defn- resolved-network-timeout
   "Single point of truth for the streaming-timeout precedence chain:
@@ -8245,7 +8275,12 @@
 
      check-opts
      (cond-> {:context-limits context-limits
-              :input-tokens (:input-tokens preflight-accounting)
+              :input-limit (:input-limit opts)
+              :tokenizer (:tokenizer opts)
+              :input-tokens (preflight-input-tokens model
+                                                    base-messages
+                                                    (assoc opts :extra-body extra-body)
+                                                    preflight-accounting)
               :exact-count-fn (anthropic-exact-count-fn base-messages
                                                         model
                                                         {:api-style api-style
@@ -9031,7 +9066,12 @@
 
      check-opts
      (cond-> {:context-limits context-limits
-              :input-tokens (:input-tokens preflight-accounting)
+              :input-limit (:input-limit opts)
+              :tokenizer (:tokenizer opts)
+              :input-tokens (preflight-input-tokens model
+                                                    in-msgs
+                                                    (assoc opts :extra-body extra-body)
+                                                    preflight-accounting)
               :exact-count-fn (anthropic-exact-count-fn in-msgs
                                                         model
                                                         {:api-style api-style
@@ -9847,43 +9887,67 @@
    "supports_response_schema" :structured-output?
    "supports_prompt_caching" :prompt-caching?})
 
-(defn- enrich-gateway-model
-  "Map an OpenAI-compatible gateway's model entry onto svar model keys.
+(defn- positive-token-limit
+  [value]
+  (when (and (integer? value) (pos? (compare value 0)) (not (pos? (compare value Long/MAX_VALUE))))
+    (long value)))
 
-   Reads LiteLLM's `model_info` block (or the same keys inline) for the window,
-   the output cap and the capability flags. Absent fields stay ABSENT: svar
-   never invents a capability, and an explicit key already on the model (e.g.
-   set by `enrich-lmstudio-model`) always wins. Wire fields are read as
-   strings; svar's derived keys are the only keywords."
+(defn- enrich-gateway-model
+  "Normalize published model budgets without confusing input caps with total windows.
+   Reads OpenAI-compatible/LiteLLM, Copilot, Codex, OpenRouter and Gemini fields.
+   Missing or malformed fields remain absent; no provider inherits another account's
+   limits. Codex max_context_window is an opt-in maximum, not its active window."
   [m]
   (if-not (map? m)
     m
     (let [info
           (merge m (when (map? (get m "model_info")) (get m "model_info")))
 
-          ctx
-          (or (get info "max_input_tokens") (get info "context_window"))
+          limits
+          (get-in m ["capabilities" "limits"])
 
-          out
-          (or (get info "max_output_tokens") (get info "max_tokens"))
+          ctx
+          (some positive-token-limit
+                [(get info "context_window") (get info "context_length")
+                 (get limits "max_context_window_tokens")])
+
+          input
+          (some positive-token-limit
+                [(get info "max_input_tokens") (get info "inputTokenLimit")
+                 (get limits "max_prompt_tokens")])
+
+          output
+          (some positive-token-limit
+                [(get info "max_output_tokens") (get info "outputTokenLimit")
+                 (get limits "max_output_tokens")
+                 (get-in m ["top_provider" "max_completion_tokens"]) (get info "max_tokens")])
+
+          tokenizer
+          (or (get-in m ["capabilities" "tokenizer"]) (get info "tokenizer"))
 
           caps
-          (reduce-kv
-            (fn [acc wire-k svar-k]
-              (if (contains? info wire-k) (assoc acc svar-k (boolean (get info wire-k))) acc))
-            {}
-            GATEWAY_CAPABILITY_KEYS)]
+          (reduce-kv (fn [acc wire-k svar-k]
+                       (if (boolean? (get info wire-k)) (assoc acc svar-k (get info wire-k)) acc))
+                     {}
+                     GATEWAY_CAPABILITY_KEYS)]
 
       (merge caps
-             (cond-> m
-               (and (not (:context m)) (number? ctx))
-               (assoc :context (long ctx))
+             (cond-> {}
+               ctx
+               (assoc :context ctx)
 
-               (and (not (:max-output-tokens m)) (number? out))
-               (assoc :max-output-tokens (long out))
+               input
+               (assoc :input-limit input)
+
+               output
+               (assoc :output-limit output)
+
+               (and (string? tokenizer) (not (str/blank? tokenizer)))
+               (assoc :tokenizer tokenizer)
 
                (string? (get info "litellm_provider"))
-               (assoc :upstream-provider (get info "litellm_provider")))))))
+               (assoc :upstream-provider (get info "litellm_provider")))
+             m))))
 
 (defn- shape-models
   "Apply provider-specific model normalization keyed by `:models-shape`, then the
@@ -9937,6 +10001,19 @@
               (and (map? body) (sequential? (get body "data"))) (vec (get body "data"))
               (and (map? body) (sequential? (get body "models"))) (vec (get body "models"))
               :else [])))
+
+(defn model-catalog-identity
+  "Opaque identity for live model metadata: provider, endpoint and credential/account.
+   Safe to persist with a normalized catalog. Tokens and account headers never leave
+   this SHA-256 digest; changes invalidate learned metadata instead of crossing accounts."
+  [provider]
+  (let [known (router/known-provider (:id provider))]
+    (sha256-hex (canonical-cache-str
+                  {:provider-id (:id provider)
+                   :base-url (or (:base-url provider) (:base-url known))
+                   :api-style (or (:api-style provider) (:api-style known) :openai-compatible-chat)
+                   :api-key (:api-key provider)
+                   :account-headers (prompt-cache-namespace-headers (:llm-headers provider))}))))
 
 (def ^:private MODELS_CACHE_TTL_MS
   "How long a successful `/models` catalog is reused before re-fetching. The
@@ -10037,9 +10114,10 @@
          ;; SAME url legitimately return different catalogs. Hashed, never
          ;; stored raw.
          cache-key
-         [models-url provider-id api-style
-          (some-> api-key
-                  hash)]
+         [models-url provider-id api-style models-shape models-query-params
+          (sha256-hex (canonical-cache-str {:api-key api-key
+                                            :account-headers (prompt-cache-namespace-headers
+                                                               llm-headers)}))]
 
          cached
          (get @models-cache cache-key)

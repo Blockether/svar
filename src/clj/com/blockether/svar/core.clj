@@ -234,7 +234,26 @@
    Other API styles omit it. No prompt, tool payload, signature or credential is
    included. Text/schema tokens use the model tokenizer; images, opaque reasoning
    and framing remain estimates. Provider usage (including cached input) stays
-   authoritative; this API neither rescales usage nor sums retries."
+   authoritative; this API neither rescales usage nor sums retries.
+
+   `:input-token-estimator` optionally accepts a request map with :provider-id,
+   :model, :messages, opaque :prompt-cache-context, :tokenizer and :local-input-tokens.
+   Return a nonnegative input count only for a validated unchanged measured prefix
+   on this exact route/account/policy; return nil otherwise. Preflight then uses the
+   estimate instead of recounting that prefix. Provider usage is never overwritten.
+   Supported tokenizer declarations are o200k_base and cl100k_base; other names
+   retain the model-name/local fallback, so all local counts remain estimates."
   llm/ask-code!)
 
-(def models! "Fetches available models from the LLM API." llm/models!)
+(def context-budget
+  "Resolve a route's input/output budget without inference. See internal.llm/context-budget."
+  llm/context-budget)
+
+(def model-catalog-identity
+  "Credential-safe account/endpoint identity for persisting live model metadata."
+  llm/model-catalog-identity)
+
+(def models!
+  "Fetch models with published :context (total window), :input-limit, :output-limit
+   and :tokenizer metadata when available. Missing fields remain absent."
+  llm/models!)

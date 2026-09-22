@@ -547,7 +547,7 @@
             (let [m (first (svar/models! router))]
               (expect (= "gpt-5.5" (:id m)))
               (expect (= "GPT-5.5" (:name m)))
-              (expect (= 400000 (:context m)))
+              (expect (= 400000 (:input-limit m)))
               (expect (true? (:tool-call? m)))
               (expect (= 1 (get m "a weird gateway key")))
               (expect (every? string? (keys (get m "model_info"))))
@@ -1632,3 +1632,116 @@
       (expect (= :svar.llm/empty-content (classify nil)))
       (expect (= :svar.llm/empty-content (classify "")))
       (expect (= :svar.llm/empty-content (classify "content_filter"))))))
+
+(defdescribe
+  live-model-budget-metadata-test
+  (it "preserves separate Copilot window, input/output caps and tokenizer"
+      (let [m (first (@#'sut/shape-models
+                      :github-copilot
+                      [{"id" "gpt-test"
+                        "capabilities" {"tokenizer" "cl100k_base"
+                                        "limits" {"max_context_window_tokens" 100000
+                                                  "max_prompt_tokens" 70000
+                                                  "max_output_tokens" 20000}}}]))]
+        (expect (= {:context 100000 :input-limit 70000 :output-limit 20000 :tokenizer "cl100k_base"}
+                   (select-keys m [:context :input-limit :output-limit :tokenizer])))))
+  (it "keeps input-only gateway limits separate from a total window"
+      (let [m (first (@#'sut/shape-models
+                      nil
+                      [{"id" "m"
+                        "model_info" {"max_input_tokens" 60000 "max_output_tokens" 8000}}]))]
+        (expect (= 60000 (:input-limit m)))
+        (expect (= 8000 (:output-limit m)))
+        (expect (nil? (:context m)))))
+  (it
+    "reads OpenRouter and native Gemini fields without guessing a tokenizer"
+    (let [[openrouter gemini]
+          (@#'sut/shape-models
+           nil
+           [{"id" "vendor/m" "context_length" 100000 "top_provider" {"max_completion_tokens" 10000}}
+            {"name" "models/gemini-test" "inputTokenLimit" 200000 "outputTokenLimit" 32000}])]
+      (expect (= 100000 (:context openrouter)))
+      (expect (= 10000 (:output-limit openrouter)))
+      (expect (= 200000 (:input-limit gemini)))
+      (expect (= 32000 (:output-limit gemini)))
+      (expect (nil? (:tokenizer openrouter)))))
+  (it "ignores malformed limits instead of poisoning the fallback catalog"
+      (let [m (first (@#'sut/shape-models
+                      :github-copilot
+                      [{"id" "m"
+                        "capabilities" {"tokenizer" 9
+                                        "limits" {"max_prompt_tokens" -1
+                                                  "max_output_tokens" "8192"
+                                                  "max_context_window_tokens" 0}}}]))]
+        (expect (empty? (select-keys m [:context :input-limit :output-limit :tokenizer])))))
+  (it "does not reuse a cached catalog for another account header"
+      (let [calls
+            (atom 0)
+
+            provider
+            {:id :openai-codex :api-key "test-shared-token" :models [{:name "gpt-5.5"}]}
+
+            fetch
+            (fn [account]
+              (sut/models! (svar/make-router [(assoc provider
+                                                :llm-headers {"chatgpt-account-id" account})])))]
+
+        (sut/clear-models-cache!)
+        (with-redefs-fn {#'sut/http-get! (fn [& _]
+                                           {"data" [{"id" (str "account-model-"
+                                                               (swap! calls inc))}]})}
+          #(do (fetch "account-a") (fetch "account-b") (expect (= 2 @calls)))))))
+
+(defdescribe
+  routed-live-budget-test
+  (it "keeps explicit and detected model budgets above the static catalog"
+      (let [provider
+            (router/normalize-provider 0
+                                       {:id :github-copilot
+                                        :api-key "test"
+                                        :models [{:name "gpt-6-astra"
+                                                  :context 100000
+                                                  :input-limit 70000
+                                                  :output-limit 20000
+                                                  :tokenizer "cl100k_base"}]})
+
+            model
+            (first (:models provider))]
+
+        (expect (= 70000 (:input-limit model)))
+        (expect (= 100000 (:context model)))))
+  (it "does not replace a published input-only budget with an unknown-model default"
+      (let [r (svar/make-router [{:id :custom
+                                  :base-url "https://gateway.example.com/v1"
+                                  :api-key "test"
+                                  :models
+                                  [{:name "new-model" :input-limit 60000 :output-limit 8000}]}])]
+        (expect (= 60000 (:max-input-tokens (svar/context-budget r {}))))))
+  (it "calibrated preflight reaches transport across dialects without rewriting provider usage"
+      (doseq [style [:openai-compatible-chat :openai-compatible-responses :anthropic :gemini]]
+        (let [captured (atom nil)
+              opts {:model "new-model"
+                    :provider-id :custom
+                    :api-key "test"
+                    :base-url "https://gateway.example.com/v1"
+                    :api-style style
+                    :context 1000
+                    :input-limit 900
+                    :output-reserve 100
+                    :messages [{:role "user" :content (apply str (repeat 2000 "word "))}]
+                    :input-token-estimator (fn [request]
+                                             (reset! captured request)
+                                             800)}]
+
+          (with-redefs-fn {#'sut/chat-completion
+                           (fn [& _]
+                             {:content "ok"
+                              :api-usage {:input-tokens 801 :output-tokens 1 :total-tokens 802}})}
+            #(let [result (@#'sut/ask-code!* {} opts)] (expect (= 801
+                                                                  (get-in result
+                                                                          [:api-usage
+                                                                           :input-tokens])))
+               (expect (= :custom (:provider-id @captured))) (expect (= "new-model"
+                                                                        (:model @captured)))
+               (expect (string? (get-in @captured [:prompt-cache-context :id])))
+               (expect (nil? (:api-key @captured)))))))))
