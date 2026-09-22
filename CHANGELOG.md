@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.175] - 2026-09-22
+
+### Changed
+- fix(router): align Astra limits and pricing with the catalog
+- release: update version files for v0.7.174, bump to next dev version
+
+
 ## [v0.7.174] - 2026-09-22
 
 ### Changed
@@ -2608,7 +2615,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.174...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.175...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2815,3 +2822,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.172]: https://github.com/Blockether/svar/releases/tag/v0.7.172
 [v0.7.173]: https://github.com/Blockether/svar/releases/tag/v0.7.173
 [v0.7.174]: https://github.com/Blockether/svar/releases/tag/v0.7.174
+[v0.7.175]: https://github.com/Blockether/svar/releases/tag/v0.7.175
