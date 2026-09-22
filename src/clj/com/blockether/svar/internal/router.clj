@@ -985,25 +985,16 @@
   {:openai {;; Long-context tier pricing (>272k tokens) — not in models.dev.
             "gpt-5.4" {:pricing
                        {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
-            "gpt-5.5"
-            {:pricing {:input-over-272k 10.00 :cached-input-over-272k 1.00 :output-over-272k 45.00}}
-            ;; GPT-6 Astra is newer than the bundled models.dev snapshot, so
-            ;; this overlay is its only metadata source on the retail API.
-            ;; 400K product window (272K input + 128K output); effort rungs
-            ;; mirror the Codex entry.
-            "gpt-6-astra" {:context 400000
-                           :reasoning-options [{:type "effort"
-                                                :values ["low" "medium" "high" "xhigh" "max"
-                                                         "ultra"]}]}}
+            "gpt-5.5" {:pricing {:input-over-272k 10.00
+                                 :cached-input-over-272k 1.00
+                                 :output-over-272k 45.00}}}
    :openai-codex
-   ;; Codex prompt budget = 272K input (catalog reports 400K product window
-   ;; = 272K input + 128K output). Pricing flows from `:pricing-source :openai`.
+   ;; Codex prompt budgets are independent of retail product windows.
+   ;; Pricing and other catalog metadata flow from `:pricing-source :openai`.
    {"gpt-5" {:context 400000}
     "gpt-5.1" {:context 128000}
     "gpt-5.3-codex" {:context 272000}
-    "gpt-6-astra" {:context 272000
-                   :reasoning-options [{:type "effort"
-                                        :values ["low" "medium" "high" "xhigh" "max" "ultra"]}]}
+    "gpt-6-astra" {:context 272000 :input-limit 272000}
     "gpt-5.4" {:context 272000
                :pricing
                {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
@@ -1301,16 +1292,12 @@
                      :extra-body {:store false
                                   :include ["reasoning.encrypted_content"]
                                   :reasoning {:effort "medium" :summary "detailed"}}}
-    ;; GPT-6 Astra — newest GPT flagship; the bundled models.dev snapshot
-    ;; predates it, so this overlay is its only metadata source on Copilot.
-    ;; Same Responses wire as the 5.6 fleet; 272K input budget like the
-    ;; other Copilot GPT reasoning models (400K window reserves 128K output).
-    "gpt-6-astra" {:pricing {:input 0.0 :output 0.0}
-                   :context 272000
+    ;; Astra's catalog window is 1.05M total, with 922K available for input.
+    ;; `:context` is our pre-flight input budget; the catalog supplies the
+    ;; separate input/output limits, effort options and metered pricing.
+    "gpt-6-astra" {:context 922000
                    :api-style :openai-compatible-responses
                    :reasoning-style :openai-effort
-                   :reasoning-options [{:type "effort"
-                                        :values ["low" "medium" "high" "xhigh" "max" "ultra"]}]
                    :extra-body {:store false
                                 :include ["reasoning.encrypted_content"]
                                 :reasoning {:effort "medium" :summary "detailed"}}}

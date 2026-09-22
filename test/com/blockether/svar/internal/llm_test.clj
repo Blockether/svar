@@ -5,7 +5,8 @@
             [clojure.string :as str]
             [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.core :as svar]
-            [com.blockether.svar.internal.llm :as sut])
+            [com.blockether.svar.internal.llm :as sut]
+            [com.blockether.svar.internal.router :as router])
   (:import (java.io ByteArrayInputStream)))
 
 (defdescribe
@@ -1362,6 +1363,39 @@
               (it "falls back to DEFAULT_CONTEXT_LIMIT for an unknown local model"
                   (let [resolved (resolve-opts {} {:model "m" :provider-id :lmstudio})]
                     (expect (= sut-router-default (get (:context-limits resolved) "m"))))))))
+
+(defdescribe
+  astra-catalog-budgets-test
+  ;; Regression: the pre-catalog Astra overlay pinned Copilot to 272K input,
+  ;; omitted the output ceiling and advertised an unsupported ultra effort.
+  (it "resolves provider-specific Astra limits through routed pre-flight and output budgets"
+      (doseq [[provider-id input-budget output-budget] [[:github-copilot 922000 128000]
+                                                        [:openai-codex 272000 68000]]]
+        (let [provider (router/normalize-provider
+                         0
+                         {:id provider-id :api-key "test" :models [{:name "gpt-6-astra"}]})
+              model (first (:models provider))
+              opts (#'sut/inject-routed-params {} provider model)
+              resolved (#'sut/resolve-opts {} opts)
+              check-opts {:context-limits (:context-limits resolved) :input-tokens input-budget}]
+
+          (expect (= input-budget (:context model) (:input-limit model) (:context opts)))
+          (expect (= 128000 (:output-limit model)))
+          (expect (= output-budget (get-in opts [:extra-body :max_tokens])))
+          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                     (:reasoning-options model)))
+          (expect (= {:input 10.0 :output 50.0 :cached-input 1.0}
+                     (select-keys (:pricing model) [:input :output :cached-input])))
+          (expect (:ok? (router/check-context-limit "gpt-6-astra" [] check-opts)))
+          (expect (not (:ok? (router/check-context-limit "gpt-6-astra"
+                                                         []
+                                                         (update check-opts :input-tokens inc)))))
+          (when (= :github-copilot provider-id)
+            (expect (= :openai-compatible-responses (:api-style opts)))
+            (expect (= {:store false
+                        :include ["reasoning.encrypted_content"]
+                        :reasoning {:effort "medium" :summary "detailed"}}
+                       (select-keys (:extra-body opts) [:store :include :reasoning]))))))))
 
 (defdescribe routed-provider-native-reasoning-effort-test
              (let [inject
