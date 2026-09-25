@@ -10,7 +10,10 @@
 
      Re-exports the spec DSL (`field`, `spec`, `str->data`, `str->data-with-spec`,
      `data->str`, `validate-data`, `spec->prompt`, `build-ref-registry`) and
-     `make-router` so users can require only this namespace.
+     `make-router` so users can require only this namespace. The provider
+     catalog, token counting, pricing and failure classification that routing
+     uses are public here too (`KNOWN_PROVIDERS`, `count-tokens`,
+     `estimate-cost`, `classify-failure`, ...).
 
    Configuration:
    LLM calls route automatically via the router.
@@ -20,7 +23,8 @@
                    :messages [(system \"Help the user.\")
                               (user \"What is 2+2?\")]
                    :model \"gpt-4o\"})"
-  (:require [com.blockether.svar.internal.llm :as llm]
+  (:require [com.blockether.svar.internal.failure :as failure]
+            [com.blockether.svar.internal.llm :as llm]
             [com.blockether.svar.internal.router :as router]
             [com.blockether.svar.internal.spec :as spec]))
 
@@ -82,6 +86,83 @@
    (plan-tier aware). The single source of truth — consumers use it as their
    `:default-models` and override only for a different curated set."
   router/provider-default-models)
+
+;; =============================================================================
+;; Provider catalog, tokens and pricing
+;; =============================================================================
+
+(def KNOWN_PROVIDERS
+  "Svar's built-in provider catalog: provider id -> defaults such as `:base-url`,
+   `:api-style`, `:env-keys`, `:default-models`, rate limits and plan-tier policy.
+   Consumers layer their own provider metadata over these defaults."
+  router/KNOWN_PROVIDERS)
+
+(def normalize-provider
+  "Normalizes one provider entry the way `make-router` does: fills `:base-url`
+   from `KNOWN_PROVIDERS`, derives `:priority` and `:root`, and merges model
+   metadata with provider-scoped pricing and context limits.
+   Takes the entry's position and the entry."
+  router/normalize-provider)
+
+(def provider-model-metadata
+  "Metadata for one model as a provider serves it (capabilities, pricing,
+   context limits), without building a router. Takes a provider id and a model
+   map with at least `:name`."
+  router/provider-model-metadata)
+
+(def provider-model-visible?
+  "True when the provider's model filters allow `model-name`."
+  router/provider-model-visible?)
+
+(def resolve-effective-model
+  "The model descriptor a router would route to, optionally under routing
+   overrides such as `:optimize`, `:provider` or `:model`. Returns nil when no
+   provider is available."
+  router/resolve-effective-model)
+
+(def count-tokens
+  "Counts the tokens of a text string with the model's tokenizer. A tokenizer's
+   special tokens count as the plain text they are."
+  router/count-tokens)
+
+(def count-messages
+  "Estimates the tokens of a message vector for a model, including reasoning,
+   tool payloads, text and images. Provider usage stays authoritative."
+  router/count-messages)
+
+(def MODEL_PRICING
+  "Flattened model name -> pricing table (USD per 1M tokens) that
+   `estimate-cost` uses when no pricing map is given. A model served by several
+   providers takes the cheapest total."
+  router/MODEL_PRICING)
+
+(def estimate-cost
+  "Estimates USD cost from input and output tokens, with separate uncached
+   input, cached input, cache creation and output components. Rates are USD per
+   1M tokens."
+  router/estimate-cost)
+
+;; =============================================================================
+;; Failures and log context
+;; =============================================================================
+
+(def classify-failure
+  "Classifies a provider or gateway failure into a stable shape:
+   `{:category :retryable? :reached-model? :status :request-id :summary
+   :next-step ...}`."
+  failure/classify)
+
+(def STREAM_WATCHDOG_ERROR_TYPES
+  "Typed stream aborts (time to first token, idle and semantic watchdogs) that
+   are safe to retry only before visible output."
+  failure/STREAM_WATCHDOG_ERROR_TYPES)
+
+(defmacro with-log-context
+  "Evaluates `body` with `context` merged into the map svar adds to its HTTP
+   logs, e.g. `{:query-id \"abc\" :iteration 0}`."
+  [context & body]
+  `(binding [llm/*log-context* (merge llm/*log-context* ~context)]
+     ~@body))
 
 ;; =============================================================================
 ;; Spec DSL

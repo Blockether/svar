@@ -3,7 +3,45 @@
    (mocked + integration). Integration tests (real LLM) are guarded by env var."
   (:require [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.core :as svar]
+            [com.blockether.svar.internal.llm :as llm]
             [com.blockether.svar.test-support :as ts]))
+
+;; =============================================================================
+;; Provider catalog, tokens and pricing
+;; =============================================================================
+
+(defdescribe
+  public-catalog-api-test
+  (describe
+    "provider catalog"
+    (it "exposes the built-in provider defaults"
+        (expect (= "https://api.openai.com/v1" (get-in svar/KNOWN_PROVIDERS [:openai :base-url]))))
+    (it "normalizes a provider entry the way make-router does"
+        (let [p (svar/normalize-provider 0 {:id :openai :models [{:name "gpt-4o"}]})]
+          (expect (= "https://api.openai.com/v1" (:base-url p)))
+          (expect (= "gpt-4o" (:root p)))))
+    (it "answers provider-scoped model metadata without a router"
+        (expect (svar/provider-model-visible? :openai "gpt-4o"))
+        (expect (contains? (:capabilities (svar/provider-model-metadata :openai {:name "gpt-4o"}))
+                           :chat))))
+  (describe "tokens and pricing"
+            (it "counts text and message tokens"
+                (expect (pos? (svar/count-tokens "gpt-4o" "hello world")))
+                (expect (> (svar/count-messages "gpt-4o" [(svar/user "hello world")])
+                           (svar/count-messages "gpt-4o" []))))
+            (it "prices tokens with the flattened table"
+                (expect (pos? (:total-cost (svar/estimate-cost "gpt-4o" 1000
+                                                               100 svar/MODEL_PRICING))))))
+  (describe "failures and log context"
+            (it "classifies a failure"
+                (expect (= :rate-limited
+                           (:category (svar/classify-failure (ex-info "rate limited"
+                                                                      {:status 429}))))))
+            (it "merges nested log context for the body"
+                (expect (= {:query-id "q" :iteration 1}
+                           (svar/with-log-context {:query-id "q"}
+                                                  (svar/with-log-context {:iteration 1}
+                                                                         llm/*log-context*)))))))
 
 ;; =============================================================================
 ;; Message Helpers Tests
