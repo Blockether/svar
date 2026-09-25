@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.178] - 2026-09-25
+
+### Changed
+- fix(llm): update Claude Code OAuth user agent
+- release: update version files for v0.7.177, bump to next dev version
+
+
 ## [v0.7.177] - 2026-09-22
 
 ### Changed
@@ -2629,7 +2636,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.177...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.178...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2839,3 +2846,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.175]: https://github.com/Blockether/svar/releases/tag/v0.7.175
 [v0.7.176]: https://github.com/Blockether/svar/releases/tag/v0.7.176
 [v0.7.177]: https://github.com/Blockether/svar/releases/tag/v0.7.177
+[v0.7.178]: https://github.com/Blockether/svar/releases/tag/v0.7.178
