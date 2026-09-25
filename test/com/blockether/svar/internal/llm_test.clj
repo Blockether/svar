@@ -713,7 +713,8 @@
               (expect (nil? (get headers "x-api-key")))
               (expect (str/includes? (get headers "anthropic-beta") "claude-code-20250219"))
               (expect (str/includes? (get headers "anthropic-beta") "oauth-2025-04-20"))
-              (expect (= "claude-cli/2.1.251" (get headers "user-agent")))
+              ;; Anthropic rejects earlier CLI versions for coding-plan models.
+              (expect (= "claude-cli/2.1.280" (get headers "user-agent")))
               (expect (= "cli" (get headers "x-app")))
               ;; Clean Claude Code identity — must NOT self-label as the
               ;; third-party SDK. An `(external, sdk-cli)` user-agent suffix and
