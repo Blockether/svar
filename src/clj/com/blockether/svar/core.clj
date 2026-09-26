@@ -117,8 +117,15 @@
    map with at least `:name`."
   router/provider-model-metadata)
 
+(def hidden-model?
+  "True when model lists leave `model-name` out on every provider: stealth models,
+   previews and MiMo builds older than MiMo V2.6. A model configured by name still
+   routes."
+  router/hidden-model?)
+
 (def provider-model-visible?
-  "True when the provider's model filters allow `model-name`."
+  "True when model lists offer `model-name` for the provider: its model filters allow
+   it and `hidden-model?` does not hide it."
   router/provider-model-visible?)
 
 (def resolve-effective-model

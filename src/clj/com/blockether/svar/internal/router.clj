@@ -95,8 +95,7 @@
    ;; tool-call prompt).
    :gemini {:base-url "https://generativelanguage.googleapis.com/v1beta"
             :api-style :gemini
-            :default-models [{:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}
-                             {:name "gemini-3-pro-preview"} {:name "gemini-3-flash-preview"}]
+            :default-models [{:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}]
             :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
    :openrouter {:base-url "https://openrouter.ai/api/v1" :env-keys ["OPENROUTER_API_KEY"]}
    ;; Mistral — OpenAI-compatible `/v1/chat/completions`. No `:api-style` needed
@@ -534,13 +533,23 @@
               "claude-sonnet-4-6" "gpt-5.6-sol" "gpt-5.5" "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex"
               "grok-4.6" "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1"
               "glm-5-turbo" "glm-5v-turbo" "glm-4.7" "deepseek-v4-flash" "minimax-m2.7"
-              "mimo-v2.5-pro" "mimo-v2.5" "muse-spark-1.2-contributor"]})
+              "muse-spark-1.2-contributor"]})
 
 (def SPECIAL_MODEL_NAMES
   "Model ids `sort-models` puts last although their names look ordinary: `deepseek-flash`
    is an alias that follows DeepSeek's current Flash model, and `codex-auto-review` and
    `gpt-reserve` are Codex helper models rather than general picks."
   #{"deepseek-flash" "codex-auto-review" "gpt-reserve"})
+
+(def STEALTH_MODEL_NAMES
+  "Stealth models: anonymous, time-limited builds a provider serves under a code name, such
+   as OpenCode's `big-pickle`, `omen-alpha`, `ox-alpha` and `space-bunny-free`. No catalog
+   marks them, so `hidden-model?` names them here."
+  #{"big-pickle" "omen-alpha" "ox-alpha" "ox-alpha-free" "space-bunny-free"})
+
+(def MIN_MIMO_VERSION
+  "Oldest Xiaomi MiMo generation, as [major minor], that model lists still offer."
+  [2 6])
 
 ;; =============================================================================
 ;; Reasoning-depth translation (abstract → provider-specific)
@@ -1906,10 +1915,25 @@
 
     (or (contains? excluded model-name) (and version min-version (version< version min-version)))))
 
+(defn hidden-model?
+  "True when model lists leave `model-name` out on every provider: stealth models
+   (`STEALTH_MODEL_NAMES`), previews and MiMo builds older than `MIN_MIMO_VERSION`.
+   Matching ignores case, an aggregator's `vendor/` prefix and dotted versus dashed
+   version separators. Hiding affects listings only: a model configured by name
+   still routes."
+  [model-name]
+  (let [k (modelsdev/model-key model-name)]
+    (boolean (or (contains? STEALTH_MODEL_NAMES k)
+                 (re-find #"[-:]preview(?=[-:]|$)" k)
+                 (when-let [[_ major minor] (re-find #"(?:^|-)mimo-v(\d+)(?:-(\d+))?" k)]
+                   (version< [(Long/parseLong major) (Long/parseLong (or minor "0"))]
+                             MIN_MIMO_VERSION))))))
+
 (defn provider-model-visible?
-  "True when provider-scoped model filters allow `model-name`."
+  "True when model lists offer `model-name` for `provider-id`: the provider's filters
+   allow it (`provider-excluded-model?`) and `hidden-model?` does not hide it."
   [provider-id model-name]
-  (not (provider-excluded-model? provider-id model-name)))
+  (not (or (provider-excluded-model? provider-id model-name) (hidden-model? model-name))))
 
 (defn- provider-model-source
   "Catalog id used to look up `KNOWN_PROVIDER_MODELS` (the svar wire/policy

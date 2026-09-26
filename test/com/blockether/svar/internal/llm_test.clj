@@ -479,8 +479,20 @@
                                                     {"id" "gpt-5.4"} {"id" "gpt-5.5"}
                                                     {"id" "gemini-3-pro-preview"}]})}
           (fn []
-            (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gpt-5.5"
-                        "gemini-3-pro-preview"]
+            (expect (= ["claude-sonnet-4.6" "gpt-5.3-codex" "gpt-5.4" "gpt-5.5"]
+                       (mapv :id (svar/models! router))))))))
+  (it "leaves stealth, preview and old MiMo models out of /models output"
+      (let [router (svar/make-router [{:id :openrouter
+                                       :api-key "sk-test"
+                                       :models [{:name "xiaomi/mimo-v2.6-pro"}]}])]
+        (sut/clear-models-cache!)
+        (with-redefs-fn {#'sut/http-get!
+                         (fn [_url _api-key & _opts]
+                           {"data" [{"id" "xiaomi/mimo-v2.6-pro"} {"id" "xiaomi/mimo-v2.5-pro"}
+                                    {"id" "google/gemini-3.1-pro-preview"}
+                                    {"id" "google/gemini-2.5-pro"} {"id" "opencode/big-pickle"}]})}
+          (fn []
+            (expect (= ["xiaomi/mimo-v2.6-pro" "google/gemini-2.5-pro"]
                        (mapv :id (svar/models! router))))))))
   (it "keeps z.ai Coding Plan glm-5v-turbo in /models output"
       (let [router (svar/make-router

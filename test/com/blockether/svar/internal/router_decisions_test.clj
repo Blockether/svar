@@ -2500,6 +2500,35 @@
                    (router/sort-models pid ["glm-4.7" "glm-5.3" "glm-5.3-flash"]))
                 (str pid)))))
 
+(defdescribe
+  hidden-model-test
+  (it "hides stealth models, previews and MiMo builds older than MiMo V2.6"
+      (doseq [model ["big-pickle" "opencode/omen-alpha" "ox-alpha-free" "space-bunny-free"
+                     "gemini-3.1-pro-preview" "google/gemini-3-flash-preview" "hy4-preview"
+                     "gpt-4o-audio-preview-2024-12-17" "mimo-v2.5-pro" "xiaomi/mimo-v2.5"
+                     "mimo-v2-omni" "MiMo-V2-Flash"]]
+        (expect (router/hidden-model? model) model)))
+  (it "keeps current models listed"
+      (doseq [model ["mimo-v2.6-pro" "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "gemini-2.5-pro"
+                     "gemini-3.8-flash" "gpt-6-sol" "kimi-k3" "hy3" "deepseek-flash"]]
+        (expect (not (router/hidden-model? model)) model)))
+  (it "keeps hidden models out of every curated provider default list"
+      (doseq [pid (keys router/KNOWN_PROVIDERS)]
+        (expect (not-any? router/hidden-model? (router/provider-default-models pid)) (str pid))))
+  (it "applies on top of each provider's own filters"
+      (expect (router/provider-model-visible? :openrouter "xiaomi/mimo-v2.6-pro"))
+      (expect (not (router/provider-model-visible? :openrouter "xiaomi/mimo-v2.5-pro")))
+      (expect (not (router/provider-model-visible? :openrouter "openrouter/omen-alpha")))
+      (expect (not (router/provider-model-visible? :openai-codex "gpt-5.1-codex"))))
+  (it "still routes a hidden model the caller configures by name"
+      (expect (= ["gemini-3.1-pro-preview"]
+                 (mapv :name
+                       (:models (router/normalize-provider
+                                  0
+                                  {:id :gemini
+                                   :api-key "k"
+                                   :models [{:name "gemini-3.1-pro-preview"}]})))))))
+
 ;; =============================================================================
 ;; Capability routing (`:capabilities` — the HARD filter)
 ;; =============================================================================
