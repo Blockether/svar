@@ -2402,9 +2402,7 @@
           (expect (= :openai-effort (:reasoning-style astra))))))
   (it "uses curated plain OpenAI defaults when caller omits :models"
       (let [p (router/normalize-provider 0 {:id :openai :api-key "x"})]
-        (expect (= ["gpt-6-sol" "gpt-6-astra" "gpt-6-luna" "gpt-5" "gpt-4o" "gpt-5-mini"
-                    "gpt-4o-mini" "o3-mini"]
-                   (mapv :name (:models p))))
+        (expect (= ["gpt-6-sol" "gpt-6-astra" "gpt-6-luna"] (mapv :name (:models p))))
         (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
           (expect (= 1050000 (:context astra)))
           (expect (= :frontier (:intelligence astra)))
@@ -2502,19 +2500,20 @@
 
 (defdescribe
   hidden-model-test
-  (it "hides stealth models, previews and MiMo builds older than MiMo V2.6"
+  (it "hides stealth models and previews"
       (doseq [model ["big-pickle" "opencode/omen-alpha" "ox-alpha-free" "space-bunny-free"
                      "gemini-3.1-pro-preview" "google/gemini-3-flash-preview" "hy4-preview"
-                     "gpt-4o-audio-preview-2024-12-17" "mimo-v2.5-pro" "xiaomi/mimo-v2.5"
-                     "mimo-v2-omni" "MiMo-V2-Flash"]]
+                     "gpt-4o-audio-preview-2024-12-17"]]
         (expect (router/hidden-model? model) model)))
   (it "keeps current models listed"
       (doseq [model ["mimo-v2.6-pro" "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "gemini-2.5-pro"
                      "gemini-3.8-flash" "gpt-6-sol" "kimi-k3" "hy3" "deepseek-flash"]]
         (expect (not (router/hidden-model? model)) model)))
-  (it "keeps hidden models out of every curated provider default list"
+  (it "offers every curated provider default model"
       (doseq [pid (keys router/KNOWN_PROVIDERS)]
-        (expect (not-any? router/hidden-model? (router/provider-default-models pid)) (str pid))))
+        (expect (every? #(router/provider-model-visible? pid %)
+                        (router/provider-default-models pid))
+                (str pid))))
   (it "applies on top of each provider's own filters"
       (expect (router/provider-model-visible? :openrouter "xiaomi/mimo-v2.6-pro"))
       (expect (not (router/provider-model-visible? :openrouter "xiaomi/mimo-v2.5-pro")))
@@ -2528,6 +2527,50 @@
                                   {:id :gemini
                                    :api-key "k"
                                    :models [{:name "gemini-3.1-pro-preview"}]})))))))
+
+(defdescribe
+  outdated-model-test
+  (it "leaves out versions older than their family's minimum"
+      (doseq [model ["glm-4.7" "z-ai/glm-4.6" "glm-4.6v" "kimi-k2.5" "moonshotai/kimi-k2-thinking"
+                     "qwen3.5-plus" "qwen3-coder-plus" "qwen3-max-2026-01-23"
+                     "qwen/qwen-2.5-72b-instruct" "grok-4.5" "grok-4-1-fast-reasoning"
+                     "minimax-m2.5" "MiniMax-M2.5" "mimo-v2.5-pro" "xiaomi/mimo-v2.5" "mimo-v2-omni"
+                     "MiMo-V2-Flash" "claude-sonnet-4-5" "anthropic/claude-opus-4.5"
+                     "claude-3-5-sonnet-latest" "gpt-4o" "openai/gpt-5-mini" "gpt-4.1-mini"]]
+        (expect (router/outdated-model? :openrouter model) model)))
+  (it "keeps current versions and models without a family minimum"
+      (doseq [model ["glm-5-turbo" "glm-5v-turbo" "glm-5.1" "glm-5.3-flash" "kimi-k2.6" "kimi-k3"
+                     "qwen3.6-plus" "qwen3.8-27b" "grok-4.6" "grok-4.20-multi-agent"
+                     "grok-code-fast-1" "minimax-m2.7" "minimax-m3" "mimo-v2.6-pro"
+                     "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "claude-haiku-4-5" "claude-sonnet-4.6"
+                     "claude-opus-4-6" "claude-fable-5-1" "gpt-5.3-codex" "gpt-6-sol" "gpt-oss-120b"
+                     "deepseek-v4-pro"]]
+        (expect (not (router/outdated-model? :openrouter model)) model)))
+  (it "leaves out dated Claude snapshots"
+      (expect (router/outdated-model? :anthropic-coding-plan "claude-haiku-4-5-20251001"))
+      (expect (router/outdated-model? :openrouter "claude-opus-4-20250514")))
+  (it "leaves out models the provider's models.dev catalog marks deprecated"
+      (with-redefs [modelsdev/provider-models (fn [pid]
+                                                (when (= :opencode-go pid)
+                                                  {"glm-5" {:status "deprecated"} "glm-5.1" {}}))]
+        (expect (router/outdated-model? :opencode-go "glm-5"))
+        (expect (not (router/outdated-model? :opencode-go "glm-5.1")))
+        (expect (not (router/outdated-model? :zai "glm-5")))))
+  (it "lists every model a local provider serves"
+      (doseq [pid
+              [:ollama :lmstudio]
+
+              model
+              ["qwen3-coder-30b" "glm-4.7"]]
+
+        (expect (not (router/outdated-model? pid model)) (str pid " " model))))
+  (it "applies family minimums without a provider id"
+      (expect (router/outdated-model? nil "glm-4.7"))
+      (expect (not (router/outdated-model? nil "glm-5.1"))))
+  (it "leaves outdated models out of provider model lists"
+      (expect (not (router/provider-model-visible? :zai-coding-plan "glm-4.7")))
+      (expect (not (router/provider-model-visible? :openai "gpt-4o")))
+      (expect (router/provider-model-visible? :openai "gpt-6-sol"))))
 
 ;; =============================================================================
 ;; Capability routing (`:capabilities` — the HARD filter)

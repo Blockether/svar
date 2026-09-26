@@ -494,7 +494,7 @@
           (fn []
             (expect (= ["xiaomi/mimo-v2.6-pro" "google/gemini-2.5-pro"]
                        (mapv :id (svar/models! router))))))))
-  (it "keeps z.ai Coding Plan glm-5v-turbo in /models output"
+  (it "keeps z.ai Coding Plan glm-5v-turbo and drops outdated GLM in /models output"
       (let [router (svar/make-router
                      [{:id :zai-coding :api-key "sk-test" :models [{:name "glm-4.7"}]}])]
         (sut/clear-models-cache!)
@@ -502,8 +502,7 @@
                                            {"data" [{"id" "glm-4.7"} {"id" "glm-5-turbo"}
                                                     {"id" "glm-5v-turbo"}]})}
           (fn []
-            (expect (= ["glm-4.7" "glm-5-turbo" "glm-5v-turbo"]
-                       (mapv :id (svar/models! router))))))))
+            (expect (= ["glm-5-turbo" "glm-5v-turbo"] (mapv :id (svar/models! router))))))))
   (it "forwards api-style + provider-id + llm-headers + query-params to http-get!"
       (let [router
             (svar/make-router [{:id :openai-codex

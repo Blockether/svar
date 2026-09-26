@@ -118,14 +118,15 @@
   router/provider-model-metadata)
 
 (def hidden-model?
-  "True when model lists leave `model-name` out on every provider: stealth models,
-   previews and MiMo builds older than MiMo V2.6. A model configured by name still
-   routes."
+  "True when model lists leave `model-name` out on every provider: stealth models and
+   previews. A model configured by name still routes."
   router/hidden-model?)
 
 (def provider-model-visible?
   "True when model lists offer `model-name` for the provider: its model filters allow
-   it and `hidden-model?` does not hide it."
+   it, `hidden-model?` does not hide it, and it is not outdated there. Outdated models
+   are older than their family's minimum version, dated Claude snapshots or deprecated in
+   the provider's models.dev catalog; local providers list every model they serve."
   router/provider-model-visible?)
 
 (def resolve-effective-model

@@ -21,7 +21,8 @@
           (expect (= "https://api.openai.com/v1" (:base-url p)))
           (expect (= "gpt-4o" (:root p)))))
     (it "answers provider-scoped model metadata without a router"
-        (expect (svar/provider-model-visible? :openai "gpt-4o"))
+        (expect (svar/provider-model-visible? :openai "gpt-6-sol"))
+        (expect (not (svar/provider-model-visible? :openai "gpt-4o")))
         (expect (contains? (:capabilities (svar/provider-model-metadata :openai {:name "gpt-4o"}))
                            :chat))))
   (describe "tokens and pricing"

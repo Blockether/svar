@@ -23,9 +23,7 @@
 (def KNOWN_PROVIDERS
   {:openai {:base-url "https://api.openai.com/v1"
             :env-keys ["OPENAI_API_KEY"]
-            :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
-                             {:name "gpt-5"} {:name "gpt-4o"} {:name "gpt-5-mini"}
-                             {:name "gpt-4o-mini"} {:name "o3-mini"}]}
+            :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}]}
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
@@ -56,7 +54,7 @@
          :lead-models ["glm-5.3-flash"]
          :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"} {:name "glm-5.3-flashx"}
                           {:name "glm-5.2"} {:name "glm-5.1"} {:name "glm-5-turbo"}
-                          {:name "glm-5v-turbo"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
+                          {:name "glm-5v-turbo"}]}
    :zai-coding {:base-url "https://api.z.ai/api/anthropic/v1"
                 :api-style :anthropic
                 ;; Coding Plan endpoint, but for budget accounting we use
@@ -86,8 +84,7 @@
                      :lead-models ["glm-5.3-flash"]
                      :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"}
                                       {:name "glm-5.3-flashx"} {:name "glm-5.2"} {:name "glm-5.1"}
-                                      {:name "glm-5-turbo"} {:name "glm-5v-turbo"}
-                                      {:name "glm-4.7"}]}
+                                      {:name "glm-5-turbo"} {:name "glm-5v-turbo"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
@@ -95,7 +92,8 @@
    ;; tool-call prompt).
    :gemini {:base-url "https://generativelanguage.googleapis.com/v1beta"
             :api-style :gemini
-            :default-models [{:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}]
+            :default-models [{:name "gemini-3.8-flash"} {:name "gemini-2.5-pro"}
+                             {:name "gemini-2.5-flash"}]
             :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
    :openrouter {:base-url "https://openrouter.ai/api/v1" :env-keys ["OPENROUTER_API_KEY"]}
    ;; Mistral — OpenAI-compatible `/v1/chat/completions`. No `:api-style` needed
@@ -532,7 +530,7 @@
    :previous ["claude-opus-5" "claude-fable-5" "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
               "claude-sonnet-4-6" "gpt-5.6-sol" "gpt-5.5" "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex"
               "grok-4.6" "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1"
-              "glm-5-turbo" "glm-5v-turbo" "glm-4.7" "deepseek-v4-flash" "minimax-m2.7"
+              "glm-5-turbo" "glm-5v-turbo" "deepseek-v4-flash" "minimax-m2.7"
               "muse-spark-1.2-contributor"]})
 
 (def SPECIAL_MODEL_NAMES
@@ -547,9 +545,23 @@
    marks them, so `hidden-model?` names them here."
   #{"big-pickle" "omen-alpha" "ox-alpha" "ox-alpha-free" "space-bunny-free"})
 
-(def MIN_MIMO_VERSION
-  "Oldest Xiaomi MiMo generation, as [major minor], that model lists still offer."
-  [2 6])
+(def MIN_MODEL_VERSIONS
+  "Oldest version, as [major minor], of each model family that hosted providers' model lists
+   still offer, keyed by the id prefix before the version: `qwen` covers `qwen3.6-plus` and
+   `qwen-2.5-72b-instruct`. `claude` covers ids that put the version before the tier, such as
+   `claude-3-5-sonnet`; it stops at 4.5 because such ids also name Claude Haiku 4.5. GLM stays
+   at GLM-5 because `glm-5-turbo` and `glm-5v-turbo` have no GLM-5.1 successor. GPT starts at
+   GPT-5.3, the oldest version that Codex and Copilot serve."
+  {"claude" [4 5]
+   "claude-opus" [4 6]
+   "claude-sonnet" [4 6]
+   "glm" [5 0]
+   "gpt" [5 3]
+   "grok" [4 6]
+   "kimi-k" [2 6]
+   "mimo-v" [2 6]
+   "minimax-m" [2 7]
+   "qwen" [3 6]})
 
 ;; =============================================================================
 ;; Reasoning-depth translation (abstract → provider-specific)
@@ -1917,23 +1929,13 @@
 
 (defn hidden-model?
   "True when model lists leave `model-name` out on every provider: stealth models
-   (`STEALTH_MODEL_NAMES`), previews and MiMo builds older than `MIN_MIMO_VERSION`.
-   Matching ignores case, an aggregator's `vendor/` prefix and dotted versus dashed
-   version separators. Hiding affects listings only: a model configured by name
-   still routes."
+   (`STEALTH_MODEL_NAMES`) and previews. Matching ignores case, an aggregator's `vendor/`
+   prefix and dotted versus dashed version separators. Hiding affects listings only: a model
+   configured by name still routes. `outdated-model?` adds the rules that depend on the
+   provider."
   [model-name]
   (let [k (modelsdev/model-key model-name)]
-    (boolean (or (contains? STEALTH_MODEL_NAMES k)
-                 (re-find #"[-:]preview(?=[-:]|$)" k)
-                 (when-let [[_ major minor] (re-find #"(?:^|-)mimo-v(\d+)(?:-(\d+))?" k)]
-                   (version< [(Long/parseLong major) (Long/parseLong (or minor "0"))]
-                             MIN_MIMO_VERSION))))))
-
-(defn provider-model-visible?
-  "True when model lists offer `model-name` for `provider-id`: the provider's filters
-   allow it (`provider-excluded-model?`) and `hidden-model?` does not hide it."
-  [provider-id model-name]
-  (not (or (provider-excluded-model? provider-id model-name) (hidden-model? model-name))))
+    (boolean (or (contains? STEALTH_MODEL_NAMES k) (re-find #"[-:]preview(?=[-:]|$)" k)))))
 
 (defn- provider-model-source
   "Catalog id used to look up `KNOWN_PROVIDER_MODELS` (the svar wire/policy
@@ -1952,6 +1954,51 @@
    id-mapping). Defaults to `provider-model-source`."
   [provider-id]
   (or (get-in KNOWN_PROVIDERS [provider-id :pricing-source]) (provider-model-source provider-id)))
+
+(defn- local-provider?
+  "True when `provider-id`'s built-in endpoint runs on this machine, as Ollama's and
+   LM Studio's do."
+  [provider-id]
+  (boolean (some->> (known-provider provider-id)
+                    :base-url
+                    (re-find #"^https?://(?:localhost|127\.0\.0\.1)(?:[:/]|$)"))))
+
+(def ^:private min-version-patterns
+  "`MIN_MODEL_VERSIONS` as [pattern min-version] pairs. A pattern captures the major version
+   after its family prefix and a one- or two-digit minor, which a date or a parameter count
+   such as `8b` never forms."
+  (mapv (fn [[prefix min-version]]
+          [(re-pattern (str "(?:^|-)" prefix "-?(\\d+)(?:-(\\d{1,2})(?=[-:]|$))?")) min-version])
+        MIN_MODEL_VERSIONS))
+
+(defn outdated-model?
+  "True when `provider-id`'s model lists leave `model-name` out as outdated: its version is
+   older than its family's `MIN_MODEL_VERSIONS` entry, it is a dated Claude snapshot, which
+   Anthropic also serves under an undated alias, or the provider's models.dev catalog marks
+   it deprecated. Local providers such as Ollama and LM Studio list every model they serve.
+   Like `hidden-model?`, this affects listings only."
+  [provider-id model-name]
+  (let [k (modelsdev/model-key model-name)]
+    (and (not (local-provider? provider-id))
+         (boolean (or (some (fn [[pattern min-version]]
+                              (when-let [[_ major minor] (re-find pattern k)]
+                                (version< [(parse-long major) (parse-long (or minor "0"))]
+                                          min-version)))
+                            min-version-patterns)
+                      (re-find #"(?:^|-)claude-.+-\d{8}$" k)
+                      (= "deprecated"
+                         (:status (lookup-by-model-variants (modelsdev/provider-models
+                                                              (provider-pricing-source provider-id))
+                                                            model-name))))))))
+
+(defn provider-model-visible?
+  "True when model lists offer `model-name` for `provider-id`: the provider's filters allow it
+   (`provider-excluded-model?`), and neither `hidden-model?` nor `outdated-model?` leaves it
+   out."
+  [provider-id model-name]
+  (not (or (provider-excluded-model? provider-id model-name)
+           (hidden-model? model-name)
+           (outdated-model? provider-id model-name))))
 
 (defn provider-model-entry
   "Returns provider-scoped entry for a provider/model, or nil if excluded.
