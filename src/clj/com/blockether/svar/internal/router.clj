@@ -23,17 +23,17 @@
 (def KNOWN_PROVIDERS
   {:openai {:base-url "https://api.openai.com/v1"
             :env-keys ["OPENAI_API_KEY"]
-            :default-models [{:name "gpt-6-astra"} {:name "gpt-6-sol"} {:name "gpt-6-luna"}
-                             {:name "gpt-5"} {:name "gpt-5-mini"} {:name "gpt-4o"}
+            :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
+                             {:name "gpt-5"} {:name "gpt-4o"} {:name "gpt-5-mini"}
                              {:name "gpt-4o-mini"} {:name "o3-mini"}]}
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
-               :default-models [{:name "claude-opus-5-5"} {:name "claude-opus-5"}
+               :default-models [{:name "claude-opus-5-5"} {:name "claude-fable-5-1"}
+                                {:name "claude-sonnet-5"} {:name "claude-haiku-4-5"}
+                                {:name "claude-opus-5"} {:name "claude-fable-5"}
                                 {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                                {:name "claude-opus-4-6"} {:name "claude-fable-5-1"}
-                                {:name "claude-fable-5"} {:name "claude-sonnet-5"}
-                                {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
+                                {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
                            :env-keys []
                            :api-style :anthropic
@@ -41,21 +41,22 @@
                            ;; OAuth coding plan: use retail Anthropic pricing for honest metering
                            ;; once the included quota is exhausted (see internal/modelsdev).
                            :pricing-source :anthropic
-                           :default-models [{:name "claude-opus-5-5"} {:name "claude-opus-5"}
+                           :default-models [{:name "claude-opus-5-5"} {:name "claude-fable-5-1"}
+                                            {:name "claude-sonnet-5"} {:name "claude-haiku-4-5"}
+                                            {:name "claude-opus-5"} {:name "claude-fable-5"}
                                             {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                                            {:name "claude-opus-4-6"} {:name "claude-fable-5-1"}
-                                            {:name "claude-fable-5"} {:name "claude-sonnet-5"}
-                                            {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]
+                                            {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}]
                            :prepend-default-models? true}
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
          :env-keys ["ZAI_API_KEY"]
          ;; `glm-5.3-flashx` is the SAME model as `glm-5.3-flash` on z.ai's fast lane
-         ;; (up to ~200 tok/s) at 2.5x the per-token rate. Flash stays FIRST so the
-         ;; quicker lane is an explicit pick, never the automatic default.
-         :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3-flashx"} {:name "glm-5.3"}
-                          {:name "glm-5.2"} {:name "glm-5-turbo"} {:name "glm-5.1"}
-                          {:name "glm-4.7"} {:name "glm-5v-turbo"} {:name "glm-4.6v"}]}
+         ;; (up to ~200 tok/s) at 2.5x the per-token rate. Flash LEADS the canonical
+         ;; order so the quicker lane is an explicit pick, never the automatic default.
+         :lead-models ["glm-5.3-flash"]
+         :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"} {:name "glm-5.3-flashx"}
+                          {:name "glm-5.2"} {:name "glm-5.1"} {:name "glm-5-turbo"}
+                          {:name "glm-5v-turbo"} {:name "glm-4.7"} {:name "glm-4.6v"}]}
    :zai-coding {:base-url "https://api.z.ai/api/anthropic/v1"
                 :api-style :anthropic
                 ;; Coding Plan endpoint, but for budget accounting we use
@@ -76,15 +77,17 @@
                      :provider-model-source :zai
                      :env-keys ["ZAI_CODING_API_KEY" "ZAI_API_KEY"]
                      ;; `glm-5.3-flash` is the plan's current multimodal default: it
-                     ;; consumes one third of GLM-5.3's quota. Keep the legacy vision model
-                     ;; `glm-5v-turbo` LAST so an all-zero coding-plan price table never
-                     ;; lets it outrank Flash on a `:cost` / `:speed` side-channel.
-                     ;; `glm-5.3-flashx` is curated here as well — the plan opens it by
-                     ;; application order, which is an account entitlement rather than a
-                     ;; catalog fact — but never ahead of Flash.
-                     :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3-flashx"}
-                                      {:name "glm-5.3"} {:name "glm-5.2"} {:name "glm-5-turbo"}
-                                      {:name "glm-4.7"} {:name "glm-5.1"} {:name "glm-5v-turbo"}]}
+                     ;; consumes one third of GLM-5.3's quota, so it LEADS the canonical
+                     ;; order. Leading also keeps an all-zero coding-plan price table from
+                     ;; letting the legacy vision model `glm-5v-turbo` outrank Flash on a
+                     ;; `:cost` / `:speed` side-channel. `glm-5.3-flashx` is curated here as
+                     ;; well — the plan opens it by application order, which is an account
+                     ;; entitlement rather than a catalog fact — but never ahead of Flash.
+                     :lead-models ["glm-5.3-flash"]
+                     :default-models [{:name "glm-5.3-flash"} {:name "glm-5.3"}
+                                      {:name "glm-5.3-flashx"} {:name "glm-5.2"} {:name "glm-5.1"}
+                                      {:name "glm-5-turbo"} {:name "glm-5v-turbo"}
+                                      {:name "glm-4.7"}]}
    ;; Native Google Gemini (generateContent), NOT the OpenAI-compat shim.
    ;; `:api-style :gemini` selects the native wire: `tool_use` ↔ `functionCall`,
    ;; results ↔ `functionResponse`, auth via `x-goog-api-key`. Clean native
@@ -92,8 +95,8 @@
    ;; tool-call prompt).
    :gemini {:base-url "https://generativelanguage.googleapis.com/v1beta"
             :api-style :gemini
-            :default-models [{:name "gemini-3-pro-preview"} {:name "gemini-3-flash-preview"}
-                             {:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}]
+            :default-models [{:name "gemini-2.5-pro"} {:name "gemini-2.5-flash"}
+                             {:name "gemini-3-pro-preview"} {:name "gemini-3-flash-preview"}]
             :env-keys ["GEMINI_API_KEY" "GOOGLE_API_KEY"]}
    :openrouter {:base-url "https://openrouter.ai/api/v1" :env-keys ["OPENROUTER_API_KEY"]}
    ;; Mistral — OpenAI-compatible `/v1/chat/completions`. No `:api-style` needed
@@ -110,9 +113,9 @@
    :github-copilot
    {:base-url "https://api.individual.githubcopilot.com"
     :models-base :host
-    :default-models [{:name "claude-opus-5"} {:name "claude-fable-5"} {:name "claude-sonnet-5"}
-                     {:name "gpt-6-astra"} {:name "gpt-6-sol"} {:name "gpt-6-luna"}
-                     {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"}]
+    :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "claude-sonnet-5"}
+                     {:name "gpt-5.6-terra"} {:name "gpt-6-luna"} {:name "claude-opus-5"}
+                     {:name "claude-fable-5"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -132,9 +135,9 @@
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys []
                   :api-style :openai-compatible-responses
-                  :default-models [{:name "gpt-6-astra"} {:name "gpt-6-sol"} {:name "gpt-6-luna"}
-                                   {:name "gpt-5.6-luna"} {:name "gpt-5.6-sol"} {:name "gpt-5.5"}
-                                   {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
+                  :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
+                                   {:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"}
+                                   {:name "gpt-5.6-luna"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
@@ -203,7 +206,8 @@
    accepts a reasoning-depth parameter. `:reasoning-style` (optional) pins the
    wire shape to emit — see `REASONING_LEVELS` keys. When omitted, the style
    is inferred from the provider's `:api-style` (`:anthropic` → anthropic
-   thinking, everything else → openai-effort)."
+   thinking, everything else → openai-effort). An entry refines name
+   inference, so it may carry only the keys inference gets wrong."
   {;; ── OpenAI GPT-4o ────────────────────────────────────────────────────────
    "gpt-4o" {:intelligence :high :speed :medium :capabilities #{:chat :vision}}
    ;; ── OpenAI GPT-4.1 ──────────────────────────────────────────────────────
@@ -462,7 +466,81 @@
                         :speed :slow
                         :capabilities #{:chat}
                         :reasoning? true
-                        :reasoning-style :openai-effort}})
+                        :reasoning-style :openai-effort}
+   ;; ── Entries below refine name inference: omitted keys keep the inferred value ─
+   ;; ── Moonshot Kimi ────────────────────────────────────────────────────────────
+   "kimi-k3" {:intelligence :high :speed :medium}
+   "kimi-k2.7-code" {:intelligence :high :speed :medium}
+   "kimi-k2.6" {:intelligence :high :speed :medium}
+   ;; ── xAI Grok ─────────────────────────────────────────────────────────────────
+   "grok-4.7" {:intelligence :frontier :speed :medium}
+   "grok-4.6" {:intelligence :high :speed :medium}
+   ;; ── Alibaba Qwen ─────────────────────────────────────────────────────────────
+   "qwen3.8-max" {:intelligence :high :speed :medium}
+   "qwen3.8-flash" {:intelligence :medium :speed :fast}
+   "qwen3.7-max" {:intelligence :high :speed :medium}
+   "qwen3.7-plus" {:intelligence :medium :speed :medium}
+   "qwen3.6-plus" {:intelligence :medium :speed :medium}
+   ;; ── DeepSeek V4 ──────────────────────────────────────────────────────────────
+   "deepseek-v4-pro" {:intelligence :high :speed :medium}
+   "deepseek-v4.1-flash" {:intelligence :high :speed :fast}
+   "deepseek-flash" {:intelligence :high :speed :fast}
+   "deepseek-v4-flash" {:intelligence :medium :speed :fast}
+   "deepseek-v4-flash-vision-exp" {:intelligence :medium :speed :fast}
+   ;; ── MiniMax (the `mini` in the name is not a size) ───────────────────────────
+   "minimax-m3" {:intelligence :high :speed :medium}
+   "minimax-m2.7" {:intelligence :high :speed :medium}
+   "minimax-m2.5" {:intelligence :medium :speed :medium}
+   ;; ── Meituan LongCat ──────────────────────────────────────────────────────────
+   "longcat-2.0" {:intelligence :high :speed :medium}
+   ;; ── Xiaomi MiMo ──────────────────────────────────────────────────────────────
+   "mimo-v2.6-pro" {:intelligence :high :speed :medium}
+   "mimo-v2.6-flash" {:intelligence :medium :speed :fast}
+   "mimo-v2.5-pro" {:intelligence :high :speed :medium}
+   "mimo-v2.5" {:intelligence :medium :speed :medium}
+   ;; ── OpenAI GPT-5.6 Terra ─────────────────────────────────────────────────────
+   "gpt-5.6-terra" {:intelligence :high :speed :medium}
+   ;; ── Tencent Hy ───────────────────────────────────────────────────────────────
+   "hy3" {:intelligence :medium :speed :fast}
+   "hy4-preview" {:intelligence :high :speed :medium}
+   ;; ── Meta Muse Spark ──────────────────────────────────────────────────────────
+   "muse-spark-1.3-contributor" {:intelligence :medium :speed :fast}
+   "muse-spark-1.2-contributor" {:intelligence :medium :speed :fast}})
+
+;; =============================================================================
+;; Canonical model order
+;; =============================================================================
+
+(def MODEL_ORDER
+  "Canonical cross-provider model order, best first; `sort-models` ranks model lists by it.
+
+   `:current` is today's generation in tiers — every vendor's flagship, then premium,
+   mid-size and fast models — with vendors in the same sequence inside each tier.
+   `:previous` is the generation before it, vendor by vendor, newest and largest first.
+   `sort-models` places a model neither list names next to a listed model of its models.dev
+   family by release date, or after both lists, and puts dated snapshots, previews, aliases,
+   helpers and deprecated models last."
+  {:current [;; Flagships
+             "claude-opus-5-5" "gpt-6-sol" "kimi-k3" "grok-4.7" "qwen3.8-max" "glm-5.3"
+             "deepseek-v4-pro" "minimax-m3" "longcat-2.0" "mimo-v2.6-pro"
+             ;; Premium
+             "claude-fable-5-1" "gpt-6-astra"
+             ;; Mid-size
+             "claude-sonnet-5" "gpt-5.6-terra" "kimi-k2.7-code"
+             ;; Fast
+             "claude-haiku-4-5" "gpt-6-luna" "glm-5.3-flash" "glm-5.3-flashx" "deepseek-v4.1-flash"
+             "qwen3.8-flash" "mimo-v2.6-flash" "hy3" "muse-spark-1.3-contributor"]
+   :previous ["claude-opus-5" "claude-fable-5" "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
+              "claude-sonnet-4-6" "gpt-5.6-sol" "gpt-5.5" "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex"
+              "grok-4.6" "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1"
+              "glm-5-turbo" "glm-5v-turbo" "glm-4.7" "deepseek-v4-flash" "minimax-m2.7"
+              "mimo-v2.5-pro" "mimo-v2.5" "muse-spark-1.2-contributor"]})
+
+(def SPECIAL_MODEL_NAMES
+  "Model ids `sort-models` puts last although their names look ordinary: `deepseek-flash`
+   is an alias that follows DeepSeek's current Flash model, and `codex-auto-review` and
+   `gpt-reserve` are Codex helper models rather than general picks."
+  #{"deepseek-flash" "codex-auto-review" "gpt-reserve"})
 
 ;; =============================================================================
 ;; Reasoning-depth translation (abstract → provider-specific)
@@ -1764,12 +1842,12 @@
 
 (defn infer-model-metadata
   "Returns provider-independent model metadata.
-    Looks up KNOWN_MODEL_METADATA first (tolerant of dotted/dashed version
-    separators). Falls back to regex inference for unknown models.
-    Explicit fields in model-map override inferred values."
+    Infers the tier from the name and refines it with the KNOWN_MODEL_METADATA entry
+    (tolerant of dotted/dashed version separators); keys an entry omits keep the
+    inferred value. Explicit fields in model-map override both."
   [{:keys [name] :as model-map}]
   (let [base
-        (or (lookup-by-model-variants KNOWN_MODEL_METADATA name) (regex-infer-metadata name))
+        (merge (regex-infer-metadata name) (lookup-by-model-variants KNOWN_MODEL_METADATA name))
 
         inferred
         (assoc base :name name)]
@@ -1917,6 +1995,138 @@
                (cond (string? m) m
                      (map? m) (:name m))))
        vec))
+
+(def ^:private model-order-slots
+  "Ranks behind `sort-models`: every `MODEL_ORDER` model by `modelsdev/model-key`, one
+   slot after them for unlisted models without a listed family member, and the last slot
+   for special models."
+  (let [listed
+        (map modelsdev/model-key (concat (:current MODEL_ORDER) (:previous MODEL_ORDER)))
+
+        unlisted
+        (count listed)]
+
+    {:ranks (zipmap listed (range)) :unlisted unlisted :special (inc unlisted)}))
+
+(def ^:private family-anchors
+  "models.dev family → `[[rank release-date] ...]` of the `MODEL_ORDER` models in it,
+   best rank first."
+  (delay (let [anchors (for [[k rank] (:ranks model-order-slots)
+                             :let [{:keys [families release-date]} (modelsdev/model-facts k)]
+                             family families]
+
+                         [family [rank release-date]])]
+           (update-vals (group-by first anchors) #(vec (sort-by first (map second %)))))))
+
+(def ^:private special-model-pattern
+  "Dated snapshots and preview, experimental, alpha, beta or free variants."
+  #"-\d{8}$|-\d{4}-\d{2}-\d{2}$|[-:](?:preview|exp|experimental|alpha|beta|free)(?=[-:]|$)")
+
+(def ^:private special-model-statuses #{"alpha" "beta" "deprecated"})
+
+(defn- release-order
+  "Order key for a `yyyy-mm-dd` release date, newest first; undated models sort last."
+  [date]
+  (- (long (or (some-> date
+                       str
+                       (str/replace "-" "")
+                       parse-long)
+               0))))
+
+(defn- unlisted-slot
+  "`[rank offset release-order]` for a model `MODEL_ORDER` does not name. It goes just
+   before the best-ranked listed model of its models.dev family that is not newer than
+   it, or after the family's last listed model when all of them are newer. A model
+   without a listed family member goes after every listed model, in the order it was
+   given: without a family, a release date says little about rank."
+  [{:keys [families release-date]}]
+  (let [order
+        (release-order release-date)
+
+        anchors
+        (->> families
+             (mapcat #(get @family-anchors %))
+             distinct
+             (sort-by first))
+
+        not-newer
+        (when release-date
+          (first (filter (fn [[_ anchor-date]]
+                           (and anchor-date (not (pos? (compare anchor-date release-date)))))
+                         anchors)))]
+
+    (cond not-newer [(first not-newer) -1 order]
+          (seq anchors) [(first (last anchors)) 1 order]
+          :else [(:unlisted model-order-slots) 0 0])))
+
+(defn- provider-lead-models
+  "Model names `provider-id` lists ahead of the canonical order (`:lead-models`)."
+  [provider-id]
+  (or (get-in KNOWN_PROVIDERS [provider-id :lead-models])
+      (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :lead-models])))
+
+(defn- model-order-key
+  [provider-catalog lead model]
+  (let [model-map
+        (if (map? model) model {:name model})
+
+        model-name
+        (str (:name model-map))
+
+        k
+        (modelsdev/model-key model-name)
+
+        row
+        (lookup-by-model-variants provider-catalog model-name)
+
+        facts
+        (modelsdev/model-facts model-name)
+
+        family
+        (or (:family model-map) (:family row))
+
+        lead-index
+        (.indexOf ^java.util.List lead k)
+
+        {:keys [ranks special]}
+        model-order-slots]
+
+    (into
+      [(if (neg? lead-index) (count lead) lead-index)]
+      (cond (contains? special-model-statuses (or (:status model-map) (:status row))) [special 0 0]
+            (contains? ranks k) [(get ranks k) 0 0]
+            (or (contains? SPECIAL_MODEL_NAMES k) (re-find special-model-pattern k)) [special 0 0]
+            :else (unlisted-slot {:families (cond-> (set (:families facts))
+                                              family
+                                              (conj family))
+                                  :release-date (or (:release-date model-map)
+                                                    (:release-date row)
+                                                    (:release-date facts))})))))
+
+(defn sort-models
+  "`models` - names, or maps with `:name` - best first by `MODEL_ORDER`, returned as a
+   vector of the same elements. Models the order does not name go next to a listed
+   model of the same models.dev family by release date, else after every listed model
+   in their given order. Dated snapshots, previews, aliases, helper models and models
+   the provider marks alpha, beta or deprecated go last.
+   Equal keys keep their given order, so a list of unknown local models is unchanged.
+
+   With `provider-id`, that provider's `:lead-models` come first, and its models.dev
+   rows supply release dates, families and status. A model map's own `:family`,
+   `:release-date` and `:status` win over the catalog."
+  ([models] (sort-models nil models))
+  ([provider-id models]
+   (let [provider-catalog
+         (if provider-id (modelsdev/provider-models (provider-pricing-source provider-id)) {})
+
+         lead
+         (mapv modelsdev/model-key (provider-lead-models provider-id))]
+
+     (->> models
+          (map (fn [model]
+                 [(model-order-key provider-catalog lead model) model]))
+          (sort-by first)
+          (mapv second)))))
 
 ;; =============================================================================
 ;; Provider normalization

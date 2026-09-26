@@ -18,7 +18,8 @@
    (the user pays at API rates once metered), so the overlay declares
    `:pricing-source` to redirect catalog lookup to the retail provider."
   (:require [charred.api :as json]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [clojure.string :as str]))
 
 (def ^:private RESOURCE "models.dev.json")
 
@@ -58,7 +59,8 @@
      :modalities       — {:input #{...} :output #{...}}
      :knowledge-cutoff — yyyy-mm string
      :release-date     — yyyy-mm-dd
-     :last-updated     — yyyy-mm-dd"
+     :last-updated     — yyyy-mm-dd
+     :status           — `alpha`, `beta` or `deprecated` when the provider flags one"
   [m]
   (let [d
         (fn [n]
@@ -148,7 +150,10 @@
       (assoc :release-date (:release_date m))
 
       (:last_updated m)
-      (assoc :last-updated (:last_updated m)))))
+      (assoc :last-updated (:last_updated m))
+
+      (:status m)
+      (assoc :status (:status m)))))
 
 (defn provider-models
   "Returns a map of model-name (string) → normalized metadata for
@@ -163,6 +168,52 @@
          (reduce (fn [acc m]
                    (assoc acc (:name m) m))
                  {}))))
+
+(defn model-key
+  "Provider-independent lookup key for a model id: lower-cased, without an
+   aggregator's `vendor/` prefix, with dotted version separators dashed, so
+   `anthropic/claude-opus-4.8` and `claude-opus-4-8` share one key."
+  [model-name]
+  (let [s
+        (str/lower-case (str model-name))
+
+        s
+        (subs s (inc (long (or (str/last-index-of s "/") -1))))]
+
+    (str/replace s #"(\d)\.(\d)" "$1-$2")))
+
+(defn- earlier-date
+  [a b]
+  (cond (nil? a) b
+        (nil? b) a
+        (neg? (compare a b)) a
+        :else b))
+
+(def ^:private model-facts-index
+  "`model-key` → `{:families #{...} :release-date ...}` across every provider."
+  (delay (reduce-kv (fn [acc _ provider]
+                      (reduce (fn [acc {:keys [id family release_date]}]
+                                (if (string? id)
+                                  (update acc
+                                          (model-key id)
+                                          (fn [facts]
+                                            {:families (cond-> (or (:families facts) #{})
+                                                         (string? family)
+                                                         (conj family))
+                                             :release-date (earlier-date (:release-date facts)
+                                                                         release_date)}))
+                                  acc))
+                              acc
+                              (vals (:models provider))))
+                    {}
+                    @catalog)))
+
+(defn model-facts
+  "What the catalog knows about a model id from EVERY provider that lists it:
+   `{:families #{family ...} :release-date \"yyyy-mm-dd\"}`, where the date is the
+   earliest listing. nil when no provider lists the model."
+  [model-name]
+  (get @model-facts-index (model-key model-name)))
 
 (defn provider-meta
   "Returns top-level provider info from models.dev:

@@ -87,6 +87,13 @@
    `:default-models` and override only for a different curated set."
   router/provider-default-models)
 
+(def sort-models
+  "Model names, or maps with `:name`, best first in svar's canonical cross-provider
+   order (`MODEL_ORDER`). With a provider id, that provider's lead models come first
+   and its catalog rows place models the order does not name. Consumers sort their
+   model lists with it so pickers, the first model and fallbacks agree."
+  router/sort-models)
+
 ;; =============================================================================
 ;; Provider catalog, tokens and pricing
 ;; =============================================================================

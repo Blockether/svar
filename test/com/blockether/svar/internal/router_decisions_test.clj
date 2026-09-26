@@ -1397,9 +1397,9 @@
         (expect (= "claude-opus-5-5" (:root provider)))
         ;; `:anthropic-coding-plan` prepends its FULL default catalog,
         ;; deduped against the caller's configured models.
-        (expect (= ["claude-opus-5-5" "claude-opus-5" "claude-opus-4-8" "claude-opus-4-7"
-                    "claude-opus-4-6" "claude-fable-5-1" "claude-fable-5" "claude-sonnet-5"
-                    "claude-sonnet-4-6" "claude-haiku-4-5"]
+        (expect (= ["claude-opus-5-5" "claude-fable-5-1" "claude-sonnet-5" "claude-haiku-4-5"
+                    "claude-opus-5" "claude-fable-5" "claude-opus-4-8" "claude-opus-4-7"
+                    "claude-opus-4-6" "claude-sonnet-4-6"]
                    (mapv :name (:models provider))))
         (expect (= :anthropic (:api-style provider)))
         (expect
@@ -2377,80 +2377,128 @@
                  ;; GPT/glm dotted ids resolve as-is first (their catalog keys are dotted).
                  (expect (= "gpt-5.4" (first (router/model-key-variants "gpt-5.4"))))))
 
-(defdescribe known-provider-default-models-test
-             (it "uses curated OpenAI Codex defaults when caller omits :models"
-                 (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
-                   (expect (= ["gpt-6-astra" "gpt-6-sol" "gpt-6-luna" "gpt-5.6-luna" "gpt-5.6-sol"
-                               "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
-                              (mapv :name (:models p))))
-                   (let [astra (first (:models p))]
-                     (expect (= 272000 (:context astra)))
-                     (expect (= :frontier (:intelligence astra)))
-                     (expect (:reasoning? astra))
-                     (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                                (:reasoning-options astra))))))
-             (it
-               "uses curated GitHub Copilot defaults when caller omits :models"
-               (let [p (router/normalize-provider 0 {:id :github-copilot :api-key "x"})]
-                 (expect (= ["claude-opus-5" "claude-fable-5" "claude-sonnet-5" "gpt-6-astra"
-                             "gpt-6-sol" "gpt-6-luna" "gpt-5.6-luna" "gpt-5.6-sol" "gpt-5.6-terra"]
-                            (mapv :name (:models p))))
-                 (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
-                   (expect (= 922000 (:context astra)))
-                   (expect (= :frontier (:intelligence astra)))
-                   (expect (= :openai-compatible-responses (:api-style astra)))
-                   (expect (= :openai-effort (:reasoning-style astra))))))
-             (it "uses curated plain OpenAI defaults when caller omits :models"
-                 (let [p (router/normalize-provider 0 {:id :openai :api-key "x"})]
-                   (expect (= ["gpt-6-astra" "gpt-6-sol" "gpt-6-luna" "gpt-5" "gpt-5-mini" "gpt-4o"
-                               "gpt-4o-mini" "o3-mini"]
-                              (mapv :name (:models p))))
-                   (let [astra (first (:models p))]
-                     (expect (= 1050000 (:context astra)))
-                     (expect (= :frontier (:intelligence astra)))
-                     (expect (:reasoning? astra))
-                     (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
-                                (:reasoning-options astra))))))
-             (it "uses curated Mistral defaults when caller omits :models"
-                 (let [p
-                       (router/normalize-provider 0 {:id :mistral :api-key "x"})
+(defdescribe
+  known-provider-default-models-test
+  (it "uses curated OpenAI Codex defaults when caller omits :models"
+      (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
+        (expect (= ["gpt-6-sol" "gpt-6-astra" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.5" "gpt-5.4"
+                    "gpt-5.6-luna" "gpt-5.3-codex"]
+                   (mapv :name (:models p))))
+        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
+          (expect (= 272000 (:context astra)))
+          (expect (= :frontier (:intelligence astra)))
+          (expect (:reasoning? astra))
+          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                     (:reasoning-options astra))))))
+  (it "uses curated GitHub Copilot defaults when caller omits :models"
+      (let [p (router/normalize-provider 0 {:id :github-copilot :api-key "x"})]
+        (expect (= ["gpt-6-sol" "gpt-6-astra" "claude-sonnet-5" "gpt-5.6-terra" "gpt-6-luna"
+                    "claude-opus-5" "claude-fable-5" "gpt-5.6-sol" "gpt-5.6-luna"]
+                   (mapv :name (:models p))))
+        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
+          (expect (= 922000 (:context astra)))
+          (expect (= :frontier (:intelligence astra)))
+          (expect (= :openai-compatible-responses (:api-style astra)))
+          (expect (= :openai-effort (:reasoning-style astra))))))
+  (it "uses curated plain OpenAI defaults when caller omits :models"
+      (let [p (router/normalize-provider 0 {:id :openai :api-key "x"})]
+        (expect (= ["gpt-6-sol" "gpt-6-astra" "gpt-6-luna" "gpt-5" "gpt-4o" "gpt-5-mini"
+                    "gpt-4o-mini" "o3-mini"]
+                   (mapv :name (:models p))))
+        (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
+          (expect (= 1050000 (:context astra)))
+          (expect (= :frontier (:intelligence astra)))
+          (expect (:reasoning? astra))
+          (expect (= [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                     (:reasoning-options astra))))))
+  (it "uses curated Mistral defaults when caller omits :models"
+      (let [p
+            (router/normalize-provider 0 {:id :mistral :api-key "x"})
 
-                       models
-                       (mapv :name (:models p))
+            models
+            (mapv :name (:models p))
 
-                       large
-                       (first (:models p))]
+            large
+            (first (:models p))]
 
-                   (expect (= :mistral (:id p)))
-                   (expect (= :openai-compatible-chat (:api-style p)))
-                   (expect (= ["mistral-large-latest" "mistral-medium-latest" "mistral-small-latest"
-                               "codestral-latest"]
-                              models))
-                   (expect (= 262144 (:context large)))
-                   (expect (= 262144 (:output-limit large)))))
-             ;; The Coding Plan now has a native multimodal default (`glm-5.3-flash`);
-             ;; keep the older `glm-5v-turbo` last so it remains selectable without
-             ;; outranking the current Flash model on the all-zero plan price table.
-             (it "curates z.ai's current multimodal default and keeps the legacy vision model last"
-                 (let [coding
-                       (router/provider-default-models :zai-coding-plan)
+        (expect (= :mistral (:id p)))
+        (expect (= :openai-compatible-chat (:api-style p)))
+        (expect (= ["mistral-large-latest" "mistral-medium-latest" "mistral-small-latest"
+                    "codestral-latest"]
+                   models))
+        (expect (= 262144 (:context large)))
+        (expect (= 262144 (:output-limit large)))))
+  ;; z.ai lists lead with the native multimodal `glm-5.3-flash` (`:lead-models`), so
+  ;; the older `glm-5v-turbo` stays selectable without outranking the current
+  ;; Flash model on the all-zero plan price table.
+  (it "leads z.ai's defaults with the Flash model and keeps the older vision model selectable"
+      (let [p
+            (router/normalize-provider 0 {:id :zai-coding-plan :api-key "x"})
 
-                       p
-                       (router/normalize-provider 0 {:id :zai-coding-plan :api-key "x"})
+            by-name
+            (into {} (map (juxt :name identity)) (:models p))]
 
-                       by-name
-                       (into {} (map (juxt :name identity)) (:models p))]
+        ;; Retail `:zai` offers both too, and `:zai-coding` inherits that curated set.
+        (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+          (let [defaults (router/provider-default-models pid)]
+            (expect (= "glm-5.3-flash" (first defaults)) (str pid))
+            (expect (contains? (set defaults) "glm-5v-turbo") (str pid))))
+        (expect (contains? (:capabilities (get by-name "glm-5.3-flash")) :vision))
+        (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
+        (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))
 
-                   (expect (= "glm-5.3-flash" (first coding)))
-                   (expect (= "glm-5v-turbo" (last coding)))
-                   ;; Retail `:zai` offers both too, and `:zai-coding` inherits that curated set.
-                   (doseq [pid [:zai :zai-coding]]
-                     (let [defaults (set (router/provider-default-models pid))]
-                       (expect (contains? defaults "glm-5.3-flash"))
-                       (expect (contains? defaults "glm-5v-turbo"))))
-                   (expect (contains? (:capabilities (get by-name "glm-5.3-flash")) :vision))
-                   (expect (contains? (:capabilities (get by-name "glm-5v-turbo")) :vision))
-                   (expect (not (contains? (:capabilities (get by-name "glm-5-turbo")) :vision))))))
+(defdescribe
+  canonical-model-order-test
+  (it "keeps every curated provider default list in canonical order"
+      (doseq [pid
+              (keys router/KNOWN_PROVIDERS)
+
+              :let [models
+                    (router/provider-default-models pid)]]
+
+        (expect (= models (router/sort-models pid models)) (str pid))))
+  (it "gives every MODEL_ORDER model a curated intelligence tier"
+      (doseq [model (concat (:current router/MODEL_ORDER) (:previous router/MODEL_ORDER))]
+        (expect (contains? #{:frontier :high :medium :low}
+                           (:intelligence
+                             (router/lookup-by-model-variants router/KNOWN_MODEL_METADATA model)))
+                model)))
+  (it "ranks listed models best first across vendors and generations"
+      (expect (= ["claude-opus-5-5" "gpt-6-sol" "kimi-k3" "glm-5.3" "claude-sonnet-5"
+                  "glm-5.3-flash" "claude-opus-5" "glm-4.7"]
+                 (router/sort-models ["glm-4.7" "claude-opus-5" "glm-5.3-flash" "claude-sonnet-5"
+                                      "glm-5.3" "kimi-k3" "gpt-6-sol" "claude-opus-5-5"]))))
+  (it "matches vendor prefixes, dotted versions and letter case"
+      (expect (= ["Claude-Opus-5-5" "openai/gpt-6-sol" "claude-opus-4.6"]
+                 (router/sort-models ["claude-opus-4.6" "openai/gpt-6-sol" "Claude-Opus-5-5"]))))
+  (it "places an unlisted model next to its models.dev family by release date"
+      (let [newer
+            {:name "claude-opus-5-6" :family "claude-opus" :release-date "2099-01-01"}
+
+            older
+            {:name "claude-opus-3-9" :family "claude-opus" :release-date "2020-01-01"}]
+
+        (expect (= [newer "claude-opus-5-5" "gpt-6-sol"]
+                   (router/sort-models ["gpt-6-sol" "claude-opus-5-5" newer])))
+        (expect (= ["claude-opus-4-6" older "claude-sonnet-4-6"]
+                   (router/sort-models [older "claude-sonnet-4-6" "claude-opus-4-6"])))))
+  (it "keeps models without a listed family in their given order after every listed model"
+      (expect (= ["glm-4.7" "zeta-local" "alpha-local"]
+                 (router/sort-models ["zeta-local" "glm-4.7" "alpha-local"]))))
+  (it "puts snapshots, previews, free variants, aliases, helpers and deprecated models last"
+      (let [deprecated {:name "claude-opus-5-5" :status "deprecated"}]
+        (expect (= ["gpt-6-luna" deprecated "gpt-4o-2024-08-06" "claude-opus-4-5-20251101"
+                    "gemini-3-pro-preview" "kimi-k3:free" "deepseek-flash" "codex-auto-review"]
+                   (router/sort-models [deprecated "gpt-4o-2024-08-06" "claude-opus-4-5-20251101"
+                                        "gemini-3-pro-preview" "gpt-6-luna" "kimi-k3:free"
+                                        "deepseek-flash" "codex-auto-review"])))))
+  (it "leads a provider's list with its :lead-models"
+      (expect (= ["glm-5.3" "glm-5.3-flash" "glm-4.7"]
+                 (router/sort-models ["glm-4.7" "glm-5.3" "glm-5.3-flash"])))
+      (doseq [pid [:zai :zai-coding :zai-coding-plan]]
+        (expect (= ["glm-5.3-flash" "glm-5.3" "glm-4.7"]
+                   (router/sort-models pid ["glm-4.7" "glm-5.3" "glm-5.3-flash"]))
+                (str pid)))))
 
 ;; =============================================================================
 ;; Capability routing (`:capabilities` — the HARD filter)
