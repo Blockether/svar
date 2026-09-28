@@ -2312,6 +2312,57 @@
         verbosity :verbosity-options
         VERBOSITY_LEVELS))))
 
+(def ^:private JSON_MEMBER_NAME
+  "String keys svar spells as keywords: plain JSON identifiers. Hyphenated,
+   namespaced or other names stay strings, so request JSON cannot spell svar's
+   own options such as `:svar/tools` or `:provider-state`."
+  #"[A-Za-z_][A-Za-z0-9_]*")
+
+(def ^:private COMPOSED_EXTRA_BODY_MEMBERS
+  "Request objects whose fields svar reads or fills in while building a body."
+  #{:reasoning :response_format :text :thinking})
+
+(defn- json-member-name? [k] (and (string? k) (some? (re-matches JSON_MEMBER_NAME k))))
+
+(defn- keyword-members
+  "`m` with its JSON member names as keywords. A member given under both
+   spellings keeps the keyword entry; when both values are objects, their fields
+   merge and the keyword entry's fields win."
+  [m]
+  (if (and (map? m) (some json-member-name? (keys m)))
+    (merge-with (fn [json-value value]
+                  (if (and (map? json-value) (map? value)) (merge json-value value) value))
+                (into {}
+                      (keep (fn [[k v]]
+                              (when (json-member-name? k) [(keyword k) v])))
+                      m)
+                (into {} (remove (comp json-member-name? key)) m))
+    m))
+
+(defn canonical-extra-body
+  "Spells `extra-body` the way svar reads it. Clients, configuration and
+   extensions send JSON string keys while svar's own layers use keywords;
+   serialized together, `\"reasoning\"` and `:reasoning` become two `reasoning`
+   members. Top-level JSON member names, and the fields of the objects svar
+   composes (`reasoning`, `response_format`, `text`, `thinking`), become
+   keywords. Every other value, such as metadata, schemas and tools, stays as
+   given.
+
+   A member given under both spellings in one map keeps the keyword entry, and
+   two object values merge field by field. Canonicalize each layer before
+   merging layers, so the later layer wins."
+  [extra-body]
+  (let [body (keyword-members extra-body)]
+    (if (map? body)
+      (reduce (fn [acc k]
+                (let [v (get acc k)
+                      v' (keyword-members v)]
+
+                  (if (identical? v v') acc (assoc acc k v'))))
+              body
+              COMPOSED_EXTRA_BODY_MEMBERS)
+      body)))
+
 (defn normalize-provider
   "Normalizes a provider entry:
     - resolves :base-url from KNOWN_PROVIDERS if not provided
@@ -2387,7 +2438,9 @@
       (assoc :llm-headers (merge (:llm-headers known) (:llm-headers provider-map)))
 
       (some? (or (:extra-body provider-map) (:extra-body known)))
-      (assoc :extra-body (merge (:extra-body known) (:extra-body provider-map))))))
+      (assoc :extra-body
+        (merge (canonical-extra-body (:extra-body known))
+               (canonical-extra-body (:extra-body provider-map)))))))
 
 ;; =============================================================================
 ;; Context limit lookup

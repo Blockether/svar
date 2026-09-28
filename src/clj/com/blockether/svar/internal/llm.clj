@@ -7120,7 +7120,7 @@
            router/DEFAULT_SEMANTIC_TIMEOUT_MS)
 
          extra-body
-         (:extra-body opts)
+         (router/canonical-extra-body (:extra-body opts))
 
          on-chunk
          (or (:on-chunk opts)
@@ -7584,9 +7584,12 @@
 
    - `:model`, `:api-key`, `:base-url`, `:api-style`, `:provider-id` come from
      the selected provider/model.
-   - `:extra-body` is built from (max_tokens auto-params) < (auto reasoning) <
-     (caller extra-body). The abstract `:reasoning :low|:balanced|:deep` opt
-     is translated per the model's api-style; non-reasoning models ignore it.
+   - `:extra-body` is built from (provider) < (model) < (max_tokens
+     auto-params) < (auto reasoning) < (caller extra-body). Each layer is
+     spelled by `router/canonical-extra-body` first, so a JSON-keyed member
+     replaces the same keyword member instead of duplicating it. The abstract
+     `:reasoning :low|:balanced|:deep` opt is translated per the model's
+     api-style; non-reasoning models ignore it.
    - `:reasoning` and `:preserved-thinking?` are consumed here and removed
      downstream (they're svar-level opts, not provider params). Callers who
      set explicit reasoning keys inside `:extra-body` keep those overrides.
@@ -7619,11 +7622,11 @@
                                        {:preserved-thinking? (:preserved-thinking? opts)}))
 
         merged-body
-        (cond-> (merge (:extra-body provider)
-                       (:extra-body model-map)
+        (cond-> (merge (router/canonical-extra-body (:extra-body provider))
+                       (router/canonical-extra-body (:extra-body model-map))
                        auto-params
                        reasoning-params
-                       (:extra-body opts))
+                       (router/canonical-extra-body (:extra-body opts)))
           (:verbosity opts)
           (assoc :verbosity (:verbosity opts)))
 
@@ -8258,7 +8261,7 @@
 
      ;; Count the same output-format declaration that transport receives.
      caller-extra-body
-     (or (:extra-body opts) {})
+     (or (router/canonical-extra-body (:extra-body opts)) {})
 
      extra-body
      (cond-> caller-extra-body
@@ -9048,7 +9051,7 @@
      (vec messages)
 
      caller-extra-body
-     (or (:extra-body opts) {})
+     (or (router/canonical-extra-body (:extra-body opts)) {})
 
      ;; Tools must be shaped before counting, just as they are before transport.
      extra-body
