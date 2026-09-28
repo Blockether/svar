@@ -1758,16 +1758,20 @@
          max-tokens
          (or (:max_tokens extra-body) 4096)
 
-         ;; Drop fields Anthropic does NOT recognise (would 400 on
-         ;; unknown). `:stream_options` is OpenAI-only;
-         ;; `:prompt_cache_key` is OpenAI-only routing-stickiness key;
-         ;; `:text` is the Responses API envelope for output verbosity;
-         ;; `:service_tier "priority"` is Codex-only. Anthropic's own
-         ;; `auto` and `standard_only` service tiers remain intact.
+         ;; Drop OpenAI-only fields by both keyword and JSON string key; the
+         ;; latter arrives from clients through the gateway unchanged.
+         ;; Priority is Codex-only; Anthropic's auto and standard_only remain.
          anthropic-extra
-         (cond-> (dissoc extra-body :stream_options :prompt_cache_key :text)
-           (= "priority" (:service_tier extra-body))
-           (dissoc :service_tier))
+         (cond-> (dissoc extra-body
+                   :stream_options
+                   "stream_options"
+                   :prompt_cache_key
+                   "prompt_cache_key"
+                   :text
+                   "text")
+           (or (= "priority" (:service_tier extra-body))
+               (= "priority" (get extra-body "service_tier")))
+           (dissoc :service_tier "service_tier"))
 
          body
          (cond-> {:model model :messages non-system :max_tokens max-tokens}
