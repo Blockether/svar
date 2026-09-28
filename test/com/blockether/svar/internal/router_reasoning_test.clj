@@ -92,8 +92,8 @@
             (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
             (expect (= {:effort "max"} (:output_config out)))
             (expect (nil? (get-in out [:thinking :budget_tokens]))))))
-    (it "uses adaptive thinking for dashed and dotted Opus 5.5 ids"
-        (doseq [model ["claude-opus-5-5" "claude-opus-5.5"]]
+    (it "uses adaptive thinking for dashed and dotted Claude 5.5 ids"
+        (doseq [model ["claude-opus-5-5" "claude-opus-5.5" "claude-sonnet-5-5" "claude-sonnet-5.5"]]
           (let [out (router/reasoning-extra-body
                       :anthropic
                       {:name model :reasoning? true :reasoning-style :anthropic-thinking}

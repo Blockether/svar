@@ -27,11 +27,11 @@
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
-               :default-models [{:name "claude-opus-5-5"} {:name "claude-fable-5-1"}
-                                {:name "claude-sonnet-5"} {:name "claude-haiku-4-5"}
-                                {:name "claude-opus-5"} {:name "claude-fable-5"}
-                                {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                                {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}]}
+               :default-models
+               [{:name "claude-opus-5-5"} {:name "claude-fable-5-1"} {:name "claude-sonnet-5-5"}
+                {:name "claude-sonnet-5"} {:name "claude-haiku-4-5"} {:name "claude-opus-5"}
+                {:name "claude-fable-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
+                {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
                            :env-keys []
                            :api-style :anthropic
@@ -40,10 +40,11 @@
                            ;; once the included quota is exhausted (see internal/modelsdev).
                            :pricing-source :anthropic
                            :default-models [{:name "claude-opus-5-5"} {:name "claude-fable-5-1"}
-                                            {:name "claude-sonnet-5"} {:name "claude-haiku-4-5"}
-                                            {:name "claude-opus-5"} {:name "claude-fable-5"}
-                                            {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                                            {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}]
+                                            {:name "claude-sonnet-5-5"} {:name "claude-sonnet-5"}
+                                            {:name "claude-haiku-4-5"} {:name "claude-opus-5"}
+                                            {:name "claude-fable-5"} {:name "claude-opus-4-8"}
+                                            {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
+                                            {:name "claude-sonnet-4-6"}]
                            :prepend-default-models? true}
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
@@ -110,9 +111,10 @@
    :github-copilot
    {:base-url "https://api.individual.githubcopilot.com"
     :models-base :host
-    :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "claude-sonnet-5"}
-                     {:name "gpt-5.6-terra"} {:name "gpt-6-luna"} {:name "claude-opus-5"}
-                     {:name "claude-fable-5"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"}]
+    :default-models [{:name "claude-opus-5.5"} {:name "gpt-6-sol"} {:name "gpt-6-astra"}
+                     {:name "claude-sonnet-5.5"} {:name "claude-sonnet-5"} {:name "gpt-5.6-terra"}
+                     {:name "gpt-6-luna"} {:name "claude-opus-5"} {:name "claude-fable-5"}
+                     {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -346,6 +348,11 @@
                         :capabilities #{:chat :vision}
                         :reasoning? true
                         :reasoning-style :anthropic-thinking}
+   "claude-sonnet-5-5" {:intelligence :high
+                        :speed :medium
+                        :capabilities #{:chat :vision}
+                        :reasoning? true
+                        :reasoning-style :anthropic-thinking}
    "claude-sonnet-5" {:intelligence :high
                       :speed :medium
                       :capabilities #{:chat :vision}
@@ -523,7 +530,7 @@
              ;; Premium
              "claude-fable-5-1" "gpt-6-astra"
              ;; Mid-size
-             "claude-sonnet-5" "gpt-5.6-terra" "kimi-k2.7-code"
+             "claude-sonnet-5-5" "claude-sonnet-5" "gpt-5.6-terra" "kimi-k2.7-code"
              ;; Fast
              "claude-haiku-4-5" "gpt-6-luna" "glm-5.3-flash" "glm-5.3-flashx" "deepseek-v4.1-flash"
              "qwen3.8-flash" "mimo-v2.6-flash" "hy3" "muse-spark-1.3-contributor"]
@@ -844,12 +851,12 @@
 (def ^:private ANTHROPIC_ADAPTIVE_NAME_PATTERN
   "Claude families that take ADAPTIVE thinking, by name.
 
-   Fable 5.1 / Fable 5 / Mythos 5 / Sonnet 5 / Opus 5.5 / Opus 5 / Opus 4.8–4.7 reject
+   Fable 5.1 / Fable 5 / Mythos 5 / Sonnet 5.5 / Sonnet 5 / Opus 5.5 / Opus 5 / Opus 4.8–4.7 reject
    manual budget_tokens; Opus 4.6 and Sonnet 4.6 still accept it but Anthropic marks it
    deprecated. Dot and dash aliases both match so Copilot-style ids
    (`claude-opus-4.8`) do not regress. This is the FALLBACK — `models.dev`
    decides first, see `anthropic-adaptive-thinking-model?`."
-  #"(?i)^claude-(?:fable-5(?:[-.]1)?|mythos-5|sonnet-5|opus-5(?:[-.]5)?|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
+  #"(?i)^claude-(?:fable-5(?:[-.]1)?|mythos-5|sonnet-5(?:[-.]5)?|opus-5(?:[-.]5)?|opus-4[-.][6-8]|sonnet-4[-.]6)(?:$|-)")
 
 (defn- anthropic-adaptive-thinking-model?
   "Does this Claude model take ADAPTIVE thinking (`output_config.effort`) rather
@@ -1211,6 +1218,7 @@
      {:input 3.00 :cached-input 0.30 :cache-write-5m 3.75 :cache-write-1h 6.00 :output 15.00}
      :context 200000}
     "claude-sonnet-4-6" {:pricing {:cache-write-1h 6.00} :context 200000}
+    "claude-sonnet-5-5" {:pricing {:cache-write-1h 4.00} :context 1000000}
     "claude-sonnet-5"
     {:pricing
      {:input 3.00 :cached-input 0.30 :cache-write-5m 3.75 :cache-write-1h 6.00 :output 15.00}
@@ -1313,7 +1321,11 @@
    ;; the proxy's own depth with no way to ask for less — Gemini and Grok below
    ;; keep it because they ride the OpenAI-compatible wire, which is the wire
    ;; the lever actually misfires on.
-   {"claude-opus-5" {:pricing {:input 0.0 :output 0.0}
+   {"claude-opus-5.5" {:pricing {:input 0.0 :output 0.0}
+                       :api-style :anthropic
+                       :reasoning? true
+                       :reasoning-style :anthropic-thinking}
+    "claude-opus-5" {:pricing {:input 0.0 :output 0.0}
                      :api-style :anthropic
                      :reasoning? true
                      :reasoning-style :anthropic-thinking}
@@ -1345,6 +1357,10 @@
                        :reasoning? true
                        :reasoning-style :anthropic-thinking}
     "claude-sonnet-4.6" {:pricing {:input 0.0 :output 0.0}
+                         :api-style :anthropic
+                         :reasoning? true
+                         :reasoning-style :anthropic-thinking}
+    "claude-sonnet-5.5" {:pricing {:input 0.0 :output 0.0}
                          :api-style :anthropic
                          :reasoning? true
                          :reasoning-style :anthropic-thinking}
