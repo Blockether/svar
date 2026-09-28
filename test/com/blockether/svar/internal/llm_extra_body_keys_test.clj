@@ -31,6 +31,14 @@
                "finish_reason" "stop"}]
    "usage" {"prompt_tokens" 1 "completion_tokens" 1 "total_tokens" 2}})
 
+(def ^:private ANTHROPIC_REPLY
+  {"id" "msg_1"
+   "type" "message"
+   "role" "assistant"
+   "content" [{"type" "text" "text" "ok"}]
+   "stop_reason" "end_turn"
+   "usage" {"input_tokens" 1 "output_tokens" 1}})
+
 (defn- posted-bodies
   "Calls `f` while every HTTP POST answers `reply`; returns the JSON request
    bodies that were posted."
@@ -64,34 +72,34 @@
                                       opts)))))
 
 (defdescribe
-  canonical-extra-body-test
-  (it "spells JSON member names as keywords"
+  keyword-body-test
+  (it "turns every JSON member name, at any depth, into a keyword"
       (expect
         (= {:reasoning {:summary "detailed"} :include ["reasoning.encrypted_content"] :store false}
-           (router/canonical-extra-body MODEL_EXTRA_BODY))))
+           (router/keyword-body MODEL_EXTRA_BODY)))
+      (expect (= {:tools [{:type "function" :parameters {:properties {:user-id {:type "string"}}}}]}
+                 (router/keyword-body {"tools" [{"type" "function"
+                                                 "parameters" {"properties"
+                                                               {"user-id" {"type" "string"}}}}]}))))
   (it "keeps the keyword entry of a member given under both spellings"
-      (expect (= {:max_tokens 5 :reasoning {:summary "detailed" :effort "high"}}
-                 (router/canonical-extra-body {"max_tokens" 3
-                                               :max_tokens 5
-                                               "reasoning" {"summary" "detailed" "effort" "low"}
-                                               :reasoning {:effort "high"}}))))
-  (it "leaves other member names and nested values as given"
-      (expect (= {"svar/tools" [{"name" "run"}]
-                  "provider-state" {"id" "resp_1"}
-                  :metadata {"trace" "1"}
-                  :response_format {:type "json_schema"
-                                    :json_schema {"name" "answer" "schema" {"type" "object"}}}}
-                 (router/canonical-extra-body {"svar/tools" [{"name" "run"}]
-                                               "provider-state" {"id" "resp_1"}
-                                               "metadata" {"trace" "1"}
-                                               "response_format" {"type" "json_schema"
-                                                                  "json_schema"
-                                                                  {"name" "answer"
-                                                                   "schema" {"type" "object"}}}}))))
-  (it "returns keyword maps and nil unchanged"
+      (expect (= {:max_tokens 5 :reasoning {:effort "high"}}
+                 (router/keyword-body {"max_tokens" 3
+                                       :max_tokens 5
+                                       "reasoning" {"summary" "detailed"}
+                                       :reasoning {"effort" "high"}}))))
+  (it "never spells one of svar's own namespaced options"
+      (let [body (router/keyword-body {"svar/tools" [{"name" "run"}]})]
+        (expect (nil? (:svar/tools body)))
+        (expect (= [{:name "run"}] (get body (keyword nil "svar/tools"))))))
+  (it "serializes every member name as it arrived"
+      (let [body
+            {"svar/tools" [] "provider-state" {"id" "resp_1"} "metadata" {"user id" "7" "a.b" 1}}]
+        (expect (= (json/read-json (json/write-json-str body))
+                   (json/read-json (json/write-json-str (router/keyword-body body)))))))
+  (it "returns keyword maps and nil as given"
       (let [body {:max_tokens 5 :reasoning {:effort "high"}}]
-        (expect (identical? body (router/canonical-extra-body body))))
-      (expect (nil? (router/canonical-extra-body nil)))))
+        (expect (identical? body (router/keyword-body body))))
+      (expect (nil? (router/keyword-body nil)))))
 
 (defdescribe normalize-provider-extra-body-test
              (it "merges JSON-keyed configuration over the provider defaults"
@@ -103,7 +111,19 @@
                                    :extra-body {"reasoning" {"summary" "concise"} "store" true}})]
                    (expect (= (merge (get-in router/KNOWN_PROVIDERS [:openai-codex :extra-body])
                                      {:reasoning {:summary "concise"} :store true})
-                              (:extra-body provider))))))
+                              (:extra-body provider)))))
+             (it "gives each model's JSON-keyed extra body keyword keys"
+                 (let [provider (router/normalize-provider
+                                  0
+                                  {:id :responses-proxy
+                                   :api-key "test-key"
+                                   :base-url "http://127.0.0.1:1/v1"
+                                   :api-style :openai-compatible-responses
+                                   :models [{:name "gpt-6-luna" :extra-body MODEL_EXTRA_BODY}]})]
+                   (expect (= {:reasoning {:summary "detailed"}
+                               :include ["reasoning.encrypted_content"]
+                               :store false}
+                              (:extra-body (first (:models provider))))))))
 
 (defdescribe
   responses-request-members-test
@@ -172,4 +192,34 @@
 
         (expect (= 1 (count bodies)))
         (expect (= 1 (member-count body "response_format")))
-        (expect (= response-format (get (json/read-json body) "response_format"))))))
+        (expect (= response-format (get (json/read-json body) "response_format")))))
+  (it "drops a caller's JSON-keyed OpenAI options from Anthropic requests"
+      (let [[body :as bodies]
+            (posted-bodies ANTHROPIC_REPLY
+                           #(sut/chat-completion [{:role "user" :content "hi"}]
+                                                 "claude-haiku-4-5" "test-key"
+                                                 "http://127.0.0.1:1/v1"
+                                                 {:api-style :anthropic
+                                                  :extra-body {"text" {"verbosity" "high"}
+                                                               "stream_options" {"include_usage"
+                                                                                 true}
+                                                               "prompt_cache_key" "session-1"
+                                                               "service_tier" "priority"
+                                                               "temperature" 0.3}}))
+
+            sent
+            (json/read-json body)]
+
+        (expect (= 1 (count bodies)))
+        (expect (not-any? #(contains? sent %)
+                          ["text" "stream_options" "prompt_cache_key" "service_tier"]))
+        (expect (= 0.3 (get sent "temperature")))))
+  (it "keeps a caller's JSON-keyed Anthropic service tier"
+      (let [[body] (posted-bodies ANTHROPIC_REPLY
+                                  #(sut/chat-completion [{:role "user" :content "hi"}]
+                                                        "claude-haiku-4-5" "test-key"
+                                                        "http://127.0.0.1:1/v1"
+                                                        {:api-style :anthropic
+                                                         :extra-body {"service_tier"
+                                                                      "standard_only"}}))]
+        (expect (= "standard_only" (get (json/read-json body) "service_tier"))))))

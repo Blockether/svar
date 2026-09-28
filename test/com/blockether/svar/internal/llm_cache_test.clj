@@ -679,26 +679,7 @@
                              [{:role "user" :content "hi"}]
                              "claude-haiku-4-5"
                              {:text {:verbosity "high"}})]
-                   (expect (not (contains? body :text)))))
-             (it "strips JSON string-keyed OpenAI options before Anthropic requests"
-                 (let [body (#'sut/build-anthropic-request-body
-                             [{:role "user" :content "hi"}]
-                             "claude-haiku-4-5"
-                             {"text" {"verbosity" "high"}
-                              "stream_options" {"include_usage" true}
-                              "prompt_cache_key" "session-1"
-                              "service_tier" "priority"
-                              "temperature" 0.3})]
-                   (expect (not-any? #(contains? body %)
-                                     ["text" "stream_options" "prompt_cache_key" "service_tier"]))
-                   (expect (= 0.3 (get body "temperature")))))
-             (it "preserves JSON string-keyed Anthropic service tiers"
-                 (let [body #(#'sut/build-anthropic-request-body
-                               [{:role "user" :content "hi"}]
-                               "claude-haiku-4-5"
-                               {"service_tier" %})]
-                   (expect (= "auto" (get (body "auto") "service_tier")))
-                   (expect (= "standard_only" (get (body "standard_only") "service_tier"))))))
+                   (expect (not (contains? body :text))))))
 
 (defdescribe
   apply-llm-opts-1h-beta-header-test

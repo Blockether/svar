@@ -1055,22 +1055,22 @@
         :else (recur (str body))))
 
 (defn- canonical-thinking-block?
-  "Recognizes canonical preserved thinking, including persisted Vis wire maps.
-   String-key acceptance keeps replay robust across JSON storage boundaries."
+  "Recognizes preserved thinking in canonical content. `normalize-content`
+   converts the JSON-keyed thinking blocks of persisted history first."
   [block]
-  (and (map? block) (= "thinking" (or (:type block) (get block "type")))))
+  (and (map? block) (= "thinking" (:type block))))
 
 (defn- canonical-thinking->anthropic-block
-  "Translates canonical or persisted-wire thinking to Anthropic wire shape."
+  "Translates canonical thinking to Anthropic wire shape."
   [block]
   (let [thinking
-        (or (:thinking block) (get block "thinking"))
+        (:thinking block)
 
         thinking-signature
-        (or (:thinking-signature block) (get block "thinking_signature"))
+        (:thinking-signature block)
 
         redacted?
-        (if (contains? block :redacted?) (:redacted? block) (get block "is_redacted"))]
+        (:redacted? block)]
 
     (cond redacted? {:type "redacted_thinking" :data thinking-signature}
           (and (string? thinking-signature) (not (str/blank? thinking-signature)))
@@ -1513,7 +1513,7 @@
       (update msg
               :content
               (fn [blocks]
-                (vec (remove canonical-thinking-block? blocks))))
+                (vec (remove canonical-thinking-block? (normalize-content (vec blocks))))))
       msg)))
 
 (defn- content-blocks-of-type
@@ -1758,20 +1758,12 @@
          max-tokens
          (or (:max_tokens extra-body) 4096)
 
-         ;; Drop OpenAI-only fields by both keyword and JSON string key; the
-         ;; latter arrives from clients through the gateway unchanged.
-         ;; Priority is Codex-only; Anthropic's auto and standard_only remain.
+         ;; Drop OpenAI-only fields. Priority is Codex-only; Anthropic's auto and
+         ;; standard_only remain.
          anthropic-extra
-         (cond-> (dissoc extra-body
-                   :stream_options
-                   "stream_options"
-                   :prompt_cache_key
-                   "prompt_cache_key"
-                   :text
-                   "text")
-           (or (= "priority" (:service_tier extra-body))
-               (= "priority" (get extra-body "service_tier")))
-           (dissoc :service_tier "service_tier"))
+         (cond-> (dissoc extra-body :stream_options :prompt_cache_key :text)
+           (= "priority" (:service_tier extra-body))
+           (dissoc :service_tier))
 
          body
          (cond-> {:model model :messages non-system :max_tokens max-tokens}
@@ -7120,7 +7112,7 @@
            router/DEFAULT_SEMANTIC_TIMEOUT_MS)
 
          extra-body
-         (router/canonical-extra-body (:extra-body opts))
+         (router/keyword-body (:extra-body opts))
 
          on-chunk
          (or (:on-chunk opts)
@@ -7585,8 +7577,9 @@
    - `:model`, `:api-key`, `:base-url`, `:api-style`, `:provider-id` come from
      the selected provider/model.
    - `:extra-body` is built from (provider) < (model) < (max_tokens
-     auto-params) < (auto reasoning) < (caller extra-body). Each layer is
-     spelled by `router/canonical-extra-body` first, so a JSON-keyed member
+     auto-params) < (auto reasoning) < (caller extra-body). Every layer has
+     keyword keys: `router/normalize-provider` converts the provider and model
+     layers and `router/keyword-body` the caller's, so a JSON-keyed member
      replaces the same keyword member instead of duplicating it. The abstract
      `:reasoning :low|:balanced|:deep` opt is translated per the model's
      api-style; non-reasoning models ignore it.
@@ -7622,11 +7615,11 @@
                                        {:preserved-thinking? (:preserved-thinking? opts)}))
 
         merged-body
-        (cond-> (merge (router/canonical-extra-body (:extra-body provider))
-                       (router/canonical-extra-body (:extra-body model-map))
+        (cond-> (merge (:extra-body provider)
+                       (:extra-body model-map)
                        auto-params
                        reasoning-params
-                       (router/canonical-extra-body (:extra-body opts)))
+                       (router/keyword-body (:extra-body opts)))
           (:verbosity opts)
           (assoc :verbosity (:verbosity opts)))
 
@@ -8261,7 +8254,7 @@
 
      ;; Count the same output-format declaration that transport receives.
      caller-extra-body
-     (or (router/canonical-extra-body (:extra-body opts)) {})
+     (or (router/keyword-body (:extra-body opts)) {})
 
      extra-body
      (cond-> caller-extra-body
@@ -9051,7 +9044,7 @@
      (vec messages)
 
      caller-extra-body
-     (or (router/canonical-extra-body (:extra-body opts)) {})
+     (or (router/keyword-body (:extra-body opts)) {})
 
      ;; Tools must be shaped before counting, just as they are before transport.
      extra-body
@@ -9835,7 +9828,7 @@
 (defn- provider-model-id
   [model]
   (cond (string? model) model
-        (map? model) (or (:id model) (:name model) (get model "id") (get model "name"))
+        (map? model) (or (:id model) (:name model))
         :else (str model)))
 
 (defn- filter-provider-models

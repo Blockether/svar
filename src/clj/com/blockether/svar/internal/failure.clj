@@ -487,7 +487,7 @@
   (cond (nil? error) nil
         (string? error) error
         (instance? Throwable error) (ex-message error)
-        (map? error) (or (:message error) (get error "message"))
+        (map? error) (:message error)
         :else (str error)))
 
 (defn- attempt->throwable
@@ -976,6 +976,7 @@
    yet, so re-sending the turn without the markers cannot duplicate output."
   [^Throwable e]
   (and (str/includes? (haystack e) "prompt_cache_breakpoint") (not (stream-output-started? e))))
+
 ;; -----------------------------------------------------------------------------
 ;; The two verdicts every layer asks for
 ;; -----------------------------------------------------------------------------

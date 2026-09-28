@@ -111,16 +111,6 @@
    Takes the entry's position and the entry."
   router/normalize-provider)
 
-(def canonical-extra-body
-  "Spells an `:extra-body` map the way svar reads request options. Top-level
-   names that are plain JSON identifiers, and the fields of `reasoning`,
-   `response_format`, `text` and `thinking`, become keywords. Hyphenated or
-   namespaced names such as `\"svar/tools\"` stay strings, and every other
-   value stays as given. A member given under both spellings keeps the keyword
-   entry. Canonicalize each layer before merging layers, so the later layer
-   wins."
-  router/canonical-extra-body)
-
 (def provider-model-metadata
   "Metadata for one model as a provider serves it (capabilities, pricing,
    context limits), without building a router. Takes a provider id and a model

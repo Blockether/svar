@@ -20,10 +20,6 @@
         (let [p (svar/normalize-provider 0 {:id :openai :models [{:name "gpt-4o"}]})]
           (expect (= "https://api.openai.com/v1" (:base-url p)))
           (expect (= "gpt-4o" (:root p)))))
-    (it "spells JSON-keyed extra-body members the way requests read them"
-        (expect (= {:temperature 0.2 :reasoning {:summary "detailed"} "svar/tools" []}
-                   (svar/canonical-extra-body
-                     {"temperature" 0.2 "reasoning" {"summary" "detailed"} "svar/tools" []}))))
     (it "answers provider-scoped model metadata without a router"
         (expect (svar/provider-model-visible? :openai "gpt-6-sol"))
         (expect (not (svar/provider-model-visible? :openai "gpt-4o")))

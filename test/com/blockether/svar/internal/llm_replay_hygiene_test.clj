@@ -106,7 +106,27 @@
       (expect (= 0 (anthropic-thinking-count "m-B" {:model "m-A"}))))
   (it "leaves UNSTAMPED (legacy) turns untouched — we can't tell, so we don't guess"
       (expect (= 1 (responses-reasoning-count "m-B" {})))
-      (expect (= 1 (anthropic-thinking-count "m-B" {})))))
+      (expect (= 1 (anthropic-thinking-count "m-B" {}))))
+  (it "Anthropic: drops persisted JSON-keyed thinking for a DIFFERENT model"
+      (let [persisted
+            {:role "assistant"
+             :model "m-A"
+             :content [{"type" "thinking" "thinking" "reason" "thinking_signature" "sig"}
+                       {:type "text" :text "answer"}]}
+
+            thinking-count
+            (fn [target]
+              (->> (build-anthropic [{:role "user" :content "hi"} persisted
+                                     {:role "user" :content "next"}]
+                                    target
+                                    {})
+                   :messages
+                   (mapcat #(when (sequential? (:content %)) (:content %)))
+                   (filter #(= "thinking" (:type %)))
+                   count))]
+
+        (expect (= 1 (thinking-count "m-A")))
+        (expect (= 0 (thinking-count "m-B"))))))
 
 (defdescribe
   aborted-turn-guard-test
