@@ -7,23 +7,41 @@
             [com.blockether.svar.internal.llm :as sut]))
 
 (def ^:private tool-def->wire @#'sut/tool-def->wire)
+
 (def ^:private tool-choice->wire @#'sut/tool-choice->wire)
+
 (def ^:private build-anthropic @#'sut/build-anthropic-request-body)
+
 (def ^:private build-chat @#'sut/build-request-body)
+
 (def ^:private build-responses @#'sut/build-openai-responses-request-body)
+
 (def ^:private extract-anthropic @#'sut/extract-anthropic-response-data)
+
 (def ^:private extract-openai @#'sut/extract-response-data)
+
 (def ^:private responses-input @#'sut/responses-message-input-entries)
+
 (def ^:private assemble-chat-frags @#'sut/assemble-chat-tool-call-fragments)
+
 (def ^:private openai-responses-state @#'sut/openai-responses-state)
+
 (def ^:private merge-provider-state @#'sut/merge-provider-state)
+
 (def ^:private enrich-tool-schema-rejection @#'sut/enrich-tool-schema-rejection)
+
 (def ^:private sanitize-tools-for-gateway @#'sut/sanitize-tools-for-gateway)
+
 (def ^:private fn-item->tool-call @#'sut/function-call-item->tool-call)
+
 (def ^:private extract-stream-delta @#'sut/extract-stream-delta)
+
 (def ^:private make-anthropic-stream-delta-fn @#'sut/make-anthropic-stream-delta-fn)
+
 (def ^:private build-gemini @#'sut/build-gemini-request-body)
+
 (def ^:private extract-gemini @#'sut/extract-gemini-response-data)
+
 (def ^:private gemini-tool-config @#'sut/gemini-tool-config)
 
 (def ^:private parse-sse-data @#'sut/parse-sse-data)
@@ -590,6 +608,40 @@
         {:api-key "test" :base-url "https://gateway.example.com/v1" :on-chunk (constantly nil)}))))
 
 (defdescribe
+  responses-output-budget-error-test
+  ;; Blockether/vis#296: retain the real cap and usage without returning partial calls.
+  (doseq [[path expected-cap] [["/responses" 32768] ["/codex/responses" nil]]]
+    (it (str "preserves output-budget evidence for " path)
+        (let [event {"type" "response.incomplete"
+                     "response" {"incomplete_details" {"reason" "max_output_tokens"}
+                                 "usage" {"input_tokens" 70000
+                                          "output_tokens" 32768
+                                          "output_tokens_details" {"reasoning_tokens" 32000}}}}
+              failure
+              (with-redefs [http/post (fn [_ _]
+                                        {:status 200
+                                         :body (java.io.ByteArrayInputStream.
+                                                 (.getBytes
+                                                   (str "data: " (json/write-json-str event) "\n\n")
+                                                   "UTF-8"))})]
+                (try (sut/openai-responses-completion {:model "test-model"
+                                                       :input [{:role "user" :content "test"}]
+                                                       :max_output_tokens 32768}
+                                                      {:api-key "test"
+                                                       :base-url "https://gateway.example.com/v1"
+                                                       :responses-path path
+                                                       :on-chunk (constantly nil)})
+                     nil
+                     (catch clojure.lang.ExceptionInfo e (ex-data e))))]
+
+          (expect (= :svar.core/stream-incomplete (:type failure)))
+          (expect (= expected-cap (:max-output-tokens failure)))
+          (expect (= 70000 (get-in failure [:api-usage :input-tokens])))
+          (expect (= 32768 (get-in failure [:api-usage :output-tokens])))
+          (expect (= 32000 (get-in failure [:api-usage :output-tokens-details :reasoning])))
+          (expect (nil? (:tool-calls failure)))))))
+
+(defdescribe
   responses-single-source-test
   ;; Vis #173: a stream delivers each output item exactly once on
   ;; `response.output_item.done`. The terminal snapshot may repeat items under
@@ -663,7 +715,9 @@
                            nil
                            (catch clojure.lang.ExceptionInfo e (ex-data e)))]
           (expect (= :svar.core/stream-incomplete (:type failure)))
-          (expect (= "max_output_tokens" (:reason failure)))))
+          (expect (= "max_output_tokens" (:reason failure)))
+          (expect (= 1 (:tool-call-count failure)))
+          (expect (nil? (:tool-calls failure)))))
     (it "keeps separate same-program calls and same-text reasoning items"
         (let [other-reasoning
               (dissoc reasoning "id" "encrypted_content")

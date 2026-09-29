@@ -6666,6 +6666,11 @@
                            :url url
                            :reason (or (:reason incomplete) "unknown")
                            :stream-finalization stream-finalization
+                           :api-usage @usage-atom
+                           ;; The wire budget is absent on Codex, which strips this control.
+                           :max-output-tokens (:max_output_tokens body)
+                           :tool-args-acc-len (.length tool-args-acc)
+                           :tool-call-count (count (:tool-calls @provider-state-atom))
                            :content-acc-len (.length content-acc)
                            :reasoning-acc-len (.length reasoning-acc)
                            :partial-content (when (pos? (.length content-acc)) (str content-acc))
