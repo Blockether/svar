@@ -2541,7 +2541,8 @@
                   :fresh-for-ms DEFAULT_PROMPT_CACHE_FRESH_FOR_MS}
    ;; Circuit breaker defaults
    :failure-threshold 5
-   :recovery-ms 60000})
+   :recovery-ms 60000
+   :stream-recovery-delays-ms failure/STREAM_RECOVERY_DELAYS_MS})
 
 (def ^:private INTELLIGENCE_ORDER {:frontier 4 :high 3 :medium 2 :low 1})
 
@@ -3190,10 +3191,6 @@
 
 (defn- stream-watchdog-error? [e] (contains? STREAM_WATCHDOG_ERROR_TYPES (:type (ex-data e))))
 
-(def ^:private STALL_RESTART_ALLOWANCE
-  "See `failure/STALL_RESTART_ALLOWANCE`."
-  failure/STALL_RESTART_ALLOWANCE)
-
 (defn- stall-restart-safe?
   "True for a stream the MODEL stalled while its transport stayed healthy and
    no non-rewindable output had reached the caller — `llm`'s own
@@ -3437,47 +3434,74 @@
           ;; a target.
           :else (budget-exhausted-result last-error))))))
 
-(defn- handle-stalled-stream-restart
-  "Re-issue a restart-safe stall on the SAME provider, at most
-   `failure/STALL_RESTART_ALLOWANCE` times, before the caller crosses providers.
+(defn- stream-recovery-allowance
+  "Same-provider re-sends a stream failure may spend before the router crosses
+   providers. A stream that broke before its answer (`failure/stream-recovery-safe?`)
+   gets the whole `:stream-recovery-delays-ms` schedule when no other candidate can
+   take the call, and one re-send when it is a model stall that another candidate
+   could serve. Every other failure gets none."
+  [router single-candidate? e]
+  (let [schedule (count (:stream-recovery-delays-ms router))]
+    (cond (not (failure/stream-recovery-safe? e)) 0
+          single-candidate? schedule
+          (stall-restart-safe? e) (min 1 schedule)
+          :else 0)))
 
-   No sleep: a stall is not a cooldown, and the watchdog already spent minutes
-   waiting. Each restart is announced as `:llm.routing/provider-retry` with
-   `:reason :stream-stalled` — the marker a consumer already drops its partial
-   stream on, which is what keeps the replay free of duplicated output.
+(defn- handle-stream-recovery
+  "Re-send a stream that broke before its answer on the SAME provider, at most
+   `allowance` times, before the caller crosses providers.
 
-   Anything OTHER than a further stall is handed back untouched so the fallback
-   ladder classifies it: a request that stalled and then met a real refusal has
-   stopped being a stall, and re-entering here for it would rebuild the nested
-   ladder this router deliberately collapsed."
-  [router prefs trace provider model-map f e start-ms]
-  (let [elapsed* #(- (router-now-ms router) (long start-ms))]
-    (loop [restarts 0
-           last-error e]
+   Each re-send waits its `:stream-recovery-delays-ms` step (an interruptible
+   `Thread/sleep`, so a caller's Stop still wins) and is announced first as
+   `:llm.routing/provider-retry` with `failure/stream-recovery-reason`. That event
+   is the marker a consumer drops its partial stream on, which keeps the replay
+   free of duplicated output.
 
-      (if (>= restarts (long STALL_RESTART_ALLOWANCE))
+   Anything OTHER than a further restart-safe stream failure is handed back
+   untouched so the fallback ladder takes it: a request that stalled and then met
+   a real refusal has stopped being a stream failure, and re-entering here for it
+   would rebuild the nested ladder this router deliberately collapsed."
+  [router prefs trace provider model-map f e start-ms allowance]
+  (let [elapsed*
+        #(- (router-now-ms router) (long start-ms))
+
+        delays
+        (vec (:stream-recovery-delays-ms router))]
+
+    (loop [restarts
+           0
+
+           last-error
+           e]
+
+      (if (>= restarts (long allowance))
         {:error last-error :elapsed-ms (long (elapsed*))}
-        (do (append-routing-event! trace
-                                   prefs
-                                   (routing-event router
-                                                  :llm.routing/provider-retry
-                                                  {:status (:status (ex-data last-error))
-                                                   :reason :stream-stalled
-                                                   :provider (provider-label provider)
-                                                   :model (:name model-map)
-                                                   :attempt (inc restarts)
-                                                   :delay-ms 0
-                                                   :elapsed-ms (long (elapsed*))
-                                                   :error (ex-message last-error)}))
-            (let [outcome (try {:success (f provider model-map)}
-                               (catch Exception next-error
-                                 ;; Cancellation MUST escape — see propagate-interrupt!.
-                                 (propagate-interrupt! next-error)
-                                 {:error next-error}))]
-              (cond (:success outcome) outcome
-                    (stall-restart-safe? (:error outcome)) (recur (inc restarts) (:error outcome))
-                    (stream-content-started? (:error outcome)) (throw (:error outcome))
-                    :else (assoc outcome :elapsed-ms (long (elapsed*))))))))))
+        (let [delay-ms (long (nth delays restarts (or (peek delays) 0)))]
+          (append-routing-event! trace
+                                 prefs
+                                 (routing-event router
+                                                :llm.routing/provider-retry
+                                                {:status (:status (ex-data last-error))
+                                                 :reason (failure/stream-recovery-reason last-error)
+                                                 :provider (provider-label provider)
+                                                 :model (:name model-map)
+                                                 :attempt (inc restarts)
+                                                 :max-retries (long allowance)
+                                                 :delay-ms delay-ms
+                                                 :elapsed-ms (long (elapsed*))
+                                                 :error (ex-message last-error)}))
+          ;; Interruptible sleep — see comment in handle-rate-limit-retries.
+          (when (pos? delay-ms) (Thread/sleep delay-ms))
+          (let [outcome (try {:success (f provider model-map)}
+                             (catch Exception next-error
+                               ;; Cancellation MUST escape — see propagate-interrupt!.
+                               (propagate-interrupt! next-error)
+                               {:error next-error}))]
+            (cond (:success outcome) outcome
+                  (failure/stream-recovery-safe? (:error outcome)) (recur (inc restarts)
+                                                                          (:error outcome))
+                  (stream-content-started? (:error outcome)) (throw (:error outcome))
+                  :else (assoc outcome :elapsed-ms (long (elapsed*))))))))))
 
 (defn with-provider-fallback
   [router prefs f]
@@ -3498,6 +3522,11 @@
               :when (or (nil? (:force-model prefs)) (= (:force-model prefs) (:name model)))]
 
           [provider model])
+
+        ;; Stream recovery spends its whole schedule only where no other
+        ;; candidate could take the call.
+        single-candidate?
+        (<= (count scoped-models) 1)
 
         effort-resolutions
         (when reasoning-effort
@@ -3642,47 +3671,51 @@
                     (catch Exception e
                       ;; Cancellation MUST escape — see propagate-interrupt!.
                       (propagate-interrupt! e)
-                      (cond (and (or (router-transient-error? router e)
-                                     (stream-watchdog-error? e)
-                                     (= :quota-exhausted (:category (classify-failure e)))
-                                     (and (= :fallback-provider (:on-auth-error prefs))
-                                          (= :auth (:category (classify-failure e)))))
-                                 (stream-content-started? e))
-                            (throw e)
-                            ;; The MODEL stalled while the transport stayed
-                            ;; healthy and only rewindable output was painted:
-                            ;; announce the reset and re-issue on the provider
-                            ;; whose cache is warm, before spending a fallback
-                            ;; on a request that never produced an answer.
-                            (stall-restart-safe? e) (handle-stalled-stream-restart router
-                                                                                   prefs
-                                                                                   trace
-                                                                                   provider
-                                                                                   model-map
-                                                                                   f
-                                                                                   e
-                                                                                   start-ms)
-                            ;; Watchdog spent its wait budget. Cross providers now.
-                            (stream-watchdog-error? e)
-                            {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
-                            (router-transient-error? router e) (handle-rate-limit-retries
-                                                                 router
-                                                                 prefs
-                                                                 trace
-                                                                 provider
-                                                                 model-map
-                                                                 f
-                                                                 e
-                                                                 start-ms)
-                            (= :quota-exhausted (:category (classify-failure e)))
-                            {:provider-limit-error e}
-                            (format-error? prefs e) {:format-error e}
-                            (and (= :fallback-provider (:on-auth-error prefs))
-                                 (= :auth (:category (classify-failure e))))
-                            {:auth-error e}
-                            (= :model-unavailable (:category (classify-failure e)))
-                            {:model-unsupported e}
-                            :else (throw e))))]
+                      (let [recovery-allowance
+                            (stream-recovery-allowance router single-candidate? e)]
+                        (cond
+                          ;; The stream broke before its answer and only rewindable
+                          ;; reasoning was painted: announce the reset and re-send on
+                          ;; the provider whose cache is warm, before spending a
+                          ;; fallback on a request that never produced an answer.
+                          (pos? (long recovery-allowance)) (handle-stream-recovery
+                                                             router
+                                                             prefs
+                                                             trace
+                                                             provider
+                                                             model-map
+                                                             f
+                                                             e
+                                                             start-ms
+                                                             recovery-allowance)
+                          (and (or (router-transient-error? router e)
+                                   (stream-watchdog-error? e)
+                                   (= :quota-exhausted (:category (classify-failure e)))
+                                   (and (= :fallback-provider (:on-auth-error prefs))
+                                        (= :auth (:category (classify-failure e)))))
+                               (stream-content-started? e))
+                          (throw e)
+                          ;; Watchdog spent its wait budget. Cross providers now.
+                          (stream-watchdog-error? e)
+                          {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
+                          (router-transient-error? router e) (handle-rate-limit-retries
+                                                               router
+                                                               prefs
+                                                               trace
+                                                               provider
+                                                               model-map
+                                                               f
+                                                               e
+                                                               start-ms)
+                          (= :quota-exhausted (:category (classify-failure e)))
+                          {:provider-limit-error e}
+                          (format-error? prefs e) {:format-error e}
+                          (and (= :fallback-provider (:on-auth-error prefs))
+                               (= :auth (:category (classify-failure e))))
+                          {:auth-error e}
+                          (= :model-unavailable (:category (classify-failure e)))
+                          {:model-unsupported e}
+                          :else (throw e)))))]
               (cond
                 (:success result)
                 (let [result (:success result)
@@ -3955,6 +3988,9 @@
                   router-level network defaults
      :budget    - {:max-tokens N :max-cost N} spend limits (nil = no limit)
      :rate-limit - {:same-provider-delays-ms [...] :fallback-after-ms N ...}
+     :stream-recovery-delays-ms - waits before each same-provider re-send of a
+                  stream that broke before its answer (default [1000 3000];
+                  [] turns stream recovery off)
      :failure-threshold - Int. Failures before circuit opens (default: 5)
      :recovery-ms       - Int. Ms before open→half-open (default: 60000)
 
@@ -4030,6 +4066,7 @@
       :rate-limit (merge DEFAULT_RATE_LIMIT_ROUTING (:rate-limit merged))
       :failure-threshold (:failure-threshold merged)
       :recovery-ms (:recovery-ms merged)
+      :stream-recovery-delays-ms (vec (:stream-recovery-delays-ms merged))
       :transient-status-codes (:transient-status-codes merged)})))
 
 ;; =============================================================================

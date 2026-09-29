@@ -371,24 +371,23 @@
    that turns a throttle the provider itself scheduled into a hard failure."
   180000)
 
-(def STALL_RESTART_ALLOWANCE
-  "Same-provider re-issues granted to a stream the MODEL stalled, before the
-   router crosses providers.
+(def STREAM_RECOVERY_DELAYS_MS
+  "Waits before each same-provider re-send of a stream that broke before its
+   answer: the router's default `:stream-recovery-delays-ms`.
 
-   A restart-safe stall is not a provider refusing us: the socket stayed healthy,
-   keepalives kept arriving, and no final text or tool call reached the caller.
-   Any partial reasoning is rewindable; that is what `:safe-to-restart?` asserts.
-   There is no cooldown to honor and nothing to wait for, so the cheapest recovery
-   is to re-issue the same request once, on the same provider, into its warm prompt
-   cache.
+   A restart-safe stream failure (see `stream-recovery-safe?`) is not a provider
+   refusing us, so there is no cooldown to honor. A short wait lets a dropped
+   connection or a stalled prefill clear, and the re-send reuses the provider's warm
+   prompt cache. When no other candidate can take the call, the router spends the
+   whole schedule. Otherwise it spends one re-send on a model stall, because a
+   second stall is evidence about the PROVIDER, and crosses providers at once for
+   every other stream failure.
 
    Measured (vis session 907a20a8, 2026-08-25): a reasoning-phase semantic timeout
    on `openai-codex` went straight to provider fallback, found no second provider
-   able to serve it, and killed a turn 816 s in — the recovery the watchdog exists
-   to enable never ran once. ONE, deliberately: a second stall is evidence about
-   the PROVIDER rather than about this request, and that is the fallback ladder's
-   verdict to make."
-  1)
+   able to serve it, and killed a turn 816 s in. Vis then carried its own two-step
+   re-send for pinned calls; the schedule lives here so every caller gets it."
+  [1000 3000])
 
 (defn backoff-ms
   "Exponential backoff with FULL JITTER, the AWS-recommended shape.
@@ -846,6 +845,54 @@
    incomplete streams retry before visible output because early close often clears;
    a `max_output_tokens` incomplete throws `:svar.llm/max-tokens-exceeded` instead."
   #{:svar.core/stream-truncated :svar.core/stream-incomplete})
+
+(defn answer-output-started?
+  "True when failure `data` shows that answer text or a tool call reached the caller.
+   Reasoning alone does not count: the retry event tells the caller to drop it."
+  [data]
+  (boolean (or (not (str/blank? (:partial-content data)))
+               (seq (:tool-calls data))
+               (some #(pos? (long (or (get data %) 0)))
+                     [:content-acc-len :tool-args-acc-len :tool-call-count]))))
+
+(defn stream-recovery-safe?
+  "True when `e` is a stream that broke before its answer, so the same request can
+   be sent again without repeating output: a watchdog abort, a stream that ended
+   early, or a dropped stream connection, with no answer text or tool call delivered.
+   An HTTP status, an output-budget stop and a partial tool call are excluded; the
+   transient, auth, quota and output-budget rules own those."
+  [^Throwable e]
+  (let [data
+        (ex-data e)
+
+        etype
+        (:type data)]
+
+    (and (not (output-budget-exhausted? data))
+         (or (contains? STREAM_WATCHDOG_ERROR_TYPES etype)
+             (contains? STREAM_INCOMPLETE_TYPES etype)
+             (and (= :svar.core/http-error etype) (true? (:stream? data)) (nil? (:status data))))
+         (not (answer-output-started? data))
+         (not (and (= :svar.core/stream-semantic-timeout etype)
+                   (false? (:safe-to-restart? data)))))))
+
+(defn stream-recovery-reason
+  "Stable `:llm.routing/provider-retry` reason for a restart-safe stream failure."
+  [^Throwable e]
+  (case (:type (ex-data e))
+    :svar.core/stream-ttft-timeout
+    :no-response
+
+    :svar.core/stream-idle-timeout
+    :stream-idle
+
+    :svar.core/stream-semantic-timeout
+    :stream-stalled
+
+    (:svar.core/stream-truncated :svar.core/stream-incomplete)
+    :stream-truncated
+
+    :stream-dropped))
 
 ;; -----------------------------------------------------------------------------
 ;; Host connect-health registry

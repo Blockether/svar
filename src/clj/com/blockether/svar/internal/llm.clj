@@ -6724,6 +6724,8 @@
                                  :stream-finalization stream-finalization
                                  :content-acc-len (.length content-acc)
                                  :reasoning-acc-len (.length reasoning-acc)
+                                 :tool-args-acc-len (.length tool-args-acc)
+                                 :tool-call-count (count (:tool-calls @provider-state-atom))
                                  :partial-content (when (pos? (.length content-acc))
                                                     (str content-acc))
                                  :reasoning (when (pos? (.length reasoning-acc))
@@ -9026,15 +9028,6 @@
           (= :svar.llm/max-tokens-exceeded (:type (ex-data t))) t
           :else (recur (.getCause ^Throwable t) (inc n)))))
 
-(defn- visible-output?
-  "True when the failed attempt streamed answer text or a tool call. A re-send
-   would repeat that output, so only reasoning-only failures are re-sent."
-  [data]
-  (boolean (or (not (str/blank? (:partial-content data)))
-               (seq (:tool-calls data))
-               (some #(pos? (long (or (get data %) 0)))
-                     [:content-acc-len :tool-args-acc-len :tool-call-count]))))
-
 (defn- output-budget-limit
   "Largest output budget a re-send may request: the model's output ceiling and the
    context window left after the failed request's input, whichever is smaller.
@@ -9058,7 +9051,7 @@
    streamed, or `limit` leaves no room above the exhausted budget."
   [data limit]
   (let [sent (:max-output-tokens data)]
-    (when (and (pos-int? sent) (not (visible-output? data)))
+    (when (and (pos-int? sent) (not (failure/answer-output-started? data)))
       (let [spent (max (long sent) (long (or (get-in data [:api-usage :output-tokens]) 0)))
             doubled (* 2 spent)
             budget (if limit (min doubled (long limit)) doubled)]

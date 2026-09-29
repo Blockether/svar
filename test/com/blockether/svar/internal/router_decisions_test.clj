@@ -423,7 +423,8 @@
           (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}]
                            {:clock clock
                             :failure-threshold 1
-                            :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
+                            :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}
+                            :stream-recovery-delays-ms [0 0]})
 
           calls
           (atom [])
@@ -463,7 +464,8 @@
                             {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
                            {:clock clock
                             :failure-threshold 1
-                            :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
+                            :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}
+                            :stream-recovery-delays-ms [0 0]})
 
           calls
           (atom [])
@@ -512,6 +514,100 @@
 
           (expect (identical? failure caught))
           (expect (= [:p1] @calls))))))
+
+(defn- pinned-router
+  "One provider with one model: no other candidate can take the call."
+  [delays]
+  (let [[clock _] (mock-clock)]
+    (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}]
+                     {:clock clock
+                      :max-wait-ms 0
+                      :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}
+                      :stream-recovery-delays-ms delays})))
+
+(defn- stream-failure
+  [etype data]
+  (ex-info "Stream connection error: closed" (merge {:type etype :stream? true} data)))
+
+(defn- run-with-failures
+  "Runs one routed call whose attempts throw `failures` in order, then succeed."
+  [r failures]
+  (let [calls
+        (atom [])
+
+        live
+        (atom [])
+
+        pending
+        (atom failures)
+
+        outcome
+        (try (router/with-provider-fallback r
+                                            {:on-chunk #(swap! live conj %)}
+                                            (fn [provider _model]
+                                              (swap! calls conj (:id provider))
+                                              (if-let [failure (first @pending)]
+                                                (do (swap! pending rest) (throw failure))
+                                                (success-result 100))))
+             (catch Exception e {:thrown e}))]
+
+    {:calls @calls
+     :retries (filterv #(= :llm.routing/provider-retry (:event/type %)) @live)
+     :outcome outcome}))
+
+(defdescribe
+  with-provider-fallback-stream-recovery-test
+  "A stream that broke before its answer is re-sent on the same provider when no other
+   candidate can take the call. Pinned Vis turns used to depend on a Vis-side loop for this."
+  (it "re-sends a pre-output failure after each scheduled wait"
+      (let [{:keys [calls retries outcome]}
+            (run-with-failures (pinned-router [5 7])
+                               [(stream-failure :svar.core/stream-ttft-timeout {})
+                                (stream-failure :svar.core/stream-semantic-timeout
+                                                {:reasoning-acc-len 40 :safe-to-restart? true})])]
+        (expect (= [:p1 :p1 :p1] calls))
+        (expect (= :p1 (:routed/provider-id outcome)))
+        (expect (= [:no-response :stream-stalled] (mapv :reason retries)))
+        (expect (= [5 7] (mapv :delay-ms retries)))
+        (expect (= [1 2] (mapv :attempt retries)))
+        (expect (= [2 2] (mapv :max-retries retries)))))
+  (it "re-sends a dropped or truncated stream that painted only reasoning"
+      (doseq [[etype reason] [[:svar.core/http-error :stream-dropped]
+                              [:svar.core/stream-truncated :stream-truncated]]]
+        (let [{:keys [calls retries outcome]}
+              (run-with-failures (pinned-router [0 0])
+                                 [(stream-failure etype
+                                                  {:reasoning-acc-len 30 :content-acc-len 0})])]
+          (expect (= [:p1 :p1] calls))
+          (expect (= :p1 (:routed/provider-id outcome)))
+          (expect (= [reason] (mapv :reason retries))))))
+  (it "stops after the schedule and keeps the stream failure as the cause"
+      (let [failure
+            (stream-failure :svar.core/stream-ttft-timeout {})
+
+            {:keys [calls retries outcome]}
+            (run-with-failures (pinned-router [0 0]) [failure failure failure])
+
+            thrown
+            (:thrown outcome)]
+
+        (expect (= [:p1 :p1 :p1] calls))
+        (expect (= 2 (count retries)))
+        (expect (= :svar.llm/provider-unavailable (:type (ex-data thrown))))
+        (expect (identical? failure (ex-cause thrown)))))
+  (it "never re-sends a stream that already delivered a tool call"
+      (let [{:keys [calls retries]} (run-with-failures (pinned-router [0 0])
+                                                       [(stream-failure :svar.core/http-error
+                                                                        {:tool-args-acc-len 12})])]
+        (expect (= [:p1] calls))
+        (expect (empty? retries))))
+  (it "turns stream recovery off with an empty schedule"
+      (let [{:keys [calls retries outcome]} (run-with-failures
+                                              (pinned-router [])
+                                              [(stream-failure :svar.core/stream-ttft-timeout {})])]
+        (expect (= [:p1] calls))
+        (expect (empty? retries))
+        (expect (some? (:thrown outcome))))))
 
 (defdescribe
   with-provider-fallback-rate-limit-trace-test

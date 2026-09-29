@@ -324,6 +324,16 @@
    {:event/type :llm.routing/provider-retry :reason :output-budget-exhausted}. A
    healed result carries :output-budget-resends and :output-budget-resend-usage.
 
+   A stream that breaks before any answer text or tool call reaches you (no
+   response, a silent or stalled stream, an early end or a dropped connection) is
+   re-sent on the same provider. When no other provider can take the call, the
+   router waits 1 s and then 3 s before its two re-sends. Otherwise it re-sends a
+   model stall once and moves to the next provider for the rest. :on-chunk first
+   gets {:event/type :llm.routing/provider-retry :reason <:no-response
+   :stream-idle :stream-stalled :stream-truncated :stream-dropped> :attempt N
+   :max-retries N :delay-ms N}, so discard the reasoning already streamed. The
+   router option :stream-recovery-delays-ms sets the waits; [] turns this off.
+
    Responses calls also return content-free :request-accounting on the result and
    final :on-chunk callback, even with :check-context? false or missing usage:
    {:source :svar-estimate :projection :prepared-request :model <actual model>

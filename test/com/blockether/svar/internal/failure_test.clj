@@ -558,3 +558,29 @@
       (expect (false? (:retryable? c)))
       (expect (= [:auth :auth] (:attempt-categories c)))
       (expect (true? (:all-attempts-category? c))))))
+
+(defdescribe
+  stream-recovery-safe-test
+  "Which broken streams the router may send again without repeating output."
+  (it "accepts watchdog aborts, early ends and dropped connections before the answer"
+      (doseq [[etype data] [[:svar.core/stream-ttft-timeout {}]
+                            [:svar.core/stream-idle-timeout {:reasoning-acc-len 9}]
+                            [:svar.core/stream-semantic-timeout
+                             {:reasoning-acc-len 9 :safe-to-restart? true}]
+                            [:svar.core/stream-truncated {:reasoning-acc-len 9}]
+                            [:svar.core/http-error {:stream? true}]]]
+        (expect (sut/stream-recovery-safe? (ex-info "broken" (assoc data :type etype))))))
+  (it "refuses answer text, tool input, HTTP statuses, rewind vetoes and cancellation"
+      (doseq [data [{:type :svar.core/stream-truncated :content-acc-len 1}
+                    {:type :svar.core/stream-truncated :tool-call-count 1}
+                    {:type :svar.core/http-error :stream? true :tool-args-acc-len 3}
+                    {:type :svar.core/http-error :stream? true :status 502}
+                    {:type :svar.core/stream-semantic-timeout :safe-to-restart? false}
+                    {:type :svar.core/stream-cancelled}]]
+        (expect (false? (sut/stream-recovery-safe? (ex-info "broken" data))))))
+  (it "names each failure with a stable retry reason"
+      (expect (= [:no-response :stream-idle :stream-stalled :stream-truncated :stream-dropped]
+                 (mapv #(sut/stream-recovery-reason (ex-info "broken" {:type %}))
+                       [:svar.core/stream-ttft-timeout :svar.core/stream-idle-timeout
+                        :svar.core/stream-semantic-timeout :svar.core/stream-truncated
+                        :svar.core/http-error])))))

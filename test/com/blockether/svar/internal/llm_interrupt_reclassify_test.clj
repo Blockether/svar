@@ -125,7 +125,7 @@
 (defdescribe
   routed-watchdog-interrupt-test
   (it
-    "leaves a real pre-header timeout safe for nonzero caller backoff and a second request"
+    "re-sends a real pre-header timeout after a nonzero router backoff"
     (let [server
           (HttpServer/create (InetSocketAddress. "127.0.0.1" 0) 0)
 
@@ -141,7 +141,7 @@
           r
           (sut/make-router
             [{:id :local :api-key "test" :base-url "http://127.0.0.1" :models [{:name "gpt-4o"}]}]
-            {:rate-limit {:same-provider-delays-ms []}})]
+            {:rate-limit {:same-provider-delays-ms []} :stream-recovery-delays-ms [25]})]
 
       (.createContext
         server
@@ -191,20 +191,14 @@
                                                       {:content-delta (get chunk "text")})
                                                     (fn [_]))))))
 
-              error
-              (try (request!) nil (catch Exception e e))]
+              result
+              (request!)]
 
-          (expect (= :svar.core/stream-ttft-timeout
-                     (some #(when (= :svar.core/stream-ttft-timeout (:type (ex-data %)))
-                              (:type (ex-data %)))
-                           (take-while some? (iterate ex-cause error)))))
-          (expect (= 1 @requests))
-          (expect (false? (.isInterrupted (Thread/currentThread))))
-          ;; Do not clear here: the original failure is this exact sleep throwing.
-          (Thread/sleep 25)
-          (deliver release-first true)
-          (expect (= "ok" (:content (request!))))
+          ;; The router owns the backoff now. Its nonzero sleep right after the
+          ;; consumed watchdog interrupt is the exact shape of the original failure.
+          (expect (= "ok" (:content result)))
           (expect (= 2 @requests))
+          (expect (false? (.isInterrupted (Thread/currentThread))))
           ;; Blockether/vis#210: an abandoned pre-header cancellation poll must not
           ;; interrupt later work when the old caller predicate becomes true.
           (reset! cancel? true)

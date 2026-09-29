@@ -1991,7 +1991,8 @@
                 :responses-path "/codex/responses"
                 :models [{:name "gpt-5.6" :context 100000 :input 1.0 :output 1.0}]}]
               {:network {:semantic-timeout-ms 50 :idle-timeout-ms 2000 :max-retries 1}
-               :rate-limit {:same-provider-delays-ms [0 0] :respect-retry-after? false}})]
+               :rate-limit {:same-provider-delays-ms [0 0] :respect-retry-after? false}
+               :stream-recovery-delays-ms [0 0]})]
 
         (with-redefs [sut/open-responses-websocket!
                       (stalled-websocket-factory opens sent aborts 400)]
