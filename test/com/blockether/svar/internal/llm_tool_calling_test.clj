@@ -634,7 +634,7 @@
                      nil
                      (catch clojure.lang.ExceptionInfo e (ex-data e))))]
 
-          (expect (= :svar.core/stream-incomplete (:type failure)))
+          (expect (= :svar.llm/max-tokens-exceeded (:type failure)))
           (expect (= expected-cap (:max-output-tokens failure)))
           (expect (= 70000 (get-in failure [:api-usage :input-tokens])))
           (expect (= 32768 (get-in failure [:api-usage :output-tokens])))
@@ -714,7 +714,7 @@
                                                                  {"reason" "max_output_tokens"}}}])
                            nil
                            (catch clojure.lang.ExceptionInfo e (ex-data e)))]
-          (expect (= :svar.core/stream-incomplete (:type failure)))
+          (expect (= :svar.llm/max-tokens-exceeded (:type failure)))
           (expect (= "max_output_tokens" (:reason failure)))
           (expect (= 1 (:tool-call-count failure)))
           (expect (nil? (:tool-calls failure)))))

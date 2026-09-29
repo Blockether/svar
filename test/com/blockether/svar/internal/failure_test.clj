@@ -138,23 +138,21 @@
                                    {:status 400}))]
           (expect (= :context-length-exceeded (:category c)))
           (expect (not (:retryable? c)))))
-    (it "names a provider-declared output budget exhaustion"
-        (let [e
-              (err "Stream connection closed after max_output_tokens"
-                   {:type :svar.core/stream-incomplete :stream? true :reason "max_output_tokens"})
+    (doseq [[wire data]
+            [["Responses"
+              {:type :svar.llm/max-tokens-exceeded :stream? true :reason "max_output_tokens"}]
+             ["Chat" {:type :svar.llm/max-tokens-exceeded}]]]
+      (it (str "names a provider-declared output budget exhaustion from " wire)
+          (let [e (err "Output budget exhausted" data)
+                c (sut/classify e)
+                decision (sut/low-level-retry-decision e)]
 
-              c
-              (sut/classify e)
-
-              decision
-              (sut/low-level-retry-decision e)]
-
-          (expect (= :output-budget-exhausted (:category c)))
-          (expect (false? (:retryable? c)))
-          (expect (true? (:reached-model? c)))
-          (expect (false? (sut/transient-error? e)))
-          (expect (false? (:retry? decision)))
-          (expect (= :hard-category (:no-retry-reason decision)))))
+            (expect (= :output-budget-exhausted (:category c)))
+            (expect (false? (:retryable? c)))
+            (expect (true? (:reached-model? c)))
+            (expect (false? (sut/transient-error? e)))
+            (expect (false? (:retry? decision)))
+            (expect (= :hard-category (:no-retry-reason decision))))))
     (it "keeps every category inside the published set"
         (expect (every? (fn [e]
                           (contains? sut/CATEGORIES (:category (sut/classify e))))

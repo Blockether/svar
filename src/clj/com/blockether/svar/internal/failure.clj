@@ -476,8 +476,10 @@
     :svar.core/stream-truncated :svar.core/stream-incomplete})
 
 (defn- output-budget-exhausted?
+  "The canonical output-budget exhaustion every wire reports: Chat `length`,
+   Anthropic `max_tokens` and a Responses `max_output_tokens` incomplete."
   [data]
-  (and (= :svar.core/stream-incomplete (:type data)) (= "max_output_tokens" (:reason data))))
+  (= :svar.llm/max-tokens-exceeded (:type data)))
 
 (declare classify)
 
@@ -842,7 +844,7 @@
   "SSE ended before the provider's terminal marker (`stream-truncated`) or the
    provider explicitly said `response.incomplete` (`stream-incomplete`). Generic
    incomplete streams retry before visible output because early close often clears;
-   `max_output_tokens` is explicitly excluded as a deterministic output cap."
+   a `max_output_tokens` incomplete throws `:svar.llm/max-tokens-exceeded` instead."
   #{:svar.core/stream-truncated :svar.core/stream-incomplete})
 
 ;; -----------------------------------------------------------------------------

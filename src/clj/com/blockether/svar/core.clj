@@ -318,6 +318,12 @@
    :rate-limit :prompt-cache-context}. `:rate-limit` (when the provider sent quota
    headers) carries `{:resets-at-ms <epoch-ms> :remaining :limit :windows}`.
 
+   Every wire reports an exhausted output budget as :svar.llm/max-tokens-exceeded.
+   When only reasoning streamed, the request is re-sent once with double the budget,
+   bounded by the model's output ceiling and context window. :on-chunk first gets
+   {:event/type :llm.routing/provider-retry :reason :output-budget-exhausted}. A
+   healed result carries :output-budget-resends and :output-budget-resend-usage.
+
    Responses calls also return content-free :request-accounting on the result and
    final :on-chunk callback, even with :check-context? false or missing usage:
    {:source :svar-estimate :projection :prepared-request :model <actual model>

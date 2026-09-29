@@ -3733,7 +3733,7 @@
    request that never reached the model became a terminal turn failure."
   #{:svar.core/stream-incomplete :svar.core/stream-truncated :svar.core/stream-ttft-timeout
     :svar.core/stream-idle-timeout :svar.core/stream-semantic-timeout :svar.core/stream-cancelled
-    :svar.core/stream-failed :svar.tokens/context-overflow})
+    :svar.core/stream-failed :svar.llm/max-tokens-exceeded :svar.tokens/context-overflow})
 
 (defn- stream-finalization-error?
   [e]
@@ -6647,9 +6647,11 @@
         ;; A Responses stream that ends `incomplete` (reason max_output_tokens /
         ;; content_filter / — on some proxies, notably GitHub Copilot — NULL) is
         ;; a hard stream error: partial output is never returned as a completed
-        ;; answer. Unknown/content-filter incompletes may retry before any output,
-        ;; but max_output_tokens surfaces immediately because replaying the same
-        ;; request cannot change the provider's output cap. The reason is
+        ;; answer. Unknown/content-filter incompletes may retry before any output.
+        ;; max_output_tokens is the output-budget exhaustion Chat reports as
+        ;; `finish_reason: length`, so it throws the same canonical
+        ;; `:svar.llm/max-tokens-exceeded`: an unchanged replay stops at the same
+        ;; cap, and `ask-code!*` owns the larger-budget re-send. The reason is
         ;; null-checked with an "unknown" fallback, matching the OpenAI Codex CLI.
         (let [stream-finalization (stream-finalization-summary {:terminal @terminal-event
                                                                 :incomplete incomplete
@@ -6659,22 +6661,25 @@
                                                                 :content-acc content-acc
                                                                 :reasoning-acc reasoning-acc
                                                                 :response response})]
-          (throw (ex-info (str "Stream ended with incomplete response, reason: "
-                               (or (:reason incomplete) "unknown"))
-                          {:type :svar.core/stream-incomplete
-                           :stream? true
-                           :url url
-                           :reason (or (:reason incomplete) "unknown")
-                           :stream-finalization stream-finalization
-                           :api-usage @usage-atom
-                           ;; The wire budget is absent on Codex, which strips this control.
-                           :max-output-tokens (:max_output_tokens body)
-                           :tool-args-acc-len (.length tool-args-acc)
-                           :tool-call-count (count (:tool-calls @provider-state-atom))
-                           :content-acc-len (.length content-acc)
-                           :reasoning-acc-len (.length reasoning-acc)
-                           :partial-content (when (pos? (.length content-acc)) (str content-acc))
-                           :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
+          (throw
+            (ex-info (str "Stream ended with incomplete response, reason: "
+                          (or (:reason incomplete) "unknown"))
+                     {:type (if (= "max_output_tokens" (:reason incomplete))
+                              :svar.llm/max-tokens-exceeded
+                              :svar.core/stream-incomplete)
+                      :stream? true
+                      :url url
+                      :reason (or (:reason incomplete) "unknown")
+                      :stream-finalization stream-finalization
+                      :api-usage @usage-atom
+                      ;; The wire budget is absent on Codex, which strips this control.
+                      :max-output-tokens (:max_output_tokens body)
+                      :tool-args-acc-len (.length tool-args-acc)
+                      :tool-call-count (count (:tool-calls @provider-state-atom))
+                      :content-acc-len (.length content-acc)
+                      :reasoning-acc-len (.length reasoning-acc)
+                      :partial-content (when (pos? (.length content-acc)) (str content-acc))
+                      :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when-not @terminal-event
         (let [stream-finalization (stream-finalization-summary {:terminal nil
                                                                 :incomplete nil
@@ -7655,6 +7660,11 @@
         ;; models → DEFAULT_CONTEXT_LIMIT). This is what carries LM Studio's
         ;; detected window into the overflow check.
         (merge (select-keys model-map [:context :input-limit :output-limit :tokenizer]))
+        ;; The largest budget this model accepts bounds `ask-code!*`'s larger-budget
+        ;; re-send after an output-budget failure.
+        (cond->
+          (router/model-output-ceiling model-map)
+          (assoc :output-ceiling (router/model-output-ceiling model-map)))
         (cond->
           (some? (:responses-path provider))
           (assoc :responses-path (:responses-path provider)))
@@ -8793,7 +8803,7 @@
        reasoning-only Responses turn (e.g. gpt-5 via Codex) was misread as
        :empty-content and retried into a bogus \"Provider unavailable\";
        a truncated Responses stream never reaches here, it throws
-       :svar.core/stream-incomplete earlier)
+       `:svar.llm/max-tokens-exceeded` or :svar.core/stream-incomplete earlier)
      - `refusal` (Anthropic Fable 5 / Opus 5 safety classifier) -> :refusal.
        A DOCUMENTED, non-transient outcome (HTTP 200 + `stop_reason: refusal`):
        replaying the SAME request to the SAME model \"usually earns another
@@ -8911,9 +8921,9 @@
    `*cancel-fn*` between attempts and never swallows interrupts (an interrupt
    during backoff re-interrupts and throws the pending empty-reply error,
    annotated exactly like an exhaustion). Every other failure - including
-   `:svar.llm/max-tokens-exceeded`, which a re-send cannot fix, and clean-stop
-   empties marked `:empty-reply-resend-eligible? false` - propagates
-   immediately.
+   `:svar.llm/max-tokens-exceeded`, which only a LARGER budget can fix (see
+   `call-with-output-budget-resend`), and clean-stop empties marked
+   `:empty-reply-resend-eligible? false` - propagates immediately.
 
    Accounting: each discarded attempt's `:api-usage` (billed by the provider)
    is accumulated. A HEALED call returns `send!`'s value with
@@ -8995,6 +9005,163 @@
                    (.interrupt (Thread/currentThread))
                    (throw (annotate-empty-reply-ex error attempt burned-usage))))
             (recur next-attempt (conj burned (:api-usage (ex-data error))))))))))
+
+(def ^:private ^:const OUTPUT_BUDGET_RESEND_LIMIT
+  "Larger-budget re-sends after the model exhausts its output budget before any
+   answer text or tool call. One doubled budget covers reasoning-heavy calls; a
+   second would pay again for the same reasoning, so the caller changes strategy."
+  1)
+
+(defn- output-budget-failure
+  "The `:svar.llm/max-tokens-exceeded` throwable in `e`'s bounded cause chain, or
+   nil. Transport wrappers keep the typed failure as a cause."
+  [^Throwable e]
+  (loop [t
+         e
+
+         n
+         0]
+
+    (cond (or (nil? t) (> n 8)) nil
+          (= :svar.llm/max-tokens-exceeded (:type (ex-data t))) t
+          :else (recur (.getCause ^Throwable t) (inc n)))))
+
+(defn- visible-output?
+  "True when the failed attempt streamed answer text or a tool call. A re-send
+   would repeat that output, so only reasoning-only failures are re-sent."
+  [data]
+  (boolean (or (not (str/blank? (:partial-content data)))
+               (seq (:tool-calls data))
+               (some #(pos? (long (or (get data %) 0)))
+                     [:content-acc-len :tool-args-acc-len :tool-call-count]))))
+
+(defn- output-budget-limit
+  "Largest output budget a re-send may request: the model's output ceiling and the
+   context window left after the failed request's input, whichever is smaller.
+   Nil when neither is known."
+  [output-ceiling context data]
+  (let [input
+        (get-in data [:api-usage :input-tokens])
+
+        room
+        (when (and context input) (- (long context) (long input)))]
+
+    (some->> [output-ceiling room]
+             (remove nil?)
+             seq
+             (apply min))))
+
+(defn- output-budget-resend-budget
+  "The doubled output budget for re-sending the request that failed with `data`,
+   bounded by `limit`. Nil when a re-send cannot help: the request carried no
+   output budget (Codex strips the control), answer text or a tool call already
+   streamed, or `limit` leaves no room above the exhausted budget."
+  [data limit]
+  (let [sent (:max-output-tokens data)]
+    (when (and (pos-int? sent) (not (visible-output? data)))
+      (let [spent (max (long sent) (long (or (get-in data [:api-usage :output-tokens]) 0)))
+            doubled (* 2 spent)
+            budget (if limit (min doubled (long limit)) doubled)]
+
+        (when (> budget spent) budget)))))
+
+(defn- annotate-output-budget-ex
+  "Rebuilds the typed output-budget failure `cause` at the call boundary with the
+   re-send count, the output ceiling and the discarded attempts' summed usage."
+  [^Throwable e ^Throwable cause resends burned-usage output-ceiling]
+  (ex-info (ex-message cause)
+           (cond-> (assoc (ex-data cause) :output-budget-resends resends)
+             output-ceiling
+             (assoc :output-ceiling output-ceiling)
+
+             burned-usage
+             (assoc :output-budget-resend-usage burned-usage))
+           e))
+
+(defn- announce-output-budget-resend!
+  "Logs one larger-budget re-send and announces it on the caller's raw `on-chunk`
+   as a provider retry, so a streaming caller discards the reasoning it painted."
+  [{:keys [model provider-id on-chunk]} attempt budget ^Throwable cause]
+  (trove/log! {:level :warn
+               :id ::output-budget-resend
+               :data (log-data {:model model
+                                :provider-id provider-id
+                                :attempt attempt
+                                :max-resends OUTPUT_BUDGET_RESEND_LIMIT
+                                :max-output-tokens budget
+                                :output-tokens (get-in (ex-data cause)
+                                                       [:api-usage :output-tokens])})
+               :msg "output budget exhausted before any answer -> re-sending with a larger budget"})
+  (when on-chunk
+    (try (on-chunk (cond-> {:event/type :llm.routing/provider-retry
+                            :reason :output-budget-exhausted
+                            :attempt attempt
+                            :max-retries OUTPUT_BUDGET_RESEND_LIMIT
+                            :delay-ms 0
+                            :max-output-tokens budget
+                            :error (ex-message cause)}
+                     (some? provider-id)
+                     (assoc :provider
+                       (name provider-id) :from-provider
+                       (name provider-id))
+
+                     (some? model)
+                     (assoc :model
+                       (str model) :from-model
+                       (str model))))
+         (catch Throwable t
+           (trove/log! {:level :debug
+                        :id ::output-budget-resend-hook-failed
+                        :data (log-data {:model model :error (ex-message t)})
+                        :msg "output-budget re-send :on-chunk hook threw; ignored"})))))
+
+(defn- call-with-output-budget-resend
+  "Runs `send!` (fn of an output-budget override, nil on the first attempt) and,
+   when it throws `:svar.llm/max-tokens-exceeded` before any answer text or tool
+   call, re-sends the SAME request to the SAME model with a doubled output budget -
+   at most `OUTPUT_BUDGET_RESEND_LIMIT` times, bounded by the model's
+   `:output-ceiling` and the remaining `:context` window. An unchanged replay would
+   stop at the same cap, so every re-send raises it. Honors `*cancel-fn*`.
+
+   A HEALED call returns `send!`'s value with `:output-budget-resends` and
+   `:output-budget-resend-usage` (the discarded attempts' summed api-usage). A
+   failure throws the typed exception with `:output-budget-resends`,
+   `:output-ceiling` and `:output-budget-resend-usage` merged into ex-data."
+  [{:keys [output-ceiling context] :as opts} send!]
+  (let [cancel-fn *cancel-fn*]
+    (loop [attempt 0
+           budget nil
+           burned []]
+
+      (let [outcome (try {:value (send! budget)}
+                         (catch Exception e
+                           (if-let [cause (output-budget-failure e)]
+                             {:error e :cause cause}
+                             (throw e))))
+            burned-usage (sum-api-usage burned)]
+
+        (if-let [cause (:cause outcome)]
+          (let [data (ex-data cause)
+                next-budget (when (and (< attempt OUTPUT_BUDGET_RESEND_LIMIT)
+                                       (not (caller-cancel-requested? cancel-fn)))
+                              (output-budget-resend-budget
+                                data
+                                (output-budget-limit output-ceiling context data)))]
+
+            (when-not next-budget
+              (throw (annotate-output-budget-ex (:error outcome)
+                                                cause
+                                                attempt
+                                                burned-usage
+                                                output-ceiling)))
+            (announce-output-budget-resend! opts (inc attempt) next-budget cause)
+            (recur (inc attempt) next-budget (conj burned (:api-usage data))))
+          (cond-> (:value outcome)
+            (pos? attempt)
+            (assoc :output-budget-resends attempt)
+
+            burned-usage
+            (assoc :output-budget-resend-usage burned-usage)))))))
 
 (defn ask-code!*
   "Low-level native-tool-calling completion — no routing. Prefer `ask-code!`
@@ -9180,12 +9347,26 @@
        llm-headers
        (assoc :llm-headers llm-headers))
 
+     ;; `output-budget` (nil on the first attempt) replaces the request's output
+     ;; budget on a larger-budget re-send; each wire maps `:max_tokens` to its field.
      send-once!
-     (fn []
-       (let [[{:keys [content reasoning provider-state assistant-message tool-calls api-usage
+     (fn [output-budget]
+       (let [attempt-extra-body
+             (cond-> extra-body
+               output-budget
+               (-> (dissoc :max_output_tokens)
+                   (assoc :max_tokens output-budget)))
+
+             [{:keys [content reasoning provider-state assistant-message tool-calls api-usage
                       http-response stream-finalization]
                :as response} duration-ms]
-             (util/with-elapsed (chat-completion in-msgs model api-key chat-url retry-opts))
+             (util/with-elapsed (chat-completion in-msgs
+                                                 model
+                                                 api-key
+                                                 chat-url
+                                                 (cond-> retry-opts
+                                                   output-budget
+                                                   (assoc :extra-body attempt-extra-body))))
 
              stream-finalization
              (or stream-finalization (:stream-finalization http-response))]
@@ -9236,6 +9417,11 @@
                    ;; read category/explanation without digging into
                    ;; `:stream-finalization`.
                    (cond-> (assoc base-envelope :type anomaly-type)
+                     (= :svar.llm/max-tokens-exceeded anomaly-type)
+                     (assoc :max-output-tokens
+                       (or (:max_tokens attempt-extra-body)
+                           (:max_output_tokens attempt-extra-body)))
+
                      stop-details
                      (assoc :stop-details stop-details)))))))
          (assoc response
@@ -9244,10 +9430,18 @@
 
      {:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
              rate-limits stream-finalization duration-ms empty-reply-resends
-             empty-reply-resend-usage request-accounting]}
-     (call-with-empty-reply-resend
-       {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
-       send-once!)]
+             empty-reply-resend-usage output-budget-resends output-budget-resend-usage
+             request-accounting]}
+     (call-with-output-budget-resend
+       {:model model
+        :provider-id provider-id
+        :on-chunk on-chunk
+        :output-ceiling (:output-ceiling opts)
+        :context (:context opts)}
+       (fn [output-budget]
+         (call-with-empty-reply-resend
+           {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
+           #(send-once! output-budget))))]
 
     (let [tool-calls
           (vec (or tool-calls []))
@@ -9262,17 +9456,18 @@
                                       :input-tokens (or (:input-tokens request-accounting)
                                                         (:input-tokens context-check))})
 
-          ;; Burned empty-reply re-sends are billed by the provider - cost is
-          ;; recomputed over the SUMMED usage so :cost stays honest, while
+          ;; Burned empty-reply and output-budget re-sends are billed by the provider -
+          ;; cost is recomputed over the SUMMED usage so :cost stays honest, while
           ;; :tokens / :api-usage stay last-attempt (context-accurate).
           cost-stats
-          (if empty-reply-resend-usage
+          (if (or empty-reply-resend-usage output-budget-resend-usage)
             (router/count-and-estimate model
                                        in-msgs
                                        (or content "")
                                        {:pricing pricing
                                         :api-usage (sum-api-usage [api-usage
-                                                                   empty-reply-resend-usage])
+                                                                   empty-reply-resend-usage
+                                                                   output-budget-resend-usage])
                                         :api-style api-style})
             token-stats)
 
@@ -9343,7 +9538,13 @@
         (assoc :empty-reply-resends empty-reply-resends)
 
         empty-reply-resend-usage
-        (assoc :empty-reply-resend-usage empty-reply-resend-usage)))))
+        (assoc :empty-reply-resend-usage empty-reply-resend-usage)
+
+        output-budget-resends
+        (assoc :output-budget-resends output-budget-resends)
+
+        output-budget-resend-usage
+        (assoc :output-budget-resend-usage output-budget-resend-usage)))))
 
 (defn ask-code!
   "Native tool-calling completion. Routed sibling of `ask!` (which is for
@@ -9394,6 +9595,19 @@
    its `:cost` includes the usage billed for the discarded attempts. Pass
    `:on-empty-reply-resend` (fn of 1 arg) to observe each re-send live:
    {:model :provider-id :attempt :max-resends :delay-ms :error}.
+
+   OUTPUT BUDGET: every wire reports an exhausted output budget as
+   `:svar.llm/max-tokens-exceeded` (Chat `length`, Anthropic `max_tokens`,
+   Responses `max_output_tokens`). When that happens before any answer text or
+   tool call and the request carried an output budget, the SAME request is re-sent
+   once with double the budget, bounded by the model's output ceiling and the
+   remaining context window. `:on-chunk` first receives `{:event/type
+   :llm.routing/provider-retry :reason :output-budget-exhausted :max-output-tokens N}`,
+   so discard the reasoning already streamed. A HEALED call carries
+   `:output-budget-resends` and `:output-budget-resend-usage`, and its `:cost`
+   includes the discarded attempt. The terminal ex-data carries `:max-output-tokens`
+   (nil when the endpoint ignores the control), `:output-ceiling` when known,
+   `:output-budget-resends` and `:api-usage`.
 
    SELF-HEALING TOOL SCHEMAS: `strict` is always removed before the first
    request. When a provider rejects another advisory tool field that can be

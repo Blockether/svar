@@ -1061,7 +1061,7 @@
                    (swap! calls inc)
                    (throw (ex-info
                             "Stream ended with incomplete response, reason: max_output_tokens"
-                            {:type :svar.core/stream-incomplete
+                            {:type :svar.llm/max-tokens-exceeded
                              :stream? true
                              :reason "max_output_tokens"
                              :content-acc-len 0
@@ -1070,7 +1070,7 @@
                (catch clojure.lang.ExceptionInfo e e))]
 
       (expect (= 1 @calls))
-      (expect (= :svar.core/stream-incomplete (:type (ex-data thrown))))
+      (expect (= :svar.llm/max-tokens-exceeded (:type (ex-data thrown))))
       (expect (= "max_output_tokens" (:reason (ex-data thrown)))))))
 
 (defdescribe
