@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.191] - 2026-09-29
+
+### Changed
+- fix(llm): own output-budget recovery for vis#296
+- release: update version files for v0.7.190, bump to next dev version
+
+
 ## [v0.7.190] - 2026-09-29
 
 ### Changed
@@ -2720,7 +2727,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.190...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.191...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -2943,3 +2950,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.188]: https://github.com/Blockether/svar/releases/tag/v0.7.188
 [v0.7.189]: https://github.com/Blockether/svar/releases/tag/v0.7.189
 [v0.7.190]: https://github.com/Blockether/svar/releases/tag/v0.7.190
+[v0.7.191]: https://github.com/Blockether/svar/releases/tag/v0.7.191
