@@ -1729,6 +1729,20 @@
                                   :models
                                   [{:name "new-model" :input-limit 60000 :output-limit 8000}]}])]
         (expect (= 60000 (:max-input-tokens (svar/context-budget r {}))))))
+  (it "reports the largest max_tokens the provider accepts above a deliberate output cap"
+      (let [zai
+            (svar/make-router
+              [{:id :zai-coding-plan :api-key "test" :models [{:name "glm-5.3-flash"}]}])
+
+            custom
+            (svar/make-router [{:id :custom
+                                :base-url "https://gateway.example.com/v1"
+                                :api-key "test"
+                                :models [{:name "new-model" :output-limit 8000}]}])]
+
+        (expect (= 32768 (:output-limit (svar/context-budget zai {}))))
+        (expect (= 131072 (:output-ceiling (svar/context-budget zai {}))))
+        (expect (= 8000 (:output-ceiling (svar/context-budget custom {}))))))
   (it "calibrated preflight reaches transport across dialects without rewriting provider usage"
       (doseq [style [:openai-compatible-chat :openai-compatible-responses :anthropic :gemini]]
         (let [captured (atom nil)

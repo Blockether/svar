@@ -7691,7 +7691,10 @@
 (defn context-budget
   "Resolve the SAME input/output budget used by routed preflight, without inference.
    Returns provider/model identity, declared limits/tokenizer, requested output reserve
-   and :max-input-tokens. Explicit output controls participate in the total-window bound."
+   and :max-input-tokens. Explicit output controls participate in the total-window bound.
+   `:output-ceiling` is the largest `max_tokens` the provider accepts (see
+   `router/model-output-ceiling`); a caller that raises one call's budget through
+   `:extra-body` stays at or below it."
   [router opts]
   (let [resolved
         (router/resolve-routing router (routing-opts-with-reasoning opts))
@@ -7705,13 +7708,18 @@
         (inject-routed-params opts provider model-map)
 
         budget-opts
-        (resolve-opts router routed)]
+        (resolve-opts router routed)
 
-    (merge (select-keys model-map [:context :input-limit :output-limit :tokenizer])
-           {:provider-id (:id provider)
-            :model (:name model-map)
-            :output-reserve (or (:output-reserve budget-opts) router/DEFAULT_OUTPUT_RESERVE)
-            :max-input-tokens (router/max-input-tokens (:name model-map) budget-opts)})))
+        output-ceiling
+        (router/model-output-ceiling model-map)]
+
+    (cond-> (merge (select-keys model-map [:context :input-limit :output-limit :tokenizer])
+                   {:provider-id (:id provider)
+                    :model (:name model-map)
+                    :output-reserve (or (:output-reserve budget-opts) router/DEFAULT_OUTPUT_RESERVE)
+                    :max-input-tokens (router/max-input-tokens (:name model-map) budget-opts)})
+      output-ceiling
+      (assoc :output-ceiling output-ceiling))))
 
 (defn- resolved-network-timeout
   "Single point of truth for the streaming-timeout precedence chain:

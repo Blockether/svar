@@ -30,6 +30,7 @@
 ;; =============================================================================
 
 (defn- zai-key [] (ts/env "ZAI_API_KEY"))
+
 ;; Renamed from ZAI_CODING_API_KEY → ZAI_CODING_PLAN_API_KEY to clearly
 ;; identify the Z.ai Coding Plan subscription (the coding endpoint).
 ;; Additional alias Z_AI_CODING_API_KEY is accepted for environments that
@@ -40,6 +41,7 @@
   (ts/first-env "ZAI_CODING_PLAN_API_KEY" "Z_AI_CODING_API_KEY" "ZAI_API_KEY"))
 
 (defn- zai-enabled? [] (some? (zai-key)))
+
 (defn- zai-coding-enabled? [] (some? (zai-coding-key)))
 
 (defn- zai-router
@@ -195,6 +197,7 @@
                      (expect (= "glm-5.3-flash" (:routed/model result)))
                      (expect (= :zai-coding (:routed/provider-id result)))
                      (expect (some? (get-in result [:result :answer])))))))
+
 (defdescribe
   zai-coding-reasoning-levels-test
   "Each `:reasoning` level reaches the Coding Plan endpoint and returns a
@@ -320,6 +323,23 @@
                                    keys-of-interest)]
 
               (expect (= zai cod)))))))
+  (describe "Output ceiling"
+            ;; z.ai answers max_tokens 131073 with HTTP 400 code 1210 "range [1,131072]"
+            ;; for every capped GLM, so a caller may double the 32768 agentic cap once.
+            (it "records the hard max_tokens ceiling above every GLM agentic cap"
+                (doseq [pid
+                        [:zai :zai-coding :zai-coding-plan]
+
+                        name
+                        ["glm-5.1" "glm-5.2" "glm-5.3" "glm-5.3-flash" "glm-5.3-flashx"
+                         "glm-5-turbo" "glm-5v-turbo"]]
+
+                  (let [m (router/provider-model-entry pid name)]
+                    (expect (= 32768 (router/model-output-budget m)) (str pid " " name))
+                    (expect (= 131072 (router/model-output-ceiling m)) (str pid " " name)))))
+            (it "falls back to the output limit when no separate ceiling is declared"
+                (expect (= 8000 (router/model-output-ceiling {:output-limit 8000})))
+                (expect (nil? (router/model-output-ceiling {:context 100000})))))
   ;; GLM-5.3 landed on the Coding Plan first: models.dev carries it under
   ;; `zai-coding-plan` / `zhipuai-coding-plan`, NOT yet under retail `zai`,
   ;; so svar's own overlay is the only source of its pricing, context, output

@@ -1250,10 +1250,11 @@
     ;; huge budget let GLM reason ~100K tokens and emit ZERO content; 32768
     ;; keeps coding turns bounded while leaving ample room for a real answer
     ;; (validated: merge / LRU-cache prompts produce code well within it).
-    ;; Raise per-call via `:extra-body {:max_tokens N}` (≤131072) when a turn
-    ;; genuinely needs a longer output.
-    "glm-5.1" {:context 200000 :output-limit 32768 :json-object-mode? true}
-    "glm-5.2" {:context 1000000 :output-limit 32768 :json-object-mode? true}
+    ;; `:output-ceiling` 131072 is that hard ceiling as data (live-checked: 131073
+    ;; answers HTTP 400 code 1210 "range [1,131072]"). A caller that raises one
+    ;; call via `:extra-body {:max_tokens N}` reads it from `context-budget`.
+    "glm-5.1" {:context 200000 :output-limit 32768 :output-ceiling 131072 :json-object-mode? true}
+    "glm-5.2" {:context 1000000 :output-limit 32768 :output-ceiling 131072 :json-object-mode? true}
     ;; GLM-5.3 shipped on the Coding Plan first: models.dev carries it under
     ;; `zai-coding-plan` / `zhipuai-coding-plan` but NOT yet under retail `zai`,
     ;; so this overlay is the only source of its metadata on every z.ai surface
@@ -1264,6 +1265,7 @@
     "glm-5.3" {:pricing {:input 1.40 :cached-input 0.26 :output 4.40}
                :context 1000000
                :output-limit 32768
+               :output-ceiling 131072
                :json-object-mode? true
                :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
     ;; GLM-5.3-Flash is live on both the Coding Plan and direct API, but the
@@ -1273,6 +1275,7 @@
     "glm-5.3-flash" {:pricing {:input 0.15 :cached-input 0.03 :output 0.50}
                      :context 1000000
                      :output-limit 32768
+                     :output-ceiling 131072
                      :json-object-mode? true
                      :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
     ;; GLM-5.3-FlashX is the same model on z.ai's fast lane at 2.5x the Flash
@@ -1283,10 +1286,13 @@
     "glm-5.3-flashx" {:pricing {:input 0.375 :cached-input 0.075 :output 1.25}
                       :context 1000000
                       :output-limit 32768
+                      :output-ceiling 131072
                       :json-object-mode? true
                       :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
-    "glm-5-turbo" {:context 200000 :output-limit 32768 :json-object-mode? true}
-    "glm-5v-turbo" {:context 200000 :output-limit 32768 :json-object-mode? true}
+    "glm-5-turbo"
+    {:context 200000 :output-limit 32768 :output-ceiling 131072 :json-object-mode? true}
+    "glm-5v-turbo"
+    {:context 200000 :output-limit 32768 :output-ceiling 131072 :json-object-mode? true}
     "minimax-m2.7:cloud" {:pricing {:input 0.30 :output 1.20} :context 200000}
     "gemma4:31b-cloud" {:pricing {:input 0.30 :output 0.90} :context 128000}
     "qwen3.5:397b-cloud" {:pricing {:input 1.20 :output 5.00} :context 128000}}
@@ -4212,6 +4218,13 @@
         (max 1 (quot input 4))]
 
     (if output-limit (min quarter (long output-limit)) quarter)))
+
+(defn model-output-ceiling
+  "Largest `max_tokens` the provider accepts for this model: the declared
+   `:output-ceiling` when `:output-limit` is a deliberately lower default cap,
+   else `:output-limit` itself. Nil when neither is known."
+  [{:keys [output-limit output-ceiling]}]
+  (or output-ceiling output-limit))
 
 (defn max-input-tokens
   "Input budget respecting independent prompt and total-window limits."
