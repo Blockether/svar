@@ -1414,7 +1414,7 @@
   (it
     "routes Sol and Luna with explicit input/output budgets and Responses replay"
     (doseq [model-name
-            ["gpt-6-sol" "gpt-6-luna"]
+            ["gpt-6-sol" "gpt-6-luna" "gpt-6.1-sol"]
 
             [provider-id input-budget output-budget]
             [[:openai 922000 128000] [:openai-codex 272000 68000] [:github-copilot 922000 128000]]]
@@ -1438,7 +1438,8 @@
 
             efforts
             (cond-> ["low" "medium" "high" "xhigh" "max"]
-              (not= :openai-codex provider-id)
+              ;; GPT-6.1 Sol drops `none` on every surface.
+              (and (not= :openai-codex provider-id) (not= "gpt-6.1-sol" model-name))
               (->> (into ["none"])))]
 
         (expect (= input-budget (:context model) (:input-limit model) (:context opts)))

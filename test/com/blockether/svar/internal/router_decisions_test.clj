@@ -2673,8 +2673,8 @@
   known-provider-default-models-test
   (it "uses curated OpenAI Codex defaults when caller omits :models"
       (let [p (router/normalize-provider 0 {:id :openai-codex :api-key "x"})]
-        (expect (= ["gpt-6-sol" "gpt-6-astra" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-luna" "gpt-5.5"
-                    "gpt-5.4" "gpt-5.3-codex"]
+        (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol" "gpt-5.6-sol"
+                    "gpt-5.6-luna" "gpt-5.5" "gpt-5.4" "gpt-5.3-codex"]
                    (mapv :name (:models p))))
         (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
           (expect (= 272000 (:context astra)))
@@ -2685,8 +2685,8 @@
   (it "uses curated GitHub Copilot defaults when caller omits :models"
       (let [p (router/normalize-provider 0 {:id :github-copilot :api-key "x"})]
         (expect (= ["claude-opus-5.5" "claude-sonnet-5.5" "claude-opus-5" "claude-fable-5"
-                    "claude-sonnet-5" "gpt-6-sol" "gpt-6-astra" "gpt-6-luna" "gpt-5.6-sol"
-                    "gpt-5.6-terra" "gpt-5.6-luna"]
+                    "claude-sonnet-5" "gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol"
+                    "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna"]
                    (mapv :name (:models p))))
         (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
           (expect (= 922000 (:context astra)))
@@ -2704,7 +2704,7 @@
                  (:context (router/provider-model-entry :github-copilot "claude-opus-5.5")))))
   (it "uses curated plain OpenAI defaults when caller omits :models"
       (let [p (router/normalize-provider 0 {:id :openai :api-key "x"})]
-        (expect (= ["gpt-6-sol" "gpt-6-astra" "gpt-6-luna"] (mapv :name (:models p))))
+        (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol"] (mapv :name (:models p))))
         (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
           (expect (= 1050000 (:context astra)))
           (expect (= :frontier (:intelligence astra)))
@@ -2764,19 +2764,20 @@
                              (router/lookup-by-model-variants router/KNOWN_MODEL_METADATA model)))
                 model)))
   (it "keeps each vendor's models together, newest version first, vendors by their best model"
-      (expect (= ["claude-opus-5-5" "claude-opus-5" "claude-sonnet-5" "gpt-6-sol" "kimi-k3"
-                  "glm-5.3" "glm-5.3-flash" "glm-4.7"]
+      (expect (= ["claude-opus-5-5" "claude-opus-5" "claude-sonnet-5" "gpt-6.1-sol" "gpt-6-sol"
+                  "kimi-k3" "glm-5.3" "glm-5.3-flash" "glm-4.7"]
                  (router/sort-models ["glm-4.7" "claude-opus-5" "glm-5.3-flash" "claude-sonnet-5"
-                                      "glm-5.3" "kimi-k3" "gpt-6-sol" "claude-opus-5-5"]))))
+                                      "gpt-6-sol" "glm-5.3" "kimi-k3" "gpt-6.1-sol"
+                                      "claude-opus-5-5"]))))
   (it
     "separates a multi-vendor provider's vendors and ranks a newer version above an older flagship"
     ;; Copilot's picker used to interleave Claude and GPT, and gpt-6-luna sat below GPT-5.6.
-    (expect (= ["claude-opus-5.5" "claude-sonnet-5.5" "claude-opus-5" "claude-sonnet-5" "gpt-6-sol"
-                "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.5"]
+    (expect (= ["claude-opus-5.5" "claude-sonnet-5.5" "claude-opus-5" "claude-sonnet-5"
+                "gpt-6.1-sol" "gpt-6-luna" "gpt-6-sol" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.5"]
                (router/sort-models :github-copilot
                                    ["gpt-5.5" "claude-sonnet-5" "gpt-6-luna" "claude-opus-5.5"
                                     "gpt-5.6-terra" "claude-sonnet-5.5" "gpt-6-sol" "claude-opus-5"
-                                    "gpt-5.6-sol"]))))
+                                    "gpt-5.6-sol" "gpt-6.1-sol"]))))
   (it "matches vendor prefixes, dotted versions and letter case"
       (expect (= ["Claude-Opus-5-5" "claude-opus-4.6" "openai/gpt-6-sol"]
                  (router/sort-models ["claude-opus-4.6" "openai/gpt-6-sol" "Claude-Opus-5-5"]))))
@@ -2824,7 +2825,7 @@
         (expect (router/hidden-model? model) model)))
   (it "keeps current models listed"
       (doseq [model ["mimo-v2.6-pro" "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "gemini-2.5-pro"
-                     "gemini-3.8-flash" "gpt-6-sol" "kimi-k3" "hy3" "deepseek-flash"]]
+                     "gemini-3.8-flash" "gpt-6-sol" "gpt-6.1-sol" "kimi-k3" "hy3" "deepseek-flash"]]
         (expect (not (router/hidden-model? model)) model)))
   (it "offers every curated provider default model"
       (doseq [pid (keys router/KNOWN_PROVIDERS)]
@@ -2860,8 +2861,8 @@
                      "qwen3.6-plus" "qwen3.8-27b" "grok-4.6" "grok-4.20-multi-agent"
                      "grok-code-fast-1" "minimax-m2.7" "minimax-m3" "mimo-v2.6-pro"
                      "xiaomi/mimo-v2.6-flash" "mimo-v3-pro" "claude-haiku-4-5" "claude-sonnet-4.6"
-                     "claude-opus-4-6" "claude-fable-5-1" "gpt-5.3-codex" "gpt-6-sol" "gpt-oss-120b"
-                     "deepseek-v4-pro"]]
+                     "claude-opus-4-6" "claude-fable-5-1" "gpt-5.3-codex" "gpt-6-sol" "gpt-6.1-sol"
+                     "gpt-oss-120b" "deepseek-v4-pro"]]
         (expect (not (router/outdated-model? :openrouter model)) model)))
   (it "leaves out dated Claude snapshots"
       (expect (router/outdated-model? :anthropic-coding-plan "claude-haiku-4-5-20251001"))

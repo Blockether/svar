@@ -63,7 +63,8 @@
     ;; OpenAI model docs, 2026-09-22: long prompts double input/cache rates
     ;; and multiply output by 1.5; the tier applies to the full request.
     (doseq [[model input cached write output]
-            [["gpt-6-sol" 2.0 0.2 2.5 10.0] ["gpt-6-luna" 0.1 0.01 0.125 0.5]]
+            [["gpt-6-sol" 2.0 0.2 2.5 10.0] ["gpt-6-luna" 0.1 0.01 0.125 0.5]
+             ["gpt-6.1-sol" 2.0 0.1 2.5 10.0]]
 
             provider
             [:openai :openai-codex :github-copilot]]

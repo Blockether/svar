@@ -23,7 +23,8 @@
 (def KNOWN_PROVIDERS
   {:openai {:base-url "https://api.openai.com/v1"
             :env-keys ["OPENAI_API_KEY"]
-            :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}]}
+            :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
+                             {:name "gpt-6-sol"}]}
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
@@ -112,9 +113,9 @@
    {:base-url "https://api.individual.githubcopilot.com"
     :models-base :host
     :default-models [{:name "claude-opus-5.5"} {:name "claude-sonnet-5.5"} {:name "claude-opus-5"}
-                     {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "gpt-6-sol"}
-                     {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-5.6-sol"}
-                     {:name "gpt-5.6-terra"} {:name "gpt-5.6-luna"}]
+                     {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "gpt-6.1-sol"}
+                     {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-6-sol"}
+                     {:name "gpt-5.6-sol"} {:name "gpt-5.6-terra"} {:name "gpt-5.6-luna"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -134,9 +135,9 @@
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys []
                   :api-style :openai-compatible-responses
-                  :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
-                                   {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"} {:name "gpt-5.5"}
-                                   {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
+                  :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
+                                   {:name "gpt-6-sol"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"}
+                                   {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
@@ -292,6 +293,11 @@
                  :capabilities #{:chat :vision}
                  :reasoning? true
                  :reasoning-style :openai-effort}
+   "gpt-6.1-sol" {:intelligence :frontier
+                  :speed :medium
+                  :capabilities #{:chat :vision}
+                  :reasoning? true
+                  :reasoning-style :openai-effort}
    ;; ── Anthropic Claude Fable / Mythos / 4.x (adaptive + extended thinking) ─
    "claude-fable-5-1" {:intelligence :frontier
                        :speed :slow
@@ -527,7 +533,7 @@
    family by release date, or after both lists, and puts dated snapshots, previews, aliases,
    helpers and deprecated models last."
   {:current [;; Flagships
-             "claude-opus-5-5" "gpt-6-sol" "kimi-k3" "grok-4.7" "qwen3.8-max" "glm-5.3"
+             "claude-opus-5-5" "gpt-6.1-sol" "kimi-k3" "grok-4.7" "qwen3.8-max" "glm-5.3"
              "deepseek-v4-pro" "minimax-m3" "longcat-2.0" "mimo-v2.6-pro"
              ;; Premium
              "claude-fable-5-1" "gpt-6-astra"
@@ -537,10 +543,10 @@
              "claude-haiku-4-5" "gpt-6-luna" "glm-5.3-flash" "glm-5.3-flashx" "deepseek-v4.1-flash"
              "qwen3.8-flash" "mimo-v2.6-flash" "hy3" "muse-spark-1.3-contributor"]
    :previous ["claude-opus-5" "claude-fable-5" "claude-sonnet-5" "claude-opus-4-8" "claude-opus-4-7"
-              "claude-opus-4-6" "claude-sonnet-4-6" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.5"
-              "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex" "grok-4.6" "kimi-k2.6" "qwen3.7-max"
-              "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"
-              "deepseek-v4-flash" "minimax-m2.7" "muse-spark-1.2-contributor"]})
+              "claude-opus-4-6" "claude-sonnet-4-6" "gpt-6-sol" "gpt-5.6-sol" "gpt-5.6-terra"
+              "gpt-5.5" "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex" "grok-4.6" "kimi-k2.6"
+              "qwen3.7-max" "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1" "glm-5-turbo"
+              "glm-5v-turbo" "deepseek-v4-flash" "minimax-m2.7" "muse-spark-1.2-contributor"]})
 
 (def SPECIAL_MODEL_NAMES
   "Model ids `sort-models` puts last although their names look ordinary: `deepseek-flash`
@@ -1080,10 +1086,12 @@
 ;; =============================================================================
 
 (def ^:private GPT6_SOL_LUNA_MODELS
-  ;; models.dev has no Sol/Luna rows at launch (2026-09-22). Use published API
-  ;; metadata until the catalog catches up, shared across the three surfaces:
+  ;; models.dev has no Sol/Luna rows at launch (2026-09-22), and the bundled
+  ;; snapshot has no 6.1 Sol row. Use published API metadata until the catalog
+  ;; catches up, shared across the three surfaces:
   ;; https://developers.openai.com/api/docs/models/gpt-6-sol
   ;; https://developers.openai.com/api/docs/models/gpt-6-luna
+  ;; https://developers.openai.com/api/docs/models/gpt-6.1-sol
   (let [common {:context 922000
                 ;; 1.05M total includes 128K output; enforce the input ceiling.
                 :input-limit 922000
@@ -1120,7 +1128,21 @@
                               :input-over-272k 0.20
                               :cached-input-over-272k 0.02
                               :cache-write-over-272k 0.25
-                              :output-over-272k 0.75})}))
+                              :output-over-272k 0.75})
+     ;; 6.1 Sol drops the `none` effort and halves the cached-input rates.
+     "gpt-6.1-sol" (assoc common
+                     :display-name "GPT-6.1 Sol"
+                     :reasoning-options [{:type "effort"
+                                          :values ["low" "medium" "high" "xhigh" "max"]}]
+                     :pricing {:input 2.00
+                               :cached-input 0.10
+                               :cache-read 0.10
+                               :cache-write 2.50
+                               :output 10.00
+                               :input-over-272k 4.00
+                               :cached-input-over-272k 0.20
+                               :cache-write-over-272k 5.00
+                               :output-over-272k 15.00})}))
 
 ;; Pricing data last verified: 2026-04-12.
 ;; USD per million tokens. Values drift — re-audit quarterly.
@@ -1146,6 +1168,7 @@
   ;; overrides (`:extra-body`, `:reasoning-style`).
   {:openai {"gpt-6-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
             "gpt-6-luna" (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
+            "gpt-6.1-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6.1-sol")
             ;; Long-context tier pricing (>272k tokens) — not in models.dev.
             "gpt-5.4" {:pricing
                        {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
@@ -1172,6 +1195,9 @@
                    :input-limit 272000
                    :reasoning-options [{:type "effort"
                                         :values ["low" "medium" "high" "xhigh" "max"]}])
+    "gpt-6.1-sol" (assoc (get GPT6_SOL_LUNA_MODELS "gpt-6.1-sol")
+                    :context 272000
+                    :input-limit 272000)
     "gpt-5.4" {:context 272000
                :pricing
                {:input-over-272k 5.00 :cached-input-over-272k 0.50 :output-over-272k 22.50}}
@@ -1497,6 +1523,7 @@
     ;; not establish account availability or a separately verified Copilot cap.
     "gpt-6-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6-sol")
     "gpt-6-luna" (get GPT6_SOL_LUNA_MODELS "gpt-6-luna")
+    "gpt-6.1-sol" (get GPT6_SOL_LUNA_MODELS "gpt-6.1-sol")
     "gpt-4.1" {:pricing {:input 0.0 :output 0.0} :context 128000}
     "gpt-4o" {:pricing {:input 0.0 :output 0.0} :context 128000}
     ;; Gemini + Grok on Copilot also gate reasoning server-side
