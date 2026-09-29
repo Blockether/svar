@@ -334,6 +334,14 @@
    :max-retries N :delay-ms N}, so discard the reasoning already streamed. The
    router option :stream-recovery-delays-ms sets the waits; [] turns this off.
 
+   A provider that rejects its credentials is re-sent on the same provider when the
+   routing option :refresh-credentials answers new credentials for it. The router
+   re-sends at once, then after 2.4 s, 3.6 s and 4.8 s while a fresh token settles.
+   :on-chunk first gets {:event/type :llm.routing/provider-retry :reason
+   :authentication :attempt N :max-retries N :delay-ms N}. The router option
+   :auth-retry-delays-ms sets the waits; [] turns this off. :on-auth-error then
+   decides between the next provider and a failure.
+
    Responses calls also return content-free :request-accounting on the result and
    final :on-chunk callback, even with :check-context? false or missing usage:
    {:source :svar-estimate :projection :prepared-request :model <actual model>

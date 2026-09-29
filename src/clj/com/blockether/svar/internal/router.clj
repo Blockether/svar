@@ -2542,7 +2542,8 @@
    ;; Circuit breaker defaults
    :failure-threshold 5
    :recovery-ms 60000
-   :stream-recovery-delays-ms failure/STREAM_RECOVERY_DELAYS_MS})
+   :stream-recovery-delays-ms failure/STREAM_RECOVERY_DELAYS_MS
+   :auth-retry-delays-ms failure/AUTH_RETRY_DELAYS_MS})
 
 (def ^:private INTELLIGENCE_ORDER {:frontier 4 :high 3 :medium 2 :low 1})
 
@@ -3503,6 +3504,116 @@
                   (stream-content-started? (:error outcome)) (throw (:error outcome))
                   :else (assoc outcome :elapsed-ms (long (elapsed*))))))))))
 
+(defn- refreshed-credentials
+  "Ask the caller's `:refresh-credentials` hook for credentials to re-send with
+   after `provider` rejected its own. Answers the provider map to use, keyed to the
+   rejected provider's id, or nil when the hook declines, answers something other
+   than a map or throws. A throwing hook is logged; cancellation still escapes."
+  [hook provider model-map e attempt max-retries]
+  (let [answer (try (hook {:provider provider
+                           :model (:name model-map)
+                           :error e
+                           :attempt attempt
+                           :max-retries max-retries})
+                    (catch Exception hook-error
+                      ;; Cancellation MUST escape — see propagate-interrupt!.
+                      (propagate-interrupt! hook-error)
+                      (trove/log! {:level :warn
+                                   :id ::credential-refresh-failed
+                                   :data {:provider-id (:id provider)
+                                          :model (:name model-map)
+                                          :attempt attempt
+                                          :error (ex-message hook-error)}
+                                   :msg "credential refresh failed: keeping the auth rejection"})
+                      nil))]
+    (when (map? answer) (assoc answer :id (:id provider)))))
+
+(defn- credential-recovering-sender
+  "Wrap the per-candidate send `f` so a provider that rejects its credentials is
+   re-sent with new ones before the caller crosses providers.
+
+   The routing pref `:refresh-credentials` is the caller's credential source (see
+   `resolve-routing`); without it `f` comes back unchanged. With it, an auth
+   rejection that painted no visible output asks the hook for credentials, at most
+   `(count (:auth-retry-delays-ms router))` times per provider in one routed call.
+   Each re-send waits its step (an interruptible `Thread/sleep`, so a caller's Stop
+   still wins) and is announced first as `:llm.routing/provider-retry` with reason
+   `:authentication`. `credentials` keeps the answer by provider id, so every later
+   send to that provider in the call, stream recovery and rate-limit retries
+   included, uses it.
+
+   A declined or exhausted refresh rethrows the rejection untouched, so
+   `:on-auth-error` still decides between provider fallback and failure."
+  [router prefs trace credentials f]
+  (let [hook
+        (:refresh-credentials prefs)
+
+        delays
+        (vec (:auth-retry-delays-ms router))
+
+        max-retries
+        (count delays)
+
+        refreshes
+        (atom {})]
+
+    (if (or (nil? hook) (zero? max-retries))
+      f
+      (fn [provider model-map]
+        (let [pid
+              (:id provider)
+
+              start-ms
+              (router-now-ms router)]
+
+          (loop []
+
+            (let [current
+                  (get @credentials pid provider)
+
+                  outcome
+                  (try {:success (f current model-map)}
+                       (catch Exception e
+                         ;; Cancellation MUST escape — see propagate-interrupt!.
+                         (propagate-interrupt! e)
+                         {:error e}))
+
+                  e
+                  (:error outcome)
+
+                  attempt
+                  (inc (long (get @refreshes pid 0)))
+
+                  next-provider
+                  (when (and e
+                             (<= attempt max-retries)
+                             (= :auth (:category (classify-failure e)))
+                             (not (stream-content-started? e)))
+                    (refreshed-credentials hook current model-map e attempt max-retries))]
+
+              (cond (nil? e) (:success outcome)
+                    (nil? next-provider) (throw e)
+                    :else (let [delay-ms (long (nth delays (dec attempt)))]
+                            (swap! refreshes assoc pid attempt)
+                            (swap! credentials assoc pid next-provider)
+                            (append-routing-event!
+                              trace
+                              prefs
+                              (routing-event router
+                                             :llm.routing/provider-retry
+                                             {:status (:status (ex-data e))
+                                              :reason :authentication
+                                              :provider (provider-label provider)
+                                              :model (:name model-map)
+                                              :attempt attempt
+                                              :max-retries max-retries
+                                              :delay-ms delay-ms
+                                              :elapsed-ms (- (router-now-ms router) start-ms)
+                                              :error (ex-message e)}))
+                            ;; Interruptible sleep — see comment in handle-rate-limit-retries.
+                            (when (pos? delay-ms) (Thread/sleep delay-ms))
+                            (recur))))))))))
+
 (defn with-provider-fallback
   [router prefs f]
   (budget-check! router)
@@ -3610,6 +3721,14 @@
         failed-attempts
         (atom [])
 
+        ;; Credentials a `:refresh-credentials` hook answered after an auth
+        ;; rejection, by provider id; see `credential-recovering-sender`.
+        credentials
+        (atom {})
+
+        call-provider
+        (credential-recovering-sender router prefs trace credentials f)
+
         max-wait-ms
         (:max-wait-ms router)]
 
@@ -3667,7 +3786,7 @@
               (reset! pending-fallback nil))
             (let [result
                   (try
-                    {:success (f provider model-map)}
+                    {:success (call-provider provider model-map)}
                     (catch Exception e
                       ;; Cancellation MUST escape — see propagate-interrupt!.
                       (propagate-interrupt! e)
@@ -3684,7 +3803,7 @@
                                                              trace
                                                              provider
                                                              model-map
-                                                             f
+                                                             call-provider
                                                              e
                                                              start-ms
                                                              recovery-allowance)
@@ -3704,7 +3823,7 @@
                                                                trace
                                                                provider
                                                                model-map
-                                                               f
+                                                               call-provider
                                                                e
                                                                start-ms)
                           (= :quota-exhausted (:category (classify-failure e)))
@@ -3751,7 +3870,7 @@
                   (cond-> (assoc result
                             :routed/provider-id pid
                             :routed/model (:name model-map)
-                            :routed/base-url (:base-url provider)
+                            :routed/base-url (:base-url (get @credentials pid provider))
                             :routed/selected @selected
                             :routed/actual {:provider (provider-label provider)
                                             :model (:name model-map)}
@@ -3991,6 +4110,9 @@
      :stream-recovery-delays-ms - waits before each same-provider re-send of a
                   stream that broke before its answer (default [1000 3000];
                   [] turns stream recovery off)
+     :auth-retry-delays-ms - waits before each same-provider re-send after an auth
+                  rejection that the routing pref :refresh-credentials answers
+                  (default [0 2400 3600 4800]; [] turns the re-send off)
      :failure-threshold - Int. Failures before circuit opens (default: 5)
      :recovery-ms       - Int. Ms before open→half-open (default: 60000)
 
@@ -4067,6 +4189,7 @@
       :failure-threshold (:failure-threshold merged)
       :recovery-ms (:recovery-ms merged)
       :stream-recovery-delays-ms (vec (:stream-recovery-delays-ms merged))
+      :auth-retry-delays-ms (vec (:auth-retry-delays-ms merged))
       :transient-status-codes (:transient-status-codes merged)})))
 
 ;; =============================================================================
@@ -4088,6 +4211,12 @@
    Auth fallback may release a provider/model pin only after that provider
    rejects auth, and never after visible streamed output.
 
+   `:refresh-credentials` is the caller's credential source for a provider that
+   rejected its credentials: `(fn [{:keys [provider model error attempt
+   max-retries]}])` answering the provider map to re-send with, or nil to decline.
+   The router re-sends on the same provider before `:on-auth-error` applies; the
+   router option `:auth-retry-delays-ms` sets how often and how long it waits.
+
    `:reasoning` implies `:require-reasoning? true`, filtering selection to
    reasoning-capable models.
 
@@ -4098,7 +4227,7 @@
   [router routing-opts]
   (let [{:keys [optimize provider model on-transient-error reasoning reasoning-effort
                 prefer-providers on-format-error format-retry-on on-auth-error exclude-providers
-                exclude-models on-chunk capabilities prompt-cache-scope]}
+                exclude-models on-chunk capabilities prompt-cache-scope refresh-credentials]}
         routing-opts
 
         error-strategy
@@ -4166,6 +4295,9 @@
 
           on-auth-error
           (assoc :on-auth-error on-auth-error)
+
+          refresh-credentials
+          (assoc :refresh-credentials refresh-credentials)
 
           (seq exclude-providers)
           (assoc :exclude-providers (set exclude-providers))

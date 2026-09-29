@@ -7874,6 +7874,9 @@
                              :fallback-model-in-the-same-provider, :fail
        :on-auth-error - :fallback-provider opts into provider-scoped credential
                         failover before visible output; unset means fail.
+       :refresh-credentials - fn of {:provider :model :error :attempt :max-retries}
+                        called after an auth rejection; answers the provider map
+                        to re-send with on the same provider, or nil to decline.
        :exclude-providers - set of provider ids to skip for this call.
      :reasoning - Abstract reasoning depth: :low, :balanced, or :deep
        (strings + OpenAI-style :low/:medium/:high aliases also accepted).

@@ -2461,6 +2461,189 @@
         (expect (= 2 (count (:attempts (ex-data thrown)))))
         (expect (= #{:p1 :p2} (:auth-failed (ex-data thrown)))))))
 
+(defdescribe
+  provider-credential-refresh-test
+  "An auth rejection is re-sent on the same provider with the credentials the caller's
+   `:refresh-credentials` hook answers, before `:on-auth-error` applies."
+  (it
+    "re-sends with refreshed credentials before any fallback"
+    (let [r
+          (llm/make-router [{:id :p1 :api-key "old" :base-url "http://p1" :models [{:name "m1"}]}
+                            {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                           {:auth-retry-delays-ms [0 0]})
+
+          calls
+          (atom [])
+
+          asks
+          (atom [])
+
+          live
+          (atom [])
+
+          result
+          (router/with-provider-fallback
+            r
+            {:on-auth-error :fallback-provider
+             :on-chunk #(swap! live conj %)
+             :refresh-credentials (fn [ask]
+                                    (swap! asks conj
+                                      (select-keys ask [:model :attempt :max-retries]))
+                                    (assoc (:provider ask)
+                                      :api-key "new"
+                                      :base-url "http://p1-new"))}
+            (fn [provider model]
+              (swap! calls conj [(:id provider) (:api-key provider) (:name model)])
+              (if (= "old" (:api-key provider))
+                (throw (ex-info "Unauthorized" {:type :svar.core/http-error :status 401}))
+                (success-result 100))))]
+
+      (expect (= [[:p1 "old" "m1"] [:p1 "new" "m1"]] @calls))
+      (expect (= [{:model "m1" :attempt 1 :max-retries 2}] @asks))
+      (expect (= :p1 (:routed/provider-id result)))
+      (expect (= "http://p1-new" (:routed/base-url result)))
+      (expect (not (:routed/fallback? result)))
+      (expect (= (:routed/trace result) @live))
+      (expect (= [[:llm.routing/provider-retry :authentication 1 0]]
+                 (mapv (juxt :event/type :reason :attempt :delay-ms) (:routed/trace result))))))
+  (it "spends the retry schedule on a provider that keeps refusing, then crosses providers"
+      (let [r
+            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                              {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                             {:auth-retry-delays-ms [0 0]})
+
+            calls
+            (atom [])
+
+            attempts
+            (atom [])
+
+            result
+            (router/with-provider-fallback
+              r
+              {:on-auth-error :fallback-provider
+               :refresh-credentials (fn [{:keys [provider attempt]}]
+                                      (swap! attempts conj attempt)
+                                      provider)}
+              (fn [provider _model]
+                (swap! calls conj (:id provider))
+                (if (= :p1 (:id provider))
+                  (throw (ex-info "Unauthorized" {:type :svar.core/http-error :status 401}))
+                  (success-result 100))))]
+
+        (expect (= [:p1 :p1 :p1 :p2] @calls))
+        (expect (= [1 2] @attempts))
+        (expect (= :p2 (:routed/provider-id result)))
+        (expect (= [:llm.routing/provider-retry :llm.routing/provider-retry
+                    :llm.routing/provider-fallback]
+                   (mapv :event/type (:routed/trace result))))
+        (expect (= :authentication (:reason (peek (:routed/trace result)))))))
+  (it "keeps the rejection when the hook declines or throws"
+      (doseq [hook [(constantly nil)
+                    (fn [_]
+                      (throw (ex-info "refresh broke" {})))]]
+        (let [r (llm/make-router
+                  [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                   {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                  {:auth-retry-delays-ms [0 0]})
+              calls (atom [])
+              thrown (try (router/with-provider-fallback
+                            r
+                            {:refresh-credentials hook}
+                            (fn [provider _model]
+                              (swap! calls conj (:id provider))
+                              (throw (ex-info "Unauthorized"
+                                              {:type :svar.core/http-error :status 401}))))
+                          :no-throw
+                          (catch clojure.lang.ExceptionInfo e e))]
+
+          (expect (= "Unauthorized" (ex-message thrown)))
+          (expect (= [:p1] @calls)))))
+  (it "never re-sends after visible output"
+      (let [r
+            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}]
+                             {:auth-retry-delays-ms [0 0]})
+
+            asked
+            (atom 0)
+
+            calls
+            (atom 0)]
+
+        (expect (throws? clojure.lang.ExceptionInfo
+                         #(router/with-provider-fallback r
+                                                         {:refresh-credentials (fn [ask]
+                                                                                 (swap! asked inc)
+                                                                                 (:provider ask))}
+                                                         (fn [_provider _model]
+                                                           (swap! calls inc)
+                                                           (throw (ex-info
+                                                                    "Unauthorized"
+                                                                    {:type :svar.core/http-error
+                                                                     :status 401
+                                                                     :content-acc-len 5}))))))
+        (expect (= 1 @calls))
+        (expect (zero? (long @asked)))))
+  (it "keeps refreshed credentials for a later same-provider re-send"
+      (let [r
+            (llm/make-router [{:id :p1 :api-key "old" :base-url "http://p1" :models [{:name "m1"}]}]
+                             {:auth-retry-delays-ms [0]
+                              :stream-recovery-delays-ms [0]
+                              :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
+
+            sent-keys
+            (atom [])
+
+            result
+            (router/with-provider-fallback
+              r
+              {:refresh-credentials (fn [{:keys [provider]}]
+                                      (assoc provider :api-key "new"))}
+              (fn [provider _model]
+                (swap! sent-keys conj (:api-key provider))
+                (case (count @sent-keys)
+                  1
+                  (throw (ex-info "Unauthorized" {:type :svar.core/http-error :status 401}))
+
+                  2
+                  (throw (ex-info "semantic stall after reasoning"
+                                  {:type :svar.core/stream-semantic-timeout
+                                   :reasoning-acc-len 12
+                                   :safe-to-restart? true}))
+
+                  (success-result 100))))]
+
+        (expect (= ["old" "new" "new"] @sent-keys))
+        (expect (= [[:llm.routing/provider-retry :authentication]
+                    [:llm.routing/provider-retry :stream-stalled]]
+                   (mapv (juxt :event/type :reason) (:routed/trace result))))))
+  (it "defaults to four re-sends, passes the hook through routing and turns off with []"
+      (let [providers
+            [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}]
+
+            hook
+            (fn [ask]
+              (:provider ask))
+
+            asked
+            (atom 0)]
+
+        (expect (= [0 2400 3600 4800] (:auth-retry-delays-ms (llm/make-router providers))))
+        (expect (= hook
+                   (:refresh-credentials (:prefs (router/resolve-routing (llm/make-router providers)
+                                                                         {:refresh-credentials
+                                                                          hook})))))
+        (expect (throws? clojure.lang.ExceptionInfo
+                         #(router/with-provider-fallback
+                            (llm/make-router providers {:auth-retry-delays-ms []})
+                            {:refresh-credentials (fn [ask]
+                                                    (swap! asked inc)
+                                                    (:provider ask))}
+                            (fn [_provider _model]
+                              (throw (ex-info "Unauthorized"
+                                              {:type :svar.core/http-error :status 401}))))))
+        (expect (zero? (long @asked))))))
+
 (defdescribe copilot-claude-dotted-or-dashed-test
              ;; Regression: vis's canonical Claude id is DASHED (claude-opus-4-8) but the
              ;; Copilot overlay (KNOWN_PROVIDER_MODELS) is keyed DOTTED (claude-opus-4.8).

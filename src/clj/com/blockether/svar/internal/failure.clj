@@ -389,6 +389,20 @@
    re-send for pinned calls; the schedule lives here so every caller gets it."
   [1000 3000])
 
+(def AUTH_RETRY_DELAYS_MS
+  "Waits before each same-provider re-send after a provider rejected its
+   credentials: the router's default `:auth-retry-delays-ms`. The router re-sends
+   only when the routing pref `:refresh-credentials` answers credentials for it.
+
+   The first re-send goes out at once, with the credential the hook just minted.
+   A freshly minted OAuth token can still be refused at the provider edge for a
+   moment, and minting again only issues another token that is not yet valid (the
+   401 storm). The later steps therefore wait, growing, for the new token to settle.
+
+   Vis carried this schedule itself (one immediate re-send, then waits growing by
+   1.2 s and capped at 5 s) until it moved here, so every caller gets it."
+  [0 2400 3600 4800])
+
 (defn backoff-ms
   "Exponential backoff with FULL JITTER, the AWS-recommended shape.
 
