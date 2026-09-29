@@ -28,10 +28,10 @@
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
                :default-models
-               [{:name "claude-opus-5-5"} {:name "claude-fable-5-1"} {:name "claude-sonnet-5-5"}
-                {:name "claude-sonnet-5"} {:name "claude-haiku-4-5"} {:name "claude-opus-5"}
-                {:name "claude-fable-5"} {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
-                {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}]}
+               [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"} {:name "claude-fable-5-1"}
+                {:name "claude-opus-5"} {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                {:name "claude-opus-4-8"} {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
+                {:name "claude-sonnet-4-6"} {:name "claude-haiku-4-5"}]}
    :anthropic-coding-plan {:base-url "https://api.anthropic.com/v1"
                            :env-keys []
                            :api-style :anthropic
@@ -39,12 +39,12 @@
                            ;; OAuth coding plan: use retail Anthropic pricing for honest metering
                            ;; once the included quota is exhausted (see internal/modelsdev).
                            :pricing-source :anthropic
-                           :default-models [{:name "claude-opus-5-5"} {:name "claude-fable-5-1"}
-                                            {:name "claude-sonnet-5-5"} {:name "claude-sonnet-5"}
-                                            {:name "claude-haiku-4-5"} {:name "claude-opus-5"}
-                                            {:name "claude-fable-5"} {:name "claude-opus-4-8"}
-                                            {:name "claude-opus-4-7"} {:name "claude-opus-4-6"}
-                                            {:name "claude-sonnet-4-6"}]
+                           :default-models [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"}
+                                            {:name "claude-fable-5-1"} {:name "claude-opus-5"}
+                                            {:name "claude-fable-5"} {:name "claude-sonnet-5"}
+                                            {:name "claude-opus-4-8"} {:name "claude-opus-4-7"}
+                                            {:name "claude-opus-4-6"} {:name "claude-sonnet-4-6"}
+                                            {:name "claude-haiku-4-5"}]
                            :prepend-default-models? true}
    :zai {:base-url "https://api.z.ai/api/anthropic/v1"
          :api-style :anthropic ; GLM rides the z.ai Anthropic-Messages endpoint — native tool_use. The chat wire (/paas/v4) is XML-poisoned (see TOOL_CALLING.md).
@@ -111,10 +111,10 @@
    :github-copilot
    {:base-url "https://api.individual.githubcopilot.com"
     :models-base :host
-    :default-models [{:name "claude-opus-5.5"} {:name "gpt-6-sol"} {:name "gpt-6-astra"}
-                     {:name "claude-sonnet-5.5"} {:name "claude-sonnet-5"} {:name "gpt-5.6-terra"}
-                     {:name "gpt-6-luna"} {:name "claude-opus-5"} {:name "claude-fable-5"}
-                     {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"}]
+    :default-models [{:name "claude-opus-5.5"} {:name "claude-sonnet-5.5"} {:name "claude-opus-5"}
+                     {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "gpt-6-sol"}
+                     {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-5.6-sol"}
+                     {:name "gpt-5.6-terra"} {:name "gpt-5.6-luna"}]
     :llm-headers {"Editor-Version" "vscode/1.100.0"
                   "Editor-Plugin-Version" "copilot-chat/0.26.7"
                   "Copilot-Integration-Id" "vscode-chat"
@@ -135,8 +135,8 @@
                   :env-keys []
                   :api-style :openai-compatible-responses
                   :default-models [{:name "gpt-6-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
-                                   {:name "gpt-5.6-sol"} {:name "gpt-5.5"} {:name "gpt-5.4"}
-                                   {:name "gpt-5.6-luna"} {:name "gpt-5.3-codex"}]
+                                   {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"} {:name "gpt-5.5"}
+                                   {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
                   ;; Keep Codex GPT models at gpt-5.3+ only.
                   :min-gpt-version [5 3]
                   :exclude-models #{"gpt-4o" "gpt-4.1" "gpt-5" "gpt-5-mini" "gpt-5.1"
@@ -516,7 +516,9 @@
 ;; =============================================================================
 
 (def MODEL_ORDER
-  "Canonical cross-provider model order, best first; `sort-models` ranks model lists by it.
+  "Canonical cross-provider model ranking, best first. `sort-models` orders vendors by their
+   best-ranked model and, inside a vendor, ranks models of one version by it; a newer version
+   comes first whatever its rank.
 
    `:current` is today's generation in tiers — every vendor's flagship, then premium,
    mid-size and fast models — with vendors in the same sequence inside each tier.
@@ -530,15 +532,15 @@
              ;; Premium
              "claude-fable-5-1" "gpt-6-astra"
              ;; Mid-size
-             "claude-sonnet-5-5" "claude-sonnet-5" "gpt-5.6-terra" "kimi-k2.7-code"
+             "claude-sonnet-5-5" "kimi-k2.7-code"
              ;; Fast
              "claude-haiku-4-5" "gpt-6-luna" "glm-5.3-flash" "glm-5.3-flashx" "deepseek-v4.1-flash"
              "qwen3.8-flash" "mimo-v2.6-flash" "hy3" "muse-spark-1.3-contributor"]
-   :previous ["claude-opus-5" "claude-fable-5" "claude-opus-4-8" "claude-opus-4-7" "claude-opus-4-6"
-              "claude-sonnet-4-6" "gpt-5.6-sol" "gpt-5.5" "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex"
-              "grok-4.6" "kimi-k2.6" "qwen3.7-max" "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1"
-              "glm-5-turbo" "glm-5v-turbo" "deepseek-v4-flash" "minimax-m2.7"
-              "muse-spark-1.2-contributor"]})
+   :previous ["claude-opus-5" "claude-fable-5" "claude-sonnet-5" "claude-opus-4-8" "claude-opus-4-7"
+              "claude-opus-4-6" "claude-sonnet-4-6" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.5"
+              "gpt-5.4" "gpt-5.6-luna" "gpt-5.3-codex" "grok-4.6" "kimi-k2.6" "qwen3.7-max"
+              "qwen3.7-plus" "qwen3.6-plus" "glm-5.2" "glm-5.1" "glm-5-turbo" "glm-5v-turbo"
+              "deepseek-v4-flash" "minimax-m2.7" "muse-spark-1.2-contributor"]})
 
 (def SPECIAL_MODEL_NAMES
   "Model ids `sort-models` puts last although their names look ordinary: `deepseek-flash`
@@ -2152,7 +2154,29 @@
   (or (get-in KNOWN_PROVIDERS [provider-id :lead-models])
       (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :lead-models])))
 
-(defn- model-order-key
+(def ^:private model-version-pattern
+  "First version in a `modelsdev/model-key`: a one- or two-digit major after the start, a dash
+   or a letter, then an optional dashed one- or two-digit minor. A parameter count such as
+   `72b`, a context size such as `32k` and a date never form one."
+  #"(?<![^a-z-])(\d{1,2})(?![\dbk])(?:-(\d{1,2})(?=[-:]|$))?")
+
+(defn- model-version
+  "`[major minor]` of a `modelsdev/model-key` - `[5 6]` for `gpt-5-6-terra`, `[3 0]` for
+   `kimi-k3` - or nil when it names no version."
+  [k]
+  (when-let [[_ major minor] (re-find model-version-pattern k)]
+    [(parse-long major) (parse-long (or minor "0"))]))
+
+(defn- model-vendor
+  "Leading letters of a `modelsdev/model-key`, which name its vendor's model line: `claude`,
+   `gpt`, or `qwen` for `qwen3-8-max`."
+  [k]
+  (or (re-find #"^[a-z]+" k) ""))
+
+(defn- model-order-facts
+  "What `sort-models` orders `model` by: its `:lead` index, `:vendor`, `:version-order` -
+   newest first, unversioned last - and `:rank` - `[rank offset release-order]`, nil for a
+   special model."
   [provider-catalog lead model]
   (let [model-map
         (if (map? model) model {:name model})
@@ -2175,28 +2199,33 @@
         lead-index
         (.indexOf ^java.util.List lead k)
 
-        {:keys [ranks special]}
-        model-order-slots]
+        ranks
+        (:ranks model-order-slots)]
 
-    (into
-      [(if (neg? lead-index) (count lead) lead-index)]
-      (cond (contains? special-model-statuses (or (:status model-map) (:status row))) [special 0 0]
-            (contains? ranks k) [(get ranks k) 0 0]
-            (or (contains? SPECIAL_MODEL_NAMES k) (re-find special-model-pattern k)) [special 0 0]
-            :else (unlisted-slot {:families (cond-> (set (:families facts))
-                                              family
-                                              (conj family))
-                                  :release-date (or (:release-date model-map)
-                                                    (:release-date row)
-                                                    (:release-date facts))})))))
+    {:lead (if (neg? lead-index) (count lead) lead-index)
+     :vendor (model-vendor k)
+     :version-order (if-let [[major minor] (model-version k)]
+                      [0 (- (long major)) (- (long minor))]
+                      [1 0 0])
+     :rank (cond (contains? special-model-statuses (or (:status model-map) (:status row))) nil
+                 (contains? ranks k) [(get ranks k) 0 0]
+                 (or (contains? SPECIAL_MODEL_NAMES k) (re-find special-model-pattern k)) nil
+                 :else (unlisted-slot {:families (cond-> (set (:families facts))
+                                                   family
+                                                   (conj family))
+                                       :release-date (or (:release-date model-map)
+                                                         (:release-date row)
+                                                         (:release-date facts))}))}))
 
 (defn sort-models
-  "`models` - names, or maps with `:name` - best first by `MODEL_ORDER`, returned as a
-   vector of the same elements. Models the order does not name go next to a listed
-   model of the same models.dev family by release date, else after every listed model
-   in their given order. Dated snapshots, previews, aliases, helper models and models
-   the provider marks alpha, beta or deprecated go last.
-   Equal keys keep their given order, so a list of unknown local models is unchanged.
+  "`models` - names, or maps with `:name` - best first, returned as a vector of the same
+   elements. A vendor's models stay together, newest version first: `gpt-6-luna` comes
+   before `gpt-5.6-sol`. Vendors - the leading letters of an id, such as `claude` or `gpt` -
+   follow their best model in `MODEL_ORDER`, which also ranks models of one version. A model
+   the order does not name ranks next to a listed model of its models.dev family by release
+   date, else after every listed model; vendors without a ranked model keep their given
+   order. Dated snapshots, previews, aliases, helper models and models the provider marks
+   alpha, beta or deprecated go last, grouped the same way.
 
    With `provider-id`, that provider's `:lead-models` come first, and its models.dev
    rows supply release dates, families and status. A model map's own `:family`,
@@ -2207,11 +2236,37 @@
          (if provider-id (modelsdev/provider-models (provider-pricing-source provider-id)) {})
 
          lead
-         (mapv modelsdev/model-key (provider-lead-models provider-id))]
+         (mapv modelsdev/model-key (provider-lead-models provider-id))
 
-     (->> models
-          (map (fn [model]
-                 [(model-order-key provider-catalog lead model) model]))
+         special-rank
+         [(:special model-order-slots) 0 0]
+
+         model-facts
+         (mapv #(model-order-facts provider-catalog lead %) models)
+
+         vendor-ranks
+         (reduce (fn [acc {:keys [vendor rank]}]
+                   (let [rank
+                         (or rank special-rank)
+
+                         best
+                         (get acc vendor)]
+
+                     (assoc acc vendor (if (and best (<= (compare best rank) 0)) best rank))))
+                 {}
+                 model-facts)
+
+         vendor-positions
+         (reduce-kv (fn [acc i {:keys [vendor]}]
+                      (if (contains? acc vendor) acc (assoc acc vendor i)))
+                    {}
+                    model-facts)]
+
+     (->> (map (fn [{:keys [lead vendor version-order rank]} model]
+                 [[lead (if rank 0 1) (vendor-ranks vendor) (vendor-positions vendor) version-order
+                   (or rank special-rank)] model])
+               model-facts
+               models)
           (sort-by first)
           (mapv second)))))
 
