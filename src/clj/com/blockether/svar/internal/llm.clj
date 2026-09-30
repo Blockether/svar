@@ -7545,7 +7545,7 @@
 (defn- routing-opts-with-reasoning
   "Merges svar-level opts that influence routing/fallback into the `:routing`
    map so `resolve-routing` can build a complete prefs map:
-     - `:reasoning`         → implies `:require-reasoning? true`
+     - `:reasoning`         → implies `:require-reasoning? true` (not for `:off`)
      - `:reasoning-effort`  → exact provider-native `low|high|max`
      - `:on-format-error`   → enables format-error provider fallback
      - `:format-retry-on`   → customises the format-error type set

@@ -346,7 +346,8 @@ The API name is provider-neutral, but the stateful backend currently supports on
 
 Two knobs, different jobs:
 
-- `:reasoning` = how hard the model thinks before answering. Use `:low`, `:balanced`, or `:deep`.
+- `:reasoning` = how hard the model thinks before answering. Use `:off`, `:low`, `:balanced`, or `:deep`.
+  `:off` turns thinking off when the provider has a switch for it. Otherwise svar asks for the least thinking the model accepts.
 - `:verbosity` = how verbose the visible answer should be. Use `:low`, `:medium`, or `:high`.
 
 They are independent. Example: `:reasoning :deep` + `:verbosity :low` means think hard, answer briefly.

@@ -5,6 +5,7 @@
    - `normalize-reasoning-level` vocabulary + OpenAI-alias back-compat.
    - `reasoning-extra-body` producing the right wire shape per api-style.
    - Silent no-op for non-reasoning models and unknown levels.
+   - `:off`: thinking disabled where the wire can, least thinking elsewhere.
    - Anthropic budget-tokens magnitudes matching the documented thresholds.
    - Anthropic max_tokens clamp when thinking is enabled."
   (:require [lazytest.core :refer [defdescribe describe expect it]]
@@ -23,6 +24,10 @@
                            (expect (= :low (router/normalize-reasoning-level "LOW")))
                            (expect (= :balanced (router/normalize-reasoning-level " Balanced ")))
                            (expect (= :deep (router/normalize-reasoning-level "DEEP")))))
+             (describe "the no-thinking level"
+                       (it "accepts :off as a keyword or a trimmed, case-insensitive string"
+                           (expect (= :off (router/normalize-reasoning-level :off)))
+                           (expect (= :off (router/normalize-reasoning-level " OFF ")))))
              (it "rejects retired effort names"
                  (expect (nil? (router/normalize-reasoning-level :quick)))
                  (expect (nil? (router/normalize-reasoning-level :medium)))
@@ -691,3 +696,87 @@
 
             (expect (= expected-budget (get-in clamped [:thinking :budget_tokens])))
             (expect (> (:max_tokens clamped) expected-budget)))))))
+
+(defdescribe
+  reasoning-off-test
+  "`:off`: thinking disabled where the wire has a switch, least thinking where it has none."
+  (describe "wires with a thinking switch"
+            (it "turns z.ai thinking off, whatever effort rungs the model sells"
+                (doseq [model [{:name "glm-4.7" :reasoning? true :reasoning-style :zai-thinking}
+                               {:name "glm-5.3-flash"
+                                :reasoning? true
+                                :reasoning-style :zai-effort
+                                :reasoning-options [{:type "effort" :values ["low" "high" "max"]}]}
+                               {:name "glm-5.2"
+                                :reasoning? true
+                                :reasoning-style :zai-effort
+                                :reasoning-options [{:type "effort" :values ["high" "max"]}]}]]
+                  (expect (= {:thinking {:type "disabled"}}
+                             (router/reasoning-extra-body :openai-compatible-chat model :off)))
+                  (expect (= {:thinking {:type "disabled"}}
+                             (router/reasoning-extra-body :openai-compatible-chat model
+                                                          :off {:preserved-thinking? true})))))
+            (it "turns Claude thinking off on the Anthropic wire, manual and adaptive alike"
+                (doseq [model [{:name "claude-sonnet-4-5"
+                                :reasoning? true
+                                :reasoning-style :anthropic-thinking
+                                :reasoning-options [{:type "budget_tokens" :min 1024}]}
+                               {:name "claude-opus-4-8"
+                                :reasoning? true
+                                :reasoning-style :anthropic-thinking}]]
+                  (expect (= {:thinking {:type "disabled"}}
+                             (router/reasoning-extra-body :anthropic model :off))))))
+  (describe
+    "wires without a thinking switch"
+    (it "sends none or minimal only when the catalog sells it"
+        (expect (= {:reasoning_effort "none"}
+                   (router/reasoning-extra-body
+                     :openai-compatible-chat
+                     {:name "gpt-5.1"
+                      :reasoning? true
+                      :reasoning-options [{:type "effort" :values ["none" "low" "medium" "high"]}]}
+                     :off)))
+        (expect (= {:reasoning_effort "minimal"}
+                   (router/reasoning-extra-body :openai-compatible-chat
+                                                {:name "gpt-5"
+                                                 :reasoning? true
+                                                 :reasoning-options [{:type "effort"
+                                                                      :values ["minimal" "low"
+                                                                               "medium" "high"]}]}
+                                                :off))))
+    (it "falls back to the weakest rung the model sells when it cannot stop thinking"
+        (expect (= {:reasoning_effort "low"}
+                   (router/reasoning-extra-body :openai-compatible-chat
+                                                {:name "o3"
+                                                 :reasoning? true
+                                                 :reasoning-options
+                                                 [{:type "effort" :values ["low" "medium" "high"]}]}
+                                                :off)))
+        (expect (= {:reasoning_effort "high"}
+                   (router/reasoning-extra-body :openai-compatible-chat
+                                                {:name "glm-5.2"
+                                                 :reasoning? true
+                                                 :reasoning-options [{:type "effort"
+                                                                      :values ["high" "max"]}]}
+                                                :off))))
+    (it "sends low, never an unadvertised none, when the catalog knows no rungs"
+        (expect (= {:reasoning_effort "low"}
+                   (router/reasoning-extra-body :openai-compatible-chat
+                                                {:name "deepseek-reasoner" :reasoning? true}
+                                                :off)))
+        ;; Claude on an OpenAI-compatible proxy wire has no thinking switch either.
+        (expect (= {:reasoning_effort "low"}
+                   (router/reasoning-extra-body
+                     :openai-compatible-chat
+                     {:name "claude-opus-4.8" :reasoning? true :reasoning-style :anthropic-thinking}
+                     :off))))
+    (it "sends nothing where the server alone picks the depth"
+        (expect (nil? (router/reasoning-extra-body
+                        :openai-compatible-chat
+                        {:name "gemini-3-pro" :reasoning? true :reasoning-style :server-managed}
+                        :off)))))
+  (describe
+    "models that do not reason"
+    (it "sends nothing"
+        (expect (nil? (router/reasoning-extra-body :openai-compatible-chat {:name "gpt-4o"} :off)))
+        (expect (nil? (router/reasoning-extra-body :anthropic {:name "claude-haiku-3"} :off))))))

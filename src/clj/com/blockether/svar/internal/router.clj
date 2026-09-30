@@ -585,7 +585,8 @@
 (def REASONING_LEVELS
   "Abstract reasoning levels translated per reasoning-style.
    Vocabulary is intentionally provider-neutral — callers pass :low|:balanced|:deep
-   and svar picks the right on-the-wire shape for the selected model.
+   and svar picks the right on-the-wire shape for the selected model. `:off` has
+   no row: it asks for no thinking, see `reasoning-off-extra-body`.
 
    Sub-key semantics:
      `:openai-effort`      → flat top-level `:reasoning_effort` string.
@@ -663,9 +664,12 @@
           :server-managed nil}})
 
 (defn normalize-reasoning-level
-  "Coerce any accepted spelling to a canonical :low|:balanced|:deep keyword.
+  "Coerce any accepted spelling to a canonical :off|:low|:balanced|:deep keyword.
    Accepts those keywords or strings case-insensitively.
-   Returns nil for unknown input."
+   Returns nil for unknown input.
+
+   `:off` asks for NO thinking. It is not a `REASONING_LEVELS` row: that table
+   says how much to think, and `reasoning-extra-body` handles `:off` on its own."
   [v]
   (let [raw
         (cond (keyword? v) (name v)
@@ -676,6 +680,9 @@
         (when raw (str/lower-case (str/trim raw)))]
 
     (case s
+      "off"
+      :off
+
       "low"
       :low
 
@@ -991,6 +998,36 @@
       wanted
       (some #{wanted} (catalog-effort-values model-map)))))
 
+(defn- weakest-accepted-effort
+  "The effort rung that thinks LEAST among the rungs this model accepts.
+
+   models.dev decides: `none` or `minimal` when the row sells one (GPT-5.1,
+   GPT-5), else the weakest rung it sells (`low` on o3, `high` on a row that
+   stops at `high`/`max`). Without catalog evidence the answer is
+   `WEAKEST_THINKING_EFFORT`: an unadvertised `none` or `minimal` is a 400 on
+   o-series and GPT-5 rows, and every reasoning row takes `low`."
+  [model-map]
+  (or (first (catalog-effort-values model-map)) WEAKEST_THINKING_EFFORT))
+
+(defn- reasoning-off-extra-body
+  "Extra-body for the `:off` level on `style`, the reasoning style of the wire.
+
+   A wire with a thinking switch turns thinking off: `:zai-thinking`,
+   `:zai-effort` and `:anthropic-thinking` on the Anthropic wire take
+   `thinking: {type: \"disabled\"}`. `:openai-effort` has no switch, so `:off`
+   asks for the least thinking the model accepts (`weakest-accepted-effort`)
+   instead of leaving the provider's default depth, which is usually heavier.
+   `:server-managed` answers nil: that server alone picks the depth."
+  [style model-map]
+  (case style
+    (:zai-thinking :zai-effort :anthropic-thinking)
+    {:thinking {:type "disabled"}}
+
+    :openai-effort
+    {:reasoning_effort (weakest-accepted-effort model-map)}
+
+    nil))
+
 (defn reasoning-extra-body
   "Translates an abstract reasoning level into provider-specific extra-body.
    Returns nil when:
@@ -1000,6 +1037,9 @@
        model on the Anthropic wire. Those DO get a body without a level: the
        display opt-in alone (see `anthropic-adaptive-display-body`), because
        their own default is `display: \"omitted\"` — empty thinking blocks.
+
+   `:off` asks for NO thinking: `reasoning-off-extra-body` gives the wire shape
+   per style, including the styles that cannot turn thinking off.
 
    Dispatches on the model's `:reasoning-style` first (explicit pin), falling
    back to inference from `api-style` when the model doesn't declare one.
@@ -1037,46 +1077,48 @@
                      raw-style)
              mapped (get-in REASONING_LEVELS [norm style])]
 
-         (when mapped
-           (case style
-             :openai-effort
-             (when-let [effort (clamp-effort mapped (supported-efforts model-map :openai-effort))]
-               {:reasoning_effort effort})
+         (cond (= :off norm) (reasoning-off-extra-body style model-map)
+               mapped (case style
+                        :openai-effort
+                        (when-let [effort (clamp-effort mapped
+                                                        (supported-efforts model-map
+                                                                           :openai-effort))]
+                          {:reasoning_effort effort})
 
-             :anthropic-thinking
-             (anthropic-thinking-extra-body model-map norm mapped)
+                        :anthropic-thinking
+                        (anthropic-thinking-extra-body model-map norm mapped)
 
-             :zai-thinking
-             {:thinking (cond-> {:type mapped}
-                          ;; `clear_thinking: false` = keep reasoning_content
-                          ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
-                          preserved-thinking?
-                          (assoc :clear_thinking false))}
+                        :zai-thinking
+                        {:thinking (cond-> {:type mapped}
+                                     ;; `clear_thinking: false` = keep reasoning_content
+                                     ;; across turns. Only meaningful on Z.ai GLM-5 / 4.7+.
+                                     preserved-thinking?
+                                     (assoc :clear_thinking false))}
 
-             ;; GLM-5.2+ (DeepSeek-V4 mechanism): thinking is ON and the DEPTH
-             ;; is chosen by `reasoning_effort`. GLM's rungs are "low"/"high"/
-             ;; "max" — NOT OpenAI's low/medium/high — and they line up 1:1 with
-             ;; the abstract levels (`REASONING_LEVELS`): `:low` → "low",
-             ;; `:balanced` → "high", `:deep` → "max".
-             ;;
-             ;; "low" is the rung a row may not sell: GLM-5.2 stops at "high", and
-             ;; z.ai answers an effort a model does not know with its heavy "max"
-             ;; default rather than an error — the opposite of a quick turn. Not
-             ;; thinking is the only short turn left there, and it is verified live
-             ;; against z.ai's Anthropic endpoint: glm-5.2 honors `thinking:{type
-             ;; "disabled"}` (clean `text` answer, `stop_reason "end_turn"`, zero
-             ;; reasoning burn), whereas a small `max_tokens` cap just truncates
-             ;; mid-think and starves the answer (600-token cap → all thinking, no
-             ;; reply).
-             :zai-effort
-             (if-let [effort (zai-effort-rung mapped model-map)]
-               {:reasoning_effort effort
-                :thinking (cond-> {:type "enabled"}
-                            preserved-thinking?
-                            (assoc :clear_thinking false))}
-               {:thinking {:type "disabled"}})
+                        ;; GLM-5.2+ (DeepSeek-V4 mechanism): thinking is ON and the DEPTH
+                        ;; is chosen by `reasoning_effort`. GLM's rungs are "low"/"high"/
+                        ;; "max" — NOT OpenAI's low/medium/high — and they line up 1:1 with
+                        ;; the abstract levels (`REASONING_LEVELS`): `:low` → "low",
+                        ;; `:balanced` → "high", `:deep` → "max".
+                        ;;
+                        ;; "low" is the rung a row may not sell: GLM-5.2 stops at "high", and
+                        ;; z.ai answers an effort a model does not know with its heavy "max"
+                        ;; default rather than an error — the opposite of a quick turn. Not
+                        ;; thinking is the only short turn left there, and it is verified live
+                        ;; against z.ai's Anthropic endpoint: glm-5.2 honors `thinking:{type
+                        ;; "disabled"}` (clean `text` answer, `stop_reason "end_turn"`, zero
+                        ;; reasoning burn), whereas a small `max_tokens` cap just truncates
+                        ;; mid-think and starves the answer (600-token cap → all thinking, no
+                        ;; reply).
+                        :zai-effort
+                        (if-let [effort (zai-effort-rung mapped model-map)]
+                          {:reasoning_effort effort
+                           :thinking (cond-> {:type "enabled"}
+                                       preserved-thinking?
+                                       (assoc :clear_thinking false))}
+                          {:thinking {:type "disabled"}})
 
-             nil))))
+                        nil))))
      ;; No level named: Claude adaptive models still need the display opt-in,
      ;; everything else keeps the historical silent nil.
      (anthropic-adaptive-display-body api-style model-map))))
@@ -4245,7 +4287,7 @@
    router option `:auth-retry-delays-ms` sets how often and how long it waits.
 
    `:reasoning` implies `:require-reasoning? true`, filtering selection to
-   reasoning-capable models.
+   reasoning-capable models. `:reasoning :off` does not: any model can skip thinking.
 
    `:capabilities` is a set of model capabilities the call REQUIRES (today
    `#{:vision}`). It is a hard filter: providers with no model carrying every
@@ -4305,7 +4347,8 @@
           prompt-cache-scope
           (assoc :prompt-cache-scope prompt-cache-scope)
 
-          reasoning
+          ;; `:off` asks for no thinking, which every model can serve.
+          (and reasoning (not= :off (normalize-reasoning-level reasoning)))
           (assoc :require-reasoning? true)
 
           (seq capabilities)

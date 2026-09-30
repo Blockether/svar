@@ -56,8 +56,8 @@
   router/REASONING_LEVELS)
 
 (def normalize-reasoning-level
-  "Coerce any accepted spelling to canonical :low|:balanced|:deep.
-   Also accepts :low/:medium/:high aliases for OpenAI-style migrations."
+  "Coerce any accepted spelling to canonical :off|:low|:balanced|:deep.
+   `:off` asks for no thinking; see `reasoning-extra-body`."
   router/normalize-reasoning-level)
 
 (def reasoning-extra-body

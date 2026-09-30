@@ -115,6 +115,10 @@
         (let [{:keys [prefs]} (router/resolve-routing router {:optimize :cost :reasoning :deep})]
           (expect (true? (:require-reasoning? prefs)))
           (expect (= :cost (:prefer prefs)))))
+    (it "`:reasoning :off` leaves `:require-reasoning?` unset: any model can skip thinking"
+        (let [{:keys [prefs]} (router/resolve-routing router {:optimize :cost :reasoning :off})]
+          (expect (nil? (:require-reasoning? prefs)))
+          (expect (= :cost (:prefer prefs)))))
     (it "`:reasoning-effort` is retained as an exact routing constraint"
         (let [{:keys [prefs]} (router/resolve-routing router
                                                       {:optimize :cost :reasoning-effort "max"})]
