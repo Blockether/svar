@@ -256,3 +256,33 @@
        :cached (long-or-0 (:cache-read details))
        :cache-created (long-or-0 (:cache-write details))
        :input-regular (long-or-0 (:regular details))})))
+
+;; =============================================================================
+;; Output throughput
+;; =============================================================================
+
+(defn tokens-per-second
+  "Output throughput of a run of model calls, in tokens per second.
+
+   `calls` is a collection of `ask!` / `ask-code!` results, or any maps with
+   the same `:tokens {:output n}` and `:duration-ms` keys. The rate is the
+   summed output tokens over the summed response time:
+
+   - `:duration-ms` covers one model response, from the request to the end of
+     the response body. Tools run between calls, outside that window, so a slow
+     tool never lowers the rate.
+   - Reasoning tokens are already part of `:output` and are not added again.
+   - A negative duration (clock skew) counts as zero.
+
+   Returns nil when `calls` is empty, when any call has no `:duration-ms` (a rate
+   over part of the calls would overstate throughput), or when the summed output
+   or duration is not positive."
+  [calls]
+  (when (and (seq calls) (every? #(some? (:duration-ms %)) calls))
+    (let [output
+          (long (reduce + 0 (map #(long-or-0 (get-in % [:tokens :output])) calls)))
+
+          duration-ms
+          (double (reduce + 0.0 (map #(max 0.0 (double (:duration-ms %))) calls)))]
+
+      (when (and (pos? output) (pos? duration-ms)) (/ (* 1000.0 output) duration-ms)))))

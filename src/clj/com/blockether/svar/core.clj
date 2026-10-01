@@ -26,7 +26,8 @@
   (:require [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.llm :as llm]
             [com.blockether.svar.internal.router :as router]
-            [com.blockether.svar.internal.spec :as spec]))
+            [com.blockether.svar.internal.spec :as spec]
+            [com.blockether.svar.internal.usage :as usage]))
 
 ;; =============================================================================
 ;; Router
@@ -157,6 +158,13 @@
    input, cached input, cache creation and output components. Rates are USD per
    1M tokens."
   router/estimate-cost)
+
+(def tokens-per-second
+  "Output throughput of a run of `ask!` / `ask-code!` results, in tokens per
+   second: summed output tokens over summed response time. Tool time between
+   calls is excluded, and reasoning counts once, inside output. Returns nil when
+   there are no calls, any call lacks `:duration-ms`, or a total is not positive."
+  usage/tokens-per-second)
 
 ;; =============================================================================
 ;; Failures and log context

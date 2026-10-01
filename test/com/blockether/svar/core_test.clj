@@ -25,14 +25,16 @@
         (expect (not (svar/provider-model-visible? :openai "gpt-4o")))
         (expect (contains? (:capabilities (svar/provider-model-metadata :openai {:name "gpt-4o"}))
                            :chat))))
-  (describe "tokens and pricing"
-            (it "counts text and message tokens"
-                (expect (pos? (svar/count-tokens "gpt-4o" "hello world")))
-                (expect (> (svar/count-messages "gpt-4o" [(svar/user "hello world")])
-                           (svar/count-messages "gpt-4o" []))))
-            (it "prices tokens with the flattened table"
-                (expect (pos? (:total-cost (svar/estimate-cost "gpt-4o" 1000
-                                                               100 svar/MODEL_PRICING))))))
+  (describe
+    "tokens and pricing"
+    (it "counts text and message tokens"
+        (expect (pos? (svar/count-tokens "gpt-4o" "hello world")))
+        (expect (> (svar/count-messages "gpt-4o" [(svar/user "hello world")])
+                   (svar/count-messages "gpt-4o" []))))
+    (it "prices tokens with the flattened table"
+        (expect (pos? (:total-cost (svar/estimate-cost "gpt-4o" 1000 100 svar/MODEL_PRICING)))))
+    (it "measures output throughput across calls"
+        (expect (= 10.0 (svar/tokens-per-second [{:tokens {:output 50} :duration-ms 5000}])))))
   (describe "failures and log context"
             (it "classifies a failure"
                 (expect (= :rate-limited
