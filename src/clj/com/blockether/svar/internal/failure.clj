@@ -618,6 +618,11 @@
               (update :retryable? #(boolean (and % (not started?))))))]
 
     (cond
+      (= :svar.llm/model-metadata-unavailable etype)
+      (answer :invalid-request
+              false false
+              "the model has no valid provider-specific input/context limits"
+              "refresh the model catalog or configure verified limits before retrying")
       limit? (answer :quota-exhausted
                      false true
                      "the account's quota/billing limit is exhausted"

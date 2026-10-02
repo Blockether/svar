@@ -112,6 +112,7 @@
    :github-copilot
    {:base-url "https://api.individual.githubcopilot.com"
     :models-base :host
+    :models-shape :github-copilot
     :default-models [{:name "claude-opus-5.5"} {:name "claude-sonnet-5.5"} {:name "claude-opus-5"}
                      {:name "claude-fable-5"} {:name "claude-sonnet-5"} {:name "gpt-6.1-sol"}
                      {:name "gpt-6-astra"} {:name "gpt-6-luna"} {:name "gpt-6-sol"}

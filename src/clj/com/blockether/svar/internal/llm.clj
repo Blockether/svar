@@ -7581,6 +7581,35 @@
       (contains? opts :on-chunk)
       (assoc :on-chunk (:on-chunk opts)))))
 
+(defn- positive-token-limit
+  [value]
+  (when (and (integer? value) (pos? (compare value 0)) (not (pos? (compare value Long/MAX_VALUE))))
+    (long value)))
+
+(defn- require-copilot-model-limits!
+  "Reject missing or contradictory Copilot budgets before the unknown-model fallback is used."
+  [provider {:keys [name context input-limit output-limit] :as model}]
+  (when (= :github-copilot (:id provider))
+    (let [invalid?
+          (or (some #(and (some? %) (nil? (positive-token-limit %)))
+                    (vals (select-keys model [:context :input-limit :output-limit])))
+              (and context input-limit (> (long input-limit) (long context)))
+              (and context output-limit (>= (long output-limit) (long context))))
+
+          reason
+          (cond invalid? :invalid-limits
+                (not (or context input-limit)) :missing-input-limit)]
+
+      (when reason
+        (anomaly/incorrect!
+          (str "GitHub Copilot model metadata is missing or invalid for "
+               name
+               ". Refresh the model catalog or configure verified input/context limits.")
+          {:type :svar.llm/model-metadata-unavailable
+           :provider-id (:id provider)
+           :model name
+           :reason reason})))))
+
 (defn- inject-routed-params
   "Injects router-chosen `[provider model-map]` + caller opts into the opts map
    destined for a `*!*` primitive. Centralises the reasoning translation so
@@ -7608,6 +7637,7 @@
    - routed primitives carry `:router-handles-transients?`, making the router
      the sole owner of retry schedule, budget, telemetry, and fallback."
   [opts provider model-map]
+  (require-copilot-model-limits! provider model-map)
   (let [auto-params
         {:max_tokens (router/model-output-budget model-map)}
 
@@ -10110,11 +10140,6 @@
    "supports_response_schema" :structured-output?
    "supports_prompt_caching" :prompt-caching?})
 
-(defn- positive-token-limit
-  [value]
-  (when (and (integer? value) (pos? (compare value 0)) (not (pos? (compare value Long/MAX_VALUE))))
-    (long value)))
-
 (defn- enrich-gateway-model
   "Normalize published model budgets without confusing input caps with total windows.
    Reads OpenAI-compatible/LiteLLM, Copilot, Codex, OpenRouter and Gemini fields.
@@ -10172,6 +10197,35 @@
                (assoc :upstream-provider (get info "litellm_provider")))
              m))))
 
+(defn- enrich-copilot-model
+  "Use Copilot's advertised wire and capability flags for models absent from the static catalog."
+  [m]
+  (if-not (map? m)
+    m
+    (let [endpoints
+          (set (get m "supported_endpoints"))
+
+          api-style
+          (cond (some endpoints ["/v1/messages" "/messages"]) :anthropic
+                (some endpoints ["/responses" "/v1/responses"]) :openai-compatible-responses
+                (some endpoints ["/chat/completions" "/v1/chat/completions"])
+                :openai-compatible-chat)
+
+          supports
+          (get-in m ["capabilities" "supports"])]
+
+      (cond-> (reduce-kv (fn [model wire-key model-key]
+                           (if (boolean? (get supports wire-key))
+                             (assoc model model-key (get supports wire-key))
+                             model))
+                         m
+                         {"vision" :vision?
+                          "tool_calls" :tool-call?
+                          "parallel_tool_calls" :parallel-tool-calls?
+                          "reasoning" :reasoning?})
+        api-style
+        (assoc :api-style api-style)))))
+
 (defn- shape-models
   "Apply provider-specific model normalization keyed by `:models-shape`, then the
    provider-agnostic gateway enrichment."
@@ -10180,6 +10234,9 @@
         (case models-shape
           :lmstudio
           (mapv enrich-lmstudio-model models)
+
+          :github-copilot
+          (mapv enrich-copilot-model models)
 
           models)))
 

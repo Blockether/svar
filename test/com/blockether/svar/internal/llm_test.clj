@@ -649,10 +649,13 @@
             (atom [])
 
             router
-            (svar/make-router [{:id :github-copilot
-                                :base-url "https://api.individual.githubcopilot.com/v1"
-                                :api-key "sk-test"
-                                :models [{:name "gpt-5.5"}]}])
+            (svar/make-router
+              [{:id :github-copilot
+                :base-url "https://api.individual.githubcopilot.com/v1"
+                :api-key "sk-test"
+                ;; Transport fixture: independent limits from a live catalog.
+                :models
+                [{:name "gpt-5.5" :context 1050000 :input-limit 922000 :output-limit 128000}]}])
 
             answer-spec
             (svar/spec (svar/field svar/NAME
