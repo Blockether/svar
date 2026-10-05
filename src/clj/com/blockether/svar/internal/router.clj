@@ -856,13 +856,12 @@
 (def ^:private ANTHROPIC_ADAPTIVE_THINKING
   "The thinking config every Claude adaptive-thinking request carries.
 
-   `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5.1 /
-   Fable 5 / Mythos 5 / Opus 5.5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, and an omitted block
-   arrives with an EMPTY `thinking` field and no `thinking_delta` events at all
-   (docs.claude.com /en/docs/build-with-claude/thinking, \"Controlling thinking
-   display\"). Callers that render reasoning would show a silent, empty block
-   for every such turn, so svar always opts into the summary."
-  {:type "adaptive" :display "summarized"})
+   svar asks for `display: \"omitted\"` on every model. The summary arrives in one
+   burst after thinking ends, so it only delays the answer. An omitted block keeps
+   its signature, so replay still works, but carries an EMPTY `thinking` field and
+   no `thinking_delta` events (docs.claude.com /en/docs/build-with-claude/thinking,
+   \"Controlling thinking display\")."
+  {:type "adaptive" :display "omitted"})
 
 (def ^:private ANTHROPIC_ADAPTIVE_NAME_PATTERN
   "Claude families that take ADAPTIVE thinking, by name.
@@ -956,9 +955,8 @@
 (defn- anthropic-thinking-extra-body
   [model-map norm budget]
   (if (anthropic-adaptive-thinking-model? model-map)
-    ;; No advertised thinking rung (`clamp-effort` → nil) still keeps the display
-    ;; opt-in: Anthropic's own default effort is a depth, `display: "omitted"` is
-    ;; an empty reasoning surface.
+    ;; No advertised thinking rung (`clamp-effort` → nil) still sends the adaptive
+    ;; config: Anthropic's own default effort is a depth.
     (let [effort (clamp-effort (get-in REASONING_LEVELS [norm :anthropic-effort])
                                (supported-efforts model-map :anthropic-thinking))]
       (cond-> {:thinking ANTHROPIC_ADAPTIVE_THINKING}
@@ -966,15 +964,12 @@
         (assoc :output_config {:effort effort})))
     {:thinking {:type "enabled" :budget_tokens budget}}))
 
-(defn- anthropic-adaptive-display-body
+(defn- anthropic-adaptive-thinking-body
   "Thinking config for an adaptive Claude model when the caller named NO level.
 
-   Without this, `reasoning-extra-body` returned nil for a level-less call, the
-   body carried no `thinking` field, and the newest Claude models ran with their
-   own default `display: \"omitted\"` — thinking blocks with an empty `thinking`
-   field, no `thinking_delta` events, and a reasoning surface that shows nothing.
-   Emitting the display opt-in alone (no `output_config`) leaves DEPTH entirely
-   to Anthropic's default effort, which is what \"no level\" means."
+   A level-less call keeps adaptive thinking explicit, with the same display as a
+   leveled call. Without `output_config`, DEPTH stays with Anthropic's default
+   effort, which is what \"no level\" means."
   [api-style model-map]
   (when (and (= api-style :anthropic)
              (:reasoning? model-map)
@@ -1036,8 +1031,7 @@
      - the reasoning-style has no mapping in REASONING_LEVELS
      - `level` is nil / unknown AND the model is not a Claude adaptive-thinking
        model on the Anthropic wire. Those DO get a body without a level: the
-       display opt-in alone (see `anthropic-adaptive-display-body`), because
-       their own default is `display: \"omitted\"` — empty thinking blocks.
+       adaptive thinking config alone (see `anthropic-adaptive-thinking-body`).
 
    `:off` asks for NO thinking: `reasoning-off-extra-body` gives the wire shape
    per style, including the styles that cannot turn thinking off.
@@ -1120,9 +1114,9 @@
                           {:thinking {:type "disabled"}})
 
                         nil))))
-     ;; No level named: Claude adaptive models still need the display opt-in,
+     ;; No level named: Claude adaptive models still get the adaptive config,
      ;; everything else keeps the historical silent nil.
-     (anthropic-adaptive-display-body api-style model-map))))
+     (anthropic-adaptive-thinking-body api-style model-map))))
 
 ;; =============================================================================
 ;; Provider-scoped model availability, pricing, and context limits
