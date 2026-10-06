@@ -1503,6 +1503,43 @@
                      (expect (not (contains? opts :reasoning-effort)))))))
 
 (defdescribe
+  routed-thinking-display-test
+  (let [inject
+        (var-get #'sut/inject-routed-params)
+
+        provider
+        {:id :anthropic :api-style :anthropic}
+
+        model
+        {:name "claude-opus-5"
+         :context 1000000
+         :reasoning? true
+         :reasoning-style :anthropic-thinking
+         :reasoning-options [{:type "effort" :values ["low" "medium" "high" "max"]}]}
+
+        display
+        (fn [opts]
+          (get-in (inject opts provider model) [:extra-body :thinking :display]))]
+
+    (it "sends the summary unless the caller turns it off"
+        (expect (= "summarized" (display {})))
+        (expect (= "summarized" (display {:reasoning :deep})))
+        (expect (= "omitted" (display {:thinking-display "omitted"})))
+        (expect (= "omitted" (display {:reasoning :deep :thinking-display :omitted}))))
+    (it "applies to the exact provider-native effort too"
+        (let [body (:extra-body
+                     (inject {:reasoning-effort "max" :thinking-display "omitted"} provider model))]
+          (expect (= {:type "adaptive" :display "omitted"} (:thinking body)))
+          (expect (= {:effort "max"} (:output_config body)))))
+    (it "lets an explicit :thinking in :extra-body win"
+        (expect (= "summarized"
+                   (display {:thinking-display "omitted"
+                             :extra-body {:thinking {:type "adaptive" :display "summarized"}}}))))
+    (it "consumes the opt before the wire primitive"
+        (expect (not (contains? (inject {:thinking-display "omitted"} provider model)
+                                :thinking-display))))))
+
+(defdescribe
   reasoning-content-echo-provenance-test
   "openai-chat reasoning_content echo: the :thinking-signature slot rides
    the wire ONLY when it IS the reasoning text (z.ai capture shape,

@@ -6,6 +6,7 @@
    - `reasoning-extra-body` producing the right wire shape per api-style.
    - Silent no-op for non-reasoning models and unknown levels.
    - `:off`: thinking disabled where the wire can, least thinking elsewhere.
+   - `apply-thinking-display`: the caller's choice of Claude thinking display.
    - Anthropic budget-tokens magnitudes matching the documented thresholds.
    - Anthropic max_tokens clamp when thinking is enabled."
   (:require [lazytest.core :refer [defdescribe describe expect it]]
@@ -85,7 +86,7 @@
                       :anthropic
                       {:name model :reasoning? true :reasoning-style :anthropic-thinking}
                       level)]
-            (expect (= {:type "adaptive" :display "omitted"} (:thinking out)))
+            (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
             (expect (= {:effort effort} (:output_config out)))
             (expect (nil? (get-in out [:thinking :budget_tokens]))))))
     (it "uses adaptive thinking for dashed and dotted Fable 5.1 ids"
@@ -94,7 +95,7 @@
                       :anthropic
                       {:name model :reasoning? true :reasoning-style :anthropic-thinking}
                       :deep)]
-            (expect (= {:type "adaptive" :display "omitted"} (:thinking out)))
+            (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
             (expect (= {:effort "max"} (:output_config out)))
             (expect (nil? (get-in out [:thinking :budget_tokens]))))))
     (it "uses adaptive thinking for dashed and dotted Claude 5.5 ids"
@@ -103,7 +104,7 @@
                       :anthropic
                       {:name model :reasoning? true :reasoning-style :anthropic-thinking}
                       :deep)]
-            (expect (= {:type "adaptive" :display "omitted"} (:thinking out)))
+            (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
             (expect (= {:effort "max"} (:output_config out)))
             (expect (nil? (get-in out [:thinking :budget_tokens]))))))
     (it "climbs Anthropic's own effort ladder, not OpenAI's"
@@ -126,11 +127,13 @@
           ;; below default. (`:deep` names the ceiling on both, then clamps.)
           (expect (not= (get-in router/REASONING_LEVELS [:balanced :openai-effort])
                         (get-in router/REASONING_LEVELS [:balanced :anthropic-effort])))))
-    (it "keeps adaptive thinking with omitted display when the caller names no level"
-        ;; Regression: a level-less call emitted no `thinking` field at all. Keep the
-        ;; adaptive config explicit, with the same display as a leveled call.
+    (it "opts into summarized display even when the caller names no level"
+        ;; Regression: a level-less call emitted no `thinking` field at all, so
+        ;; Opus 5 / Sonnet 5 / Fable 5 used their own `display: "omitted"`
+        ;; default — thinking blocks with an EMPTY thinking field and no
+        ;; `thinking_delta` events, i.e. a reasoning surface showing nothing.
         (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}]
-          (expect (= {:thinking {:type "adaptive" :display "omitted"}}
+          (expect (= {:thinking {:type "adaptive" :display "summarized"}}
                      (router/reasoning-extra-body :anthropic opus nil)))
           ;; No level means no DEPTH opinion: Anthropic's default effort stands.
           (expect (nil? (:output_config (router/reasoning-extra-body :anthropic opus nil))))
@@ -438,7 +441,7 @@
                         :reasoning? true
                         :reasoning-style :anthropic-thinking
                         :reasoning-options [{:type "effort" :values ["none"]}]}]
-          (expect (= {:thinking {:type "adaptive" :display "omitted"}}
+          (expect (= {:thinking {:type "adaptive" :display "summarized"}}
                      (router/reasoning-extra-body :anthropic off-only :deep)))))
     (it "keeps \"max\" for a Claude row the catalog does not carry"
         (let [opus {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}]
@@ -502,7 +505,7 @@
             out
             (router/reasoning-extra-body :anthropic custom :balanced)]
 
-        (expect (= {:type "adaptive" :display "omitted"} (:thinking out)))
+        (expect (= {:type "adaptive" :display "summarized"} (:thinking out)))
         (expect (= {:effort "high"} (:output_config out)))))
   (it "a budget_tokens-only row is manual, whatever the name says"
       (let [named-adaptive {:name "claude-opus-5"
@@ -522,7 +525,7 @@
                                         {:type "budget_tokens" :min 1024}]})]
         (expect (= {:thinking {:type "enabled" :budget_tokens 24000}}
                    (router/reasoning-extra-body :anthropic (both "claude-opus-4-5") :deep)))
-        (expect (= {:type "adaptive" :display "omitted"}
+        (expect (= {:type "adaptive" :display "summarized"}
                    (:thinking
                      (router/reasoning-extra-body :anthropic (both "claude-opus-4-6") :deep))))))
   (it "the exact-effort API sends the adaptive block only to adaptive families"
@@ -541,7 +544,8 @@
 
         (expect (= {:output_config {:effort "high"}}
                    (:extra-body (router/resolve-reasoning-effort :anthropic opus45 "high"))))
-        (expect (= {:output_config {:effort "max"} :thinking {:type "adaptive" :display "omitted"}}
+        (expect (= {:output_config {:effort "max"}
+                    :thinking {:type "adaptive" :display "summarized"}}
                    (:extra-body (router/resolve-reasoning-effort :anthropic opus5 "max")))))))
 
 (defdescribe
@@ -777,3 +781,34 @@
     (it "sends nothing"
         (expect (nil? (router/reasoning-extra-body :openai-compatible-chat {:name "gpt-4o"} :off)))
         (expect (nil? (router/reasoning-extra-body :anthropic {:name "claude-haiku-3"} :off))))))
+
+(defdescribe
+  thinking-display-test
+  "`apply-thinking-display`: the caller chooses if adaptive Claude thinking is visible."
+  (let [adaptive {:thinking {:type "adaptive" :display "summarized"}
+                  :output_config {:effort "max"}}]
+    (it "defaults to the summary"
+        (expect (= "summarized" (first router/THINKING_DISPLAY_OPTIONS)))
+        (expect (= {:thinking {:type "adaptive" :display "summarized"}}
+                   (router/reasoning-extra-body
+                     :anthropic
+                     {:name "claude-opus-5" :reasoning? true :reasoning-style :anthropic-thinking}
+                     nil))))
+    (it "omits the thinking text on request and keeps the depth"
+        (expect (= {:thinking {:type "adaptive" :display "omitted"} :output_config {:effort "max"}}
+                   (router/apply-thinking-display adaptive "omitted"))))
+    (it "accepts keywords and any case"
+        (doseq [v [:omitted " Omitted " "OMITTED"]]
+          (expect (= "omitted"
+                     (get-in (router/apply-thinking-display adaptive v) [:thinking :display])))))
+    (it "ignores nil and unknown values"
+        (doseq [v [nil "full" :none 1]]
+          (expect (= adaptive (router/apply-thinking-display adaptive v)))))
+    (it "leaves bodies without adaptive thinking unchanged"
+        ;; Manual budget thinking, disabled thinking and the Z.ai GLM shape have
+        ;; no display field.
+        (doseq [body [nil {:thinking {:type "enabled" :budget_tokens 8192}}
+                      {:thinking {:type "disabled"}}
+                      {:thinking {:type "enabled"} :reasoning_effort "max"}
+                      {:reasoning_effort "high"}]]
+          (expect (= body (router/apply-thinking-display body "omitted")))))))

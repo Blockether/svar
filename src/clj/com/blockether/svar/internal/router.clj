@@ -853,15 +853,24 @@
   [model-map]
   (filterv (set PROVIDER_NATIVE_REASONING_EFFORTS) (catalog-effort-values model-map)))
 
+(def THINKING_DISPLAY_OPTIONS
+  "Values of the Claude adaptive `thinking.display` field, svar's default first.
+
+   \"summarized\" streams a readable summary of the thinking. \"omitted\" sends an
+   EMPTY `thinking` field and no `thinking_delta` events, so the answer can start
+   sooner. An omitted block keeps its signature, so replay still works
+   (docs.claude.com /en/docs/build-with-claude/thinking, \"Controlling thinking
+   display\")."
+  ["summarized" "omitted"])
+
 (def ^:private ANTHROPIC_ADAPTIVE_THINKING
   "The thinking config every Claude adaptive-thinking request carries.
 
-   svar asks for `display: \"omitted\"` on every model. The summary arrives in one
-   burst after thinking ends, so it only delays the answer. An omitted block keeps
-   its signature, so replay still works, but carries an EMPTY `thinking` field and
-   no `thinking_delta` events (docs.claude.com /en/docs/build-with-claude/thinking,
-   \"Controlling thinking display\")."
-  {:type "adaptive" :display "omitted"})
+   `display` is NOT optional for us: it defaults to \"omitted\" on Fable 5.1 /
+   Fable 5 / Mythos 5 / Opus 5.5 / Opus 5 / Sonnet 5 / Opus 4.8 / Opus 4.7, so svar
+   always names it. svar asks for the summary; the `:thinking-display` ask opt
+   selects \"omitted\" instead (see `apply-thinking-display`)."
+  {:type "adaptive" :display "summarized"})
 
 (def ^:private ANTHROPIC_ADAPTIVE_NAME_PATTERN
   "Claude families that take ADAPTIVE thinking, by name.
@@ -964,6 +973,15 @@
         (assoc :output_config {:effort effort})))
     {:thinking {:type "enabled" :budget_tokens budget}}))
 
+(defn- anthropic-adaptive-thinking?
+  "True when requests to this model carry the adaptive thinking config: an
+   adaptive Claude model that thinks on the Anthropic wire."
+  [api-style model-map]
+  (boolean (and (= api-style :anthropic)
+                (:reasoning? model-map)
+                (= :anthropic-thinking (infer-reasoning-style api-style model-map))
+                (anthropic-adaptive-thinking-model? model-map))))
+
 (defn- anthropic-adaptive-thinking-body
   "Thinking config for an adaptive Claude model when the caller named NO level.
 
@@ -971,11 +989,29 @@
    leveled call. Without `output_config`, DEPTH stays with Anthropic's default
    effort, which is what \"no level\" means."
   [api-style model-map]
-  (when (and (= api-style :anthropic)
-             (:reasoning? model-map)
-             (= :anthropic-thinking (infer-reasoning-style api-style model-map))
-             (anthropic-adaptive-thinking-model? model-map))
-    {:thinking ANTHROPIC_ADAPTIVE_THINKING}))
+  (when (anthropic-adaptive-thinking? api-style model-map) {:thinking ANTHROPIC_ADAPTIVE_THINKING}))
+
+(defn- normalize-thinking-display
+  "The `THINKING_DISPLAY_OPTIONS` value that `v` names, or nil.
+
+   Accepts a string or keyword in any case, such as `:omitted` or \"Summarized\"."
+  [v]
+  (when-let [s (cond (keyword? v) (name v)
+                     (string? v) v)]
+    (some #{(str/lower-case (str/trim s))} THINKING_DISPLAY_OPTIONS)))
+
+(defn apply-thinking-display
+  "Set `thinking.display` in an adaptive Claude request body.
+
+   `display` is a `THINKING_DISPLAY_OPTIONS` value, as a string or keyword. The
+   body comes back unchanged when `display` is nil or unknown, or when its
+   `:thinking` is not adaptive: manual `budget_tokens` thinking, disabled
+   thinking and other vendors have no display field."
+  [extra-body display]
+  (let [display (normalize-thinking-display display)]
+    (if (and display (= "adaptive" (get-in extra-body [:thinking :type])))
+      (assoc-in extra-body [:thinking :display] display)
+      extra-body)))
 
 (defn- zai-effort-rung
   "The `reasoning_effort` GLM will honor for `wanted`, or nil when it honors
@@ -2428,7 +2464,8 @@
 (defn- add-wire-capabilities
   "Stamp the CAPABILITY facts every surface needs onto one normalized model:
    the reasoning style the request path will actually use, whether the caller
-   may pick a depth, and the verbosity control the wire accepts.
+   may pick a depth, and the verbosity and thinking-display controls the wire
+   accepts.
 
    They are decided HERE because they are decided by the WIRE, and only the
    router knows which wire a model rides: the model's own `:api-style` wins over
@@ -2451,7 +2488,14 @@
       verbosity
       (assoc :verbosity-style
         verbosity :verbosity-options
-        VERBOSITY_LEVELS))))
+        VERBOSITY_LEVELS)
+
+      ;; Only adaptive Claude on the Anthropic wire has a `thinking.display`
+      ;; field; `apply-thinking-display` leaves every other body unchanged.
+      (anthropic-adaptive-thinking? api-style model)
+      (assoc :thinking-display-style
+        :anthropic-display :thinking-display-options
+        THINKING_DISPLAY_OPTIONS))))
 
 (defn keyword-body
   "`body` with every string map key, at any depth, turned into a keyword of the
@@ -5343,12 +5387,15 @@
                   :capabilities (or (:capabilities model-map) #{})
                   ;; Capability, not vendor: `normalize-provider` stamped these
                   ;; from the wire the model actually rides, so a channel can
-                  ;; decide whether to OFFER a reasoning-depth or verbosity
-                  ;; control without owning a model table of its own.
+                  ;; decide whether to OFFER a reasoning-depth, verbosity or
+                  ;; thinking-display control without owning a model table of
+                  ;; its own.
                   :reasoning-style (:reasoning-style model-map)
                   :reasoning-effort? (boolean (:reasoning-effort? model-map))
                   :verbosity-style (:verbosity-style model-map)
                   :verbosity-options (:verbosity-options model-map)
+                  :thinking-display-style (:thinking-display-style model-map)
+                  :thinking-display-options (:thinking-display-options model-map)
                   :provider (:id provider)
                   ;; The model's own api-style wins, exactly as the request path
                   ;; resolves it — one Copilot provider serves an Anthropic wire

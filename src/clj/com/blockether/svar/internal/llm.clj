@@ -7624,9 +7624,12 @@
      replaces the same keyword member instead of duplicating it. The abstract
      `:reasoning :low|:balanced|:deep` opt is translated per the model's
      api-style; non-reasoning models ignore it.
-   - `:reasoning` and `:preserved-thinking?` are consumed here and removed
-     downstream (they're svar-level opts, not provider params). Callers who
-     set explicit reasoning keys inside `:extra-body` keep those overrides.
+   - `:reasoning`, `:reasoning-effort`, `:preserved-thinking?` and
+     `:thinking-display` are consumed here and removed downstream (they're
+     svar-level opts, not provider params). `:thinking-display` only changes
+     the adaptive Claude `thinking` block that the reasoning translation
+     emits. Callers who set explicit reasoning keys inside `:extra-body` keep
+     those overrides.
    - `:json-object-mode?` is propagated from the routed model's metadata
      when the caller didn't set it explicitly. Used by `ask!*` to auto-inject
      `response_format: {type: \"json_object\"}` on
@@ -7649,12 +7652,14 @@
           (router/resolve-reasoning-effort api-style model-map (:reasoning-effort opts)))
 
         reasoning-params
-        (if effort-resolution
-          (:extra-body effort-resolution)
-          (router/reasoning-extra-body api-style
-                                       model-map
-                                       (:reasoning opts)
-                                       {:preserved-thinking? (:preserved-thinking? opts)}))
+        (router/apply-thinking-display (if effort-resolution
+                                         (:extra-body effort-resolution)
+                                         (router/reasoning-extra-body
+                                           api-style
+                                           model-map
+                                           (:reasoning opts)
+                                           {:preserved-thinking? (:preserved-thinking? opts)}))
+                                       (:thinking-display opts))
 
         merged-body
         (cond-> (merge (:extra-body provider)
@@ -7677,7 +7682,7 @@
           (:json-object-mode? model-map))]
 
     (-> opts
-        (dissoc :reasoning :reasoning-effort :preserved-thinking?)
+        (dissoc :reasoning :reasoning-effort :preserved-thinking? :thinking-display)
         (assoc :model (:name model-map)
                :api-key (:api-key provider)
                :base-url (:base-url provider)
@@ -7923,7 +7928,12 @@
        reasoning_content back in subsequent assistant turns or quality and
        cache hit rates degrade. No-op on non-z.ai styles. The Coding Plan
        endpoint (`:zai-coding`) has preserved thinking ON by default
-       server-side - setting this flag is harmless there.
+        server-side - setting this flag is harmless there.
+     :thinking-display - Claude adaptive thinking only: \"summarized\" (the
+        default) streams a readable thinking summary; \"omitted\" sends empty
+        thinking blocks and no thinking_delta events, so the answer can start
+        sooner. Accepts strings or keywords. Unknown values and other models
+        ignore it. A `:thinking` map in `:extra-body` wins.
      :extra-body - Map merged into the API request body. Use this to pass
        provider-specific params (e.g. {:temperature 0.3}, {:top_p 0.9}) or
        to override reasoning params with explicit wire-shape overrides.

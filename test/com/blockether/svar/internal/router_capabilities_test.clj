@@ -1,11 +1,12 @@
 (ns com.blockether.svar.internal.router-capabilities-test
   "Wire capabilities svar stamps on every resolved model.
 
-   `:reasoning-effort?` and `:verbosity-style` exist so a CHANNEL never has to
-   ask which provider it is talking to. Both are decided by the wire the model
-   rides, which only the router knows: one `github-copilot` provider serves an
-   Anthropic wire for Claude and an OpenAI Responses wire for GPT, so a
-   provider-keyword test gets both answers wrong at once."
+   `:reasoning-effort?`, `:verbosity-style` and `:thinking-display-style` exist so
+   a CHANNEL never has to ask which provider it is talking to. They are decided
+   by the wire the model rides, which only the router knows: one
+   `github-copilot` provider serves an Anthropic wire for Claude and an OpenAI
+   Responses wire for GPT, so a provider-keyword test gets both answers wrong at
+   once."
   (:require [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.internal.router :as router]))
 
@@ -28,56 +29,57 @@
 (defdescribe
   reasoning-effort-capability-test
   "`:reasoning-effort?` answers 'may the CALLER pick a depth', not 'does it think'."
-  (describe
-    "GitHub Copilot serves two wires under one provider id"
-    (it "grants effort to the GPT tier, which rides the Responses wire"
-        (let [m (get (copilot "gpt-5.5") "gpt-5.5")]
-          (expect (true? (:reasoning? m)))
-          (expect (= :openai-compatible-responses (:api-style m)))
-          (expect (= :openai-effort (:reasoning-style m)))
-          (expect (true? (:reasoning-effort? m)))))
-    (it "grants effort to the Claude tier, which rides the native Anthropic wire"
-        ;; Regression, GitHub Copilot Enterprise: claude-opus-5 offered no depth
-        ;; control at all. The row was `:server-managed` — a guard against the
-        ;; spiral that `reasoning_effort` caused on Copilot's OPENAI-compatible
-        ;; chat wire. Claude has been back on `/v1/messages` since; there the
-        ;; native `thinking`/`output_config` fields are readable, so the caller
-        ;; picks the depth and the OpenAI knob is never emitted.
-        (let [m (get (copilot "claude-sonnet-4.6") "claude-sonnet-4.6")]
-          (expect (true? (:reasoning? m)))
-          (expect (= :anthropic (:api-style m)))
-          (expect (= :anthropic-thinking (:reasoning-style m)))
-          (expect (true? (:reasoning-effort? m)))))
-    (it
-      "emits Anthropic thinking on that wire, never `reasoning_effort`"
-      (let [opus
-            (get (copilot "claude-opus-5") "claude-opus-5")
+  (describe "GitHub Copilot serves two wires under one provider id"
+            (it "grants effort to the GPT tier, which rides the Responses wire"
+                (let [m (get (copilot "gpt-5.5") "gpt-5.5")]
+                  (expect (true? (:reasoning? m)))
+                  (expect (= :openai-compatible-responses (:api-style m)))
+                  (expect (= :openai-effort (:reasoning-style m)))
+                  (expect (true? (:reasoning-effort? m)))))
+            (it "grants effort to the Claude tier, which rides the native Anthropic wire"
+                ;; Regression, GitHub Copilot Enterprise: claude-opus-5 offered no depth
+                ;; control at all. The row was `:server-managed` — a guard against the
+                ;; spiral that `reasoning_effort` caused on Copilot's OPENAI-compatible
+                ;; chat wire. Claude has been back on `/v1/messages` since; there the
+                ;; native `thinking`/`output_config` fields are readable, so the caller
+                ;; picks the depth and the OpenAI knob is never emitted.
+                (let [m (get (copilot "claude-sonnet-4.6") "claude-sonnet-4.6")]
+                  (expect (true? (:reasoning? m)))
+                  (expect (= :anthropic (:api-style m)))
+                  (expect (= :anthropic-thinking (:reasoning-style m)))
+                  (expect (true? (:reasoning-effort? m)))))
+            (it "emits Anthropic thinking on that wire, never `reasoning_effort`"
+                (let [opus
+                      (get (copilot "claude-opus-5") "claude-opus-5")
 
-            haiku
-            (get (copilot "claude-haiku-4.5") "claude-haiku-4.5")
+                      haiku
+                      (get (copilot "claude-haiku-4.5") "claude-haiku-4.5")
 
-            body
-            (fn [m level]
-              (router/reasoning-extra-body (:api-style m) m level))]
+                      body
+                      (fn [m level]
+                        (router/reasoning-extra-body (:api-style m) m level))]
 
-        ;; Opus 5 is an adaptive-thinking family: depth is `output_config.effort`.
-        (expect (= {:thinking {:type "adaptive" :display "omitted"} :output_config {:effort "low"}}
-                   (body opus :low)))
-        ;; Regression: `:deep` used to resolve through the OPENAI effort column
-        ;; and land on "high" — Anthropic's DEFAULT — so asking for deep
-        ;; thinking bought nothing above the default posture.
-        (expect (= {:thinking {:type "adaptive" :display "omitted"} :output_config {:effort "max"}}
-                   (body opus :deep)))
-        ;; Older families still take a manual budget.
-        (expect (= {:thinking {:type "enabled" :budget_tokens 8192}} (body haiku :balanced)))
-        ;; The lever that spiralled the proxy stays unreachable on this wire.
-        (doseq [level
-                [:low :balanced :deep]
+                  ;; Opus 5 is an adaptive-thinking family: depth is `output_config.effort`.
+                  (expect (= {:thinking {:type "adaptive" :display "summarized"}
+                              :output_config {:effort "low"}}
+                             (body opus :low)))
+                  ;; Regression: `:deep` used to resolve through the OPENAI effort column
+                  ;; and land on "high" — Anthropic's DEFAULT — so asking for deep
+                  ;; thinking bought nothing above the default posture.
+                  (expect (= {:thinking {:type "adaptive" :display "summarized"}
+                              :output_config {:effort "max"}}
+                             (body opus :deep)))
+                  ;; Older families still take a manual budget.
+                  (expect (= {:thinking {:type "enabled" :budget_tokens 8192}}
+                             (body haiku :balanced)))
+                  ;; The lever that spiralled the proxy stays unreachable on this wire.
+                  (doseq [level
+                          [:low :balanced :deep]
 
-                m
-                [opus haiku]]
+                          m
+                          [opus haiku]]
 
-          (expect (nil? (:reasoning_effort (body m level))))))))
+                    (expect (nil? (:reasoning_effort (body m level))))))))
   (describe "styles that carry a caller-chosen depth"
             (it "grants effort on the native Anthropic wire (budget tokens)"
                 (let [m (get (models-of {:id :anthropic :api-key "test-key"}) "claude-sonnet-4-6")]
@@ -127,6 +129,31 @@
                    (expect (nil? (:verbosity-options m))))))
 
 (defdescribe
+  thinking-display-capability-test
+  "`thinking.display` exists only on adaptive Claude thinking on the Anthropic wire."
+  (it "stamps adaptive Claude with the style and its vocabulary"
+      (doseq [m [(get (copilot "claude-opus-5") "claude-opus-5")
+                 (get (models-of {:id :anthropic :api-key "test-key"}) "claude-sonnet-4-6")]]
+        (expect (= :anthropic-display (:thinking-display-style m)))
+        (expect (= router/THINKING_DISPLAY_OPTIONS (:thinking-display-options m)))
+        (expect (= ["summarized" "omitted"] (:thinking-display-options m)))))
+  (it "leaves the key absent where the request has no display field"
+      ;; Haiku 4.5 takes manual budget thinking, GPT rides the Responses
+      ;; wire, and Z.ai GLM only turns thinking on or off, also on the
+      ;; Anthropic wire.
+      (doseq [m [(get (copilot "claude-haiku-4.5") "claude-haiku-4.5")
+                 (get (copilot "gpt-5.5") "gpt-5.5")
+                 (get (models-of
+                        {:id :custom-glm
+                         :api-key "test-key"
+                         :base-url "https://example.test/anthropic"
+                         :api-style :anthropic
+                         :models [{:name "glm-5.2" :reasoning? true :reasoning-style :zai-effort}]})
+                      "glm-5.2")]]
+        (expect (nil? (:thinking-display-style m)))
+        (expect (nil? (:thinking-display-options m))))))
+
+(defdescribe
   resolve-effective-model-capabilities-test
   "The resolved-model map is the ONE thing a channel reads, so it carries them."
   (it "surfaces both capabilities for the routed model"
@@ -141,7 +168,8 @@
         (expect (= "gpt-5.5" (:name info)))
         (expect (true? (:reasoning-effort? info)))
         (expect (= :openai-text (:verbosity-style info)))
-        (expect (= ["low" "medium" "high"] (:verbosity-options info)))))
+        (expect (= ["low" "medium" "high"] (:verbosity-options info)))
+        (expect (nil? (:thinking-display-style info)))))
   (it "surfaces depth-but-no-verbosity for the Claude tier of the SAME provider"
       (let [router
             (router/make-router [{:id :github-copilot
@@ -154,7 +182,10 @@
         (expect (= "claude-sonnet-4.6" (:name info)))
         ;; Anthropic wire: the depth knob is native, the OpenAI text knob is not.
         (expect (true? (:reasoning-effort? info)))
-        (expect (nil? (:verbosity-style info)))))
+        (expect (nil? (:verbosity-style info)))
+        ;; Adaptive Claude: the thinking summary can be turned off.
+        (expect (= :anthropic-display (:thinking-display-style info)))
+        (expect (= router/THINKING_DISPLAY_OPTIONS (:thinking-display-options info)))))
   (it "surfaces the refusal when the wire really does manage depth itself"
       (let [router
             (router/make-router [{:id :proxy-that-gates
