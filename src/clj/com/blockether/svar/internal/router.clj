@@ -736,29 +736,15 @@
                 (contains? #{:openai-effort :anthropic-thinking :zai-effort}
                            (infer-reasoning-style api-style model-map)))))
 
-(def ^:private PROVIDER_NATIVE_REASONING_EFFORTS
-  "Exact rungs a caller may pin through `:reasoning-effort`, weakest → strongest.
-
-   The exact API exists for provider-controlled evaluations, so the vocabulary
-   is deliberately narrow: the rungs z.ai's GLM rows sell. `low` joined it with
-   GLM-5.3, which advertises the light rung GLM-5.2 never had. Every value stays
-   catalog-gated per model (`effort-option-values`), so a row that does not
-   advertise a rung can never be pinned to it."
-  ["low" "high" "max"])
-
-(defn- normalize-reasoning-effort
-  [effort]
-  (when (string? effort)
-    (let [normalized (str/lower-case (str/trim effort))]
-      (when (contains? (set PROVIDER_NATIVE_REASONING_EFFORTS) normalized) normalized))))
-
-(def ^:private EFFORT_LADDER
+(def EFFORT_LADDER
   "Every reasoning-effort rung models.dev advertises, weakest → strongest.
 
    The vocabulary is the catalog's own (`reasoning_options[].values`) and is
    declared exactly once, here, so ordering and clamping cannot drift apart.
    `none` / `minimal` mean *do not think*; svar's abstract levels never aim
-   there — `:low` is the weakest rung that still thinks."
+   there — `:low` is the weakest rung that still thinks. A caller may pin any
+   rung through `:reasoning-effort`, but only on a model whose catalog row
+   advertises it (`reasoning-effort-options`)."
   ["none" "minimal" "low" "medium" "high" "xhigh" "max"])
 
 (def ^:private EFFORT_RANK
@@ -768,6 +754,13 @@
         (map-indexed (fn [i v]
                        [v i]))
         EFFORT_LADDER))
+
+(defn- normalize-reasoning-effort
+  "The `EFFORT_LADDER` rung that `effort` names, case-insensitively, or nil."
+  [effort]
+  (when (string? effort)
+    (let [normalized (str/lower-case (str/trim effort))]
+      (when (contains? EFFORT_RANK normalized) normalized))))
 
 (def ^:private UNCATALOGUED_EFFORT_CEILING
   "Strongest rung svar will send when models.dev advertises NO effort options
@@ -849,9 +842,34 @@
                     (or (last (filter #(<= (long (EFFORT_RANK %)) (long want)) candidates))
                         (first candidates)))))))
 
-(defn- effort-option-values
-  [model-map]
-  (filterv (set PROVIDER_NATIVE_REASONING_EFFORTS) (catalog-effort-values model-map)))
+(defn reasoning-effort-options
+  "Exact rungs a caller may pin on this model through `:reasoning-effort`,
+   weakest → strongest, or `[]` when the caller cannot choose its depth.
+
+   The catalog decides: these are the `EFFORT_LADDER` rungs that the model's
+   models.dev row advertises. A model without that evidence, a binary
+   `:zai-thinking` switch and a `:server-managed` wire offer none."
+  [api-style model-map]
+  (if (caller-selectable-reasoning-effort? api-style model-map)
+    (catalog-effort-values model-map)
+    []))
+
+(defn nearest-reasoning-effort
+  "The rung of `reasoning-effort-options` closest to the rung `effort` names, or nil.
+
+   An offered rung comes back unchanged. Otherwise the answer is the strongest
+   offered rung below `effort`, or the weakest offered rung when every option sits
+   above it (`clamp-effort`). This carries one chosen rung across models that offer
+   different ladders. Nil when `effort` is not an `EFFORT_LADDER` rung or when the
+   model offers no rung that matches the request."
+  [api-style model-map effort]
+  (let [wanted
+        (normalize-reasoning-effort effort)
+
+        options
+        (reasoning-effort-options api-style model-map)]
+
+    (when (and wanted (seq options)) (clamp-effort wanted options))))
 
 (def THINKING_DISPLAY_OPTIONS
   "Values of the Claude adaptive `thinking.display` field, svar's default first.
@@ -908,19 +926,16 @@
   "Resolve an exact provider-native reasoning effort for one model.
 
    Unlike `reasoning-extra-body`, this API does no abstract-level aliasing or
-   translation: only the literal strings \"low\", \"high\" and \"max\" are accepted,
-   and the requested value must appear in the model catalog's effort options.
-   The returned map is stable evidence callers can retain with a routed result."
+   translation: `effort` must name an `EFFORT_LADDER` rung that the model offers
+   (`reasoning-effort-options`), or `:effective` is nil. The returned map is
+   stable evidence callers can retain with a routed result."
   ([model-map effort] (resolve-reasoning-effort nil model-map effort))
   ([api-style model-map effort]
    (let [requested
          (when (string? effort) (str/lower-case (str/trim effort)))
 
-         effective
-         (normalize-reasoning-effort effort)
-
          supported
-         (effort-option-values model-map)
+         (reasoning-effort-options api-style model-map)
 
          raw-style
          (infer-reasoning-style api-style model-map)
@@ -931,10 +946,7 @@
            raw-style)
 
          effective
-         (when (and effective
-                    (some #{effective} supported)
-                    (contains? #{:openai-effort :anthropic-thinking :zai-effort} wire-style))
-           effective)
+         (some #{(normalize-reasoning-effort effort)} supported)
 
          extra-body
          (when effective
@@ -2464,8 +2476,8 @@
 (defn- add-wire-capabilities
   "Stamp the CAPABILITY facts every surface needs onto one normalized model:
    the reasoning style the request path will actually use, whether the caller
-   may pick a depth, and the verbosity and thinking-display controls the wire
-   accepts.
+   may pick a depth and which exact rungs it may pin, and the verbosity and
+   thinking-display controls the wire accepts.
 
    They are decided HERE because they are decided by the WIRE, and only the
    router knows which wire a model rides: the model's own `:api-style` wins over
@@ -2479,11 +2491,17 @@
         (or (:api-style model) provider-api-style)
 
         verbosity
-        (infer-verbosity-style api-style model)]
+        (infer-verbosity-style api-style model)
+
+        effort-options
+        (reasoning-effort-options api-style model)]
 
     (cond-> (assoc model :reasoning-effort? (caller-selectable-reasoning-effort? api-style model))
       (:reasoning? model)
       (assoc :reasoning-style (infer-reasoning-style api-style model))
+
+      (seq effort-options)
+      (assoc :reasoning-effort-options effort-options)
 
       verbosity
       (assoc :verbosity-style
@@ -5392,6 +5410,7 @@
                   ;; its own.
                   :reasoning-style (:reasoning-style model-map)
                   :reasoning-effort? (boolean (:reasoning-effort? model-map))
+                  :reasoning-effort-options (:reasoning-effort-options model-map)
                   :verbosity-style (:verbosity-style model-map)
                   :verbosity-options (:verbosity-options model-map)
                   :thinking-display-style (:thinking-display-style model-map)

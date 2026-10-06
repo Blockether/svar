@@ -372,6 +372,53 @@
           (expect (= ["high" "max"] (:supported resolved)))))))
 
 (defdescribe
+  provider-native-reasoning-effort-options-test
+  "A caller may pin every rung that the model's catalog row advertises."
+  (let [opus
+        {:name "claude-opus-5-5"
+         :reasoning? true
+         :reasoning-style :anthropic-thinking
+         :reasoning-options [{:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]}
+
+        gpt
+        {:name "gpt-5.1"
+         :reasoning? true
+         :reasoning-options [{:type "effort" :values ["none" "low" "medium" "high"]}]}]
+
+    (it "lists every advertised rung, weakest first"
+        (expect (= ["low" "medium" "high" "xhigh" "max"]
+                   (router/reasoning-effort-options :anthropic opus)))
+        (expect (= ["none" "low" "medium" "high"]
+                   (router/reasoning-effort-options :openai-compatible-chat gpt))))
+    (it "offers no rung when the caller cannot choose the depth"
+        (expect (= []
+                   (router/reasoning-effort-options :openai-compatible-chat
+                                                    (assoc gpt :reasoning-style :server-managed))))
+        (expect (= [] (router/reasoning-effort-options :anthropic (assoc opus :reasoning? false))))
+        (expect (= []
+                   (router/reasoning-effort-options :anthropic (dissoc opus :reasoning-options)))))
+    (it "pins rungs that no abstract level reaches"
+        (expect (= {:output_config {:effort "xhigh"}
+                    :thinking {:type "adaptive" :display "summarized"}}
+                   (:extra-body (router/resolve-reasoning-effort :anthropic opus "xhigh"))))
+        (expect (= "medium"
+                   (:effective (router/resolve-reasoning-effort :anthropic opus "MEDIUM"))))
+        (expect (= {:reasoning_effort "none"}
+                   (:extra-body
+                     (router/resolve-reasoning-effort :openai-compatible-chat gpt "none")))))
+    (it "carries a chosen rung to the nearest rung another model offers"
+        (expect (= "xhigh" (router/nearest-reasoning-effort :anthropic opus "xhigh")))
+        (expect (= "high" (router/nearest-reasoning-effort :openai-compatible-chat gpt "xhigh")))
+        (expect (= "high" (router/nearest-reasoning-effort :openai-compatible-chat gpt "max")))
+        (expect (= "low" (router/nearest-reasoning-effort :anthropic opus "minimal")))
+        (expect (= "none" (router/nearest-reasoning-effort :openai-compatible-chat gpt "none"))))
+    (it "answers nil without a rung to match"
+        (expect (nil? (router/nearest-reasoning-effort :anthropic opus "deep")))
+        (expect (nil? (router/nearest-reasoning-effort :anthropic
+                                                       (dissoc opus :reasoning-options)
+                                                       "high"))))))
+
+(defdescribe
   catalog-clamped-effort-test
   "Every effort svar sends is a value models.dev advertises for that model."
   ;; Regression: the abstract-level path read `REASONING_LEVELS` blind — only

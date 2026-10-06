@@ -67,8 +67,23 @@
    their own extra-body."
   router/reasoning-extra-body)
 
+(def REASONING_EFFORTS
+  "Every provider-native reasoning-effort rung, weakest → strongest.
+   See `com.blockether.svar.internal.router/EFFORT_LADDER`."
+  router/EFFORT_LADDER)
+
+(def reasoning-effort-options
+  "Exact provider-native rungs one model offers, weakest → strongest, or `[]`.
+   Normalized models also carry them as `:reasoning-effort-options`."
+  router/reasoning-effort-options)
+
+(def nearest-reasoning-effort
+  "The rung a model offers that is closest to a requested rung, or nil.
+   Use it to carry one chosen rung across models with different ladders."
+  router/nearest-reasoning-effort)
+
 (def resolve-reasoning-effort
-  "Resolve exact provider-native `high|max` support and wire evidence.
+  "Resolve exact provider-native effort support and wire evidence.
    No abstract reasoning aliases or automatic translations are applied."
   router/resolve-reasoning-effort)
 

@@ -1503,6 +1503,45 @@
                      (expect (not (contains? opts :reasoning-effort)))))))
 
 (defdescribe
+  routed-preferred-reasoning-effort-test
+  (let [inject
+        (var-get #'sut/inject-routed-params)
+
+        provider
+        {:id :zai-coding-plan :api-style :anthropic}
+
+        model
+        {:name "glm-5.2"
+         :context 1000000
+         :reasoning? true
+         :reasoning-style :zai-effort
+         :reasoning-options [{:type "effort" :values ["high" "max"]}]}
+
+        binary
+        {:name "glm-5.1" :context 200000 :reasoning? true :reasoning-style :zai-thinking}
+
+        effort
+        (fn [opts m]
+          (get-in (inject opts provider m) [:extra-body :reasoning_effort]))]
+
+    (it "sends a rung that the model offers unchanged"
+        (expect (= "max" (effort {:preferred-reasoning-effort "max"} model))))
+    (it "sends the nearest offered rung for a rung that the model lacks"
+        (expect (= "high" (effort {:preferred-reasoning-effort "xhigh"} model)))
+        (expect (= "high" (effort {:preferred-reasoning-effort "low"} model))))
+    (it "keeps the abstract level on a model that offers no rung"
+        (let [body (:extra-body
+                     (inject {:reasoning :deep :preferred-reasoning-effort "max"} provider binary))]
+          (expect (nil? (:reasoning_effort body)))
+          (expect (= {:type "enabled"} (:thinking body)))))
+    (it "lets an exact effort win"
+        (expect (= "high"
+                   (effort {:reasoning-effort "high" :preferred-reasoning-effort "max"} model))))
+    (it "consumes the preference before the wire primitive"
+        (expect (not (contains? (inject {:preferred-reasoning-effort "max"} provider model)
+                                :preferred-reasoning-effort))))))
+
+(defdescribe
   routed-thinking-display-test
   (let [inject
         (var-get #'sut/inject-routed-params)

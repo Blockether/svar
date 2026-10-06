@@ -129,6 +129,28 @@
                    (expect (nil? (:verbosity-options m))))))
 
 (defdescribe
+  reasoning-effort-options-capability-test
+  "`:reasoning-effort-options` lists the exact rungs a caller may pin on the model's wire."
+  (it "stamps every advertised rung for the depth-selectable tiers"
+      (expect (= ["low" "medium" "high" "max"]
+                 (:reasoning-effort-options (get (models-of {:id :anthropic :api-key "test-key"})
+                                                 "claude-sonnet-4-6"))))
+      (expect (= ["none" "low" "medium" "high" "xhigh"]
+                 (:reasoning-effort-options (get (copilot "gpt-5.5") "gpt-5.5")))))
+  (it "leaves the key absent when the model offers no rung"
+      ;; Haiku 4.5 takes manual budget tokens; models.dev sells it no effort rung.
+      (expect (nil? (:reasoning-effort-options (get (models-of {:id :anthropic :api-key "test-key"})
+                                                    "claude-haiku-4-5"))))
+      (expect (nil? (:reasoning-effort-options (get (models-of {:id :custom-thinker
+                                                                :api-key "test-key"
+                                                                :base-url "https://example.test/v1"
+                                                                :models [{:name "glm-4.6"
+                                                                          :reasoning? true
+                                                                          :reasoning-style
+                                                                          :zai-thinking}]})
+                                                    "glm-4.6"))))))
+
+(defdescribe
   thinking-display-capability-test
   "`thinking.display` exists only on adaptive Claude thinking on the Anthropic wire."
   (it "stamps adaptive Claude with the style and its vocabulary"
@@ -169,6 +191,7 @@
         (expect (true? (:reasoning-effort? info)))
         (expect (= :openai-text (:verbosity-style info)))
         (expect (= ["low" "medium" "high"] (:verbosity-options info)))
+        (expect (= ["none" "low" "medium" "high" "xhigh"] (:reasoning-effort-options info)))
         (expect (nil? (:thinking-display-style info)))))
   (it "surfaces depth-but-no-verbosity for the Claude tier of the SAME provider"
       (let [router
@@ -199,6 +222,7 @@
             (router/resolve-effective-model router)]
 
         (expect (false? (:reasoning-effort? info)))
+        (expect (nil? (:reasoning-effort-options info)))
         (expect (nil? (:verbosity-style info))))))
 
 (defdescribe

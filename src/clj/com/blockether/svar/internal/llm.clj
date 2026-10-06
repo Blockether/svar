@@ -7583,7 +7583,7 @@
   "Merges svar-level opts that influence routing/fallback into the `:routing`
    map so `resolve-routing` can build a complete prefs map:
      - `:reasoning`         → implies `:require-reasoning? true` (not for `:off`)
-     - `:reasoning-effort`  → exact provider-native `low|high|max`
+     - `:reasoning-effort`  → exact provider-native rung (`router/EFFORT_LADDER`)
      - `:on-format-error`   → enables format-error provider fallback
      - `:format-retry-on`   → customises the format-error type set
      - `:cache-key`         → scopes Svar's prompt-cache meter without exposing it
@@ -7661,11 +7661,12 @@
      replaces the same keyword member instead of duplicating it. The abstract
      `:reasoning :low|:balanced|:deep` opt is translated per the model's
      api-style; non-reasoning models ignore it.
-   - `:reasoning`, `:reasoning-effort`, `:preserved-thinking?` and
-     `:thinking-display` are consumed here and removed downstream (they're
-     svar-level opts, not provider params). `:thinking-display` only changes
-     the adaptive Claude `thinking` block that the reasoning translation
-     emits. Callers who set explicit reasoning keys inside `:extra-body` keep
+   - `:reasoning`, `:reasoning-effort`, `:preferred-reasoning-effort`,
+     `:preserved-thinking?` and `:thinking-display` are consumed here and
+     removed downstream (they're svar-level opts, not provider params).
+     `:thinking-display` only changes the adaptive Claude `thinking` block
+     that the reasoning translation emits. Callers who set explicit
+     reasoning keys inside `:extra-body` keep
      those overrides.
    - `:json-object-mode?` is propagated from the routed model's metadata
      when the caller didn't set it explicitly. Used by `ask!*` to auto-inject
@@ -7685,8 +7686,13 @@
         (or (:api-style model-map) (:api-style provider))
 
         effort-resolution
-        (when (some? (:reasoning-effort opts))
-          (router/resolve-reasoning-effort api-style model-map (:reasoning-effort opts)))
+        (if (some? (:reasoning-effort opts))
+          (router/resolve-reasoning-effort api-style model-map (:reasoning-effort opts))
+          ;; A preferred rung is not a contract: each attempt clamps it to the
+          ;; ladder of its own model, and a model without rungs keeps `:reasoning`.
+          (some->> (:preferred-reasoning-effort opts)
+                   (router/nearest-reasoning-effort api-style model-map)
+                   (router/resolve-reasoning-effort api-style model-map)))
 
         reasoning-params
         (router/apply-thinking-display (if effort-resolution
@@ -7719,7 +7725,11 @@
           (:json-object-mode? model-map))]
 
     (-> opts
-        (dissoc :reasoning :reasoning-effort :preserved-thinking? :thinking-display)
+        (dissoc :reasoning
+                :reasoning-effort
+                :preferred-reasoning-effort
+                :preserved-thinking?
+                :thinking-display)
         (assoc :model (:name model-map)
                :api-key (:api-key provider)
                :base-url (:base-url provider)
@@ -7958,6 +7968,11 @@
          Z.ai GLM-4.6+         → `{:thinking {:type \"enabled\"|\"disabled\"}}`
        Models without `:reasoning?` in their metadata ignore this silently.
        Anything set in `:extra-body` wins over this automatic translation.
+     :preferred-reasoning-effort - Provider-native rung to aim for
+       (`router/EFFORT_LADDER`, e.g. \"xhigh\"). Each attempt sends the rung
+       of its own model that is nearest (`nearest-reasoning-effort`), so
+       fallback keeps every model. A model that offers no rung uses
+       `:reasoning`. An exact `:reasoning-effort` wins.
      :preserved-thinking? - Z.ai-only. When true AND the selected model uses
        `:reasoning-style :zai-thinking`, emits `clear_thinking: false` so
        reasoning_content is preserved across assistant turns (Preserved

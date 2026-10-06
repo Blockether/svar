@@ -372,16 +372,24 @@ They are independent. Example: `:reasoning :deep` + `:verbosity :low` means thin
 
 `:reasoning` is provider-agnostic — svar translates it to the right wire shape for the selected model. `:verbosity` is honored on providers that expose a visible-output verbosity control (notably OpenAI Responses-style endpoints such as `:openai-codex`) and ignored elsewhere.
 
-For provider-controlled evaluations, `:reasoning-effort` is a separate exact
-control. It accepts only the provider-native strings `"low"`, `"high"` and
-`"max"`, requires the selected model to advertise that value in its models.dev
-`:reasoning-options`, and bypasses abstract reasoning aliases, caps, and
-translations. GLM-5.2 sells `high`/`max`; GLM-5.3, GLM-5.3-Flash and
-GLM-5.3-FlashX add the light `low` rung. All four send
-`{:thinking {:type "enabled"} :reasoning_effort "<rung>"}`. Routed
+`:reasoning-effort` is a separate exact control, for provider-controlled
+evaluations and for apps that let people pick a provider's own levels. It accepts
+any provider-native rung in `REASONING_EFFORTS` (`"none"` to `"max"`), requires the
+selected model to advertise that rung in its models.dev `:reasoning-options`, and
+bypasses abstract reasoning aliases, caps, and translations.
+`reasoning-effort-options` lists the rungs one model offers (normalized models
+also carry them as `:reasoning-effort-options`), and `nearest-reasoning-effort`
+maps a chosen rung to the closest rung that another model offers. GLM-5.2 sells
+`high`/`max`; GLM-5.3, GLM-5.3-Flash and GLM-5.3-FlashX add the light `low` rung.
+All four send `{:thinking {:type "enabled"} :reasoning_effort "<rung>"}`. Routed
 results retain the actual resolution under `:routed/reasoning-effort`; callers
 can preflight with `resolve-reasoning-effort`, which returns `:requested`,
 `:effective`, `:supported`, `:wire-style`, and `:extra-body`.
+
+`:preferred-reasoning-effort` is the soft form of the same choice, for a saved user
+preference. Each attempt sends the rung of its own model that is nearest to it
+(`nearest-reasoning-effort`), so fallback keeps every model. A model that offers
+no rung uses `:reasoning`. An exact `:reasoning-effort` wins.
 
 ### Provider-noise hardening (`:format-retries`, `:json-object-mode?`, `:on-format-error`)
 
