@@ -340,7 +340,12 @@
    gets {:event/type :llm.routing/provider-retry :reason <:no-response
    :stream-idle :stream-stalled :stream-truncated :stream-dropped> :attempt N
    :max-retries N :delay-ms N}, so discard the reasoning already streamed. The
-   router option :stream-recovery-delays-ms sets the waits; [] turns this off.
+    router option :stream-recovery-delays-ms sets the waits; [] turns this off.
+
+    Hidden Anthropic thinking sends no text for minutes. A ping inside an open
+    thinking block counts as model progress, so the stall check does not cut
+    long thinking. :on-chunk then gets a chunk with :thinking-alive? true and
+    no new text, so you can show that the model still works.
 
    A provider that rejects its credentials is re-sent on the same provider when the
    routing option :refresh-credentials answers new credentials for it. The router

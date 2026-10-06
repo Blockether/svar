@@ -5580,6 +5580,31 @@
                  (:terminal? extracted)
                  (:incomplete? extracted)))))
 
+(defn- stream-thinking-open?
+  "Whether an Anthropic thinking block is open after the parsed event, given
+   `open?` before it. A `thinking` block start opens it; any other block start
+   and every `content_block_stop` close it."
+  [open? parsed]
+  (case (stream-event-type parsed)
+    "content_block_start"
+    (= "thinking" (get-in parsed ["content_block" "type"]))
+
+    "content_block_stop"
+    false
+
+    open?))
+
+(defn- stream-thinking-keepalive?
+  "True for a `ping` that arrives while a thinking block is open.
+
+   With the thinking display omitted, Anthropic streams no thinking text for
+   minutes, and this keepalive is the only sign that the model still works. It
+   counts as model progress, so long hidden thinking does not trip the semantic
+   deadline. A ping outside a thinking block stays transport liveness, and the
+   idle watchdog still closes a connection that sends nothing."
+  [open? parsed]
+  (boolean (and open? (= "ping" (stream-event-type parsed)))))
+
 (defn- stream-failed-error
   "Provider-failure payload carried by an OpenAI Responses `response.failed`
    (or bare SSE `error`) event, else nil. The OpenAI Codex CLI parses this SAME
@@ -6307,6 +6332,9 @@
         current-reasoning-item
         (atom nil)
 
+        thinking-block-open?
+        (atom false)
+
         terminal-event
         (atom nil)
 
@@ -6441,7 +6469,8 @@
                          reasoning-piece (or reasoning-delta
                                              (when (zero? (.length reasoning-acc))
                                                (some-> reasoning-fallback
-                                                       reasoning-part-text)))]
+                                                       reasoning-part-text)))
+                         thinking-alive? (stream-thinking-keepalive? @thinking-block-open? parsed)]
 
                      (when-let [event-type (stream-event-type parsed)]
                        (reset! last-event-type event-type))
@@ -6464,8 +6493,10 @@
                        (reset! incomplete-response {:reason incomplete-reason :chunk parsed}))
                      (when-let [err (stream-failed-error parsed)]
                        (reset! failed-response err))
+                     (swap! thinking-block-open? stream-thinking-open? parsed)
                      ((:observe! progress)
-                       (stream-semantic-event? parsed extracted content-piece reasoning-piece))
+                       (or thinking-alive?
+                           (stream-semantic-event? parsed extracted content-piece reasoning-piece)))
                      (when content-piece (.append content-acc content-piece))
                      (when reasoning-piece (.append reasoning-acc reasoning-piece))
                      (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
@@ -6481,7 +6512,8 @@
                                   :tool-args-acc (str tool-args-acc)
                                   :tool-call-preview @tool-call-preview-atom
                                   :provider-state @provider-state-atom
-                                  :api-usage api-usage})))))
+                                  :api-usage api-usage
+                                  :thinking-alive? thinking-alive?})))))
            (dispatch-event! [event-type data-lines]
              (when-let [parsed (parse-sse-event event-type data-lines)]
                (handle-parsed! parsed)))]
@@ -7005,22 +7037,25 @@
                               *stream-first-byte-timeout-ms*
                               first-byte-timeout-ms]
 
-                      (http-post-stream! chat-url
-                                         request-body
-                                         headers
-                                         timeout-ms
-                                         ttft-timeout-ms
-                                         idle-timeout-ms
-                                         delta-fn
-                                         (fn [{:keys [content-acc reasoning-acc tool-args-acc
-                                                      tool-call-preview provider-state api-usage]}]
-                                           (on-chunk {:content content-acc
-                                                      :reasoning (nonblank-str reasoning-acc)
-                                                      :tool-input (nonblank-str tool-args-acc)
-                                                      :tool-call-preview tool-call-preview
-                                                      :provider-state provider-state
-                                                      :api-usage api-usage
-                                                      :done? false})))))
+                      (http-post-stream!
+                        chat-url
+                        request-body
+                        headers
+                        timeout-ms
+                        ttft-timeout-ms
+                        idle-timeout-ms
+                        delta-fn
+                        (fn [{:keys [content-acc reasoning-acc tool-args-acc tool-call-preview
+                                     provider-state api-usage thinking-alive?]}]
+                          (on-chunk (cond-> {:content content-acc
+                                             :reasoning (nonblank-str reasoning-acc)
+                                             :tool-input (nonblank-str tool-args-acc)
+                                             :tool-call-preview tool-call-preview
+                                             :provider-state provider-state
+                                             :api-usage api-usage
+                                             :done? false}
+                                      thinking-alive?
+                                      (assoc :thinking-alive? true)))))))
                   retry-opts)
       (catch Exception e
         (if (stream-finalization-error? e)
@@ -7085,6 +7120,8 @@
      - :semantic-timeout-ms - Integer. Model/progress timeout for streaming
                               responses while transport bytes still arrive.
                               Surfaces `:svar.core/stream-semantic-timeout`.
+                              A ping inside an open Anthropic thinking block
+                              counts as progress: hidden thinking sends no text.
                               Pass `nil` to disable.
      - :extra-body - Map. Additional params for the API request body.
      - :on-chunk - Function. When provided, enables SSE streaming. Callback receives
@@ -8384,7 +8421,7 @@
 
      streaming-on-chunk
      (when on-chunk
-       (fn [{:keys [content reasoning provider-state api-usage]}]
+       (fn [{:keys [content reasoning provider-state api-usage thinking-alive?]}]
          (let [tokens
                (api-usage->tokens api-usage)
 
@@ -8406,13 +8443,17 @@
 
            ;; Fire callback when reasoning OR content is available.
            ;; Reasoning streams before content - don't gate on content.
-           (when (or coerced (some? reasoning))
-             (on-chunk {:result coerced
-                        :reasoning reasoning
-                        :provider-state provider-state
-                        :tokens tokens
-                        :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
-                        :done? false})))))
+           ;; Hidden thinking has neither: forward its keepalive.
+           (when (or coerced (some? reasoning) thinking-alive?)
+             (on-chunk (cond-> {:result coerced
+                                :reasoning reasoning
+                                :provider-state provider-state
+                                :tokens tokens
+                                :cost (when cost
+                                        (select-keys cost [:input-cost :output-cost :total-cost]))
+                                :done? false}
+                         thinking-alive?
+                         (assoc :thinking-alive? true)))))))
 
      retry-opts
      (cond-> (merge network
@@ -9328,7 +9369,8 @@
 
      streaming-on-chunk
      (when on-chunk
-       (fn [{:keys [content reasoning tool-input tool-call-preview provider-state api-usage]}]
+       (fn [{:keys [content reasoning tool-input tool-call-preview provider-state api-usage
+                    thinking-alive?]}]
          (let [tokens
                (api-usage->tokens api-usage)
 
@@ -9344,18 +9386,24 @@
            ;; the tool call's arguments (`:tool-input`), often
            ;; with NO text content at all — fire on that too so
            ;; callers can render the call being written live.
+           ;; Hidden thinking sends no text for minutes: forward its
+           ;; keepalive, so callers can see that the model still works.
            (when (or (not (str/blank? (or reasoning "")))
                      (not (str/blank? (or content "")))
                      (not (str/blank? (or tool-input "")))
-                     (some? tool-call-preview))
-             (on-chunk {:content content
-                        :reasoning reasoning
-                        :tool-input tool-input
-                        :tool-call-preview tool-call-preview
-                        :provider-state provider-state
-                        :tokens tokens
-                        :cost (when cost (select-keys cost [:input-cost :output-cost :total-cost]))
-                        :done? false})))))
+                     (some? tool-call-preview)
+                     thinking-alive?)
+             (on-chunk (cond-> {:content content
+                                :reasoning reasoning
+                                :tool-input tool-input
+                                :tool-call-preview tool-call-preview
+                                :provider-state provider-state
+                                :tokens tokens
+                                :cost (when cost
+                                        (select-keys cost [:input-cost :output-cost :total-cost]))
+                                :done? false}
+                         thinking-alive?
+                         (assoc :thinking-alive? true)))))))
 
      retry-opts
      (cond-> (merge network

@@ -1662,6 +1662,147 @@
                           {"type" "response.completed" "response" {"status" "completed"}}
                           {"type" "message_start"}]))))))
 
+(defn- paced-sse-body
+  "SSE body that serves one event every `pace-ms`, as a live provider does."
+  [events pace-ms]
+  (let [pending
+        (atom (seq events))
+
+        current
+        (atom nil)
+
+        closed?
+        (atom false)]
+
+    (proxy [java.io.InputStream] []
+      (read
+        ([] -1)
+        ([^bytes buf off len]
+         (if @closed?
+           -1
+           (let [^ByteArrayInputStream in
+                 (or (when-let [^ByteArrayInputStream open @current]
+                       (when (pos? (.available open)) open))
+                     (when-let [[event & more] @pending]
+                       (Thread/sleep (long pace-ms))
+                       (reset! pending more)
+                       (reset! current (ByteArrayInputStream. (.getBytes ^String event "UTF-8")))))]
+             (if in (.read in buf (int off) (int len)) -1)))))
+      (close [] (reset! closed? true)))))
+
+(defn- anthropic-sse
+  [data]
+  (str "event: " (get data "type") "\ndata: " (json/write-json-str data) "\n\n"))
+
+(defdescribe
+  anthropic-hidden-thinking-test
+  "With the thinking display omitted, Anthropic streams no thinking text for
+   minutes, and its pings are the only proof that the model works. A ping inside
+   an open thinking block holds the semantic deadline; a ping anywhere else does not."
+  (let [open?
+        (var-get #'sut/stream-thinking-open?)
+
+        keepalive?
+        (var-get #'sut/stream-thinking-keepalive?)
+
+        ping
+        {"type" "ping"}
+
+        message-start
+        {"type" "message_start"
+         "message" {"id" "msg_1"
+                    "type" "message"
+                    "role" "assistant"
+                    "content" []
+                    "usage" {"input_tokens" 5 "output_tokens" 1}}}
+
+        thinking-start
+        {"type" "content_block_start"
+         "index" 0
+         "content_block" {"type" "thinking" "thinking" "" "signature" ""}}
+
+        thinking-end
+        [{"type" "content_block_delta"
+          "index" 0
+          "delta" {"type" "signature_delta" "signature" "sig"}}
+         {"type" "content_block_stop" "index" 0}]
+
+        text-start
+        {"type" "content_block_start" "index" 1 "content_block" {"type" "text" "text" ""}}
+
+        text-answer
+        [text-start
+         {"type" "content_block_delta" "index" 1 "delta" {"type" "text_delta" "text" "ok"}}
+         {"type" "content_block_stop" "index" 1}
+         {"type" "message_delta" "delta" {"stop_reason" "end_turn"} "usage" {"output_tokens" 3}}
+         {"type" "message_stop"}]
+
+        complete!
+        (fn [events on-chunk]
+          (with-redefs [http/post (fn [_url _opts]
+                                    {:status 200
+                                     :body (paced-sse-body (map anthropic-sse events) 15)})]
+            (sut/chat-completion [(svar/user "hi")]
+                                 "claude-test" "sk-ant-test"
+                                 "https://example.invalid/v1" {:api-style :anthropic
+                                                               :max-retries 0
+                                                               :idle-timeout-ms 1000
+                                                               :semantic-timeout-ms 150
+                                                               :on-chunk on-chunk})))]
+
+    (it "opens on a thinking block start and closes on any other block start or stop"
+        (expect (true? (open? false thinking-start)))
+        (expect (true? (open? true ping)))
+        (expect (false? (open? true {"type" "content_block_stop" "index" 0})))
+        (expect (false? (open? true text-start)))
+        (expect (false? (open? false ping))))
+    (it "counts only a ping inside an open thinking block as a keepalive"
+        (expect (true? (keepalive? true ping)))
+        (expect (false? (keepalive? false ping)))
+        (expect (false? (keepalive? true thinking-start))))
+    (it "keeps hidden thinking alive past the semantic deadline and reports each keepalive"
+        (let [chunks
+              (atom [])
+
+              result
+              (complete!
+                (concat [message-start thinking-start] (repeat 30 ping) thinking-end text-answer)
+                #(swap! chunks conj %))]
+
+          (expect (= "ok" (:content result)))
+          (expect (= 30 (count (filter :thinking-alive? @chunks))))))
+    (it "forwards each hidden-thinking keepalive to the ask-code! caller"
+        (let [chunks
+              (atom [])
+
+              events
+              (concat [message-start thinking-start] (repeat 3 ping) thinking-end text-answer)
+
+              result
+              (with-redefs [http/post (fn [_url _opts]
+                                        {:status 200
+                                         :body (paced-sse-body (map anthropic-sse events) 1)})]
+                (@#'sut/ask-code!*
+                 {}
+                 {:model "claude-test"
+                  :provider-id :custom
+                  :api-key "sk-ant-test"
+                  :base-url "https://example.invalid/v1"
+                  :api-style :anthropic
+                  :check-context? false
+                  :messages [(svar/user "hi")]
+                  :on-chunk #(swap! chunks conj %)}))]
+
+          (expect (= "ok" (:content result)))
+          (expect (= 3 (count (filter :thinking-alive? @chunks))))
+          (expect (every? #(= "" (:content %)) (filter :thinking-alive? @chunks)))))
+    (it "still closes a stream that only pings outside a thinking block"
+        (let [error (try (complete! (concat [message-start] (repeat 30 ping) text-answer)
+                                    (fn [_]))
+                         nil
+                         (catch Exception e e))]
+          (expect (= :svar.core/stream-semantic-timeout (:type (ex-data error))))))))
+
 (defdescribe
   empty-reply-anomaly-type-test
   "A blank reply (no tool call, no text) is only an ERROR when the finish reason
