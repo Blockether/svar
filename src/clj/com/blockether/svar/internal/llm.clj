@@ -9189,6 +9189,12 @@
             burned-usage
             (assoc :output-budget-resend-usage burned-usage)))))))
 
+(defn- prompt-cache-warm-output-budget
+  "Returns the smallest output budget that `api-style` accepts. The Responses
+   API rejects `max_output_tokens` below 16."
+  [api-style]
+  (if (= :openai-compatible-responses api-style) 16 1))
+
 (defn ask-code!*
   "Low-level native-tool-calling completion — no routing. Prefer `ask-code!`
    which routes + falls back into this.
@@ -9231,6 +9237,9 @@
 
      provider-id
      (:provider-id opts)
+
+     warm?
+     (:svar/prompt-cache-warm? opts)
 
      cache-context
      (prompt-cache-context-for-opts (assoc opts
@@ -9371,7 +9380,10 @@
        (assoc :responses-path responses-path)
 
        llm-headers
-       (assoc :llm-headers llm-headers))
+       (assoc :llm-headers llm-headers)
+
+       warm?
+       (assoc :max-retries 0))
 
      ;; `output-budget` (nil on the first attempt) replaces the request's output
      ;; budget on a larger-budget re-send; each wire maps `:max_tokens` to its field.
@@ -9413,7 +9425,8 @@
          ;; `:svar.llm/empty-content` throw is caught by
          ;; `call-with-empty-reply-resend` below and re-sent bounded times before
          ;; it ever reaches the caller.
-         (when (and (empty? tool-calls) (str/blank? content))
+         ;; A prompt-cache warm caps its output at a few tokens, so it skips this check.
+         (when (and (not warm?) (empty? tool-calls) (str/blank? content))
            (when-let [anomaly-type (empty-reply-anomaly-type (some-> stream-finalization
                                                                      :finish-reason
                                                                      str))]
@@ -9458,16 +9471,19 @@
              rate-limits stream-finalization duration-ms empty-reply-resends
              empty-reply-resend-usage output-budget-resends output-budget-resend-usage
              request-accounting]}
-     (call-with-output-budget-resend
-       {:model model
-        :provider-id provider-id
-        :on-chunk on-chunk
-        :output-ceiling (:output-ceiling opts)
-        :context (:context opts)}
-       (fn [output-budget]
-         (call-with-empty-reply-resend
-           {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
-           #(send-once! output-budget))))]
+     (if warm?
+       ;; A warm is one capped attempt: it never re-sends.
+       (send-once! (prompt-cache-warm-output-budget api-style))
+       (call-with-output-budget-resend
+         {:model model
+          :provider-id provider-id
+          :on-chunk on-chunk
+          :output-ceiling (:output-ceiling opts)
+          :context (:context opts)}
+         (fn [output-budget]
+           (call-with-empty-reply-resend
+             {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
+             #(send-once! output-budget)))))]
 
     (let [tool-calls
           (vec (or tool-calls []))
@@ -9768,6 +9784,58 @@
                            (update :extra-body dissoc :fallbacks))
                        (vec (rest remaining))
                        (conj tried {:model from-model :category (get details "category")}))))))))))
+
+(defn- budget-thinking?
+  "True when `extra-body` asks Anthropic for thinking with a token budget. That
+   API then needs `max_tokens` above `budget_tokens`."
+  [extra-body]
+  (let [thinking
+        (:thinking (router/keyword-body extra-body))
+
+        field
+        (fn [k]
+          (when (map? thinking) (or (get thinking k) (get thinking (name k)))))]
+
+    (boolean (and (= "enabled"
+                     (some-> (field :type)
+                             name))
+                  (some? (field :budget_tokens))))))
+
+(defn warm-prompt-cache!
+  "Re-sends a routed `ask-code!` request with a minimal output budget, to keep
+   its provider prompt cache warm. Pass the opts of the last real request, so
+   that the prefix and the cache breakpoints match.
+
+   Differences from `ask-code!`:
+     - One attempt on the candidate that routing tries first, through
+       `router/with-pinned-provider`: no fallback, retry or re-send.
+     - The output budget is the smallest one that the wire accepts.
+     - No `:on-chunk` streaming and no context preflight.
+
+   Throws `:svar.llm/prompt-cache-warm-unsupported` when the routed request
+   uses Anthropic budget thinking, because that API needs `max_tokens` above
+   `budget_tokens`. Returns the `ask-code!*` result; read `:api-usage`, `:cost`
+   and `:duration-ms`."
+  [router opts]
+  (binding [*cancel-fn* (or (:cancel-fn opts) *cancel-fn*)]
+    (let [opts (apply-known-tool-quirk opts)
+          resolved (router/resolve-routing router (routing-opts-with-reasoning opts))]
+
+      (router/with-pinned-provider
+        router
+        (:prefs resolved)
+        (fn [provider model-map]
+          (let [routed (inject-routed-params opts provider model-map)]
+            (when (budget-thinking? (:extra-body routed))
+              (throw (ex-info "Prompt-cache warm does not support Anthropic budget thinking."
+                              {:type :svar.llm/prompt-cache-warm-unsupported
+                               :reason :budget-thinking
+                               :provider-id (:id provider)
+                               :model (:name model-map)})))
+            (ask-code!* router
+                        (-> routed
+                            (dissoc :on-chunk :on-empty-reply-resend :check-context?)
+                            (assoc :svar/prompt-cache-warm? true)))))))))
 
 ;; =============================================================================
 ;; Explicit stateful sessions

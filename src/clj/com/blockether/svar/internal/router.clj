@@ -3678,6 +3678,41 @@
                             (when (pos? delay-ms) (Thread/sleep delay-ms))
                             (recur))))))))))
 
+(defn- record-routed-success!
+  "Records one successful call on `provider`: prompt-cache state, token rate,
+   circuit breaker, cumulative stats and budget. Returns the prompt-cache
+   record."
+  [router prefs provider model-map result start-ms]
+  (let [pid
+        (:id provider)
+
+        token-count
+        (or (get-in result [:api-usage :total-tokens]) (get-in result [:tokens :total]) 0)
+
+        latency-ms
+        (- (router-now-ms router) (long start-ms))
+
+        prompt-cache
+        (record-prompt-cache! router
+                              (:prompt-cache-scope prefs)
+                              pid
+                              (:name model-map)
+                              (:api-usage result)
+                              start-ms)]
+
+    (record-tokens! router pid token-count)
+    (cb-record-success! router pid)
+    (record-cumulative! router pid token-count latency-ms)
+    (budget-record! router
+                    pid
+                    (:name model-map)
+                    (or (:api-usage result)
+                        {:input-tokens 0
+                         :output-tokens 0
+                         :total-tokens 0
+                         :input-tokens-details {:regular 0 :cache-write 0 :cache-read 0}}))
+    prompt-cache))
+
 (defn with-provider-fallback
   [router prefs f]
   (budget-check! router)
@@ -3907,30 +3942,10 @@
                                                                         (:api-style provider))
                                                                     model-map
                                                                     reasoning-effort))
-                      token-count (or (get-in result [:api-usage :total-tokens])
-                                      (get-in result [:tokens :total])
-                                      0)
-                      latency-ms (- (router-now-ms router) start-ms)
                       trace-value @trace
-                      prompt-cache (record-prompt-cache! router
-                                                         (:prompt-cache-scope prefs)
-                                                         pid
-                                                         (:name model-map)
-                                                         (:api-usage result)
-                                                         start-ms)]
+                      prompt-cache
+                      (record-routed-success! router prefs provider model-map result start-ms)]
 
-                  (record-tokens! router pid token-count)
-                  (cb-record-success! router pid)
-                  (record-cumulative! router pid token-count latency-ms)
-                  (budget-record! router
-                                  pid
-                                  (:name model-map)
-                                  (or (:api-usage result)
-                                      {:input-tokens 0
-                                       :output-tokens 0
-                                       :total-tokens 0
-                                       :input-tokens-details
-                                       {:regular 0 :cache-write 0 :cache-read 0}}))
                   (cond-> (assoc result
                             :routed/provider-id pid
                             :routed/model (:name model-map)
@@ -4151,6 +4166,31 @@
                                        (and single? (:body te-data))
                                        (assoc :body (:body te-data)))
                                      te)))))))))))
+
+(defn with-pinned-provider
+  "Calls `(f provider model-map)` once on the candidate that
+   `with-provider-fallback` tries first. Use it when only that provider can
+   serve the request, for example a prompt-cache warm. It has no fallback,
+   retry or stream recovery: a failure throws to the caller and records
+   nothing. A success records the same router state as `with-provider-fallback`.
+   Throws `:svar/no-provider-available` when no candidate is available."
+  [router prefs f]
+  (budget-check! router)
+  (if-let [[provider model-map] (select-and-claim! router prefs)]
+    (let [start-ms (router-now-ms router)
+          result (f provider model-map)
+          prompt-cache (record-routed-success! router prefs provider model-map result start-ms)]
+
+      (cond-> (assoc result
+                :routed/provider-id (:id provider)
+                :routed/model (:name model-map)
+                :routed/actual {:provider (provider-label provider) :model (:name model-map)})
+        prompt-cache
+        (assoc :prompt-cache prompt-cache)))
+    (throw (ex-info "No available provider matches the routing preferences."
+                    {:type :svar/no-provider-available
+                     :provider (:force-provider prefs)
+                     :model (:force-model prefs)}))))
 
 ;; =============================================================================
 ;; Router creation

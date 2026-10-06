@@ -374,6 +374,16 @@
    retain the model-name/local fallback, so all local counts remain estimates."
   llm/ask-code!)
 
+(def warm-prompt-cache!
+  "Keeps the provider prompt cache of a routed `ask-code!` request warm. Pass the
+   opts of the last real request. It sends one attempt with a minimal output
+   budget on the candidate that routing tries first: no fallback, retry,
+   streaming or context preflight. Throws
+   `:svar.llm/prompt-cache-warm-unsupported` for Anthropic budget thinking.
+   Returns the `ask-code!` result shape; read `:api-usage`, `:cost` and
+   `:duration-ms`."
+  llm/warm-prompt-cache!)
+
 (def context-budget
   "Resolve a route's input/output budget without inference. See internal.llm/context-budget."
   llm/context-budget)
