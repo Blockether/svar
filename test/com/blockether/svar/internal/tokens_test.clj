@@ -443,6 +443,17 @@
         (expect (< (Math/abs (- 0.1 (:input-cached-cost cost))) 1.0E-12))
         (expect (< (Math/abs (- 0.045 (:output-cost cost))) 1.0E-12))
         (expect (< (Math/abs (- 2.145 (:total-cost cost))) 1.0E-12))))
+  (it "bills Claude Haiku 5.5 at its long-context rate above 100K input tokens"
+      (let [short
+            (sut/estimate-cost "claude-haiku-5-5" 100000 1000)
+
+            long
+            (sut/estimate-cost "claude-haiku-5-5" 100001 1000)]
+
+        (expect (< (Math/abs (- 0.01 (:input-uncached-cost short))) 1.0E-12))
+        (expect (< (Math/abs (- 0.0005 (:output-cost short))) 1.0E-12))
+        (expect (< (Math/abs (- 0.0500005 (:input-uncached-cost long))) 1.0E-12))
+        (expect (< (Math/abs (- 0.0025 (:output-cost long))) 1.0E-12))))
   (it
     "tracks public Anthropic and Gemini cache pricing"
     (doseq [model ["claude-opus-5" "claude-opus-4-8"]]

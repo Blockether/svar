@@ -1497,9 +1497,9 @@
         (expect (= "claude-opus-5-5" (:root provider)))
         ;; `:anthropic-coding-plan` prepends its FULL default catalog,
         ;; deduped against the caller's configured models.
-        (expect (= ["claude-opus-5-5" "claude-sonnet-5-5" "claude-fable-5-1" "claude-opus-5"
-                    "claude-fable-5" "claude-sonnet-5" "claude-opus-4-8" "claude-opus-4-7"
-                    "claude-opus-4-6" "claude-sonnet-4-6" "claude-haiku-4-5"]
+        (expect (= ["claude-opus-5-5" "claude-sonnet-5-5" "claude-haiku-5-5" "claude-fable-5-1"
+                    "claude-opus-5" "claude-fable-5" "claude-sonnet-5" "claude-opus-4-8"
+                    "claude-opus-4-7" "claude-opus-4-6" "claude-sonnet-4-6" "claude-haiku-4-5"]
                    (mapv :name (:models provider))))
         (expect (= :anthropic (:api-style provider)))
         (expect
@@ -1551,6 +1551,31 @@
             (= {:input 2.0 :cached-input 0.2 :cache-write-5m 2.5 :cache-write-1h 4.0 :output 10.0}
                (select-keys (:pricing entry)
                             [:input :cached-input :cache-write-5m :cache-write-1h :output]))))))
+  (it
+    "surfaces Claude Haiku 5.5 on API keys and subscription plans"
+    (doseq [pid [:anthropic :anthropic-coding-plan]]
+      (let [entry (router/provider-model-entry pid "claude-haiku-5-5")
+            model (router/provider-model-metadata pid {:name "claude-haiku-5-5"})]
+
+        (expect (= 1000000 (:context entry)))
+        (expect (= :fast (:speed model)))
+        (expect (= :anthropic-thinking (:reasoning-style model)))
+        (expect (= [{:type "toggle"} {:type "effort" :values ["low" "medium" "high" "xhigh" "max"]}]
+                   (:reasoning-options entry)))
+        (expect (= {:input 0.1
+                    :cached-input 0.01
+                    :cache-write-5m 0.125
+                    :cache-write-1h 0.2
+                    :output 0.5
+                    :input-over-100k 0.5
+                    :cached-input-over-100k 0.05
+                    :cache-write-5m-over-100k 0.625
+                    :cache-write-1h-over-100k 1.0
+                    :output-over-100k 2.5}
+                   (select-keys (:pricing entry)
+                                [:input :cached-input :cache-write-5m :cache-write-1h :output
+                                 :input-over-100k :cached-input-over-100k :cache-write-5m-over-100k
+                                 :cache-write-1h-over-100k :output-over-100k]))))))
   (it "does not claim nonexistent Claude Sonnet 4.8 catalog metadata"
       (expect (nil? (router/provider-model-entry :anthropic-coding-plan "claude-sonnet-4-8")))))
 
@@ -2688,9 +2713,9 @@
                      (:reasoning-options astra))))))
   (it "uses curated GitHub Copilot defaults when caller omits :models"
       (let [p (router/normalize-provider 0 {:id :github-copilot :api-key "x"})]
-        (expect (= ["claude-opus-5.5" "claude-sonnet-5.5" "claude-opus-5" "claude-fable-5"
-                    "claude-sonnet-5" "gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol"
-                    "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna"]
+        (expect (= ["claude-opus-5.5" "claude-sonnet-5.5" "claude-haiku-5.5" "claude-opus-5"
+                    "claude-fable-5" "claude-sonnet-5" "gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna"
+                    "gpt-6-sol" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna"]
                    (mapv :name (:models p))))
         (let [astra (get (into {} (map (juxt :name identity)) (:models p)) "gpt-6-astra")]
           (expect (= 922000 (:context astra)))
@@ -2698,14 +2723,14 @@
           (expect (= :openai-compatible-responses (:api-style astra)))
           (expect (= :openai-effort (:reasoning-style astra))))))
   (it "routes new Copilot Claude ids on the native Anthropic wire"
-      (doseq [name ["claude-opus-5.5" "claude-sonnet-5.5"]]
+      (doseq [name ["claude-opus-5.5" "claude-sonnet-5.5" "claude-haiku-5.5"]]
         (let [entry (router/provider-model-entry :github-copilot name)]
           (expect (= :anthropic (:api-style entry)))
           (expect (= :anthropic-thinking (:reasoning-style entry)))
           (expect (= 0.0 (get-in entry [:pricing :input])))
           (expect (= 0.0 (get-in entry [:pricing :output])))))
-      (expect (= 1000000
-                 (:context (router/provider-model-entry :github-copilot "claude-opus-5.5")))))
+      (doseq [name ["claude-opus-5.5" "claude-haiku-5.5"]]
+        (expect (= 1000000 (:context (router/provider-model-entry :github-copilot name))))))
   (it "uses curated plain OpenAI defaults when caller omits :models"
       (let [p (router/normalize-provider 0 {:id :openai :api-key "x"})]
         (expect (= ["gpt-6.1-sol" "gpt-6-astra" "gpt-6-luna" "gpt-6-sol"] (mapv :name (:models p))))
