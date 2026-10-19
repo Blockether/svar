@@ -3421,6 +3421,26 @@
   (some-> (:id provider)
           name))
 
+(defn- routed-failure
+  "`e` with the route that failed, after this call already left its first attempt.
+   A fallback provider's own error names no route, so the caller recorded it under
+   the provider it selected. A first-attempt failure stays the same throwable."
+  [^Throwable e trace selected provider model-map]
+  (let [fallback? (boolean (seq (remove #(= :llm.routing/provider-retry (:event/type %)) trace)))]
+    (if (and (map? (ex-data e)) (seq trace))
+      (ex-info (ex-message e)
+               (cond-> (assoc (ex-data e)
+                         :routed/provider-id (:id provider)
+                         :routed/model (:name model-map)
+                         :routed/actual {:provider (provider-label provider)
+                                         :model (:name model-map)}
+                         :routed/fallback? fallback?
+                         :routed/trace trace)
+                 selected
+                 (assoc :routed/selected selected))
+               e)
+      e)))
+
 (defn- propagate-interrupt!
   "Re-throw an `InterruptedException` (or any cause that wraps one)
    immediately. Retry / fallback loops MUST NOT swallow interrupts —
@@ -3995,7 +4015,7 @@
                                    (and (= :fallback-provider (:on-auth-error prefs))
                                         (= :auth (:category (classify-failure e)))))
                                (stream-content-started? e))
-                          (throw e)
+                          (throw (routed-failure e @trace @selected provider model-map))
                           ;; Watchdog spent its wait budget. Cross providers now.
                           (stream-watchdog-error? e)
                           {:error e :elapsed-ms (- (router-now-ms router) start-ms)}
@@ -4016,7 +4036,7 @@
                           {:auth-error e}
                           (= :model-unavailable (:category (classify-failure e)))
                           {:model-unsupported e}
-                          :else (throw e)))))]
+                          :else (throw (routed-failure e @trace @selected provider model-map))))))]
               (cond
                 (:success result)
                 (let [result (:success result)

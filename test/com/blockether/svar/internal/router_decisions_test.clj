@@ -2488,7 +2488,50 @@
         (expect (not= :no-throw thrown))
         (expect (= 401 (:status (ex-data thrown))))
         (expect (= 2 (count (:attempts (ex-data thrown)))))
-        (expect (= #{:p1 :p2} (:auth-failed (ex-data thrown)))))))
+        (expect (= #{:p1 :p2} (:auth-failed (ex-data thrown))))))
+  ;; Blockether/vis#402: p2 failed after the auth fallback, but its error named no
+  ;; route, so the caller recorded the failure under the selected p1.
+  (it "names the fallback provider on a later provider's failure"
+      (let [r
+            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                              {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}])
+
+            thrown
+            (try (router/with-provider-fallback
+                   r
+                   {:on-auth-error :fallback-provider}
+                   (fn [provider _model]
+                     (if (= :p1 (:id provider))
+                       (throw (ex-info "Unauthorized" {:type :svar.core/http-error :status 401}))
+                       (throw (ex-info
+                                "Bad request"
+                                {:type :svar.core/http-error :status 400 :request-id "req-1"})))))
+                 :no-throw
+                 (catch clojure.lang.ExceptionInfo e e))]
+
+        (expect (not= :no-throw thrown))
+        (expect (= 400 (:status (ex-data thrown))))
+        (expect (= "req-1" (:request-id (ex-data thrown))))
+        (expect (= "Bad request" (ex-message thrown)))
+        (expect (= :p2 (:routed/provider-id (ex-data thrown))))
+        (expect (= "m2" (:routed/model (ex-data thrown))))
+        (expect (true? (:routed/fallback? (ex-data thrown))))
+        (expect (= [:authentication] (mapv :reason (:routed/trace (ex-data thrown)))))))
+  (it "keeps a first-attempt failure unchanged"
+      (let [r
+            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}])
+
+            original
+            (ex-info "Bad request" {:type :svar.core/http-error :status 400})
+
+            thrown
+            (try (router/with-provider-fallback r
+                                                {}
+                                                (fn [_ _]
+                                                  (throw original)))
+                 (catch clojure.lang.ExceptionInfo e e))]
+
+        (expect (identical? original thrown)))))
 
 (defdescribe
   provider-credential-refresh-test
