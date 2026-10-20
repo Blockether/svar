@@ -5185,6 +5185,12 @@
                     (run-http! nil))
                 :else (throw error)))))))
 
+(defn- codex-responses-path?
+  "True for the ChatGPT Codex Responses endpoint. It owns output formatting and
+   rejects the output-budget control, so svar strips that control there."
+  [responses-path]
+  (= "/codex/responses" responses-path))
+
 (defn openai-responses-completion
   "Low-level OpenAI Responses transport.
 
@@ -5230,7 +5236,7 @@
         (:model request-body)
 
         codex?
-        (= "/codex/responses" responses-path)
+        (codex-responses-path? responses-path)
 
         stream?
         (or on-chunk codex?)
@@ -8226,7 +8232,11 @@
       (some? cache-created)
       (assoc :cache-created cache-created))))
 
-(declare empty-reply-anomaly-type refusal-message call-with-empty-reply-resend sum-api-usage)
+(declare empty-reply-anomaly-type
+         output-cap-message
+         refusal-message
+         call-with-empty-reply-resend
+         sum-api-usage)
 
 (defn ask!*
   "Low-level ask - calls the LLM directly without routing. Use ask! instead.
@@ -8293,319 +8303,324 @@
    :http-response, plus :format-attempts when retries were exhausted. No
    truncation - ex-data is the canonical post-mortem record."
   [router opts0]
-  (let
-    [{:keys [spec schema-tail-pointer?] :as opts0}
-     opts0
+  (let [{:keys [spec schema-tail-pointer?] :as opts0}
+        opts0
 
-     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms first-byte-timeout-ms
-             idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing
-             context-limits responses-path llm-headers]}
-     (resolve-opts router opts0)
+        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms first-byte-timeout-ms
+                idle-timeout-ms semantic-timeout-ms check-context? output-reserve network pricing
+                context-limits responses-path llm-headers]}
+        (resolve-opts router opts0)
 
-     provider-id
-     (:provider-id opts0)
+        provider-id
+        (:provider-id opts0)
 
-     chat-url
-     (make-chat-url base-url api-style)
+        chat-url
+        (make-chat-url base-url api-style)
 
-     schema-prompt
-     (spec/spec->prompt spec)
+        schema-prompt
+        (spec/spec->prompt spec)
 
-     ;; Schema placement: full schema body is inlined into the SYSTEM
-     ;; message (head, cache-friendly) AND a tiny tail pointer is
-     ;; appended to the LAST user message (recency-friendly). The
-     ;; pointer does not repeat the schema body - it just points back
-     ;; to the cached schema in system. Trade-off rationale:
-     ;;  - Schema body is the most stable thing in the payload; head
-     ;;    placement lets a single cache_control breakpoint (or OpenAI
-     ;;    implicit caching) cache caller-system + schema together.
-     ;;  - Tail pointer sits past the breakpoint, so it is billed per
-     ;;    call but never cached and never burns a breakpoint slot.
-     ;;  - Recency-bias on schema adherence is restored without losing
-     ;;    cache wins. Pre-v0.4.0 (schema as the only tail content)
-     ;;    had recency but no caching. v0.4.0 (head-only) had caching
-     ;;    but degraded adherence. This is both.
-     ;;  - `:schema-tail-pointer? false` opts out (head-only mode) for
-     ;;    quirky models that double-emit on reminders.
-     ;; Step 1: schema injection FIRST so that auto-cache can tag
-     ;; the actual last block (schema-prompt) after we've added it.
-     ;; Running apply-llm-opts before schema injection would tag the
-     ;; ORIGINAL last block, but then schema-injection appends a new
-     ;; block past the marker — cache breakpoint lands on the
-     ;; pre-schema block, schema body falls outside the cache prefix.
-     in-msgs
-     (vec (:messages opts0))
+        ;; Schema placement: full schema body is inlined into the SYSTEM
+        ;; message (head, cache-friendly) AND a tiny tail pointer is
+        ;; appended to the LAST user message (recency-friendly). The
+        ;; pointer does not repeat the schema body - it just points back
+        ;; to the cached schema in system. Trade-off rationale:
+        ;;  - Schema body is the most stable thing in the payload; head
+        ;;    placement lets a single cache_control breakpoint (or OpenAI
+        ;;    implicit caching) cache caller-system + schema together.
+        ;;  - Tail pointer sits past the breakpoint, so it is billed per
+        ;;    call but never cached and never burns a breakpoint slot.
+        ;;  - Recency-bias on schema adherence is restored without losing
+        ;;    cache wins. Pre-v0.4.0 (schema as the only tail content)
+        ;;    had recency but no caching. v0.4.0 (head-only) had caching
+        ;;    but degraded adherence. This is both.
+        ;;  - `:schema-tail-pointer? false` opts out (head-only mode) for
+        ;;    quirky models that double-emit on reminders.
+        ;; Step 1: schema injection FIRST so that auto-cache can tag
+        ;; the actual last block (schema-prompt) after we've added it.
+        ;; Running apply-llm-opts before schema injection would tag the
+        ;; ORIGINAL last block, but then schema-injection appends a new
+        ;; block past the marker — cache breakpoint lands on the
+        ;; pre-schema block, schema body falls outside the cache prefix.
+        in-msgs
+        (vec (:messages opts0))
 
-     sys-idx
-     (->> in-msgs
-          (map-indexed vector)
-          (some (fn [[i m]]
-                  (when (= "system"
-                           (some-> (:role m)
-                                   name))
-                    i))))
+        sys-idx
+        (->> in-msgs
+             (map-indexed vector)
+             (some (fn [[i m]]
+                     (when (= "system"
+                              (some-> (:role m)
+                                      name))
+                       i))))
 
-     with-spec
-     (if sys-idx
-       (update in-msgs
-               sys-idx
-               (fn [{:keys [content] :as m}]
-                 (assoc m
-                   :content (conj (normalize-content content) {:type "text" :text schema-prompt}))))
-       (into [{:role "system" :content [{:type "text" :text schema-prompt}]}] in-msgs))
+        with-spec
+        (if sys-idx
+          (update in-msgs
+                  sys-idx
+                  (fn [{:keys [content] :as m}]
+                    (assoc m
+                      :content (conj (normalize-content content)
+                                     {:type "text" :text schema-prompt}))))
+          (into [{:role "system" :content [{:type "text" :text schema-prompt}]}] in-msgs))
 
-     ;; Step 2: caller-opt → wire-body chokepoint. Runs ONCE per call
-     ;; so role normalisation / top-level :system / auto-cache /
-     ;; :cache-key forwarding all land in one place. With schema
-     ;; already injected, auto-cache tags the last block which is
-     ;; the schema prompt itself — exactly what we want.
-     ;; Wrappers (abstract!*, eval!*, refine!*, sample!*) inherit by
-     ;; merging caller opts into their inner ask!* call.
-     [with-cache opts]
-     (apply-llm-opts with-spec opts0)
+        ;; Step 2: caller-opt → wire-body chokepoint. Runs ONCE per call
+        ;; so role normalisation / top-level :system / auto-cache /
+        ;; :cache-key forwarding all land in one place. With schema
+        ;; already injected, auto-cache tags the last block which is
+        ;; the schema prompt itself — exactly what we want.
+        ;; Wrappers (abstract!*, eval!*, refine!*, sample!*) inherit by
+        ;; merging caller opts into their inner ask!* call.
+        [with-cache opts]
+        (apply-llm-opts with-spec opts0)
 
-     ;; Tail pointer ON by default - only skipped when caller passes
-     ;; an explicit `false`. `nil`/missing → ON.
-     with-tail
-     (if (false? schema-tail-pointer?) with-cache (append-schema-tail-pointer with-cache))
+        ;; Tail pointer ON by default - only skipped when caller passes
+        ;; an explicit `false`. `nil`/missing → ON.
+        with-tail
+        (if (false? schema-tail-pointer?) with-cache (append-schema-tail-pointer with-cache))
 
-     base-messages
-     with-tail
+        base-messages
+        with-tail
 
-     ;; Count the same output-format declaration that transport receives.
-     caller-extra-body
-     (or (router/keyword-body (:extra-body opts)) {})
+        ;; Count the same output-format declaration that transport receives.
+        caller-extra-body
+        (or (router/keyword-body (:extra-body opts)) {})
 
-     extra-body
-     (cond-> caller-extra-body
-       (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
-            (:json-object-mode? opts)
-            (not (contains? caller-extra-body :response_format)))
-       (assoc :response_format {:type "json_object"}))
+        extra-body
+        (cond-> caller-extra-body
+          (and (contains? #{:openai-compatible-chat :openai-compatible-responses} api-style)
+               (:json-object-mode? opts)
+               (not (contains? caller-extra-body :response_format)))
+          (assoc :response_format {:type "json_object"}))
 
-     ;; Pre-flight and transport share the prepared accounting implementation.
-     preflight-accounting
-     (when check-context?
-       (responses-accounting base-messages
-                             model
-                             (assoc opts
-                               :api-style api-style
-                               :base-url base-url
-                               :extra-body extra-body)))
+        ;; Pre-flight and transport share the prepared accounting implementation.
+        preflight-accounting
+        (when check-context?
+          (responses-accounting base-messages
+                                model
+                                (assoc opts
+                                  :api-style api-style
+                                  :base-url base-url
+                                  :extra-body extra-body)))
 
-     check-opts
-     (cond-> {:context-limits context-limits
-              :input-limit (:input-limit opts)
-              :tokenizer (:tokenizer opts)
-              :input-tokens (preflight-input-tokens model
-                                                    base-messages
-                                                    (assoc opts :extra-body extra-body)
-                                                    preflight-accounting)
-              :exact-count-fn (anthropic-exact-count-fn base-messages
-                                                        model
-                                                        {:api-style api-style
-                                                         :api-key api-key
-                                                         :base-url base-url
-                                                         :provider-id provider-id
-                                                         :llm-headers llm-headers})}
-       output-reserve
-       (assoc :output-reserve output-reserve))
+        check-opts
+        (cond-> {:context-limits context-limits
+                 :input-limit (:input-limit opts)
+                 :tokenizer (:tokenizer opts)
+                 :input-tokens (preflight-input-tokens model
+                                                       base-messages
+                                                       (assoc opts :extra-body extra-body)
+                                                       preflight-accounting)
+                 :exact-count-fn (anthropic-exact-count-fn base-messages
+                                                           model
+                                                           {:api-style api-style
+                                                            :api-key api-key
+                                                            :base-url base-url
+                                                            :provider-id provider-id
+                                                            :llm-headers llm-headers})}
+          output-reserve
+          (assoc :output-reserve output-reserve))
 
-     context-check
-     (when check-context?
-       (let [check (router/check-context-limit model base-messages check-opts)]
-         (when-not (:ok? check)
-           (anomaly/incorrect! (:error check)
-                               (cond-> {:type :svar.core/context-overflow
-                                        :model model
-                                        :input-tokens (:input-tokens check)
-                                        :max-input-tokens (:max-input-tokens check)
-                                        :overflow (:overflow check)
-                                        :utilization (:utilization check)
-                                        :suggestion (str "Reduce task content by ~"
-                                                         (int (* (double (:overflow check)) 0.75))
-                                                         " words, "
-                                                         "or use a larger context model.")}
-                                 preflight-accounting
-                                 (assoc :request-accounting preflight-accounting))))
-         check))
+        context-check
+        (when check-context?
+          (let [check (router/check-context-limit model base-messages check-opts)]
+            (when-not (:ok? check)
+              (anomaly/incorrect! (:error check)
+                                  (cond-> {:type :svar.core/context-overflow
+                                           :model model
+                                           :input-tokens (:input-tokens check)
+                                           :max-input-tokens (:max-input-tokens check)
+                                           :overflow (:overflow check)
+                                           :utilization (:utilization check)
+                                           :suggestion
+                                           (str "Reduce task content by ~"
+                                                (int (* (double (:overflow check)) 0.75))
+                                                " words, " "or use a larger context model.")}
+                                    preflight-accounting
+                                    (assoc :request-accounting preflight-accounting))))
+            check))
 
-     ;; API call - streaming if :on-chunk provided
-     on-chunk
-     (:on-chunk opts)
+        ;; API call - streaming if :on-chunk provided
+        on-chunk
+        (:on-chunk opts)
 
-     streaming-on-chunk
-     (when on-chunk
-       (fn [{:keys [content reasoning provider-state api-usage thinking-alive?]}]
-         (let [tokens
-               (api-usage->tokens api-usage)
+        streaming-on-chunk
+        (when on-chunk
+          (fn [{:keys [content reasoning provider-state api-usage thinking-alive?]}]
+            (let [tokens
+                  (api-usage->tokens api-usage)
 
-               cost
-               (when api-usage
-                 (router/estimate-cost model
-                                       (or (:input-tokens api-usage) 0)
-                                       (or (:output-tokens api-usage) 0)
-                                       pricing
-                                       {:api-usage api-usage :api-style api-style}))
+                  cost
+                  (when api-usage
+                    (router/estimate-cost model
+                                          (or (:input-tokens api-usage) 0)
+                                          (or (:output-tokens api-usage) 0)
+                                          pricing
+                                          {:api-usage api-usage :api-style api-style}))
 
-               partial-map
-               (jsonish/parse-partial content)
+                  partial-map
+                  (jsonish/parse-partial content)
 
-               coerced
-               (when partial-map
-                 (try (spec/str->data-with-spec (json/write-json-str partial-map) spec)
-                      (catch Exception _ partial-map)))]
+                  coerced
+                  (when partial-map
+                    (try (spec/str->data-with-spec (json/write-json-str partial-map) spec)
+                         (catch Exception _ partial-map)))]
 
-           ;; Fire callback when reasoning OR content is available.
-           ;; Reasoning streams before content - don't gate on content.
-           ;; Hidden thinking has neither: forward its keepalive.
-           (when (or coerced (some? reasoning) thinking-alive?)
-             (on-chunk (cond-> {:result coerced
-                                :reasoning reasoning
-                                :provider-state provider-state
-                                :tokens tokens
-                                :cost (when cost
-                                        (select-keys cost [:input-cost :output-cost :total-cost]))
-                                :done? false}
-                         thinking-alive?
-                         (assoc :thinking-alive? true)))))))
+              ;; Fire callback when reasoning OR content is available.
+              ;; Reasoning streams before content - don't gate on content.
+              ;; Hidden thinking has neither: forward its keepalive.
+              (when (or coerced (some? reasoning) thinking-alive?)
+                (on-chunk (cond-> {:result coerced
+                                   :reasoning reasoning
+                                   :provider-state provider-state
+                                   :tokens tokens
+                                   :cost (when cost
+                                           (select-keys cost
+                                                        [:input-cost :output-cost :total-cost]))
+                                   :done? false}
+                            thinking-alive?
+                            (assoc :thinking-alive? true)))))))
 
-     retry-opts
-     (cond-> (merge network
-                    {:timeout-ms timeout-ms
-                     :api-style api-style
-                     ;; Carry resolved streaming timeouts verbatim so explicit nil
-                     ;; disables each phase-specific deadline.
-                     :ttft-timeout-ms ttft-timeout-ms
-                     :first-byte-timeout-ms first-byte-timeout-ms
-                     :idle-timeout-ms idle-timeout-ms
-                     :semantic-timeout-ms semantic-timeout-ms})
-       provider-id
-       (assoc :provider-id provider-id)
+        retry-opts
+        (cond-> (merge network
+                       {:timeout-ms timeout-ms
+                        :api-style api-style
+                        ;; Carry resolved streaming timeouts verbatim so explicit nil
+                        ;; disables each phase-specific deadline.
+                        :ttft-timeout-ms ttft-timeout-ms
+                        :first-byte-timeout-ms first-byte-timeout-ms
+                        :idle-timeout-ms idle-timeout-ms
+                        :semantic-timeout-ms semantic-timeout-ms})
+          provider-id
+          (assoc :provider-id provider-id)
 
-       (some? (:stateless-items? opts))
-       (assoc :stateless-items? (:stateless-items? opts))
+          (some? (:stateless-items? opts))
+          (assoc :stateless-items? (:stateless-items? opts))
 
-       ;; The low-level HTTP ladder heals inside ONE call; route its
-       ;; retries to the caller's RAW `on-chunk` (the same seam the
-       ;; router emits routing events on) so a provider overload is
-       ;; visible progress instead of a frozen bubble.
-       on-chunk
-       (assoc :on-retry
-         on-chunk :model
-         model)
+          ;; The low-level HTTP ladder heals inside ONE call; route its
+          ;; retries to the caller's RAW `on-chunk` (the same seam the
+          ;; router emits routing events on) so a provider overload is
+          ;; visible progress instead of a frozen bubble.
+          on-chunk
+          (assoc :on-retry
+            on-chunk :model
+            model)
 
-       streaming-on-chunk
-       (assoc :on-chunk streaming-on-chunk)
+          streaming-on-chunk
+          (assoc :on-chunk streaming-on-chunk)
 
-       (seq extra-body)
-       (assoc :extra-body extra-body)
+          (seq extra-body)
+          (assoc :extra-body extra-body)
 
-       responses-path
-       (assoc :responses-path responses-path)
+          responses-path
+          (assoc :responses-path responses-path)
 
-       llm-headers
-       (assoc :llm-headers llm-headers))
+          llm-headers
+          (assoc :llm-headers llm-headers))
 
-     ;; Format-retry config. Streaming + retries don't compose (per-attempt
-     ;; partial-parse callbacks would confuse consumers about which attempt
-     ;; the stream belongs to), so retries are forced to 0 in streaming.
-     format-retries
-     (long (or (:format-retries opts) 0))
+        ;; Format-retry config. Streaming + retries don't compose (per-attempt
+        ;; partial-parse callbacks would confuse consumers about which attempt
+        ;; the stream belongs to), so retries are forced to 0 in streaming.
+        format-retries
+        (long (or (:format-retries opts) 0))
 
-     retry-types
-     (or (:format-retry-on opts) DEFAULT_FORMAT_RETRY_TYPES)
+        retry-types
+        (or (:format-retry-on opts) DEFAULT_FORMAT_RETRY_TYPES)
 
-     effective-retries
-     (if streaming-on-chunk 0 format-retries)
+        effective-retries
+        (if streaming-on-chunk 0 format-retries)
 
-     do-attempt
-     (fn do-attempt [msgs attempt-n]
-       (let [[{:keys [content reasoning provider-state api-usage http-response stream-finalization
-                      request-accounting]} attempt-duration-ms]
-             (util/with-elapsed (chat-completion msgs model api-key chat-url retry-opts))
+        do-attempt
+        (fn do-attempt [msgs attempt-n]
+          (let [[{:keys [content reasoning provider-state api-usage http-response
+                         stream-finalization request-accounting]} attempt-duration-ms]
+                (util/with-elapsed (chat-completion msgs model api-key chat-url retry-opts))
 
-             stream-finalization
-             (or stream-finalization (:stream-finalization http-response))]
+                stream-finalization
+                (or stream-finalization (:stream-finalization http-response))]
 
-         (trove/log! {:level :info
-                      :data (log-data {:model model
-                                       :duration-ms attempt-duration-ms
-                                       :input-tokens (:input-tokens api-usage)
-                                       :output-tokens (:output-tokens api-usage)
-                                       ;; nil distinguishes "no field in response" from
-                                       ;; "field present but empty" - crucial for triaging
-                                       ;; provider quirks where content is omitted entirely
-                                       ;; versus returned as an empty string.
-                                       :reasoning-length (when reasoning (count reasoning))
-                                       :content-length (when content (count content))
-                                       :content-preview
-                                       (when content (subs content 0 (min 200 (count content))))
-                                       :attempt attempt-n})
-                      :msg "HTTP response received"})
-         ;; Structured output REQUIRES content, so ANY blank reply throws -
-         ;; but the finish reason (same classifier as `ask-code!*`) decides
-         ;; WHICH type and whether a transparent re-send can help:
-         ;;   - token cap         -> :svar.llm/max-tokens-exceeded (a
-         ;;     re-send cannot fix it; propagates immediately)
-         ;;   - clean stop        -> :svar.llm/empty-content marked NOT
-         ;;     resend-eligible: the model DELIBERATELY emitted nothing, a
-         ;;     prompt-quality problem for `:format-retry-on`, not a stall
-         ;;   - unknown/truncated -> :svar.llm/empty-content, resend-eligible
-         ;;     (emission stall on an accepted request; healed by
-         ;;     `call-with-empty-reply-resend` before callers ever see it)
-         (when (str/blank? content)
-           (let [anomaly-type
-                 (empty-reply-anomaly-type (some-> stream-finalization
-                                                   :finish-reason
-                                                   str))
+            (trove/log! {:level :info
+                         :data (log-data {:model model
+                                          :duration-ms attempt-duration-ms
+                                          :input-tokens (:input-tokens api-usage)
+                                          :output-tokens (:output-tokens api-usage)
+                                          ;; nil distinguishes "no field in response" from
+                                          ;; "field present but empty" - crucial for triaging
+                                          ;; provider quirks where content is omitted entirely
+                                          ;; versus returned as an empty string.
+                                          :reasoning-length (when reasoning (count reasoning))
+                                          :content-length (when content (count content))
+                                          :content-preview
+                                          (when content (subs content 0 (min 200 (count content))))
+                                          :attempt attempt-n})
+                         :msg "HTTP response received"})
+            ;; Structured output REQUIRES content, so ANY blank reply throws -
+            ;; but the finish reason (same classifier as `ask-code!*`) decides
+            ;; WHICH type and whether a transparent re-send can help:
+            ;;   - token cap         -> :svar.llm/max-tokens-exceeded (a
+            ;;     re-send cannot fix it; propagates immediately). An unknown
+            ;;     finish reason with billed output tokens is a token cap too.
+            ;;   - clean stop        -> :svar.llm/empty-content marked NOT
+            ;;     resend-eligible: the model DELIBERATELY emitted nothing, a
+            ;;     prompt-quality problem for `:format-retry-on`, not a stall
+            ;;   - unknown/truncated -> :svar.llm/empty-content, resend-eligible
+            ;;     (emission stall on an accepted request; healed by
+            ;;     `call-with-empty-reply-resend` before callers ever see it)
+            (when (str/blank? content)
+              (let [anomaly-type
+                    (empty-reply-anomaly-type (some-> stream-finalization
+                                                      :finish-reason
+                                                      str)
+                                              (:output-tokens api-usage))
 
-                 throw-type
-                 (or anomaly-type :svar.llm/empty-content)
+                    throw-type
+                    (or anomaly-type :svar.llm/empty-content)
 
-                 stop-details
-                 (:stop-details stream-finalization)
+                    stop-details
+                    (:stop-details stream-finalization)
 
-                 refusal?
-                 (= :svar.llm/refusal throw-type)]
+                    refusal?
+                    (= :svar.llm/refusal throw-type)]
 
-             (throw
-               (ex-info
-                 (cond
-                   (= :svar.llm/max-tokens-exceeded throw-type)
-                   "Stream truncated at max_tokens before any structured output. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
-                   refusal? (refusal-message stop-details)
-                   :else (str "The model produced reasoning but no structured JSON output. "
-                              "This usually means the response budget was consumed by reasoning, "
-                              "the spec could not be satisfied for the given input, or the task "
-                              "is ambiguous. Retry by emitting a minimal valid JSON matching the "
-                              "iteration spec; if the task is ambiguous, clarify intent or shrink "
-                              "context."))
-                 (cond-> (assoc (envelope-data {:model model
-                                                :api-style api-style
-                                                :chat-url chat-url
-                                                :duration-ms attempt-duration-ms
-                                                :api-usage api-usage
-                                                :reasoning reasoning
-                                                :content content
-                                                :provider-state provider-state
-                                                :http-response http-response
-                                                :stream-finalization stream-finalization
-                                                :provider-id provider-id})
-                           :type throw-type
-                           :attempt attempt-n)
-                   (nil? anomaly-type)
-                   (assoc :empty-reply-resend-eligible? false)
+                (throw
+                  (ex-info
+                    (cond (= :svar.llm/max-tokens-exceeded throw-type)
+                          (output-cap-message (:finish-reason stream-finalization)
+                                              (:output-tokens api-usage)
+                                              "structured output")
+                          refusal? (refusal-message stop-details)
+                          :else
+                          (str "The model produced reasoning but no structured JSON output. "
+                               "This usually means the response budget was consumed by reasoning, "
+                               "the spec could not be satisfied for the given input, or the task "
+                               "is ambiguous. Retry by emitting a minimal valid JSON matching the "
+                               "iteration spec; if the task is ambiguous, clarify intent or shrink "
+                               "context."))
+                    (cond-> (assoc (envelope-data {:model model
+                                                   :api-style api-style
+                                                   :chat-url chat-url
+                                                   :duration-ms attempt-duration-ms
+                                                   :api-usage api-usage
+                                                   :reasoning reasoning
+                                                   :content content
+                                                   :provider-state provider-state
+                                                   :http-response http-response
+                                                   :stream-finalization stream-finalization
+                                                   :provider-id provider-id})
+                              :type throw-type
+                              :attempt attempt-n)
+                      (nil? anomaly-type)
+                      (assoc :empty-reply-resend-eligible? false)
 
-                   stop-details
-                   (assoc :stop-details stop-details))))))
-         {:content content
-          :request-accounting request-accounting
-          :reasoning reasoning
-          :provider-state provider-state
-          :api-usage api-usage
-          :http-response http-response
-          :duration-ms attempt-duration-ms}))]
+                      stop-details
+                      (assoc :stop-details stop-details))))))
+            {:content content
+             :request-accounting request-accounting
+             :reasoning reasoning
+             :provider-state provider-state
+             :api-usage api-usage
+             :http-response http-response
+             :duration-ms attempt-duration-ms}))]
 
     (loop [msgs
            base-messages
@@ -8884,6 +8899,10 @@
 ;; Claude-Code model). No schema, no fence parsing, no lenient extraction —
 ;; the model's action arrives as a native tool call, not fenced code.
 
+(def ^:private TOKEN_CAP_FINISH_REASONS
+  "Finish reasons that name an exhausted output budget or context window."
+  #{"length" "max_tokens" "model_context_window_exceeded"})
+
 (defn- empty-reply-anomaly-type
   "Classify a BLANK reply (no tool calls AND no text) by its finish reason.
    Returns the anomaly `:type` to throw, or `nil` when the blank reply is a
@@ -8920,15 +8939,39 @@
        turn normally carries a `server_tool_use` block, so it never reaches this
        BLANK-reply classifier; a blank pause is treated as a legit stop, never a
        blind resend.
-     - anything else (nil / mid-stream truncation)   -> :empty-content (retry)"
-  [finish-reason]
-  (let [fr (some-> finish-reason
-                   str)]
-    (cond (contains? #{"length" "max_tokens" "model_context_window_exceeded"} fr)
-          :svar.llm/max-tokens-exceeded
-          (= "refusal" fr) :svar.llm/refusal
-          (contains? #{"stop" "end_turn" "stop_sequence" "completed" "pause_turn"} fr) nil
-          :else :svar.llm/empty-content)))
+     - anything else (nil / mid-stream truncation)   -> :empty-content (retry),
+       except when the reply billed output tokens (`output-tokens` > 0) and the
+       reason is not `content_filter`. Some gateways lose the finish reason. A
+       blank reply that used its output budget is then a token cap: an
+       identical re-send stops at the same cap (Blockether/svar#2)."
+  ([finish-reason] (empty-reply-anomaly-type finish-reason nil))
+  ([finish-reason output-tokens]
+   (let [fr (some-> finish-reason
+                    str)]
+     (cond (contains? TOKEN_CAP_FINISH_REASONS fr) :svar.llm/max-tokens-exceeded
+           (= "refusal" fr) :svar.llm/refusal
+           (contains? #{"stop" "end_turn" "stop_sequence" "completed" "pause_turn"} fr) nil
+           (and (pos-int? output-tokens) (not= "content_filter" fr)) :svar.llm/max-tokens-exceeded
+           :else :svar.llm/empty-content))))
+
+(defn- output-cap-message
+  "Message for a blank reply that `empty-reply-anomaly-type` typed as a token cap.
+   `what` names the missing output. Without a token-cap finish reason, the billed
+   output tokens show the cap, often a gateway default below the request budget."
+  [finish-reason output-tokens what]
+  (if (contains? TOKEN_CAP_FINISH_REASONS
+                 (some-> finish-reason
+                         str))
+    (str "Stream truncated at max_tokens before any "
+         what
+         ". Raise `:extra-body {:max_tokens N}` or shorten input/reasoning.")
+    (str "The model used "
+         output-tokens
+         " output tokens but returned no "
+         what
+         ", and the stream named no token cap. An output cap probably stopped it, often a"
+         " gateway or provider default below the request budget. Raise that cap or shorten"
+         " input/reasoning.")))
 
 (defn- refusal-message
   "Human-facing message for an Anthropic safety refusal. Surfaces the
@@ -9145,15 +9188,31 @@
 
 (defn- output-budget-resend-budget
   "The doubled output budget for re-sending the request that failed with `data`,
-   bounded by `limit`. Nil when a re-send cannot help: the request carried no
-   output budget (Codex strips the control), answer text or a tool call already
-   streamed, or `limit` leaves no room above the exhausted budget."
+   bounded by `limit`. A request without an output budget got the gateway or
+   provider default, so the billed output tokens are the exhausted budget
+   (Blockether/svar#2). Nil when a re-send cannot help: neither budget is known,
+   answer text or a tool call already streamed, or `limit` leaves no room above
+   the exhausted budget."
   [data limit]
-  (let [sent (:max-output-tokens data)]
-    (when (and (pos-int? sent) (not (failure/answer-output-started? data)))
-      (let [spent (max (long sent) (long (or (get-in data [:api-usage :output-tokens]) 0)))
-            doubled (* 2 spent)
-            budget (if limit (min doubled (long limit)) doubled)]
+  (let [sent
+        (:max-output-tokens data)
+
+        used
+        (get-in data [:api-usage :output-tokens])
+
+        spent
+        (max (long (if (pos-int? sent) sent 0)) (long (if (pos-int? used) used 0)))]
+
+    (when (and (pos? spent)
+               (not (failure/answer-output-started? data))
+               ;; Billed output below the sent budget: a lower cap outside the
+               ;; request stopped the reply, so a larger budget cannot help.
+               (not (and (pos-int? sent) (pos-int? used) (< (long used) (long sent)))))
+      (let [doubled
+            (* 2 spent)
+
+            budget
+            (if limit (min doubled (long limit)) doubled)]
 
         (when (> budget spent) budget)))))
 
@@ -9213,13 +9272,15 @@
    call, re-sends the SAME request to the SAME model with a doubled output budget -
    at most `OUTPUT_BUDGET_RESEND_LIMIT` times, bounded by the model's
    `:output-ceiling` and the remaining `:context` window. An unchanged replay would
-   stop at the same cap, so every re-send raises it. Honors `*cancel-fn*`.
+   stop at the same cap, so every re-send raises it. A route that strips the
+   budget control (`:output-budget-stripped?`, Codex) never re-sends. Honors
+   `*cancel-fn*`.
 
    A HEALED call returns `send!`'s value with `:output-budget-resends` and
    `:output-budget-resend-usage` (the discarded attempts' summed api-usage). A
    failure throws the typed exception with `:output-budget-resends`,
    `:output-ceiling` and `:output-budget-resend-usage` merged into ex-data."
-  [{:keys [output-ceiling context] :as opts} send!]
+  [{:keys [output-ceiling context output-budget-stripped?] :as opts} send!]
   (let [cancel-fn *cancel-fn*]
     (loop [attempt 0
            budget nil
@@ -9234,7 +9295,8 @@
 
         (if-let [cause (:cause outcome)]
           (let [data (ex-data cause)
-                next-budget (when (and (< attempt OUTPUT_BUDGET_RESEND_LIMIT)
+                next-budget (when (and (not output-budget-stripped?)
+                                       (< attempt OUTPUT_BUDGET_RESEND_LIMIT)
                                        (not (caller-cancel-requested? cancel-fn)))
                               (output-budget-resend-budget
                                 data
@@ -9286,277 +9348,280 @@
    `:assistant-message` MUST be appended to `:messages` on the next call so the
    tool_use blocks round-trip; append matching `tool_result` user blocks too."
   [router opts0]
-  (let
-    [[messages opts1]
-     (apply-llm-opts (:messages opts0) opts0)
+  (let [[messages opts1]
+        (apply-llm-opts (:messages opts0) opts0)
 
-     opts
-     (assoc opts1 :messages messages)
+        opts
+        (assoc opts1 :messages messages)
 
-     {:keys [on-chunk tools tool-choice]}
-     opts
+        {:keys [on-chunk tools tool-choice]}
+        opts
 
-     {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms first-byte-timeout-ms
-             idle-timeout-ms semantic-timeout-ms output-reserve check-context? network pricing
-             context-limits responses-path llm-headers]}
-     (resolve-opts router opts)
+        {:keys [model api-key base-url api-style timeout-ms ttft-timeout-ms first-byte-timeout-ms
+                idle-timeout-ms semantic-timeout-ms output-reserve check-context? network pricing
+                context-limits responses-path llm-headers]}
+        (resolve-opts router opts)
 
-     provider-id
-     (:provider-id opts)
+        provider-id
+        (:provider-id opts)
 
-     warm?
-     (:svar/prompt-cache-warm? opts)
+        warm?
+        (:svar/prompt-cache-warm? opts)
 
-     cache-context
-     (prompt-cache-context-for-opts (assoc opts
-                                      :model model
-                                      :api-key api-key
-                                      :base-url base-url
-                                      :api-style api-style
-                                      :responses-path responses-path
-                                      :llm-headers llm-headers
-                                      :tools tools
-                                      :tool-choice tool-choice))
+        cache-context
+        (prompt-cache-context-for-opts (assoc opts
+                                         :model model
+                                         :api-key api-key
+                                         :base-url base-url
+                                         :api-style api-style
+                                         :responses-path responses-path
+                                         :llm-headers llm-headers
+                                         :tools tools
+                                         :tool-choice tool-choice))
 
-     chat-url
-     (make-chat-url base-url api-style)
+        chat-url
+        (make-chat-url base-url api-style)
 
-     in-msgs
-     (vec messages)
+        in-msgs
+        (vec messages)
 
-     caller-extra-body
-     (or (router/keyword-body (:extra-body opts)) {})
+        caller-extra-body
+        (or (router/keyword-body (:extra-body opts)) {})
 
-     ;; Tools must be shaped before counting, just as they are before transport.
-     extra-body
-     (cond-> caller-extra-body
-       (seq tools)
-       (assoc :svar/tools (vec tools))
+        ;; Tools must be shaped before counting, just as they are before transport.
+        extra-body
+        (cond-> caller-extra-body
+          (seq tools)
+          (assoc :svar/tools (vec tools))
 
-       tool-choice
-       (assoc :svar/tool-choice tool-choice))
+          tool-choice
+          (assoc :svar/tool-choice tool-choice))
 
-     preflight-accounting
-     (when check-context?
-       (responses-accounting in-msgs
-                             model
-                             (assoc opts
-                               :api-style api-style
-                               :base-url base-url
-                               :extra-body extra-body)))
+        preflight-accounting
+        (when check-context?
+          (responses-accounting in-msgs
+                                model
+                                (assoc opts
+                                  :api-style api-style
+                                  :base-url base-url
+                                  :extra-body extra-body)))
 
-     check-opts
-     (cond-> {:context-limits context-limits
-              :input-limit (:input-limit opts)
-              :tokenizer (:tokenizer opts)
-              :input-tokens (preflight-input-tokens model
-                                                    in-msgs
-                                                    (assoc opts :extra-body extra-body)
-                                                    preflight-accounting)
-              :exact-count-fn (anthropic-exact-count-fn in-msgs
-                                                        model
-                                                        {:api-style api-style
-                                                         :api-key api-key
-                                                         :base-url base-url
-                                                         :provider-id provider-id
-                                                         :llm-headers llm-headers})}
-       output-reserve
-       (assoc :output-reserve output-reserve))
+        check-opts
+        (cond-> {:context-limits context-limits
+                 :input-limit (:input-limit opts)
+                 :tokenizer (:tokenizer opts)
+                 :input-tokens (preflight-input-tokens model
+                                                       in-msgs
+                                                       (assoc opts :extra-body extra-body)
+                                                       preflight-accounting)
+                 :exact-count-fn (anthropic-exact-count-fn in-msgs
+                                                           model
+                                                           {:api-style api-style
+                                                            :api-key api-key
+                                                            :base-url base-url
+                                                            :provider-id provider-id
+                                                            :llm-headers llm-headers})}
+          output-reserve
+          (assoc :output-reserve output-reserve))
 
-     context-check
-     (when check-context?
-       (let [check (router/check-context-limit model in-msgs check-opts)]
-         (when-not (:ok? check)
-           (anomaly/incorrect! (:error check)
-                               (cond-> {:type :svar.core/context-overflow
-                                        :model model
-                                        :input-tokens (:input-tokens check)
-                                        :max-input-tokens (:max-input-tokens check)
-                                        :overflow (:overflow check)
-                                        :utilization (:utilization check)
-                                        :suggestion (str "Reduce task content by ~"
-                                                         (int (* (double (:overflow check)) 0.75))
-                                                         " words, "
-                                                         "or use a larger context model.")}
-                                 preflight-accounting
-                                 (assoc :request-accounting preflight-accounting))))
-         check))
+        context-check
+        (when check-context?
+          (let [check (router/check-context-limit model in-msgs check-opts)]
+            (when-not (:ok? check)
+              (anomaly/incorrect! (:error check)
+                                  (cond-> {:type :svar.core/context-overflow
+                                           :model model
+                                           :input-tokens (:input-tokens check)
+                                           :max-input-tokens (:max-input-tokens check)
+                                           :overflow (:overflow check)
+                                           :utilization (:utilization check)
+                                           :suggestion
+                                           (str "Reduce task content by ~"
+                                                (int (* (double (:overflow check)) 0.75))
+                                                " words, " "or use a larger context model.")}
+                                    preflight-accounting
+                                    (assoc :request-accounting preflight-accounting))))
+            check))
 
-     streaming-on-chunk
-     (when on-chunk
-       (fn [{:keys [content reasoning tool-input tool-call-preview provider-state api-usage
-                    thinking-alive?]}]
-         (let [tokens
-               (api-usage->tokens api-usage)
+        streaming-on-chunk
+        (when on-chunk
+          (fn [{:keys [content reasoning tool-input tool-call-preview provider-state api-usage
+                       thinking-alive?]}]
+            (let [tokens
+                  (api-usage->tokens api-usage)
 
-               cost
-               (when api-usage
-                 (router/estimate-cost model
-                                       (or (:input-tokens api-usage) 0)
-                                       (or (:output-tokens api-usage) 0)
-                                       pricing
-                                       {:api-usage api-usage :api-style api-style}))]
+                  cost
+                  (when api-usage
+                    (router/estimate-cost model
+                                          (or (:input-tokens api-usage) 0)
+                                          (or (:output-tokens api-usage) 0)
+                                          pricing
+                                          {:api-usage api-usage :api-style api-style}))]
 
-           ;; Native tool calling: the model's work arrives as
-           ;; the tool call's arguments (`:tool-input`), often
-           ;; with NO text content at all — fire on that too so
-           ;; callers can render the call being written live.
-           ;; Hidden thinking sends no text for minutes: forward its
-           ;; keepalive, so callers can see that the model still works.
-           (when (or (not (str/blank? (or reasoning "")))
-                     (not (str/blank? (or content "")))
-                     (not (str/blank? (or tool-input "")))
-                     (some? tool-call-preview)
-                     thinking-alive?)
-             (on-chunk (cond-> {:content content
-                                :reasoning reasoning
-                                :tool-input tool-input
-                                :tool-call-preview tool-call-preview
-                                :provider-state provider-state
-                                :tokens tokens
-                                :cost (when cost
-                                        (select-keys cost [:input-cost :output-cost :total-cost]))
-                                :done? false}
-                         thinking-alive?
-                         (assoc :thinking-alive? true)))))))
+              ;; Native tool calling: the model's work arrives as
+              ;; the tool call's arguments (`:tool-input`), often
+              ;; with NO text content at all — fire on that too so
+              ;; callers can render the call being written live.
+              ;; Hidden thinking sends no text for minutes: forward its
+              ;; keepalive, so callers can see that the model still works.
+              (when (or (not (str/blank? (or reasoning "")))
+                        (not (str/blank? (or content "")))
+                        (not (str/blank? (or tool-input "")))
+                        (some? tool-call-preview)
+                        thinking-alive?)
+                (on-chunk (cond-> {:content content
+                                   :reasoning reasoning
+                                   :tool-input tool-input
+                                   :tool-call-preview tool-call-preview
+                                   :provider-state provider-state
+                                   :tokens tokens
+                                   :cost (when cost
+                                           (select-keys cost
+                                                        [:input-cost :output-cost :total-cost]))
+                                   :done? false}
+                            thinking-alive?
+                            (assoc :thinking-alive? true)))))))
 
-     retry-opts
-     (cond-> (merge network
-                    {:timeout-ms timeout-ms
-                     :api-style api-style
-                     :ttft-timeout-ms ttft-timeout-ms
-                     :first-byte-timeout-ms first-byte-timeout-ms
-                     :idle-timeout-ms idle-timeout-ms
-                     :semantic-timeout-ms semantic-timeout-ms})
-       provider-id
-       (assoc :provider-id provider-id)
+        retry-opts
+        (cond-> (merge network
+                       {:timeout-ms timeout-ms
+                        :api-style api-style
+                        :ttft-timeout-ms ttft-timeout-ms
+                        :first-byte-timeout-ms first-byte-timeout-ms
+                        :idle-timeout-ms idle-timeout-ms
+                        :semantic-timeout-ms semantic-timeout-ms})
+          provider-id
+          (assoc :provider-id provider-id)
 
-       (some? (:stateless-items? opts))
-       (assoc :stateless-items? (:stateless-items? opts))
+          (some? (:stateless-items? opts))
+          (assoc :stateless-items? (:stateless-items? opts))
 
-       ;; The low-level HTTP ladder heals inside ONE call; route its
-       ;; retries to the caller's RAW `on-chunk` (the same seam the
-       ;; router emits routing events on) so a provider overload is
-       ;; visible progress instead of a frozen bubble.
-       on-chunk
-       (assoc :on-retry
-         on-chunk :model
-         model)
+          ;; The low-level HTTP ladder heals inside ONE call; route its
+          ;; retries to the caller's RAW `on-chunk` (the same seam the
+          ;; router emits routing events on) so a provider overload is
+          ;; visible progress instead of a frozen bubble.
+          on-chunk
+          (assoc :on-retry
+            on-chunk :model
+            model)
 
-       streaming-on-chunk
-       (assoc :on-chunk streaming-on-chunk)
+          streaming-on-chunk
+          (assoc :on-chunk streaming-on-chunk)
 
-       (seq extra-body)
-       (assoc :extra-body extra-body)
+          (seq extra-body)
+          (assoc :extra-body extra-body)
 
-       responses-path
-       (assoc :responses-path responses-path)
+          responses-path
+          (assoc :responses-path responses-path)
 
-       llm-headers
-       (assoc :llm-headers llm-headers)
+          llm-headers
+          (assoc :llm-headers llm-headers)
 
-       warm?
-       (assoc :max-retries 0))
+          warm?
+          (assoc :max-retries 0))
 
-     ;; `output-budget` (nil on the first attempt) replaces the request's output
-     ;; budget on a larger-budget re-send; each wire maps `:max_tokens` to its field.
-     send-once!
-     (fn [output-budget]
-       (let [attempt-extra-body
-             (cond-> extra-body
-               output-budget
-               (-> (dissoc :max_output_tokens)
-                   (assoc :max_tokens output-budget)))
+        ;; `output-budget` (nil on the first attempt) replaces the request's output
+        ;; budget on a larger-budget re-send; each wire maps `:max_tokens` to its field.
+        send-once!
+        (fn [output-budget]
+          (let [attempt-extra-body
+                (cond-> extra-body
+                  output-budget
+                  (-> (dissoc :max_output_tokens)
+                      (assoc :max_tokens output-budget)))
 
-             [{:keys [content reasoning provider-state assistant-message tool-calls api-usage
-                      http-response stream-finalization]
-               :as response} duration-ms]
-             (util/with-elapsed (chat-completion in-msgs
-                                                 model
-                                                 api-key
-                                                 chat-url
-                                                 (cond-> retry-opts
-                                                   output-budget
-                                                   (assoc :extra-body attempt-extra-body))))
+                [{:keys [content reasoning provider-state assistant-message tool-calls api-usage
+                         http-response stream-finalization]
+                  :as response} duration-ms]
+                (util/with-elapsed (chat-completion in-msgs
+                                                    model
+                                                    api-key
+                                                    chat-url
+                                                    (cond-> retry-opts
+                                                      output-budget
+                                                      (assoc :extra-body attempt-extra-body))))
 
-             stream-finalization
-             (or stream-finalization (:stream-finalization http-response))]
+                stream-finalization
+                (or stream-finalization (:stream-finalization http-response))]
 
-         (trove/log! {:level :debug
-                      :data (log-data {:model model
-                                       :duration-ms duration-ms
-                                       :input-tokens (:input-tokens api-usage)
-                                       :output-tokens (:output-tokens api-usage)
-                                       :tool-call-count (count tool-calls)
-                                       :content-length (when content (count content))})
-                      :msg "chat! HTTP response received"})
-         ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
-         ;; blank content is normal and terminates as :tool-calls. A blank reply with a
-         ;; CLEAN stop reason is a legitimate empty completion (see
-         ;; `empty-reply-anomaly-type`) and falls through to return normally; only a
-         ;; token cap or a truncated/unknown finish reason is thrown. The
-         ;; `:svar.llm/empty-content` throw is caught by
-         ;; `call-with-empty-reply-resend` below and re-sent bounded times before
-         ;; it ever reaches the caller.
-         ;; A prompt-cache warm caps its output at a few tokens, so it skips this check.
-         (when (and (not warm?) (empty? tool-calls) (str/blank? content))
-           (when-let [anomaly-type (empty-reply-anomaly-type (some-> stream-finalization
-                                                                     :finish-reason
-                                                                     str))]
-             (let [stop-details (:stop-details stream-finalization)
-                   refusal? (= :svar.llm/refusal anomaly-type)
-                   base-envelope (envelope-data {:model model
-                                                 :api-style api-style
-                                                 :chat-url chat-url
-                                                 :duration-ms duration-ms
-                                                 :api-usage api-usage
-                                                 :reasoning reasoning
-                                                 :content content
-                                                 :provider-state provider-state
-                                                 :assistant-message assistant-message
-                                                 :http-response http-response
-                                                 :stream-finalization stream-finalization
-                                                 :provider-id provider-id})]
+            (trove/log! {:level :debug
+                         :data (log-data {:model model
+                                          :duration-ms duration-ms
+                                          :input-tokens (:input-tokens api-usage)
+                                          :output-tokens (:output-tokens api-usage)
+                                          :tool-call-count (count tool-calls)
+                                          :content-length (when content (count content))})
+                         :msg "chat! HTTP response received"})
+            ;; Empty ONLY when neither tool calls NOR text. A tool-call-only reply with
+            ;; blank content is normal and terminates as :tool-calls. A blank reply with a
+            ;; CLEAN stop reason is a legitimate empty completion (see
+            ;; `empty-reply-anomaly-type`) and falls through to return normally; only a
+            ;; token cap or a truncated/unknown finish reason is thrown. A blank reply
+            ;; that billed output tokens without a known finish reason is a token cap
+            ;; (Blockether/svar#2): the larger-budget ladder handles it, never an
+            ;; identical re-send. The `:svar.llm/empty-content` throw is caught by
+            ;; `call-with-empty-reply-resend` below and re-sent bounded times before
+            ;; it ever reaches the caller.
+            ;; A prompt-cache warm caps its output at a few tokens, so it skips this check.
+            (when (and (not warm?) (empty? tool-calls) (str/blank? content))
+              (when-let [anomaly-type (empty-reply-anomaly-type (some-> stream-finalization
+                                                                        :finish-reason
+                                                                        str)
+                                                                (:output-tokens api-usage))]
+                (let [stop-details (:stop-details stream-finalization)
+                      refusal? (= :svar.llm/refusal anomaly-type)
+                      base-envelope (envelope-data {:model model
+                                                    :api-style api-style
+                                                    :chat-url chat-url
+                                                    :duration-ms duration-ms
+                                                    :api-usage api-usage
+                                                    :reasoning reasoning
+                                                    :content content
+                                                    :provider-state provider-state
+                                                    :assistant-message assistant-message
+                                                    :http-response http-response
+                                                    :stream-finalization stream-finalization
+                                                    :provider-id provider-id})]
 
-               (throw
-                 (ex-info
-                   (cond
-                     (= :svar.llm/max-tokens-exceeded anomaly-type)
-                     "Stream truncated at max_tokens before any content or tool call. Raise `:extra-body {:max_tokens N}` or shorten input/reasoning."
-                     refusal? (refusal-message stop-details)
-                     :else "The model produced neither text nor a tool call.")
-                   ;; Hoist stop_details to top-level ex-data so callers
-                   ;; read category/explanation without digging into
-                   ;; `:stream-finalization`.
-                   (cond-> (assoc base-envelope :type anomaly-type)
-                     (= :svar.llm/max-tokens-exceeded anomaly-type)
-                     (assoc :max-output-tokens
-                       (or (:max_tokens attempt-extra-body)
-                           (:max_output_tokens attempt-extra-body)))
+                  (throw (ex-info (cond (= :svar.llm/max-tokens-exceeded anomaly-type)
+                                        (output-cap-message (:finish-reason stream-finalization)
+                                                            (:output-tokens api-usage)
+                                                            "content or tool call")
+                                        refusal? (refusal-message stop-details)
+                                        :else "The model produced neither text nor a tool call.")
+                                  ;; Hoist stop_details to top-level ex-data so callers
+                                  ;; read category/explanation without digging into
+                                  ;; `:stream-finalization`.
+                                  (cond-> (assoc base-envelope :type anomaly-type)
+                                    (= :svar.llm/max-tokens-exceeded anomaly-type)
+                                    (assoc :max-output-tokens
+                                      (or (:max_tokens attempt-extra-body)
+                                          (:max_output_tokens attempt-extra-body)))
 
-                     stop-details
-                     (assoc :stop-details stop-details)))))))
-         (assoc response
-           :duration-ms duration-ms
-           :stream-finalization stream-finalization)))
+                                    stop-details
+                                    (assoc :stop-details stop-details)))))))
+            (assoc response
+              :duration-ms duration-ms
+              :stream-finalization stream-finalization)))
 
-     {:keys [content reasoning provider-state assistant-message tool-calls api-usage http-response
-             rate-limits stream-finalization duration-ms empty-reply-resends
-             empty-reply-resend-usage output-budget-resends output-budget-resend-usage
-             request-accounting]}
-     (if warm?
-       ;; A warm is one capped attempt: it never re-sends.
-       (send-once! (prompt-cache-warm-output-budget api-style))
-       (call-with-output-budget-resend
-         {:model model
-          :provider-id provider-id
-          :on-chunk on-chunk
-          :output-ceiling (:output-ceiling opts)
-          :context (:context opts)}
-         (fn [output-budget]
-           (call-with-empty-reply-resend
-             {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
-             #(send-once! output-budget)))))]
+        {:keys [content reasoning provider-state assistant-message tool-calls api-usage
+                http-response rate-limits stream-finalization duration-ms empty-reply-resends
+                empty-reply-resend-usage output-budget-resends output-budget-resend-usage
+                request-accounting]}
+        (if warm?
+          ;; A warm is one capped attempt: it never re-sends.
+          (send-once! (prompt-cache-warm-output-budget api-style))
+          (call-with-output-budget-resend
+            {:model model
+             :provider-id provider-id
+             :on-chunk on-chunk
+             :output-ceiling (:output-ceiling opts)
+             :context (:context opts)
+             :output-budget-stripped? (codex-responses-path? responses-path)}
+            (fn [output-budget]
+              (call-with-empty-reply-resend
+                {:model model :provider-id provider-id :on-resend (:on-empty-reply-resend opts)}
+                #(send-once! output-budget)))))]
 
     (let [tool-calls
           (vec (or tool-calls []))

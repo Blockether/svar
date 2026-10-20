@@ -7,6 +7,9 @@
    Covers:
      - re-send budget and limit arithmetic
      - routed Chat: heal, exhaust, ceiling reached, caller cancellation
+     - routed Chat without a finish reason (Blockether/svar#2): billed output is a
+       token cap, never an identical re-send; a gateway cap below the sent budget
+       fails at once
      - routed Responses over the real SSE parser: raised `max_output_tokens`, and
        no re-send on Codex, which strips the control"
   (:require [babashka.http-client :as http]
@@ -25,6 +28,8 @@
 (defn- fixed-pricing [_ _] {:input 10.0 :output 20.0})
 
 (defn- approx= [a b] (< (Math/abs (- (double a) (double b))) 1e-9))
+
+(defn- thrown-message [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-message e))))
 
 (defn- thrown-data [f] (try (f) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
 
@@ -47,8 +52,16 @@
     (it "stops at the limit" (expect (= 1500 (resend-budget {:max-output-tokens 1000} 1500))))
     (it "gives up when the limit leaves no room above the exhausted budget"
         (expect (nil? (resend-budget {:max-output-tokens 1000} 1000))))
-    (it "gives up when the request carried no budget"
+    (it "gives up when neither the sent nor the billed budget is known"
         (expect (nil? (resend-budget {:max-output-tokens nil} nil))))
+    ;; Blockether/svar#2: a gateway or provider default capped a request without a budget.
+    (it "starts from the billed output when the request carried no budget"
+        (expect (= 4096
+                   (resend-budget {:max-output-tokens nil :api-usage {:output-tokens 2048}} nil))))
+    ;; Blockether/svar#2: a gateway cap below the sent budget ignores a larger budget.
+    (it "gives up when the billed output stays below the sent budget"
+        (expect (nil? (resend-budget {:max-output-tokens 25000 :api-usage {:output-tokens 2048}}
+                                     nil))))
     (it "gives up after answer text or a tool call"
         (expect (nil? (resend-budget {:max-output-tokens 1000 :partial-content "Part"} nil)))
         (expect (nil? (resend-budget {:max-output-tokens 1000 :content-acc-len 4} nil)))
@@ -98,6 +111,17 @@
    :api-usage {:input-tokens 1000 :output-tokens 10 :total-tokens 1010}
    :http-response {:status 200}
    :stream-finalization {:finish-reason "stop"}})
+
+(defn- unknown-stop-reply
+  "A blank Chat reply that billed `output-tokens` but lost its finish reason, as
+   a gateway can do (Blockether/svar#2)."
+  [output-tokens]
+  {:content ""
+   :tool-calls []
+   :api-usage
+   {:input-tokens 1000 :output-tokens output-tokens :total-tokens (+ 1000 (long output-tokens))}
+   :http-response {:status 200}
+   :stream-finalization {}})
 
 (def ^:private budget-model {:output-limit 1000 :output-ceiling 4000})
 
@@ -159,6 +183,37 @@
             (expect (= :svar.llm/max-tokens-exceeded (:type data)))
             (expect (= 0 (:output-budget-resends data)))
             (expect (not (contains? data :output-budget-resend-usage)))))))
+  ;; Blockether/svar#2: the gateway lost the finish reason of a reply that used its
+  ;; whole output budget. svar re-sent it unchanged 3 times.
+  (it "types a blank reply with billed output and no finish reason as a token cap"
+      (let [bodies (atom [])]
+        (with-redefs [router/provider-model-pricing fixed-pricing
+                      sut/chat-completion (mock-chat [(unknown-stop-reply 2048) chat-answer]
+                                                     bodies)]
+
+          (let [result (svar/ask-code! (chat-router {:output-limit 2048 :output-ceiling 8192})
+                                       {:messages [(svar/user "Say done.")]})]
+            (expect (= "done" (:content result)))
+            (expect (= [2048 4096] (mapv :max_tokens @bodies)))
+            (expect (= 1 (:output-budget-resends result)))
+            (expect (not (contains? result :empty-reply-resends)))))))
+  (it "fails at once when a gateway cap below the sent budget stops the reply"
+      (let [bodies (atom [])]
+        (with-redefs [router/provider-model-pricing fixed-pricing
+                      sut/chat-completion (mock-chat [(unknown-stop-reply 2048)] bodies)]
+
+          (let [data (thrown-data #(svar/ask-code! (chat-router {:output-limit 32768
+                                                                 :output-ceiling 65536})
+                                                   {:messages [(svar/user "Say done.")]}))]
+            (expect (= [25000] (mapv :max_tokens @bodies)))
+            (expect (= :svar.llm/max-tokens-exceeded (:type data)))
+            (expect (= 0 (:output-budget-resends data)))
+            (expect (not (contains? data :empty-reply-resends)))
+            (expect (re-find #"used 2048 output tokens"
+                             (thrown-message #(svar/ask-code! (chat-router {:output-limit 32768
+                                                                            :output-ceiling 65536})
+                                                              {:messages [(svar/user
+                                                                            "Say done.")]}))))))))
   (it "does not re-send after the caller cancels"
       (let [bodies
             (atom [])

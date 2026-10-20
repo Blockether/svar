@@ -1864,7 +1864,14 @@
       "an unknown / missing finish reason (mid-stream truncation) stays a retryable empty-content blip"
       (expect (= :svar.llm/empty-content (classify nil)))
       (expect (= :svar.llm/empty-content (classify "")))
-      (expect (= :svar.llm/empty-content (classify "content_filter"))))))
+      (expect (= :svar.llm/empty-content (classify "content_filter"))))
+    ;; Blockether/svar#2: a gateway lost the finish reason of a reply that used its budget.
+    (it "an unknown finish reason with billed output tokens is a token cap"
+        (expect (= :svar.llm/max-tokens-exceeded (classify nil 2048)))
+        (expect (= :svar.llm/max-tokens-exceeded (classify "" 2048)))
+        (expect (= :svar.llm/empty-content (classify nil 0)))
+        (expect (= :svar.llm/empty-content (classify "content_filter" 2048)))
+        (expect (nil? (classify "end_turn" 2048))))))
 
 (defdescribe
   live-model-budget-metadata-test
