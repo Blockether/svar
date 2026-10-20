@@ -4668,7 +4668,7 @@
               (when (stalled?) (semantic-timeout!))
               (if (contains? #{"response.completed" "response.incomplete"} event-type)
                 (let [profile ((:profile progress))]
-                  (trove/log! {:level :info
+                  (trove/log! {:level :debug
                                :id ::stream-progress
                                :data (log-data (assoc profile
                                                  :url url
@@ -6115,7 +6115,7 @@
    accumulated `:content` / `:reasoning` are the closest analogues."
   [url body headers timeout-ms ttft-timeout-ms idle-timeout-ms delta-fn on-delta]
   (let [_
-        (trove/log! {:level :info
+        (trove/log! {:level :debug
                      :id ::stream-started
                      :data (log-data {:url url
                                       :timeout-ms timeout-ms
@@ -6835,7 +6835,7 @@
                                                  :response response})
               :progress (progress-profile))]
 
-        (trove/log! {:level :info
+        (trove/log! {:level :debug
                      :id ::stream-progress
                      :data (log-data (assoc (progress-profile)
                                        :url url
@@ -9482,7 +9482,7 @@
              stream-finalization
              (or stream-finalization (:stream-finalization http-response))]
 
-         (trove/log! {:level :info
+         (trove/log! {:level :debug
                       :data (log-data {:model model
                                        :duration-ms duration-ms
                                        :input-tokens (:input-tokens api-usage)
