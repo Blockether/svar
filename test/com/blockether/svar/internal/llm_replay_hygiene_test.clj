@@ -311,6 +311,30 @@
         (expect (= (:id tu) (:tool_use_id tr)))
         (expect (not (str/includes? (str (:id tu)) "|"))))))
 
+(defdescribe responses-instructions-split-test
+             ;; Codex sends only its base instructions. The ChatGPT backend reuses no prompt cache when
+             ;; `instructions` differ, and Vis put a system block that names each session there.
+             (let [messages
+                   [{:role "system" :content "base"} {:role "system" :content "session 1"}
+                    {:role "user" :content "task"} {:role "assistant" :content "ok"}
+                    {:role "system" :content "session 2"} {:role "user" :content "next"}]
+
+                   body
+                   (build-responses messages "gpt-5" {})
+
+                   roles
+                   #(mapv :role %)]
+
+               (it "puts only the first system message in instructions"
+                   (expect (= "base" (:instructions body))))
+               (it "sends each later system message as developer input in place"
+                   (expect (= ["developer" "user" "assistant" "developer" "user"]
+                              (roles (:input body)))))
+               (it "gives a session delta the same roles as the full request body"
+                   (let [delta (@#'sut/messages->responses-input messages 2 "gpt-5" false)]
+                     (expect (= (take-last 2 (:input body)) delta))
+                     (expect (= ["developer" "user"] (roles delta)))))))
+
 ;; Regression, issue #152: after a mid-turn fallback from an OpenAI Responses
 ;; provider to a chat/completions one, the replayed composite `call_id|item_id`
 ;; was serialized VERBATIM — a 93-char id carrying an illegal `|` in both

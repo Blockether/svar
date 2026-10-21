@@ -2941,7 +2941,7 @@
      - assistant `tool_use` blocks → `function_call` items
      - user `tool_result` blocks → `function_call_output` items
      - remaining text/image blocks → the message entry
-   System messages are filtered out upstream; user/assistant only."
+   System messages are filtered out upstream; user/assistant/developer only."
   ([message] (responses-message-input-entries message false))
   ([{:keys [role content]} explicit-cache?]
    (let [normalized
@@ -3013,7 +3013,11 @@
          message-entry
          (when (seq rest-blocks)
            {:type "message"
-            :role (if assistant? "assistant" "user")
+            :role (case role
+                    ("assistant" "developer")
+                    role
+
+                    "user")
             :content (responses-content-blocks role rest-blocks explicit-cache?)})]
 
      (vec (concat reasoning-items
@@ -3059,11 +3063,25 @@
   {:stateless-items? (boolean (or stateless-items? (failure/stateless-items-host? base-url)))
    :explicit-cache? (responses-explicit-cache? provider-id base-url)})
 
+(defn- responses-message-roles
+  "Keep the first system message for Responses `instructions` and turn each later system
+   message into a `developer` input message in place, as Codex sends only its base
+   instructions. The ChatGPT backend reuses no prompt cache when `instructions` differ, so
+   a system block that names one session must not join them."
+  [messages]
+  (let [i (first (keep-indexed #(when (= "system" (:role %2)) %1) messages))]
+    (into []
+          (map-indexed (fn [j m]
+                         (cond-> m
+                           (and (not= i j) (= "system" (:role m)))
+                           (assoc :role "developer"))))
+          messages)))
+
 (defn- build-openai-responses-request-body
   ([messages model extra-body] (build-openai-responses-request-body messages model extra-body nil))
   ([messages model extra-body {:keys [stateless-items? explicit-cache?] :or {explicit-cache? true}}]
    (let [messages
-         (sanitize-replayed-messages messages model true)
+         (responses-message-roles (sanitize-replayed-messages messages model true))
 
          ;; A breakpoint is a property of the ENDPOINT as much as of the model,
          ;; so the caller can switch the markers off for a backend that refuses
@@ -3080,11 +3098,10 @@
          (extra-body-tools extra-body)
 
          system-text
-         (->> messages
-              (filter #(= "system" (:role %)))
-              (map (comp responses-text-content :content))
-              (remove str/blank?)
-              (str/join "\n\n"))
+         (some->> messages
+                  (some #(when (= "system" (:role %)) %))
+                  :content
+                  responses-text-content)
 
          ;; Canonical thinking blocks live inline on assistant messages.
          ;; Each one is hoisted out as a `reasoning` input entry placed
@@ -10025,12 +10042,14 @@
                               {:type :svar.session/invalid-input}))))
 
 (defn- messages->responses-input
-  "The input entries a session sends for `messages`. `explicit-cache?` is the
+  "The input entries a session sends for the last `n` of `messages`. `explicit-cache?` is the
    endpoint's own answer, never a guess from the model name: a delta must carry
-   exactly what the full request body for that same turn would have carried."
-  [messages model explicit-cache?]
+   exactly what the full request body for that same turn would have carried. The roles
+   come from the whole history, so the delta keeps the `instructions` split of that body."
+  [messages n model explicit-cache?]
   (let [messages
-        (sanitize-replayed-messages messages model true)
+        (-> (vec (take-last n (responses-message-roles messages)))
+            (sanitize-replayed-messages model true))
 
         explicit-cache?
         (and explicit-cache? (gpt-5-6-or-later? model))]
@@ -10157,7 +10176,8 @@
                                      ;; The endpoint this body was just built for
                                      ;; decides the delta's cache markers too, and a
                                      ;; self-heal retry rebuilds the delta with it.
-                                     (messages->responses-input new-messages
+                                     (messages->responses-input full-messages
+                                                                (count new-messages)
                                                                 active-model
                                                                 (responses-explicit-cache?
                                                                   provider-id

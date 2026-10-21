@@ -257,13 +257,13 @@
             [{:role "user" :content [(sut/cached "turn two")]}]
 
             off
-            (#'sut/messages->responses-input msgs "gpt-5.6-sol" false)
+            (#'sut/messages->responses-input msgs 1 "gpt-5.6-sol" false)
 
             on
-            (#'sut/messages->responses-input msgs "gpt-5.6-sol" true)
+            (#'sut/messages->responses-input msgs 1 "gpt-5.6-sol" true)
 
             old
-            (#'sut/messages->responses-input msgs "gpt-5.5" true)]
+            (#'sut/messages->responses-input msgs 1 "gpt-5.5" true)]
 
         (expect (nil? (re-find #"prompt_cache_breakpoint" (pr-str off))))
         (expect (some? (re-find #"prompt_cache_breakpoint" (pr-str on))))
