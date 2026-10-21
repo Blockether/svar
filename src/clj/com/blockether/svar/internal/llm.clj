@@ -3148,13 +3148,13 @@
          base-extra*
          (dissoc base-extra :reasoning)
 
-         base-text
-         (or (:text base-extra) {})
-
-         base-text
-         (cond-> base-text
+         text
+         (cond-> (or (:text base-extra) {})
            text-verbosity
-           (assoc :verbosity text-verbosity))]
+           (assoc :verbosity text-verbosity)
+
+           text-format
+           (assoc :format text-format))]
 
      (cond-> {:model model :input input}
        (not (str/blank? system-text))
@@ -3166,8 +3166,8 @@
        (seq reasoning)
        (assoc :reasoning reasoning)
 
-       text-format
-       (assoc :text (assoc base-text :format text-format))
+       (seq text)
+       (assoc :text text)
 
        (seq tools)
        (assoc :tools (tools->wire :openai-compatible-responses tools))
@@ -3175,10 +3175,8 @@
        (and (seq tools) tool-choice)
        (assoc :tool_choice (tool-choice->wire :openai-compatible-responses tool-choice))
 
-       (seq base-extra*)
-       (merge (cond-> base-extra*
-                text-format
-                (dissoc :text)))))))
+       (seq (dissoc base-extra* :text))
+       (merge (dissoc base-extra* :text))))))
 
 (defn- responses-accounting
   "Count the same prepared Responses projection as transport. Other wires retain
@@ -4715,7 +4713,7 @@
 (defn- session-request-body
   [body input previous-response-id turn-state]
   (cond-> (-> body
-              (dissoc :previous_response_id :max_tokens :max_output_tokens :text)
+              (dissoc :previous_response_id :max_tokens :max_output_tokens)
               (assoc :type "response.create"
                      :stream true
                      :input input))
@@ -5260,11 +5258,10 @@
 
         request-body
         (cond-> request-body
-          ;; ChatGPT's Codex backend rejects the public Responses
-          ;; API `text` envelope with `text: Extra inputs are not
-          ;; permitted`. It also owns output formatting itself.
+          ;; Codex CLI sends no output-token cap, so the Codex backend gets none.
+          ;; It accepts the `text` envelope (verbosity and format) like Codex CLI.
           codex?
-          (dissoc :max_tokens :max_output_tokens :text)
+          (dissoc :max_tokens :max_output_tokens)
 
           stream?
           (assoc :stream true))

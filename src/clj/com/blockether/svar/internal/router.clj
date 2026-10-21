@@ -171,7 +171,7 @@
                   :models-query-params {"client_version" "1.0.0"}
                   :extra-body {:store false
                                :include ["reasoning.encrypted_content"]
-                               :reasoning {:summary "detailed"}
+                               :reasoning {:summary "auto"}
                                :text {:verbosity "low"}}}
    ;; Ollama (v0.14.0+, Jan 2026) and LM Studio (v0.4.1+, Jan 2026) both serve
    ;; a native Anthropic Messages endpoint at `<host>/v1/messages` — base-url
@@ -1199,7 +1199,7 @@
                 :reasoning-style :openai-effort
                 :extra-body {:store false
                              :include ["reasoning.encrypted_content"]
-                             :reasoning {:effort "medium" :summary "detailed"}}}]
+                             :reasoning {:effort "medium" :summary "auto"}}}]
     {"gpt-6-sol" (assoc common
                    :display-name "GPT-6 Sol"
                    :pricing {:input 2.00

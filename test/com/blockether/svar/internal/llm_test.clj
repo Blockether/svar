@@ -639,10 +639,10 @@
               (expect (nil? (:max_tokens body)))
               (expect (= false (:store body)))
               (expect (= ["reasoning.encrypted_content"] (:include body)))
-              (expect (= {:summary "detailed"} (:reasoning body)))
-              ;; ChatGPT Codex does not implement the public Responses API
-              ;; `text` envelope; sending it returns HTTP 400.
-              (expect (not (contains? body :text))))))))
+              (expect (= {:summary "auto"} (:reasoning body)))
+              ;; Codex accepts the Responses `text` envelope like Codex CLI.
+              ;; The caller's `:verbosity :high` replaces the provider's `low`.
+              (expect (= "high" (get-in body [:text :verbosity]))))))))
     (it
       "Copilot Responses requests reuse OpenAI reasoning and honor Copilot header overrides"
       (let [calls
@@ -1455,7 +1455,7 @@
         (expect (:tool-call? model))
         (expect (= {:store false
                     :include ["reasoning.encrypted_content"]
-                    :reasoning {:effort "medium" :summary "detailed"}}
+                    :reasoning {:effort "medium" :summary "auto"}}
                    (select-keys (:extra-body opts) [:store :include :reasoning])))
         (expect (:ok? (router/check-context-limit model-name [] check-opts)))
         (expect (not (:ok? (router/check-context-limit model-name

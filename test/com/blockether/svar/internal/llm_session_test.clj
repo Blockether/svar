@@ -217,6 +217,10 @@
             (expect (= "response.create" (:type first-request)))
             (expect (true? (:stream first-request)))
             (expect (nil? (:previous_response_id first-request)))
+            ;; Codex CLI sends `text` on the WebSocket too; without it the backend
+            ;; answers at its default `medium` verbosity.
+            (expect (= {:verbosity "low"} (:text first-request)))
+            (expect (= {:summary "auto"} (:reasoning first-request)))
             (expect (string? (:prompt_cache_key first-request)))
             (expect (= (:prompt_cache_key first-request) (:prompt_cache_key second-request)))
             (expect (= "resp_1" (:previous_response_id second-request)))
