@@ -9024,15 +9024,15 @@
    where the caller pinned it."
   3)
 
-(def ^:private ^:const EMPTY_REPLY_RESEND_BASE_DELAY_MS
+(def ^:private EMPTY_REPLY_RESEND_BASE_DELAY_MS
   "Base backoff for empty-reply re-sends; resend n sleeps `base * 2^(n-1)` ms
-   -> 2s / 4s / 8s."
+   -> 2s / 4s / 8s. Not `^:const`: tests set it to 0 with `with-redefs`."
   2000)
 
 (defn- empty-reply-resend-delay-ms
   "Backoff (ms) before re-send `attempt` (1-based): 2s, 4s, 8s."
   ^long [^long attempt]
-  (* EMPTY_REPLY_RESEND_BASE_DELAY_MS (bit-shift-left 1 (dec attempt))))
+  (* (long EMPTY_REPLY_RESEND_BASE_DELAY_MS) (bit-shift-left 1 (dec attempt))))
 
 (defn- sum-api-usage
   "Key-wise sum of api-usage maps (nil entries skipped). Numeric values add;

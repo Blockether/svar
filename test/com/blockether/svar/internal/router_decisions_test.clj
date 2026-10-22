@@ -1894,7 +1894,8 @@
                            {:clock clock
                             :failure-threshold 1
                             :cooldown-ms 7777 ;; 429-specific
-                            :recovery-ms 99999})
+                            :recovery-ms 99999
+                            :rate-limit {:same-provider-delays-ms [] :fallback-after-ms 0}})
 
           ;; 500-specific
           _
