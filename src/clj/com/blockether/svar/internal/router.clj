@@ -1938,6 +1938,11 @@
                                 the next provider/model. Set false to
                                 surface the rate-limit error to the
                                 caller instead.
+   `:fail-fast?`              — when true, a 429 skips the same-provider
+                                retries and ends the phase at once. Other
+                                transient failures keep the ladder. A
+                                caller that picks its own replacement
+                                route (an agent parent) sets this.
 
    The budget is `failure/RETRY_PHASE_BUDGET_MS`: the low-level HTTP ladder
    and this loop are the same same-provider phase seen at two layers, and it
@@ -3532,13 +3537,18 @@
       (let [configured
             (rate-limit-delay-ms router retry-index)
 
+            ;; A caller that reroutes by itself gets the 429 at once. Waiting out
+            ;; the provider's window only delays that decision.
+            fail-fast?
+            (and (true? (:fail-fast? policy)) (= 429 (:status (ex-data last-error))))
+
             ;; `failure/retry-sleep-plan` is the ONE policy both same-provider
             ;; ladders spend: a server-declared `Retry-After` is honored in
             ;; full or not at all, and only an undeclared wait clamps to the
             ;; remaining budget. Sleeping a truncated cooldown just re-enters
             ;; the window the provider named and is refused again.
             plan
-            (when (some? configured)
+            (when (and (some? configured) (not fail-fast?))
               (failure/retry-sleep-plan last-error
                                         {:fallback-ms configured
                                          :elapsed-ms (elapsed*)

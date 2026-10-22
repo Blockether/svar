@@ -959,6 +959,62 @@
           (expect (= "p2" (:to-provider (last @live-events))))))))
 
 (defdescribe
+  with-provider-fallback-rate-limit-fail-fast-test
+  "`:fail-fast?` hands a 429 back to the caller at once, and keeps 5xx retries."
+  (it "throws the first 429 without a same-provider retry or a provider fallback"
+      (let [[clock _]
+            (mock-clock)
+
+            r
+            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}
+                              {:id :p2 :api-key "k" :base-url "http://p2" :models [{:name "m2"}]}]
+                             {:clock clock
+                              :rate-limit {:same-provider-delays-ms [0 0]
+                                           :fallback-after-ms 60000
+                                           :fail-fast? true
+                                           :fallback-provider? false}})
+
+            calls
+            (atom [])
+
+            thrown
+            (try (router/with-provider-fallback r
+                                                {:force-provider :p1}
+                                                (fn [provider _model]
+                                                  (swap! calls conj (:id provider))
+                                                  (transient-error 429)))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+
+        (expect (= [:p1] @calls))
+        (expect (= 429 (:status (ex-data thrown))))))
+  (it "still retries a 5xx on the same provider"
+      (let [[clock _]
+            (mock-clock)
+
+            r
+            (llm/make-router [{:id :p1 :api-key "k" :base-url "http://p1" :models [{:name "m1"}]}]
+                             {:clock clock
+                              :rate-limit {:same-provider-delays-ms [0 0]
+                                           :fallback-after-ms 60000
+                                           :fail-fast? true
+                                           :fallback-provider? false}})
+
+            calls
+            (atom [])
+
+            result
+            (router/with-provider-fallback
+              r
+              {}
+              (fn [provider _model]
+                (swap! calls conj (:id provider))
+                (if (< (count @calls) 3) (transient-error 503) (success-result 100))))]
+
+        (expect (= [:p1 :p1 :p1] @calls))
+        (expect (= :p1 (:routed/provider-id result))))))
+
+(defdescribe
   with-provider-fallback-all-exhausted-test
   "Every provider returns a transient error → `:svar.llm/all-providers-exhausted`
    with `:tried` and `:routed/trace` populated."
