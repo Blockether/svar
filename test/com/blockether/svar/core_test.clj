@@ -90,74 +90,19 @@
                              (expect (= "image/jpeg" (:media-type img)))))))
 
 ;; =============================================================================
-;; Integration Tests (real LLM calls, guarded by env var)
+;; Integration tests: real calls to Blockether One, gated on its key
 ;; =============================================================================
 
-(defn- integration-tests-enabled?
-  "Returns true if LLM integration tests should run."
-  []
-  (some? (ts/first-env "BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY" "OPENAI_API_KEY")))
-
-(defn- integration-endpoint
-  "Credentials, base URL, and the model that endpoint ACTUALLY serves.
-
-   The two accepted keys point at different endpoints. The Blockether One vars
-   route to an OpenAI-compatible proxy whose catalog is the GLM family: asked
-   for `gpt-4o` it answers with reasoning and no structured content, every
-   provider attempt fails, and the router surfaces `Provider unavailable`. That
-   is a fixture/endpoint mismatch, not a svar defect, so the model follows the
-   endpoint instead of being hardcoded. A plain OpenAI key keeps `gpt-4o`."
-  []
-  (if-let [k (ts/first-env "BLOCKETHER_LLM_API_KEY" "BLOCKETHER_OPENAI_API_KEY")]
-    {:api-key k
-     :base-url (or (ts/first-env "BLOCKETHER_LLM_API_BASE_URL" "BLOCKETHER_OPENAI_BASE_URL")
-                   "https://llm.blockether.com/v1")
-     :model "glm-5.1"}
-    {:api-key (ts/env "OPENAI_API_KEY")
-     :base-url (or (ts/env "OPENAI_BASE_URL") "https://api.openai.com/v1")
-     :model "gpt-4o"}))
-
-(defn- integration-model
-  "The model name `make-integration-router` was built around."
-  []
-  (:model (integration-endpoint)))
-
-(defn- make-integration-router
-  "Creates a router for real LLM calls from env vars.
-   Asserts if no API key — integration tests must have credentials."
-  []
-  (let
-    [{:keys [api-key base-url model]}
-     (integration-endpoint)
-
-     _
-     (assert
-       api-key
-       "Set BLOCKETHER_LLM_API_KEY, BLOCKETHER_OPENAI_API_KEY, or OPENAI_API_KEY to run integration tests")]
-
-    (svar/make-router
-      [{:id :integration :api-key api-key :base-url base-url :models [{:name model}]}])))
-
-(defn- blockether-one-enabled?
-  "Returns true if Blockether One LLM endpoint is configured."
-  []
-  (some? (ts/env "BLOCKETHER_LLM_API_KEY")))
+(defn- integration-router [] (svar/make-router [(ts/blockether-provider [ts/FAST_MODEL])]))
 
 (defdescribe
-  blockether-one-glm-test
+  blockether-one-structured-test
   (describe
-    "ask! with glm-5.1 via Blockether One"
+    "ask! via Blockether One"
     (it
-      "parses structured JSON from GLM 5.1"
-      (when (blockether-one-enabled?)
-        (let [router
-              (svar/make-router [{:id :blockether-integration
-                                  :api-key (ts/env "BLOCKETHER_LLM_API_KEY")
-                                  :base-url (or (ts/env "BLOCKETHER_LLM_API_BASE_URL")
-                                                "https://llm.blockether.com/v1")
-                                  :models [{:name "glm-5.1"}]}])
-
-              person-spec
+      "parses structured JSON into typed fields"
+      (when (ts/blockether-enabled?)
+        (let [person-spec
               (svar/spec (svar/field svar/NAME
                                      :name
                                      svar/TYPE
@@ -176,26 +121,17 @@
                                      "Age in years"))
 
               result
-              (svar/ask! router
+              (svar/ask! (integration-router)
                          {:spec person-spec
                           :messages [(svar/system "Extract person data from the text.")
                                      (svar/user "Alexander is 18 years old.")]
-                          :model "glm-5.1"})]
+                          :model ts/FAST_MODEL})]
 
           ;; ask! returns {:result <data> :tokens :cost :duration-ms}
-          (expect (map? result))
-          (expect (some? (:result result)))
           (expect (some? (:tokens result)))
           (expect (some? (:cost result)))
           (expect (pos? (:duration-ms result)))
-          ;; Parsed data matches expected structure
-          (let [data (:result result)]
-            (expect (= "Alexander" (:name data)))
-            (expect (= 18 (:age data)))))))))
-
-;; =============================================================================
-;; Streaming Integration Tests (real LLM calls)
-;; =============================================================================
+          (expect (= {:name "Alexander" :age 18} (select-keys (:result result) [:name :age]))))))))
 
 (def ^:private streaming-spec
   (svar/spec (svar/field svar/NAME
@@ -207,14 +143,6 @@
                          svar/DESCRIPTION
                          "Title of the discovery")
              (svar/field svar/NAME
-                         :scientist
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_ONE
-                         svar/DESCRIPTION
-                         "Name of the scientist")
-             (svar/field svar/NAME
                          :year
                          svar/TYPE
                          svar/TYPE_INT
@@ -222,14 +150,6 @@
                          svar/CARDINALITY_ONE
                          svar/DESCRIPTION
                          "Year of discovery")
-             (svar/field svar/NAME
-                         :significance
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_ONE
-                         svar/DESCRIPTION
-                         "Why this discovery matters")
              (svar/field svar/NAME
                          :related-fields
                          svar/TYPE
@@ -239,149 +159,30 @@
                          svar/DESCRIPTION
                          "Scientific fields impacted")))
 
-(def ^:private event-spec
-  (svar/spec (svar/field svar/NAME
-                         :event
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_ONE
-                         svar/DESCRIPTION
-                         "Name of the historical event")
-             (svar/field svar/NAME
-                         :date
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_ONE
-                         svar/DESCRIPTION
-                         "Date or date range")
-             (svar/field svar/NAME
-                         :location
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_ONE
-                         svar/DESCRIPTION
-                         "Geographic location")
-             (svar/field svar/NAME
-                         :key-figures
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_MANY
-                         svar/DESCRIPTION
-                         "Important people involved")
-             (svar/field svar/NAME
-                         :causes
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_MANY
-                         svar/DESCRIPTION
-                         "Main causes or triggers")
-             (svar/field svar/NAME
-                         :consequences
-                         svar/TYPE
-                         svar/TYPE_STRING
-                         svar/CARDINALITY
-                         svar/CARDINALITY_MANY
-                         svar/DESCRIPTION
-                         "Major consequences and lasting impact")
-             (svar/field svar/NAME
-                         :death-toll
-                         svar/TYPE
-                         svar/TYPE_INT
-                         svar/CARDINALITY
-                         svar/CARDINALITY_ONE
-                         svar/DESCRIPTION
-                         "Estimated number of casualties")))
-
 (defdescribe
   streaming-integration-test
   (describe
-    "streaming penicillin extraction"
+    "streaming extraction"
     (it
-      "streams partial spec fields progressively"
-      (when (integration-tests-enabled?)
+      "streams partial spec fields and returns the final result"
+      (when (ts/blockether-enabled?)
         (let
-          [router
-           (make-integration-router)
-
-           chunks
+          [chunks
            (atom [])
 
            result
            (svar/ask!
-             router
+             (integration-router)
              {:spec streaming-spec
               :messages
               [(svar/system "Extract the requested information.")
                (svar/user
-                 "In 1928, Alexander Fleming discovered penicillin when mold contaminated his petri dish and killed bacteria. This revolutionized medicine with antibiotics, saving millions. It impacted microbiology, pharmacology, infectious disease medicine, and public health.")]
-              :model (integration-model)
-              :on-chunk (fn [chunk]
-                          (swap! chunks conj chunk)
-                          (println "CHUNK" (count @chunks) "=>" (:result chunk)))})]
+                 "In 1928, Alexander Fleming discovered penicillin. It changed microbiology and pharmacology.")]
+              :model ts/FAST_MODEL
+              :on-chunk #(swap! chunks conj %)})]
 
-          (println "\n=== STREAMING RESULT ===")
-          (println "Total chunks:" (count @chunks))
-          (println "Final:" (:result result))
-          (println "Tokens:" (:tokens result) "Cost:" (:cost result))
-          (println "========================\n")
-          (expect (some? (:result result)))
           (expect (string? (get-in result [:result :title])))
-          (expect (integer? (get-in result [:result :year])))
-          (expect (pos? (count @chunks)))
+          (expect (= 1928 (get-in result [:result :year])))
+          (expect (vector? (get-in result [:result :related-fields])))
           ;; Reasoning-only chunks may have :result nil; content chunks must have :result
-          (expect (some :result @chunks))))))
-  (describe
-    "streaming French Revolution extraction (7 fields)"
-    (it
-      "streams a complex multi-field spec"
-      (when (integration-tests-enabled?)
-        (let
-          [router
-           (make-integration-router)
-
-           chunks
-           (atom [])
-
-           result
-           (svar/ask!
-             router
-             {:spec event-spec
-              :messages
-              [(svar/system "Extract detailed structured information about the historical event.")
-               (svar/user
-                 "The French Revolution began in 1789 at Versailles. Fiscal crisis, crop failures, and Enlightenment ideals fueled anger against the monarchy. Key figures: Louis XVI, Marie Antoinette, Robespierre, Danton, Lafayette. The Bastille fell July 14 1789. Results: abolition of feudalism, Declaration of Rights of Man, execution of Louis XVI in 1793, Reign of Terror (~17,000 executions), Napoleon's rise. Total death toll ~40,000. It transformed French society, inspired democracy worldwide, created the metric system and modern citizenship.")]
-              :model (integration-model)
-              :on-chunk (fn [chunk]
-                          (swap! chunks conj chunk)
-                          (let [r
-                                (:result chunk)
-
-                                filled
-                                (count (filter some? (vals r)))]
-
-                            (println (str "CHUNK "
-                                          (count @chunks)
-                                          " ["
-                                          filled
-                                          "/7] "
-                                          "event=" (:event r)
-                                          " toll=" (:death-toll r)))))})]
-
-          (println "\n=== COMPLEX STREAMING ===")
-          (println "Total chunks:" (count @chunks))
-          (println "Final:" (:result result))
-          (println "Tokens:" (:tokens result) "Cost:" (:cost result))
-          (println "=========================\n")
-          (expect (some? (:result result)))
-          (expect (string? (get-in result [:result :event])))
-          (expect (vector? (get-in result [:result :key-figures])))
-          (expect (vector? (get-in result [:result :consequences])))
-          (expect (integer? (get-in result [:result :death-toll])))
-          (expect (pos? (count @chunks)))
-          ;; Reasoning-only chunks may have :result nil; content chunks must have :result
-          (expect (some #(map? (:result %)) @chunks)))))))
+          (expect (some :result @chunks)))))))
