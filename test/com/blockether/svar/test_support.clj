@@ -26,10 +26,10 @@
 ;; =============================================================================
 
 (def FAST_MODEL
-  "Fastest reliable chat model on Blockether One for svar (about 1.5 s a call).
-   `gpt-oss-120b` (Groq) is faster, but Groq rejects svar's `prompt_cache_key`.
+  "Fastest chat model on Blockether One for svar (under 1 s a call), served by Groq.
+   LiteLLM drops svar's `prompt_cache_key` for Groq, which rejects it.
    `nemotron-3-ultra` is as fast, but often nests or drops spec fields."
-  "minimax-m3.1-flash:cloud")
+  "gpt-oss-120b")
 
 (def SECOND_MODEL
   "Second model in multi-model routing tests. Routing excludes it, so the tests
@@ -40,7 +40,7 @@
   "Pricing (USD per 1M tokens) and reasoning metadata of the live models.
    `:blockether` is a custom provider id, so the tests supply this metadata."
   {FAST_MODEL {:pricing {:input 0.15 :output 0.60}
-               :context 200000
+               :context 131072
                :reasoning? true
                :reasoning-style :openai-effort}
    SECOND_MODEL {:pricing {:input 0.60 :output 2.40}
