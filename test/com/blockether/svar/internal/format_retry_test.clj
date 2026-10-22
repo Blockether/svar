@@ -15,7 +15,8 @@
 
    Live equivalents in `format_retry_zai_live_test.clj` exercise the same
    contract end-to-end against GLM-5.1, but those are gated on a real key."
-  (:require [lazytest.core :refer [defdescribe describe expect it]]
+  (:require [clojure.string :as str]
+            [lazytest.core :refer [defdescribe describe expect it]]
             [com.blockether.svar.core :as svar]
             [com.blockether.svar.internal.llm :as llm]))
 
@@ -521,3 +522,164 @@
                          (expect (not= ::no-throw thrown))
                          (expect (= 1 (count @calls)))
                          (expect (= :svar.spec/schema-rejected (:type (ex-data thrown))))))))))
+
+;; =============================================================================
+;; Wrong field shapes — the same paths as prose, with and without retries
+;; =============================================================================
+
+(def ^:private nested-answer "{\"answer\": {\"answer\": \"wins\"}}")
+
+(def ^:private null-answer "{\"answer\": null}")
+
+(defn- last-text
+  [messages]
+  (-> messages
+      last
+      :content
+      first
+      :text))
+
+(defn- ask-error
+  [opts]
+  (try (svar/ask! (test-router) opts) nil (catch clojure.lang.ExceptionInfo e (ex-data e))))
+
+(defn- mock-streaming-chat-completion
+  "Like `mock-chat-completion`, but sends each partial content string to the
+   request's `:on-chunk` before it returns `final`."
+  [partials final calls-atom]
+  (fn [messages _model _api-key url retry-opts]
+    (swap! calls-atom conj {:messages messages})
+    (doseq [content partials]
+      ((:on-chunk retry-opts) {:content content}))
+    {:content final
+     :api-usage {:prompt_tokens 10 :completion_tokens 20 :total_tokens 30}
+     :http-response {:status 200 :url url}}))
+
+(defdescribe
+  format-retry-field-shape-test
+  "A reply with a wrong field shape goes through every format-retry path like
+   prose does. Seen live: nemotron-3-ultra answered {\"answer\": {\"answer\": \"wins\"}}
+   and {\"answer\": null} for a required string field."
+  (describe
+    "with :format-retries"
+    (it "retries a nested map and names the field in the retry prompt"
+        (let [calls (atom [])]
+          (with-redefs [llm/chat-completion (mock-chat-completion [{:content nested-answer}
+                                                                   {:content "{\"answer\":\"ok\"}"}]
+                                                                  calls)]
+            (let [result (svar/ask!
+                           (test-router)
+                           {:spec answer-spec :messages [(svar/user "Reply ok")] :format-retries 2})
+                  fail-att (first (:format-attempts result))
+                  retry-text (last-text (:messages (second @calls)))]
+
+              (expect (= "ok" (get-in result [:result :answer])))
+              (expect (= 2 (count @calls)))
+              (expect (= :svar.spec/schema-rejected (:ex-type fail-att)))
+              (expect (= :field-type-mismatch (:reason fail-att)))
+              (expect (= :answer (:field fail-att)))
+              (expect (str/includes? retry-text "reason: field-type-mismatch"))
+              (expect (str/includes? retry-text "field: answer"))))))
+    (it "retries a null required field"
+        (let [calls (atom [])]
+          (with-redefs [llm/chat-completion (mock-chat-completion [{:content null-answer}
+                                                                   {:content "{\"answer\":\"ok\"}"}]
+                                                                  calls)]
+            (let [result (svar/ask!
+                           (test-router)
+                           {:spec answer-spec :messages [(svar/user "Reply ok")] :format-retries 1})
+                  retry-text (last-text (:messages (second @calls)))]
+
+              (expect (= "ok" (get-in result [:result :answer])))
+              (expect (= :svar.spec/required-field-missing
+                         (:ex-type (first (:format-attempts result)))))
+              (expect (str/includes? retry-text "reason: required-field-missing"))
+              (expect (str/includes? retry-text "field: answer"))))))
+    (it "throws the last error when every retry fails"
+        (let [calls (atom [])]
+          (with-redefs [llm/chat-completion (mock-chat-completion [{:content null-answer}] calls)]
+            (let [data (ask-error
+                         {:spec answer-spec :messages [(svar/user "Reply ok")] :format-retries 2})]
+              (expect (= :svar.spec/required-field-missing (:type data)))
+              (expect (= 3 (count @calls)))
+              (expect (= 3 (count (:format-attempts data))))
+              (expect (every? #(= :answer (:field %)) (:format-attempts data))))))))
+  (describe
+    "without :format-retries"
+    (it "throws on a nested map after one call"
+        (let [calls (atom [])]
+          (with-redefs [llm/chat-completion (mock-chat-completion [{:content nested-answer}
+                                                                   {:content "{\"answer\":\"ok\"}"}]
+                                                                  calls)]
+            (let [data (ask-error {:spec answer-spec :messages [(svar/user "Reply ok")]})]
+              (expect (= :svar.spec/schema-rejected (:type data)))
+              (expect (= :field-type-mismatch (:reason data)))
+              (expect (= :answer (:field data)))
+              (expect (= nested-answer (:content data)))
+              (expect (= 1 (count @calls)))))))
+    (it "throws on a null required field after one call"
+        (let [calls (atom [])]
+          (with-redefs [llm/chat-completion (mock-chat-completion [{:content null-answer}] calls)]
+            (let [data (ask-error {:spec answer-spec :messages [(svar/user "Reply ok")]})]
+              (expect (= :svar.spec/required-field-missing (:type data)))
+              (expect (= 1 (count @calls))))))))
+  (describe "streaming"
+            (it "streams incomplete chunks without errors and returns the final answer"
+                (let [calls
+                      (atom [])
+
+                      chunks
+                      (atom [])]
+
+                  (with-redefs [llm/chat-completion (mock-streaming-chat-completion
+                                                      ["{\"note\": [1" "{\"answer\": \"o\""]
+                                                      "{\"answer\":\"ok\"}"
+                                                      calls)]
+                    (let [result (svar/ask! (test-router)
+                                            {:spec answer-spec
+                                             :messages [(svar/user "Reply ok")]
+                                             :on-chunk #(swap! chunks conj %)})
+                          partials (keep :result (remove :done? @chunks))]
+
+                      (expect (= "ok" (get-in result [:result :answer])))
+                      (expect (seq partials))
+                      (expect (= [{:answer nil :note [1]} {:answer "o"}] (vec partials)))))))
+            (it
+              "throws on a wrong final shape after one call"
+              (let [calls (atom [])]
+                (with-redefs [llm/chat-completion
+                              (mock-streaming-chat-completion ["{\"answer\": "] null-answer calls)]
+                  (let [data (ask-error {:spec answer-spec
+                                         :messages [(svar/user "Reply ok")]
+                                         :format-retries 3
+                                         :on-chunk (fn [_])})]
+                    (expect (= :svar.spec/required-field-missing (:type data)))
+                    (expect (= 1 (count @calls))))))))
+  (describe ":on-format-error :fallback-provider"
+            (it "falls back when the first provider returns a nested map"
+                (let [calls
+                      (atom [])
+
+                      r
+                      (svar/make-router [{:id :p1
+                                          :api-key "sk-1"
+                                          :base-url "https://example.invalid/v1"
+                                          :api-style :openai-compatible-chat
+                                          :models [{:name "model-a"}]}
+                                         {:id :p2
+                                          :api-key "sk-2"
+                                          :base-url "https://example2.invalid/v1"
+                                          :api-style :openai-compatible-chat
+                                          :models [{:name "model-b"}]}])]
+
+                  (with-redefs [llm/chat-completion (mock-chat-completion-by-model
+                                                      {"model-a" [{:content nested-answer}]
+                                                       "model-b" [{:content
+                                                                   "{\"answer\":\"recovered\"}"}]}
+                                                      calls)]
+                    (let [result (svar/ask! r
+                                            {:spec answer-spec
+                                             :messages [(svar/user "Reply")]
+                                             :on-format-error :fallback-provider})]
+                      (expect (= "recovered" (get-in result [:result :answer])))
+                      (expect (= "model-b" (:routed/model result)))))))))

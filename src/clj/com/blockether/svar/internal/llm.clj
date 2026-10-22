@@ -8161,7 +8161,7 @@
    short - long retry messages waste tokens on every attempt and dilute the
    instruction. Echoes the parser's exact reason verbatim so the model sees
    which contract clause it violated."
-  [attempt total reason received-type]
+  [attempt total reason received-type field]
   (str "FORMAT RETRY ("
        attempt
        "/"
@@ -8171,7 +8171,9 @@
        "  reason: "
        (name (or reason :unknown))
        "\n"
-       "  received-type: " (or received-type "?")
+       "  received-type: "
+       (or received-type "?")
+       (when field (str "\n  field: " (name field)))
        "\n\n" "Return ONLY one JSON object matching the schema in the system message.\n"
        "First non-whitespace character MUST be `{`.\n"
        "No prose. No markdown commentary. No explanation."))
@@ -8181,11 +8183,12 @@
    so the model sees its own failed output AND the corrective instruction.
    Empirically outperforms a bare retry instruction - the model self-diagnoses
    what it produced."
-  [messages prev-content attempt total reason received-type]
+  [messages prev-content attempt total reason received-type field]
   (conj (vec messages)
         {:role "assistant" :content [{:type "text" :text (or prev-content "")}]}
         {:role "user"
-         :content [{:type "text" :text (format-retry-prompt attempt total reason received-type)}]}))
+         :content [{:type "text"
+                    :text (format-retry-prompt attempt total reason received-type field)}]}))
 
 (defn- envelope-data
   "Forensic envelope merged into every error ex-data thrown from `ask!*`. No
@@ -8713,6 +8716,7 @@
                         :ex-type ex-type
                         :reason (:reason data)
                         :received-type (:received-type data)
+                        :field (:field data)
                         :retryable? (contains? retry-types ex-type)}))))
 
             ;; Unify outcome:
@@ -8823,8 +8827,8 @@
           ;; and recur. Token cost of the bad attempt is already sunk (provider
           ;; produced + billed it); we record it for forensic accounting.
           (and (:retryable? outcome) (< attempt effective-retries))
-          (let [{:keys [reason received-type ex-type content reasoning provider-state api-usage
-                        http-response duration-ms]}
+          (let [{:keys [reason received-type field ex-type content reasoning provider-state
+                        api-usage http-response duration-ms]}
                 outcome
 
                 ;; For empty-content the model produced no `content` to echo
@@ -8840,6 +8844,7 @@
                  :ex-type ex-type
                  :reason reason
                  :received-type received-type
+                 :field field
                  :duration-ms duration-ms
                  :api-usage api-usage
                  :content content
@@ -8862,12 +8867,13 @@
                                              (inc attempt)
                                              effective-retries
                                              (or reason ex-type)
-                                             received-type)
+                                             received-type
+                                             field)
                    (inc attempt)
                    (conj prior-attempts attempt-record)))
           ;; TERMINAL FAILURE - either non-retryable type or retries exhausted.
           ;; Re-throw with full forensic envelope merged into ex-data.
-          :else (let [{:keys [ex ex-type reason received-type content reasoning provider-state
+          :else (let [{:keys [ex ex-type reason received-type field content reasoning provider-state
                               api-usage http-response duration-ms]}
                       outcome
 
@@ -8877,6 +8883,7 @@
                        :ex-type ex-type
                        :reason reason
                        :received-type received-type
+                       :field field
                        :duration-ms duration-ms
                        :api-usage api-usage
                        :content content
