@@ -7921,7 +7921,8 @@
                                                   :ttft-timeout-ms ttft-timeout-ms
                                                   :first-byte-timeout-ms first-byte-timeout-ms
                                                   :idle-timeout-ms idle-timeout-ms
-                                                  :semantic-timeout-ms semantic-timeout-ms}
+                                                  :semantic-timeout-ms semantic-timeout-ms
+                                                  :router-handles-transients? true}
                                            (:id provider)
                                            (assoc :provider-id (:id provider))
 
@@ -8515,6 +8516,12 @@
 
           (some? (:stateless-items? opts))
           (assoc :stateless-items? (:stateless-items? opts))
+
+          ;; A routed call owns ONE retry phase: the router's. Without this key the
+          ;; low-level ladder retried a 429 before the router saw it, so `:fail-fast?`
+          ;; never applied and the two ladders multiplied the requests.
+          (:router-handles-transients? opts)
+          (assoc :router-handles-transients? true)
 
           ;; The low-level HTTP ladder heals inside ONE call; route its
           ;; retries to the caller's RAW `on-chunk` (the same seam the
@@ -9518,6 +9525,12 @@
 
           (some? (:stateless-items? opts))
           (assoc :stateless-items? (:stateless-items? opts))
+
+          ;; A routed call owns ONE retry phase: the router's. Without this key the
+          ;; low-level ladder retried a 429 before the router saw it, so `:fail-fast?`
+          ;; never applied and the two ladders multiplied the requests.
+          (:router-handles-transients? opts)
+          (assoc :router-handles-transients? true)
 
           ;; The low-level HTTP ladder heals inside ONE call; route its
           ;; retries to the caller's RAW `on-chunk` (the same seam the
