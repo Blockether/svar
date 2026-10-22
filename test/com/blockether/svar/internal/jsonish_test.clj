@@ -443,3 +443,44 @@
                 (let [v (:value (sut/parse-json "{\"a\": \"\\uXY\", \"b\": 2}"))]
                   (expect (map? v))
                   (expect (= 2 (:b v)))))))
+
+;; =============================================================================
+;; parse-partial function tests
+;; =============================================================================
+
+(defdescribe
+  parse-partial-test
+  "Streaming prefixes: the parser returns what is complete and the text so far
+   of a cut-off string."
+  (describe "cut-off values"
+            (it "returns the text so far of a cut-off string"
+                (expect (= {:answer "o"} (sut/parse-partial "{\"answer\": \"o")))
+                (expect (= {:code "(+ 1"} (sut/parse-partial "{\"code\": \"(+ 1"))))
+            (it "drops a cut-off escape"
+                (expect (= {:a "x"} (sut/parse-partial "{\"a\": \"x\\")))
+                (expect (= {:a "x"} (sut/parse-partial "{\"a\": \"x\\u00"))))
+            (it "drops a key without a value"
+                (expect (= {:a 1} (sut/parse-partial "{\"a\": 1, \"b\": ")))
+                (expect (= {:a 1} (sut/parse-partial "{\"a\": 1, \"b"))))
+            (it "drops a literal or number that can still grow"
+                (expect (= {} (sut/parse-partial "{\"a\": tr")))
+                (expect (= {} (sut/parse-partial "{\"a\": 12")))
+                (expect (= {:a 12} (sut/parse-partial "{\"a\": 12,"))))
+            (it "keeps nested values"
+                (expect (= {:a {:b "c"}} (sut/parse-partial "{\"a\": {\"b\": \"c")))
+                (expect (= {:a ["x" "y"]} (sut/parse-partial "{\"a\": [\"x\", \"y"))))
+            (it "reads EDN keyword keys and values"
+                (expect (= {:a "low" :b "x"} (sut/parse-partial "{:a :low, :b \"x")))))
+  (describe "text around the object"
+            (it "skips prose before the first brace"
+                (expect (= {:a "x"} (sut/parse-partial "Thinking... {\"a\": \"x"))))
+            (it "skips an opening markdown fence"
+                (expect (= {:a "x"} (sut/parse-partial "```json\n{\"a\": \"x"))))
+            (it "returns nil before any object starts"
+                (expect (nil? (sut/parse-partial "no json yet")))
+                (expect (nil? (sut/parse-partial "")))
+                (expect (nil? (sut/parse-partial nil)))))
+  (describe "complete input"
+            (it "returns the same map as parse-json"
+                (expect (= {:a "done" :b [1 2]}
+                           (sut/parse-partial "{\"a\": \"done\", \"b\": [1, 2]}"))))))

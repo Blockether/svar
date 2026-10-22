@@ -87,6 +87,10 @@ public class JsonishParser {
     private CompletionState currentCompletionState;
     private int depth;  // Recursion depth limit
     private static final int MAX_DEPTH = 9999;
+    // Partial mode: input is a streaming prefix, so the end of input is not an error.
+    private boolean partial;
+    // Partial mode: a value that has not started or cannot be read yet.
+    private static final Object INCOMPLETE = new Object();
     
     public JsonishParser() {
         this.warnings = new ArrayList<>();
@@ -112,6 +116,7 @@ public class JsonishParser {
         this.pos = 0;
         this.length = cleaned.length();
         this.warnings = new ArrayList<>();
+        this.partial = false;
         
         skipWhitespaceAndComments();
         Object value = parseValue();
@@ -119,6 +124,51 @@ public class JsonishParser {
         Map<String, Object> result = new HashMap<>();
         result.put("value", value);
         result.put("warnings", warnings);
+        return result;
+    }
+
+    /**
+     * Parses a prefix of a streaming response.
+     *
+     * Returns the complete values and the text so far of a truncated string.
+     * Drops a key without a value and a truncated literal. Skips an opening
+     * markdown fence or prose before the first '{'.
+     *
+     * @param input The response text received so far
+     * @return Map with "value" (null when nothing is readable yet) and "warnings"
+     */
+    public Map<String, Object> parsePartial(String input) {
+        Map<String, Object> result = new HashMap<>();
+        this.warnings = new ArrayList<>();
+        result.put("warnings", warnings);
+        String text = input == null ? "" : input.trim();
+        if (text.startsWith("```")) {
+            int newline = text.indexOf('\n');
+            text = newline < 0 ? "" : text.substring(newline + 1);
+            int close = text.indexOf("\n```");
+            if (close >= 0) {
+                text = text.substring(0, close);
+            }
+            text = text.trim();
+        }
+        if (!text.startsWith("{") && !text.startsWith("[")) {
+            int brace = text.indexOf('{');
+            text = brace < 0 ? "" : text.substring(brace);
+        }
+        if (text.isEmpty()) {
+            result.put("value", null);
+            return result;
+        }
+        this.input = text;
+        this.pos = 0;
+        this.length = text.length();
+        this.partial = true;
+        try {
+            Object value = parseValue();
+            result.put("value", value == INCOMPLETE ? null : value);
+        } finally {
+            this.partial = false;
+        }
         return result;
     }
     
@@ -191,10 +241,20 @@ public class JsonishParser {
         skipWhitespaceAndComments();
         
         if (pos >= length) {
+            if (partial) {
+                return INCOMPLETE;
+            }
             throw new RuntimeException("Unexpected end of input");
         }
         
         char c = input.charAt(pos);
+
+        // Partial mode: a literal, number or unquoted token that runs to the
+        // end of input can still change (tr -> true, 12 -> 125), so skip it.
+        if (partial && c != '{' && c != '[' && c != '"' && tokenRunsToEnd()) {
+            pos = length;
+            return INCOMPLETE;
+        }
         
         if (c == '{') {
             return parseObject();
@@ -241,6 +301,19 @@ public class JsonishParser {
     }
     
     /**
+     * True when no delimiter follows the token at pos before the end of input.
+     */
+    private boolean tokenRunsToEnd() {
+        for (int i = pos; i < length; i++) {
+            char c = input.charAt(i);
+            if (c == ',' || c == '}' || c == ']' || Character.isWhitespace(c)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Parses an object { ... }.
      */
     private Map<String, Object> parseObject() {
@@ -257,6 +330,9 @@ public class JsonishParser {
         
         while (pos < length) {
             skipWhitespaceAndComments();
+            if (partial && pos >= length) {
+                break;
+            }
             
             // Parse key — three shapes accepted:
             //   "key": value     → quoted JSON key
@@ -281,6 +357,10 @@ public class JsonishParser {
             }
             
             skipWhitespaceAndComments();
+            // Partial mode: a key at the end of input has no value yet.
+            if (partial && pos >= length) {
+                break;
+            }
             // Only expect ':' as separator for JSON-style keys.
             // EDN keyword keys (:foo bar) have NO explicit separator.
             if (!ednKeyword) {
@@ -290,6 +370,9 @@ public class JsonishParser {
             
             // Parse value
             Object value = parseValue();
+            if (value == INCOMPLETE) {
+                break;
+            }
             map.put(key, value);
             
             skipWhitespaceAndComments();
@@ -348,6 +431,9 @@ public class JsonishParser {
         while (pos < length) {
             skipWhitespaceAndComments();
             Object value = parseValue();
+            if (value == INCOMPLETE) {
+                break;
+            }
             list.add(value);
             
             skipWhitespaceAndComments();
@@ -402,6 +488,9 @@ public class JsonishParser {
             } else if (c == '\\') {
                 pos++;
                 if (pos >= length) {
+                    if (partial) {
+                        return sb.toString();
+                    }
                     throw new RuntimeException("Unexpected end of input in string escape");
                 }
                 char escaped = input.charAt(pos);
@@ -429,6 +518,10 @@ public class JsonishParser {
                             } catch (NumberFormatException e) {
                                 sb.append('u');
                             }
+                        } else if (partial) {
+                            // Partial mode: the escape is cut off by the end of input.
+                            pos = length;
+                            return sb.toString();
                         } else {
                             sb.append('u');
                         }
@@ -444,6 +537,10 @@ public class JsonishParser {
             }
         }
         
+        if (partial) {
+            warnings.add("Truncated string");
+            return sb.toString();
+        }
         throw new RuntimeException("Unterminated string");
     }
     

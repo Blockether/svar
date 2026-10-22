@@ -87,18 +87,19 @@
     {:value (java->clojure (.value best)) :warnings (vec (.fixes best))}))
 
 (defn parse-partial
-  "Parses potentially truncated JSON from streaming. Returns the best-effort
-   parsed value or nil if the input can't be parsed at all yet.
+  "Parses a streaming prefix of a JSON reply. Returns the map read so far, or
+   nil when no map is readable yet.
 
-   Unlike parse-json, this never throws — it returns nil for unparseable input.
-   Useful for streaming where accumulated text may be mid-token or mid-value."
+   A truncated string gives its text so far. A key without a value and a
+   truncated literal are left out. An opening markdown fence or prose before
+   the first `{` is skipped. Never throws."
   [input]
   (when (and input (not (str/blank? input)))
     (try (let [parser
                (JsonishParser.)
 
                result
-               (.parse parser input)
+               (.parsePartial parser input)
 
                value
                (get result "value")]
