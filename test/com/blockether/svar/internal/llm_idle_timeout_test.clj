@@ -27,9 +27,13 @@
            (java.util.concurrent.atomic AtomicBoolean)))
 
 (def ^:private start-watchdog @#'sut/start-idle-stream-watchdog!)
+
 (def ^:private start-semantic-watchdog @#'sut/start-semantic-stream-watchdog!)
+
 (def ^:private start-ttft-watchdog @#'sut/start-ttft-watchdog!)
+
 (def ^:private deregister-watchdog @#'sut/deregister-watchdog!)
+
 (def ^:private watchdog-registry @#'sut/watchdog-registry)
 
 (defn- close-tracking-stream
@@ -432,3 +436,42 @@
             (deregister-watchdog t)
             (expect (false? interrupted?))
             (expect (false? @ttft-fired?)))))))
+
+(defdescribe
+  watchdog-deadline-test
+  (it
+    "resolves each limit from the caller, then the router network, then the default"
+    ;; The semantic watchdog is off unless a caller or the router network sets it.
+    (expect (= #{:ttft-timeout-ms :first-byte-timeout-ms :idle-timeout-ms}
+               (set (keys (sut/watchdog-limits {})))))
+    (expect
+      (= {:ttft-timeout-ms 100 :first-byte-timeout-ms 200 :idle-timeout-ms 45000 :timeout-ms 100000}
+         (sut/watchdog-limits
+           {:ttft-timeout-ms 100 :first-byte-timeout-ms 200 :semantic-timeout-ms nil}
+           {:ttft-timeout-ms 999 :idle-timeout-ms 45000 :timeout-ms 100000}))))
+  (it
+    "counts down to the watchdog that closes the attempt next"
+    (let [limits (sut/watchdog-limits {:ttft-timeout-ms 200000
+                                       :first-byte-timeout-ms 120000
+                                       :idle-timeout-ms 300000
+                                       :semantic-timeout-ms 240000})]
+      ;; Before the first stream event: the headers, then the first body byte.
+      (expect (= 201000 (sut/watchdog-deadline-ms limits {:started-ms 1000} 21000)))
+      (expect (= 321000 (sut/watchdog-deadline-ms limits {:started-ms 1000} 202000)))
+      ;; After it: transport silence or model silence, whichever comes first.
+      (expect (= 241000 (sut/watchdog-deadline-ms limits {:started-ms 1000 :byte-ms 30000} 31000)))
+      (expect (= 300000
+                 (sut/watchdog-deadline-ms limits
+                                           {:started-ms 1000 :byte-ms 60000 :output-ms 60000}
+                                           61000)))
+      ;; A passed idle estimate gives way to the next deadline that has not passed.
+      (expect (= 302000 (sut/watchdog-deadline-ms limits {:started-ms 1000 :byte-ms 2000} 250000)))
+      (expect (nil? (sut/watchdog-deadline-ms limits {:started-ms 1000 :byte-ms 2000} 400000)))
+      (expect (nil? (sut/watchdog-deadline-ms limits {} 1000)))
+      ;; A keepalive inside a thinking block is model progress.
+      (expect (= 440000
+                 (sut/watchdog-deadline-ms limits
+                                           {:started-ms 1000 :byte-ms 200000 :thinking-ms 200000}
+                                           201000)))))
+  (it "caps the header wait with the whole-request timeout"
+      (expect (= 101000 (sut/watchdog-deadline-ms {:timeout-ms 100000} {:started-ms 1000} 2000)))))

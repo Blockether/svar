@@ -713,6 +713,115 @@
             idx (assoc sys-msg :content (update blocks (dec n) assoc :svar/cache true)))))
       messages)))
 
+;; Rolling prompt-cache placement. Anthropic allows four breakpoints per call: one
+;; on the system prefix that sessions share, three on the trailing transcript. The
+;; trailing anchors move with recency and keep the previous request's write anchor.
+(def ^:private PROMPT_CACHE_TRANSCRIPT_ANCHORS
+  "Trailing transcript messages that carry a breakpoint. The shared system
+   prefix takes the fourth slot of Anthropic's limit."
+  3)
+
+(def ^:private UNCACHEABLE_BLOCK_TYPES
+  "Content-block types that refuse a `cache_control` marker: preserved thinking is
+   signed reasoning, not a cache anchor."
+  #{"thinking" "redacted_thinking"})
+
+(defn prompt-cache-placement
+  "Static descriptor of the rolling placement for `provider-id`. Pass it as
+   `:prompt-cache-policy` to `prompt-cache-context`, so the cache-context id changes
+   when the placement or the provider's prompt-cache policy changes."
+  [provider-id]
+  (let [{:keys [strategy ttl]} (router/provider-prompt-cache provider-id)]
+    {:version 2
+     :strategy strategy
+     :system-anchor :last-shared-system
+     :transcript-anchors PROMPT_CACHE_TRANSCRIPT_ANCHORS
+     :ttl ttl}))
+
+(defn prompt-cache-breakpoint-indexes
+  "Ordered indexes of the messages that `place-prompt-cache-breakpoints` marks: the
+   last system message that is not session-scoped, then the last three messages after
+   the last system message. `:session-scoped?` is a predicate on one message. It marks
+   system text that names one session, so no other session can reuse that prefix."
+  ([messages] (prompt-cache-breakpoint-indexes messages {}))
+  ([messages {:keys [session-scoped?]}]
+   (let [messages
+         (vec messages)
+
+         n
+         (count messages)
+
+         system-indexes
+         (keep-indexed (fn [i message]
+                         (when (= "system"
+                                  (some-> (:role message)
+                                          name))
+                           i))
+                       messages)
+
+         last-system
+         (last system-indexes)
+
+         system-anchor
+         (last (cond->> system-indexes
+                 session-scoped?
+                 (remove #(session-scoped? (nth messages %)))))
+
+         transcript-from
+         (max (long (if last-system (inc (long last-system)) 0))
+              (- (long n) (long PROMPT_CACHE_TRANSCRIPT_ANCHORS)))]
+
+     (vec (cond->> (range transcript-from n)
+            system-anchor
+            (cons system-anchor))))))
+
+(defn- cacheable-block-index
+  "Index of the LAST block of `content` that may carry a breakpoint, or nil when
+   every block refuses one."
+  [content]
+  (last (keep-indexed (fn [i blk]
+                        (when-not (and (map? blk) (contains? UNCACHEABLE_BLOCK_TYPES (:type blk)))
+                          i))
+                      content)))
+
+(defn- tag-message-cached
+  "Mark the last cacheable content block of message `m` with `:svar/cache true` and,
+   when `ttl` is `:1h`, `:svar/cache-ttl :1h`. Coerces a string `:content` into a text
+   block first. Leaves other shapes, and a message with no cacheable block, unchanged."
+  [m ttl]
+  (let [mark
+        (fn [blk]
+          (cond-> (assoc blk :svar/cache true)
+            (= :1h ttl)
+            (assoc :svar/cache-ttl :1h)))
+
+        content
+        (:content m)]
+
+    (cond (string? content) (assoc m :content [(mark {:type "text" :text content})])
+          (and (vector? content) (seq content))
+          (if-let [i (cacheable-block-index content)]
+            (let [blk (nth content i)
+                  blk (if (map? blk) (mark blk) (mark {:type "text" :text (str blk)}))]
+
+              (assoc m :content (assoc content i blk)))
+            m)
+          :else m)))
+
+(defn place-prompt-cache-breakpoints
+  "Mark the rolling prompt-cache breakpoints of `messages` for `provider-id`, on the
+   tier of its `provider-prompt-cache` policy. The marks disable the automatic system
+   marker. Anchors collapse instead of overlapping, so a call with only system
+   messages marks one. `opts` takes `:session-scoped?`, as in
+   `prompt-cache-breakpoint-indexes`."
+  ([messages provider-id] (place-prompt-cache-breakpoints messages provider-id {}))
+  ([messages provider-id opts]
+   (let [ttl (:ttl (router/provider-prompt-cache provider-id))]
+     (reduce (fn [ms i]
+               (update ms i tag-message-cached ttl))
+             (vec messages)
+             (prompt-cache-breakpoint-indexes messages opts)))))
+
 (defn- message-text
   "Concatenated text of ONE message's content. Handles both the plain-string
    and the block-vector shapes; returns nil when the message carries no text
@@ -7857,6 +7966,68 @@
                     :else default)]
     (if (= k :first-byte-timeout-ms) (validated-first-byte-timeout-ms value) value)))
 
+(def ^:private WATCHDOG_DEFAULTS
+  "Package defaults that a streaming request applies when neither the caller nor the
+   router network sets a limit. The whole-request `:timeout-ms` has no stream default."
+  [[:ttft-timeout-ms router/DEFAULT_TTFT_TIMEOUT_MS]
+   [:first-byte-timeout-ms router/DEFAULT_FIRST_BYTE_TIMEOUT_MS]
+   [:idle-timeout-ms router/DEFAULT_IDLE_TIMEOUT_MS]
+   [:semantic-timeout-ms router/DEFAULT_SEMANTIC_TIMEOUT_MS] [:timeout-ms nil]])
+
+(defn watchdog-limits
+  "Streaming watchdog limits that svar applies to one request, as positive
+   milliseconds. Precedence per key is caller `opts`, then `router-network`, then the
+   package default. A key is absent when its watchdog is off, for example after an
+   explicit nil."
+  ([opts] (watchdog-limits opts nil))
+  ([opts router-network]
+   (into {}
+         (keep (fn [[k default]]
+                 (let [v (resolved-network-timeout opts router-network k default)]
+                   (when (and (number? v) (pos? (long v))) [k (long v)]))))
+         WATCHDOG_DEFAULTS)))
+
+(defn watchdog-deadline-ms
+  "Wall-clock ms when the next svar watchdog closes one request attempt, or nil.
+
+   `limits` is a `watchdog-limits` map. `attempt` has `:started-ms`, the last stream
+   event `:byte-ms`, the last model output `:output-ms` and the last keepalive of
+   hidden thinking `:thinking-ms`; the last three are nil until they occur. Before the
+   first stream event, svar waits for the response headers, then for the first body
+   byte. After it, svar closes on transport silence (idle) or on model silence
+   (semantic). A keepalive inside a thinking block is model progress. A caller that
+   sees parsed events only misses SSE comments, so a passed idle estimate gives way
+   to the next deadline that has not passed."
+  [limits {:keys [started-ms byte-ms output-ms thinking-ms]} now-ms]
+  (when started-ms
+    (let [{:keys [ttft-timeout-ms first-byte-timeout-ms idle-timeout-ms semantic-timeout-ms
+                  timeout-ms]}
+          limits
+
+          shortest
+          (fn [vs]
+            (some->> vs
+                     (remove nil?)
+                     seq
+                     (apply min)))
+
+          candidates
+          (if byte-ms
+            [(when idle-timeout-ms (+ (long idle-timeout-ms) (long byte-ms)))
+             (when semantic-timeout-ms
+               (+ (long semantic-timeout-ms)
+                  (max (long (or output-ms started-ms)) (long (or thinking-ms 0)))))]
+            (let [headers-ms
+                  (when-let [wait-ms (shortest [ttft-timeout-ms timeout-ms])]
+                    (+ (long wait-ms) (long started-ms)))
+
+                  body-ms
+                  (shortest [first-byte-timeout-ms idle-timeout-ms])]
+
+              [headers-ms (when (and headers-ms body-ms) (+ (long headers-ms) (long body-ms)))]))]
+
+      (shortest (filter #(and % (> (long %) (long now-ms))) candidates)))))
+
 (defn routed-chat-completion
   "Routes a chat-completion across providers with fallback.
 
@@ -10035,6 +10206,16 @@
   (cond (string? input) {:messages [(user input)] :opts {} :replace-history? false}
         (and (map? input) (:role input)) {:messages [input] :opts {} :replace-history? false}
         (sequential? input) {:messages (vec input) :opts {} :replace-history? false}
+        (and (map? input) (contains? input :conversation))
+        (do (when (some #(contains? input %) [:history :input :messages])
+              (throw
+                (ex-info
+                  "A session turn cannot combine :conversation with :history, :input or :messages."
+                  {:type :svar.session/invalid-input})))
+            (when-not (sequential? (:conversation input))
+              (throw (ex-info "A session :conversation must be a sequence of canonical messages."
+                              {:type :svar.session/invalid-input})))
+            {:conversation (vec (:conversation input)) :opts (dissoc input :conversation)})
         (map? input)
         (let [replace-history?
               (contains? input :history)
@@ -10048,7 +10229,7 @@
               (if replace-history? (:history input) (or (:input input) (:messages input)))]
 
           (when (nil? turn-input)
-            (throw (ex-info "A session turn requires :input, :messages, or :history."
+            (throw (ex-info "A session turn requires :input, :messages, :history, or :conversation."
                             {:type :svar.session/invalid-input})))
           {:messages (cond (string? turn-input) [(user turn-input)]
                            (and (map? turn-input) (:role turn-input)) [turn-input]
@@ -10059,6 +10240,22 @@
            :replace-history? replace-history?})
         :else (throw (ex-info "Session input must be text, a canonical message, or turn options."
                               {:type :svar.session/invalid-input}))))
+
+(defn- sync-session-turn
+  "Resolve a `:conversation` turn against the canonical `history`. When `history` is
+   a prefix of the conversation, only the unsent suffix goes out. Otherwise, for
+   example after compaction rewrote earlier messages, the conversation replaces the
+   history and starts a fresh logical chain on the same socket."
+  [turn history]
+  (if-let [conversation (:conversation turn)]
+    (let [history (vec history)
+          n (count history)
+          prefix? (and (<= n (count conversation)) (= history (subvec conversation 0 n)))]
+
+      (-> (dissoc turn :conversation)
+          (assoc :messages (if prefix? (subvec conversation n) conversation)
+                 :replace-history? (not prefix?))))
+    turn))
 
 (defn- messages->responses-input
   "The input entries a session sends for the last `n` of `messages`. `explicit-cache?` is the
@@ -10094,10 +10291,14 @@
     (let [routing
           (assoc (merge (:routing base-opts) turn-routing) :provider provider-id)
 
+          ;; Turn headers add to the session headers, so a turn cannot drop the
+          ;; `session-id` cache-affinity header that `open-session` set.
           call-opts
-          (-> base-opts
-              (merge turn-opts)
-              (assoc :routing routing))
+          (cond-> (-> base-opts
+                      (merge turn-opts)
+                      (assoc :routing routing))
+            (or (:llm-headers base-opts) (:llm-headers turn-opts))
+            (assoc :llm-headers (merge (:llm-headers base-opts) (:llm-headers turn-opts))))
 
           resolved
           (router/resolve-routing router (routing-opts-with-reasoning call-opts))
@@ -10127,7 +10328,7 @@
       (locking lock
         (when @closed? (throw (ex-info "The LLM session is closed." {:type :svar.session/closed})))
         (let [{new-messages :messages turn-opts :opts replace-history? :replace-history?}
-              (session-turn input)
+              (sync-session-turn (session-turn input) @history)
 
               [active-model call-opts]
               (session-call-route router base-opts turn-opts provider-id)
@@ -10245,9 +10446,13 @@
   "Opens an explicit, sequential LLM session. The public contract is provider
    neutral; the first stateful backend is `:openai-codex`, using one Responses
    WebSocket plus `previous_response_id`. Canonical history remains local and is
-   replayed after reconnect. Before its first inference the session prewarms the
-   socket with `generate=false`; `:websocket-prewarm? false` disables that
-   optimization. An idle socket is proactively rotated after
+   replayed after reconnect. The ChatGPT backend routes cache affinity by the
+   `session-id` header, not by `prompt_cache_key`, so the session sends its cache
+   key in that header (a caller header wins) and a new session with the same key
+   reaches the warm prefix of earlier sessions. Prewarm is off by default: its
+   `generate=false` request runs directly before the first inference, saves no time
+   and makes that inference report no cached tokens. `:websocket-prewarm? true`
+   enables it. An idle socket is proactively rotated after
    `:websocket-max-age-ms` (default 3,300,000, or 55 minutes) before Codex's hard
    60-minute limit; the new socket receives canonical history under the same cache
    key. Svar captures the opaque `x-codex-turn-state` token and replays it across
@@ -10262,8 +10467,11 @@
     the full request replayed on a fresh socket. `opts` are ordinary `ask-code!` options and may include initial
    `:messages`. A turn may pass `{:history [...]}` to atomically replace the
    canonical replay history and start a fresh logical chain without replacing the
-   socket. A per-turn `:routing :model` likewise resets the logical chain and
-   replays canonical history through that socket. A turn cannot change providers.
+   socket. A turn may instead pass `{:conversation [...]}`, the full canonical
+   conversation: when the history is its prefix, only the unsent suffix goes out;
+   otherwise the conversation replaces the history as with `:history`. A per-turn
+   `:routing :model` likewise resets the logical chain and replays canonical
+   history through that socket. A turn cannot change providers.
    The returned value implements `Closeable`."
   [router opts]
   (let [resolved
@@ -10280,10 +10488,14 @@
         api-style
         (or (:api-style model-map) (:api-style provider))
 
+        cache-key
+        (or (:cache-key opts) (str "svar-session-" (java.util.UUID/randomUUID)))
+
         base-opts
-        (cond-> (dissoc opts :messages)
-          (nil? (:cache-key opts))
-          (assoc :cache-key (str "svar-session-" (java.util.UUID/randomUUID))))]
+        (-> (dissoc opts :messages)
+            (assoc :cache-key cache-key
+                   :websocket-prewarm? (true? (:websocket-prewarm? opts))
+                   :llm-headers (merge {"session-id" cache-key} (:llm-headers opts))))]
 
     (when-not (and (= :openai-codex provider-id) (= :openai-compatible-responses api-style))
       (throw (ex-info "Stateful sessions currently require the OpenAI Codex Responses provider."

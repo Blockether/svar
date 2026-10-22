@@ -97,6 +97,23 @@
    override only for local/custom endpoints."
   router/provider-base-url)
 
+(def provider-prompt-cache
+  "Prompt-cache policy svar knows for a provider id (plan-tier aware): `:strategy`
+   (`:explicit-breakpoints` or `:server-continuation`), `:ttl` (`:5m` or `:1h`) and
+   `:ttl-ms`. A `:server-continuation` provider keeps one `open-session` per
+   conversation; the others take `place-prompt-cache-breakpoints`."
+  router/provider-prompt-cache)
+
+(def provider-fast-mode
+  "Fast mode svar knows for a provider id (plan-tier aware), or nil:
+   `{:service-tier tier :cost-multiplier n}`."
+  router/provider-fast-mode)
+
+(def fast-mode-router
+  "Put the fast service tier only on the router entries of the listed provider ids
+   that declare fast mode, so a fallback provider never carries it."
+  router/fast-mode-router)
+
 (def provider-default-models
   "Sane default model NAMES (vec of strings) svar curates for a provider id
    (plan-tier aware). The single source of truth — consumers use it as their
@@ -302,6 +319,33 @@
    GPT-5.6+ Responses emits explicit prompt-cache breakpoints, including a
    rolling prior-turn boundary; older OpenAI-compatible styles strip the marker."
   llm/cached)
+
+(def place-prompt-cache-breakpoints
+  "Marks the rolling prompt-cache breakpoints of `messages` for a provider id: the
+   last shared system message plus the last three transcript messages, on the
+   provider's tier. Optional opts take `:session-scoped?`, a predicate for system
+   messages that name one session and so must not anchor the shared prefix."
+  llm/place-prompt-cache-breakpoints)
+
+(def prompt-cache-breakpoint-indexes
+  "Message indexes that `place-prompt-cache-breakpoints` marks, for cache telemetry."
+  llm/prompt-cache-breakpoint-indexes)
+
+(def prompt-cache-placement
+  "Descriptor of the rolling placement for a provider id. Pass it as
+   `:prompt-cache-policy` to `prompt-cache-context`."
+  llm/prompt-cache-placement)
+
+(def watchdog-limits
+  "Streaming watchdog limits svar applies to one request, as positive ms: caller opts,
+   then the optional router network, then package defaults. An absent key is off."
+  llm/watchdog-limits)
+
+(def watchdog-deadline-ms
+  "Wall-clock ms when the next svar watchdog closes one request attempt, or nil, for
+   `watchdog-limits` and the attempt's `:started-ms`, `:byte-ms`, `:output-ms` and
+   `:thinking-ms`."
+  llm/watchdog-deadline-ms)
 
 (def prompt-cache-context
   "Returns Svar's opaque fixed-prefix/cache-namespace identity for routed tool calls."

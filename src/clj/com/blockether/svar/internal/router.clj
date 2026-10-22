@@ -28,6 +28,11 @@
    :anthropic {:base-url "https://api.anthropic.com/v1"
                :env-keys ["ANTHROPIC_API_KEY"]
                :api-style :anthropic
+               ;; The 5-minute tier expires between two human messages, the gap a resumed
+               ;; conversation has to cross. The 1-hour tier covers that pause: only a write
+               ;; costs more (2x base, not 1.25x), and a read stays at 0.1x. Plan tiers with
+               ;; `:provider-model-source :anthropic` inherit this policy.
+               :prompt-cache {:strategy :explicit-breakpoints :ttl :1h}
                :default-models
                [{:name "claude-opus-5-5"} {:name "claude-sonnet-5-5"} {:name "claude-haiku-5-5"}
                 {:name "claude-fable-5-1"} {:name "claude-opus-5"} {:name "claude-fable-5"}
@@ -137,6 +142,12 @@
    :openai-codex {:base-url "https://chatgpt.com/backend-api"
                   :env-keys []
                   :api-style :openai-compatible-responses
+                  ;; The Responses WebSocket keeps the conversation on the server, so a
+                  ;; caller continues one `open-session` instead of placing breakpoints.
+                  :prompt-cache {:strategy :server-continuation :ttl :5m}
+                  ;; Fast mode is Priority processing, billed at 2x Standard for input,
+                  ;; cached input, cache writes and output.
+                  :fast-mode {:service-tier "priority" :cost-multiplier 2.0}
                   :default-models [{:name "gpt-6.1-sol"} {:name "gpt-6-astra"} {:name "gpt-6-luna"}
                                    {:name "gpt-6-sol"} {:name "gpt-5.6-sol"} {:name "gpt-5.6-luna"}
                                    {:name "gpt-5.5"} {:name "gpt-5.4"} {:name "gpt-5.3-codex"}]
@@ -2214,6 +2225,59 @@
   [provider-id]
   (or (get-in KNOWN_PROVIDERS [provider-id :base-url])
       (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :base-url])))
+
+(def ^:private DEFAULT_PROMPT_CACHE
+  "Prompt-cache policy of a provider without its own `:prompt-cache` entry:
+   explicit breakpoints on the 5-minute tier."
+  {:strategy :explicit-breakpoints :ttl :5m})
+
+(def ^:private PROMPT_CACHE_TTL_MS
+  "Lifetime of each prompt-cache tier, in milliseconds."
+  {:5m 300000 :1h 3600000})
+
+(defn provider-prompt-cache
+  "Prompt-cache policy svar knows for `provider-id`, with plan-tier
+   `:provider-model-source` inheritance. `:strategy` is `:explicit-breakpoints`
+   (the caller marks cache anchors) or `:server-continuation` (the caller keeps one
+   `open-session`). `:ttl` is the tier (`:5m` or `:1h`) and `:ttl-ms` its lifetime."
+  [provider-id]
+  (let [policy (merge DEFAULT_PROMPT_CACHE
+                      (or (get-in KNOWN_PROVIDERS [provider-id :prompt-cache])
+                          (get-in KNOWN_PROVIDERS
+                                  [(provider-model-source provider-id) :prompt-cache])))]
+    (assoc policy :ttl-ms (get PROMPT_CACHE_TTL_MS (:ttl policy)))))
+
+(defn provider-fast-mode
+  "Fast mode svar knows for `provider-id`, with plan-tier `:provider-model-source`
+   inheritance, or nil. `:service-tier` is the request `service_tier` value and
+   `:cost-multiplier` scales every billed token class of a request on that tier."
+  [provider-id]
+  (or (get-in KNOWN_PROVIDERS [provider-id :fast-mode])
+      (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :fast-mode])))
+
+(defn fast-mode-router
+  "Put the fast service tier on the router entry of each provider in `provider-ids`
+   that declares fast mode. Other entries stay unchanged, so a fallback to another
+   provider never carries the tier."
+  [router provider-ids]
+  (let [ids
+        (set provider-ids)
+
+        tier-for
+        (fn [provider]
+          (when (contains? ids (:id provider))
+            (:service-tier (provider-fast-mode (:id provider)))))]
+
+    (if-not (some tier-for (:providers router))
+      router
+      (update router
+              :providers
+              (fn [providers]
+                (mapv (fn [provider]
+                        (if-let [tier (tier-for provider)]
+                          (assoc-in provider [:extra-body :service_tier] tier)
+                          provider))
+                      providers))))))
 
 (defn provider-default-models
   "Sane default model NAMES (vec of strings) svar curates for `provider-id`,

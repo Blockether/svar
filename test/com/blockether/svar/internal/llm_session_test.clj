@@ -132,6 +132,10 @@
   [router opts]
   (svar/open-session router (assoc opts :websocket-prewarm? false)))
 
+(defn- open-prewarmed-session
+  [router opts]
+  (svar/open-session router (assoc opts :websocket-prewarm? true)))
+
 (defdescribe
   websocket-resource-cleanup-test
   (it "cancels an unfinished WebSocket operation after its timeout"
@@ -306,9 +310,9 @@
       (expect (some? status-fn))
       (when status-fn
         (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
-          (with-open [session (svar/open-session (codex-router)
-                                                 {:routing {:provider :openai-codex
-                                                            :model "gpt-5.6"}})]
+          (with-open [session (open-prewarmed-session (codex-router)
+                                                      {:routing {:provider :openai-codex
+                                                                 :model "gpt-5.6"}})]
             (svar/ask! session "one")
             (svar/ask! session "two")
             (let [{:keys [provider-id transport prompt-cache]} (status-fn session)]
@@ -528,9 +532,9 @@
       (with-redefs [sut/open-responses-websocket! (fn [opts]
                                                     (swap! opens inc)
                                                     (factory opts))]
-        (with-open [session (svar/open-session (codex-router)
-                                               {:routing {:provider :openai-codex
-                                                          :model "gpt-5.6"}})]
+        (with-open [session (open-prewarmed-session (codex-router)
+                                                    {:routing {:provider :openai-codex
+                                                               :model "gpt-5.6"}})]
           (expect (= "first" (:content (svar/ask! session "one"))))
           (expect (= "rebased" (:content (svar/ask! session {:history replacement}))))
           (expect (= "continued" (:content (svar/ask! session "next"))))
@@ -1569,9 +1573,9 @@
             (atom 0)]
 
         (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
-          (with-open [session (svar/open-session (codex-router)
-                                                 {:routing {:provider :openai-codex
-                                                            :model "gpt-5.6"}})]
+          (with-open [session (open-prewarmed-session (codex-router)
+                                                      {:routing {:provider :openai-codex
+                                                                 :model "gpt-5.6"}})]
             (expect (= "first" (:content (svar/ask! session "one"))))
             (let [[warmup inference] @sent]
               (expect (false? (:generate warmup)))
@@ -1593,9 +1597,9 @@
 
         (with-redefs [sut/open-responses-websocket!
                       (fake-websocket-factory events sent closes aborts)]
-          (with-open [session (svar/open-session (codex-router)
-                                                 {:routing {:provider :openai-codex
-                                                            :model "gpt-5.6"}})]
+          (with-open [session (open-prewarmed-session (codex-router)
+                                                      {:routing {:provider :openai-codex
+                                                                 :model "gpt-5.6"}})]
             (expect
               (= :svar.core/stream-cancelled
                  (try (svar/ask! session "one") nil (catch Throwable e (:type (ex-data e))))))))
@@ -1618,9 +1622,9 @@
             (atom 0)]
 
         (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
-          (with-open [session (svar/open-session (codex-router)
-                                                 {:routing {:provider :openai-codex
-                                                            :model "gpt-5.6"}})]
+          (with-open [session (open-prewarmed-session (codex-router)
+                                                      {:routing {:provider :openai-codex
+                                                                 :model "gpt-5.6"}})]
             (expect (= "first" (:content (svar/ask! session "one"))))
             (let [[warmup inference] @sent]
               (expect (false? (:generate warmup)))
@@ -1663,9 +1667,9 @@
       (with-redefs [sut/open-responses-websocket! (fn [opts]
                                                     (swap! opens inc)
                                                     (factory opts))]
-        (with-open [session (svar/open-session router
-                                               {:routing {:provider :openai-codex
-                                                          :model "gpt-5.6"}})]
+        (with-open [session (open-prewarmed-session router
+                                                    {:routing {:provider :openai-codex
+                                                               :model "gpt-5.6"}})]
           (expect (= "first" (:content (svar/ask! session "one"))))
           (let [[warmup first-attempt retry] @sent]
             (expect (false? (:generate warmup)))
@@ -1718,12 +1722,12 @@
                            (swap! aborts inc))}))]
 
         (with-redefs [sut/open-responses-websocket! factory]
-          (with-open [session (svar/open-session (codex-router)
-                                                 {:routing {:provider :openai-codex
-                                                            :model "gpt-5.6"}
-                                                  :websocket-warmup-first-token-timeout-ms 100
-                                                  :on-chunk (fn [event]
-                                                              (swap! seen conj event))})]
+          (with-open [session (open-prewarmed-session (codex-router)
+                                                      {:routing {:provider :openai-codex
+                                                                 :model "gpt-5.6"}
+                                                       :websocket-warmup-first-token-timeout-ms 100
+                                                       :on-chunk (fn [event]
+                                                                   (swap! seen conj event))})]
             (expect (= "first" (:content (svar/ask! session "one"))))
             (let [[warmup continuation retry] @sent]
               (expect (false? (:generate warmup)))
@@ -2018,3 +2022,117 @@
               ;; Every stalled socket is given up, never carried into the next
               ;; attempt: its pending response still owns the connection.
               (expect (= @opens @aborts))))))))
+
+(defdescribe
+  session-cache-affinity-test
+  (it "skips prewarm by default and sends the cache key as the session-id header"
+      (let [events
+            (atom [(completed-event "resp_1" "first")])
+
+            sent
+            (atom [])
+
+            closes
+            (atom 0)
+
+            socket-opts
+            (atom [])
+
+            factory
+            (fake-websocket-factory events sent closes)]
+
+        (with-redefs [sut/open-responses-websocket! (fn [opts]
+                                                      (swap! socket-opts conj opts)
+                                                      (factory opts))]
+          (with-open [session (svar/open-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :cache-key "shared-key"})]
+            (expect (= "first" (:content (svar/ask! session "one"))))
+            (expect (= 1 (count @sent)))
+            (expect (not (false? (:generate (first @sent)))))
+            (expect (= "shared-key" (get-in (first @socket-opts) [:headers "session-id"])))))))
+  (it "lets a caller session-id header win"
+      (let [events
+            (atom [(completed-event "resp_1" "first")])
+
+            sent
+            (atom [])
+
+            closes
+            (atom 0)
+
+            socket-opts
+            (atom [])
+
+            factory
+            (fake-websocket-factory events sent closes)]
+
+        (with-redefs [sut/open-responses-websocket! (fn [opts]
+                                                      (swap! socket-opts conj opts)
+                                                      (factory opts))]
+          (with-open [session (svar/open-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :cache-key "shared-key"
+                                                  :llm-headers {"session-id" "caller"}})]
+            (svar/ask! session "one")
+            (expect (= "caller" (get-in (first @socket-opts) [:headers "session-id"]))))))))
+
+(defdescribe
+  session-conversation-turn-test
+  (it "sends only the unsent suffix of a conversation that extends the history"
+      (let [events
+            (atom [(completed-event "resp_1" "first") (completed-event "resp_2" "second")])
+
+            sent
+            (atom [])
+
+            closes
+            (atom 0)]
+
+        (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (expect (= "first" (:content (svar/ask! session {:conversation [(svar/user "one")]}))))
+            (expect (= "second"
+                       (:content (svar/ask! session
+                                            {:conversation (conj (svar/session-history session)
+                                                                 (svar/user "two"))}))))
+            (let [delta (second @sent)
+                  input (json/write-json-str (:input delta))]
+
+              (expect (= "resp_1" (:previous_response_id delta)))
+              (expect (str/includes? input "two"))
+              (expect (not (str/includes? input "one"))))))))
+  (it "replaces a rewritten history and starts a fresh chain"
+      (let [events
+            (atom [(completed-event "resp_1" "first") (completed-event "resp_2" "second")])
+
+            sent
+            (atom [])
+
+            closes
+            (atom 0)]
+
+        (with-redefs [sut/open-responses-websocket! (fake-websocket-factory events sent closes)]
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}})]
+            (svar/ask! session {:conversation [(svar/user "one")]})
+            (svar/ask! session {:conversation [(svar/user "compacted") (svar/user "two")]})
+            (let [request (second @sent)
+                  input (json/write-json-str (:input request))]
+
+              (expect (nil? (:previous_response_id request)))
+              (expect (str/includes? input "compacted"))
+              (expect (= [(svar/user "compacted") (svar/user "two")]
+                         (subvec (svar/session-history session) 0 2))))))))
+  (it "rejects a conversation combined with other turn input"
+      (with-open [session (open-test-session (codex-router)
+                                             {:routing {:provider :openai-codex :model "gpt-5.6"}})]
+        (expect (= :svar.session/invalid-input
+                   (try (svar/ask! session {:conversation [] :history []})
+                        nil
+                        (catch clojure.lang.ExceptionInfo e (:type (ex-data e)))))))))

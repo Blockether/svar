@@ -253,3 +253,23 @@
         (expect (true? (:reasoning-effort? claude)))
         (expect (= :anthropic-thinking (:reasoning-style claude)))
         (expect (nil? (:verbosity-style claude))))))
+
+(defdescribe
+  provider-fast-mode-test
+  (it "declares Priority processing only for the providers that offer it"
+      (expect (= {:service-tier "priority" :cost-multiplier 2.0}
+                 (router/provider-fast-mode :openai-codex)))
+      (expect (nil? (router/provider-fast-mode :anthropic)))
+      (expect (nil? (router/provider-fast-mode :unknown-provider))))
+  (it "puts the tier only on listed providers that declare fast mode"
+      (let [router
+            {:providers [{:id :openai-codex :extra-body {:store false}} {:id :anthropic}
+                         {:id :openai-codex-backup}]}
+
+            fast
+            (router/fast-mode-router router [:openai-codex :anthropic])]
+
+        (expect (= {:store false :service_tier "priority"} (:extra-body (first (:providers fast)))))
+        (expect (= [{:id :anthropic} {:id :openai-codex-backup}] (rest (:providers fast))))
+        (expect (identical? router (router/fast-mode-router router [:anthropic])))
+        (expect (identical? router (router/fast-mode-router router []))))))

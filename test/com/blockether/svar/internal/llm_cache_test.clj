@@ -749,3 +749,102 @@
   (it "no usage / zero input → nil (nothing to say)"
       (expect (nil? (#'sut/log-cache-outcome! {:api-usage nil})))
       (expect (nil? (#'sut/log-cache-outcome! {:api-usage {:input-tokens 0}})))))
+
+(defdescribe
+  rolling-prompt-cache-placement-test
+  "Rolling placement: the last shared system message plus the three trailing transcript
+   messages, on the tier of the provider's prompt-cache policy."
+  (let [cached?
+        (fn [m]
+          (let [c (:content m)]
+            (boolean (and (vector? c) (some :svar/cache c)))))
+
+        ttls
+        (fn [out]
+          (into #{} (comp (mapcat :content) (keep :svar/cache-ttl)) out))
+
+        session-scoped?
+        (fn [m]
+          (= "session = {…}"
+             (let [c (:content m)]
+               (if (string? c) c (:text (first c))))))]
+
+    (it "names each provider's prompt-cache policy"
+        (expect (= {:strategy :explicit-breakpoints :ttl :1h :ttl-ms 3600000}
+                   (svar/provider-prompt-cache :anthropic)))
+        (expect (= :1h (:ttl (svar/provider-prompt-cache :anthropic-coding-plan))))
+        (expect (= {:strategy :server-continuation :ttl :5m :ttl-ms 300000}
+                   (svar/provider-prompt-cache :openai-codex)))
+        (expect (= {:strategy :explicit-breakpoints :ttl :5m :ttl-ms 300000}
+                   (svar/provider-prompt-cache :zai-coding-plan)))
+        (expect (= :explicit-breakpoints
+                   (:strategy (svar/provider-prompt-cache :unknown-provider)))))
+    (it "describes the placement for the cache-context fingerprint"
+        (expect (= {:version 2
+                    :strategy :explicit-breakpoints
+                    :system-anchor :last-shared-system
+                    :transcript-anchors 3
+                    :ttl :1h}
+                   (svar/prompt-cache-placement :anthropic))))
+    (it "tags the last system message and the three trailing transcript messages"
+        (let [out (svar/place-prompt-cache-breakpoints
+                    [{:role "system" :content "core"} {:role "system" :content "frozen"}
+                     {:role "user" :content [{:type "text" :text "settled"}]}
+                     {:role "assistant" :content [{:type "text" :text "settled reply"}]}
+                     {:role "user" :content [{:type "text" :text "previous write anchor"}]}
+                     {:role "assistant" :content [{:type "text" :text "reply"}]}
+                     {:role "user" :content [{:type "text" :text "current"}]}]
+                    :zai-coding-plan)]
+          (expect (= [false true false false true true true] (mapv cached? out)))))
+    (it "anchors before a session-scoped system message, so other sessions reuse the prefix"
+        (doseq [content ["session = {…}" [{:type "text" :text "session = {…}"}]]]
+          (let [messages [{:role "system" :content "core"} {:role "system" :content "extensions"}
+                          {:role "system" :content content} {:role :user :content "task"}]
+                out (svar/place-prompt-cache-breakpoints messages
+                                                         :anthropic-coding-plan
+                                                         {:session-scoped? session-scoped?})]
+
+            (expect (= [false true false true] (mapv cached? out)))
+            (expect (= [1 3]
+                       (svar/prompt-cache-breakpoint-indexes messages
+                                                             {:session-scoped?
+                                                              session-scoped?}))))))
+    (it "never spends more than Anthropic's four breakpoints"
+        (let [msgs (into [{:role "system" :content "s"}]
+                         (map (fn [i]
+                                {:role "user" :content [{:type "text" :text (str i)}]}))
+                         (range 20))]
+          (expect
+            (= 4 (count (filter cached? (svar/place-prompt-cache-breakpoints msgs :anthropic)))))))
+    (it "coerces a string last message into a cached text block"
+        (let [last-blk (first (:content (last (svar/place-prompt-cache-breakpoints
+                                                [{:role "system" :content "s"}
+                                                 {:role "user" :content "hello"}]
+                                                :zai-coding-plan))))]
+          (expect (= "hello" (:text last-blk)))
+          (expect (true? (:svar/cache last-blk)))))
+    (it "is a no-op on an empty list and marks a system-only call once"
+        (expect (= [] (svar/place-prompt-cache-breakpoints [] :zai-coding-plan)))
+        (expect (= 1
+                   (count (filter cached?
+                                  (svar/place-prompt-cache-breakpoints [{:role "system"
+                                                                         :content "only"}]
+                                                                       :zai-coding-plan))))))
+    (it "asks for the 1-hour tier only when the provider policy has it"
+        (let [msgs [{:role "system" :content "s"} {:role "user" :content "u"}]]
+          (expect (= #{:1h}
+                     (ttls (svar/place-prompt-cache-breakpoints msgs :anthropic-coding-plan))))
+          (expect (= #{:1h} (ttls (svar/place-prompt-cache-breakpoints msgs :anthropic))))
+          (expect (empty? (ttls (svar/place-prompt-cache-breakpoints msgs :zai-coding-plan))))))
+    (it "never marks a preserved thinking block"
+        (let [out (svar/place-prompt-cache-breakpoints
+                    [{:role "system" :content "s"}
+                     {:role "assistant"
+                      :content [{:type "thinking" :thinking "…" :signature "sig"}]}
+                     {:role "assistant"
+                      :content [{:type "thinking" :thinking "…" :signature "sig"}
+                                {:type "text" :text "answer"}]}]
+                    :anthropic-coding-plan)]
+          (expect (not (cached? (nth out 1))))
+          (expect (nil? (:svar/cache (first (:content (nth out 2))))))
+          (expect (true? (:svar/cache (second (:content (nth out 2))))))))))
