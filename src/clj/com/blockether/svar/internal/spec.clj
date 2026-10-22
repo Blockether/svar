@@ -1483,6 +1483,51 @@
   #{:spec.type/string :spec.type/int :spec.type/float :spec.type/bool :spec.type/keyword
     :spec.type/date :spec.type/datetime})
 
+(defn- unwrap-scalar
+  "Returns the scalar inside a one-entry map or a one-item vector, or `value`.
+   Models sometimes wrap a scalar answer: {\"answer\": {\"answer\": \"wins\"}}."
+  [value]
+  (let [inner (cond (and (map? value) (= 1 (count value))) (val (first value))
+                    (and (vector? value) (= 1 (count value))) (first value)
+                    :else ::none)]
+    (cond (= ::none inner) value
+          (coll? inner) (let [unwrapped (unwrap-scalar inner)]
+                          (if (coll? unwrapped) value unwrapped))
+          :else inner)))
+
+(defn- unwrap-scalar-fields
+  "Replaces a wrapped scalar in each scalar `:one` field with the scalar itself.
+   Recurses into ref values. A field that holds more than one value stays as it is."
+  [data spec-def key-ns]
+  (if-not (map? data)
+    data
+    (let [ref-registry (build-ref-registry spec-def)]
+      (reduce (fn [result field]
+                (let [field-name (::name field)
+                      actual-key (if key-ns (keyword key-ns (name field-name)) field-name)
+                      value (get result actual-key)
+                      ref-spec (get ref-registry (::target field))
+                      ref-key-ns (some-> ref-spec
+                                         ::key-ns)
+                      one? (= :spec.cardinality/one (::cardinality field))]
+
+                  (cond (or (nil? value) (str/includes? (name field-name) ".")) result
+                        (and one? (contains? scalar-types (::type field)) (coll? value))
+                        (let [unwrapped (unwrap-scalar value)]
+                          (assoc result
+                            actual-key (if (and (= :spec.type/keyword (::type field))
+                                                (string? unwrapped))
+                                         (keyword unwrapped)
+                                         unwrapped)))
+                        (and ref-spec one? (map? value))
+                        (assoc result actual-key (unwrap-scalar-fields value ref-spec ref-key-ns))
+                        (and ref-spec (not one?) (vector? value))
+                        (assoc result
+                          actual-key (mapv #(unwrap-scalar-fields % ref-spec ref-key-ns) value))
+                        :else result)))
+              data
+              (::fields spec-def)))))
+
 (defn- shape-error
   "Returns the first shape error in a parsed result, or nil.
 
@@ -1522,6 +1567,7 @@
    1. Remaps keys to match original spec field names (preserves ?!*+ chars)
    2. Converts :spec.type/keyword fields from strings to Clojure keywords
    3. Applies ::key-ns namespace to keys if configured in spec
+   4. Unwraps a scalar that a model wrapped in a one-entry map or one-item vector
    
    Params:
    `text` - String. JSON response from LLM (may be malformed).
@@ -1576,7 +1622,9 @@
                  (if (empty? key-ns-map) keywordized (namespace-keys keywordized key-ns-map))
                  ;; Apply spec-aware field defaults (nil :many → [], missing keys → nil)
                  main-key-ns (::key-ns spec-def)
-                 result (apply-spec-field-defaults namespaced spec-def main-key-ns)]
+                 result (-> namespaced
+                            (apply-spec-field-defaults spec-def main-key-ns)
+                            (unwrap-scalar-fields spec-def main-key-ns))]
 
              {:result result
               :key-mapping key-mapping

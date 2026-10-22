@@ -1767,9 +1767,9 @@
 
 (defdescribe
   str->data-with-spec-shape-test
-  "A model reply with the wrong field shape is rejected, so ask! retries it.
-   Seen live: nemotron-3-ultra answered {\"answer\": {\"answer\": \"wins\"}} and
-   {\"answer\": null} for a required string field, and svar returned both."
+  "svar unwraps a wrapped scalar and rejects other wrong field shapes, so ask!
+   retries them. Seen live: nemotron-3-ultra answered {\"answer\": {\"answer\": \"wins\"}}
+   and {\"answer\": null} for a required string field, and svar returned both."
   (describe "required :one fields"
             (it "rejects null"
                 (expect (= :svar.spec/required-field-missing
@@ -1786,17 +1786,33 @@
                              "{}"
                              (one-field-spec :spec.type/string ::sut/required false))))))
   (describe "scalar :one fields"
-            (it "rejects a map"
-                (let [data (try (sut/str->data-with-spec "{\"answer\": {\"answer\": \"wins\"}}"
-                                                         (one-field-spec :spec.type/string))
+            (it "unwraps a one-entry map"
+                (expect (= {:answer "wins"}
+                           (sut/str->data-with-spec "{\"answer\": {\"answer\": \"wins\"}}"
+                                                    (one-field-spec :spec.type/string))))
+                (expect (= {:answer "wins"}
+                           (sut/str->data-with-spec "{\"answer\": {\"a\": {\"b\": \"wins\"}}}"
+                                                    (one-field-spec :spec.type/string)))))
+            (it "unwraps a one-item vector"
+                (expect (= {:answer "wins"}
+                           (sut/str->data-with-spec "{\"answer\": [\"wins\"]}"
+                                                    (one-field-spec :spec.type/string)))))
+            (it "unwraps into a keyword field"
+                (expect (= {:answer :low}
+                           (sut/str->data-with-spec "{\"answer\": {\"level\": \"low\"}}"
+                                                    (one-field-spec :spec.type/keyword)))))
+            (it "rejects a map with more than one entry"
+                (let [data (try (sut/str->data-with-spec
+                                  "{\"answer\": {\"winner\": \"rock\", \"loser\": \"scissors\"}}"
+                                  (one-field-spec :spec.type/string))
                                 (catch clojure.lang.ExceptionInfo e (ex-data e)))]
                   (expect (= :svar.spec/schema-rejected (:type data)))
                   (expect (= :field-type-mismatch (:reason data)))
                   (expect (= :answer (:field data)))
                   (expect (string? (:message data)))))
-            (it "rejects a vector"
+            (it "rejects a vector with more than one item"
                 (expect (= :svar.spec/schema-rejected
-                           (rejection-type #(sut/str->data-with-spec "{\"answer\": [\"wins\"]}"
+                           (rejection-type #(sut/str->data-with-spec "{\"answer\": [\"a\", \"b\"]}"
                                                                      (one-field-spec
                                                                        :spec.type/string))))))
             (it "accepts date strings and namespaced keys"
@@ -1813,7 +1829,7 @@
                                                   ::sut/cardinality :spec.cardinality/one
                                                   ::sut/description "Kind")))))))
   (describe "ref fields"
-            (it "rejects a bad value inside a ref item"
+            (it "unwraps or rejects a value inside a ref item"
                 (let [item
                       (sut/spec :Item
                                 (sut/field ::sut/name :title
@@ -1832,9 +1848,12 @@
 
                   (expect (= {:items [{:title "a"}]}
                              (sut/str->data-with-spec "{\"items\": [{\"title\": \"a\"}]}" root)))
+                  (expect (= {:items [{:title "x"}]}
+                             (sut/str->data-with-spec "{\"items\": [{\"title\": {\"t\": \"x\"}}]}"
+                                                      root)))
                   (expect (= :svar.spec/schema-rejected
                              (rejection-type #(sut/str->data-with-spec
-                                                "{\"items\": [{\"title\": {\"x\": 1}}]}"
+                                                "{\"items\": [{\"title\": {\"x\": 1, \"y\": 2}}]}"
                                                 root)))))))
   (describe "partial results"
             (it "skips the checks with :partial? true"

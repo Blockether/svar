@@ -527,7 +527,7 @@
 ;; Wrong field shapes — the same paths as prose, with and without retries
 ;; =============================================================================
 
-(def ^:private nested-answer "{\"answer\": {\"answer\": \"wins\"}}")
+(def ^:private nested-answer "{\"answer\": {\"winner\": \"rock\", \"loser\": \"scissors\"}}")
 
 (def ^:private null-answer "{\"answer\": null}")
 
@@ -558,8 +558,23 @@
 (defdescribe
   format-retry-field-shape-test
   "A reply with a wrong field shape goes through every format-retry path like
-   prose does. Seen live: nemotron-3-ultra answered {\"answer\": {\"answer\": \"wins\"}}
-   and {\"answer\": null} for a required string field."
+   prose does. A wrapped scalar is unwrapped instead. Seen live: nemotron-3-ultra
+   answered {\"answer\": {\"answer\": \"wins\"}} and {\"answer\": null} for a required
+   string field."
+  (describe "a wrapped scalar"
+            (it "is unwrapped without a retry"
+                (let [calls (atom [])]
+                  (with-redefs [llm/chat-completion (mock-chat-completion
+                                                      [{:content
+                                                        "{\"answer\": {\"answer\": \"wins\"}}"}]
+                                                      calls)]
+                    (let [result (svar/ask! (test-router)
+                                            {:spec answer-spec
+                                             :messages [(svar/user "Reply ok")]
+                                             :format-retries 2})]
+                      (expect (= "wins" (get-in result [:result :answer])))
+                      (expect (= 1 (count @calls)))
+                      (expect (nil? (:format-attempts result))))))))
   (describe
     "with :format-retries"
     (it "retries a nested map and names the field in the retry prompt"
@@ -632,7 +647,7 @@
                       (atom [])]
 
                   (with-redefs [llm/chat-completion (mock-streaming-chat-completion
-                                                      ["{\"note\": [1" "{\"answer\": \"o\""]
+                                                      ["{\"note\": [1" "{\"answer\": \"o"]
                                                       "{\"answer\":\"ok\"}"
                                                       calls)]
                     (let [result (svar/ask! (test-router)
@@ -643,7 +658,7 @@
 
                       (expect (= "ok" (get-in result [:result :answer])))
                       (expect (seq partials))
-                      (expect (= [{:answer nil :note [1]} {:answer "o"}] (vec partials)))))))
+                      (expect (= [{:answer nil :note []} {:answer "o"}] (vec partials)))))))
             (it
               "throws on a wrong final shape after one call"
               (let [calls (atom [])]
