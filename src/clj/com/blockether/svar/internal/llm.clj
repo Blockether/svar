@@ -8477,7 +8477,9 @@
 
                   coerced
                   (when partial-map
-                    (try (spec/str->data-with-spec (json/write-json-str partial-map) spec)
+                    (try (spec/str->data-with-spec (json/write-json-str partial-map)
+                                                   spec
+                                                   {:partial? true})
                          (catch Exception _ partial-map)))]
 
               ;; Fire callback when reasoning OR content is available.

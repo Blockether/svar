@@ -1394,7 +1394,8 @@
 
 (defdescribe
   spec-field-defaults-test
-  "Tests for apply-spec-field-defaults — SAP coercion of null/missing fields."
+  "Tests for apply-spec-field-defaults — SAP coercion of null/missing fields.
+   A required field that is missing or null throws, so those cases pass :partial? true."
   (describe
     "cardinality-many null coercion"
     (it "coerces null :many field to empty vector"
@@ -1419,11 +1420,13 @@
   (describe
     "cardinality-one missing key insertion"
     (it "adds missing :one field with nil value"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": []}" cod-spec)]
+        (let [parsed (sut/str->data-with-spec "{\"entities\": []}" cod-spec {:partial? true})]
           (expect (contains? parsed :summary))
           (expect (nil? (:summary parsed)))))
     (it "preserves null :one field as nil"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": null}" cod-spec)]
+        (let [parsed (sut/str->data-with-spec "{\"entities\": [], \"summary\": null}"
+                                              cod-spec
+                                              {:partial? true})]
           (expect (contains? parsed :summary))
           (expect (nil? (:summary parsed)))))
     (it "preserves non-null :one field unchanged"
@@ -1431,14 +1434,15 @@
           (expect (= "text" (:summary parsed))))))
   (describe "empty JSON object"
             (it "fills all missing fields with defaults"
-                (let [parsed (sut/str->data-with-spec "{}" cod-spec)]
+                (let [parsed (sut/str->data-with-spec "{}" cod-spec {:partial? true})]
                   (expect (= [] (:entities parsed)))
                   (expect (contains? parsed :summary))
                   (expect (nil? (:summary parsed))))))
   (describe "all-null response (LLM gave up)"
             (it "coerces all fields to spec-appropriate defaults"
                 (let [parsed (sut/str->data-with-spec "{\"entities\": null, \"summary\": null}"
-                                                      cod-spec)]
+                                                      cod-spec
+                                                      {:partial? true})]
                   (expect (= [] (:entities parsed)))
                   (expect (contains? parsed :summary))
                   (expect (nil? (:summary parsed))))))
@@ -1447,7 +1451,8 @@
     (it "adds missing fields inside ref items"
         (let [parsed (sut/str->data-with-spec
                        "{\"entities\": [{\"entity\": \"Voyager\"}], \"summary\": \"ok\"}"
-                       cod-spec)]
+                       cod-spec
+                       {:partial? true})]
           ;; :rationale and :score were missing in the entity — should be added as nil
           (expect (contains? (first (:entities parsed)) :rationale))
           (expect (contains? (first (:entities parsed)) :score))
@@ -1460,12 +1465,15 @@
         [parsed
          (sut/str->data-with-spec
            "{\"entities\": [{\"entity\": \"X\", \"rationale\": null, \"score\": null}], \"summary\": \"ok\"}"
-           cod-spec)]
+           cod-spec
+           {:partial? true})]
         (expect (= "X" (:entity (first (:entities parsed)))))
         (expect (nil? (:rationale (first (:entities parsed)))))
         (expect (nil? (:score (first (:entities parsed)))))))
     (it "fills all fields in empty ref item"
-        (let [parsed (sut/str->data-with-spec "{\"entities\": [{}], \"summary\": \"ok\"}" cod-spec)]
+        (let [parsed (sut/str->data-with-spec "{\"entities\": [{}], \"summary\": \"ok\"}"
+                                              cod-spec
+                                              {:partial? true})]
           (expect (= 1 (count (:entities parsed))))
           (let [entity (first (:entities parsed))]
             (expect (contains? entity :entity))
@@ -1741,3 +1749,96 @@
                                                           {:label "amazing" :score 0.8}]})]
               (expect (not (:valid? result)))
               (expect (some #(= :invalid-enum-value (:error %)) (:errors result)))))))))
+
+(defn- one-field-spec
+  [field-type & opts]
+  (sut/spec (apply sut/field
+              ::sut/name
+              :answer
+              ::sut/type
+              field-type
+              ::sut/cardinality
+              :spec.cardinality/one ::sut/description
+              "Answer" opts)))
+
+(defn- rejection-type
+  [thunk]
+  (try (thunk) nil (catch clojure.lang.ExceptionInfo e (:type (ex-data e)))))
+
+(defdescribe
+  str->data-with-spec-shape-test
+  "A model reply with the wrong field shape is rejected, so ask! retries it.
+   Seen live: nemotron-3-ultra answered {\"answer\": {\"answer\": \"wins\"}} and
+   {\"answer\": null} for a required string field, and svar returned both."
+  (describe "required :one fields"
+            (it "rejects null"
+                (expect (= :svar.spec/required-field-missing
+                           (rejection-type #(sut/str->data-with-spec "{\"answer\": null}"
+                                                                     (one-field-spec
+                                                                       :spec.type/string))))))
+            (it "rejects a missing field"
+                (expect (= :svar.spec/required-field-missing
+                           (rejection-type
+                             #(sut/str->data-with-spec "{}" (one-field-spec :spec.type/string))))))
+            (it "keeps nil for an optional field"
+                (expect (= {:answer nil}
+                           (sut/str->data-with-spec
+                             "{}"
+                             (one-field-spec :spec.type/string ::sut/required false))))))
+  (describe "scalar :one fields"
+            (it "rejects a map"
+                (let [data (try (sut/str->data-with-spec "{\"answer\": {\"answer\": \"wins\"}}"
+                                                         (one-field-spec :spec.type/string))
+                                (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+                  (expect (= :svar.spec/schema-rejected (:type data)))
+                  (expect (= :field-type-mismatch (:reason data)))
+                  (expect (= :answer (:field data)))
+                  (expect (string? (:message data)))))
+            (it "rejects a vector"
+                (expect (= :svar.spec/schema-rejected
+                           (rejection-type #(sut/str->data-with-spec "{\"answer\": [\"wins\"]}"
+                                                                     (one-field-spec
+                                                                       :spec.type/string))))))
+            (it "accepts date strings and namespaced keys"
+                (expect (= {:answer "2026-01-02"}
+                           (sut/str->data-with-spec "{\"answer\": \"2026-01-02\"}"
+                                                    (one-field-spec :spec.type/date))))
+                (expect (= {:page.node/kind "heading"}
+                           (sut/str->data-with-spec
+                             "{\"kind\": \"heading\"}"
+                             (sut/spec :node
+                                       {::sut/key-ns "page.node"}
+                                       (sut/field ::sut/name :kind
+                                                  ::sut/type :spec.type/string
+                                                  ::sut/cardinality :spec.cardinality/one
+                                                  ::sut/description "Kind")))))))
+  (describe "ref fields"
+            (it "rejects a bad value inside a ref item"
+                (let [item
+                      (sut/spec :Item
+                                (sut/field ::sut/name :title
+                                           ::sut/type :spec.type/string
+                                           ::sut/cardinality :spec.cardinality/one
+                                           ::sut/description "Title"))
+
+                      root
+                      (sut/spec :Root
+                                {:refs [item]}
+                                (sut/field ::sut/name :items
+                                           ::sut/type :spec.type/ref
+                                           ::sut/target :Item
+                                           ::sut/cardinality :spec.cardinality/many
+                                           ::sut/description "Items"))]
+
+                  (expect (= {:items [{:title "a"}]}
+                             (sut/str->data-with-spec "{\"items\": [{\"title\": \"a\"}]}" root)))
+                  (expect (= :svar.spec/schema-rejected
+                             (rejection-type #(sut/str->data-with-spec
+                                                "{\"items\": [{\"title\": {\"x\": 1}}]}"
+                                                root)))))))
+  (describe "partial results"
+            (it "skips the checks with :partial? true"
+                (expect (= {:answer nil}
+                           (sut/str->data-with-spec "{}"
+                                                    (one-field-spec :spec.type/string)
+                                                    {:partial? true}))))))

@@ -1355,9 +1355,8 @@
       or, for iteration loops, carried on with an empty `:code` vec and
       burned budget on retries that looked successful.
 
-   2. REQUIRED fields that are missing or explicitly nil throw
-      `:svar.spec/required-field-missing`. Optional fields still get their
-      defaults (`:many → []`, `:one → nil`).
+    2. Missing `:one` fields get nil and nil `:many` fields get `[]`. The
+       required-field and field-type checks run later in `str->data-with-spec`.
 
    Both throws carry the rejection message for the caller to forward to the
    LLM verbatim, plus the raw data + preview for triage logs.
@@ -1479,6 +1478,43 @@
         data
         fields))))
 
+(def ^:private scalar-types
+  "Field types whose single value is never a map or a vector."
+  #{:spec.type/string :spec.type/int :spec.type/float :spec.type/bool :spec.type/keyword
+    :spec.type/date :spec.type/datetime})
+
+(defn- shape-error
+  "Returns the first shape error in a parsed result, or nil.
+
+   Checks only `:one` fields: a required one must not be nil, and a scalar one
+   must not hold a map or a vector. Recurses into ref values. Skips dotted
+   field names, which address values inside arrays."
+  [data spec-def key-ns]
+  (when (map? data)
+    (let [ref-registry (build-ref-registry spec-def)]
+      (some (fn [field]
+              (let [field-name (::name field)
+                    actual-key (if key-ns (keyword key-ns (name field-name)) field-name)
+                    value (get data actual-key)
+                    ref-spec (get ref-registry (::target field))
+                    ref-key-ns (some-> ref-spec
+                                       ::key-ns)]
+
+                (cond (str/includes? (name field-name) ".") nil
+                      (not= :spec.cardinality/one (::cardinality field))
+                      (when (and ref-spec (sequential? value))
+                        (some #(shape-error % ref-spec ref-key-ns) value))
+                      (nil? value) (when-not (contains? (::union field) ::nil)
+                                     {:type :svar.spec/required-field-missing :field field-name})
+                      (and (contains? scalar-types (::type field)) (coll? value))
+                      {:type :svar.spec/schema-rejected
+                       :reason :field-type-mismatch
+                       :field field-name
+                       :expected-type (::type field)
+                       :received-type (.getSimpleName (class value))}
+                      ref-spec (shape-error value ref-spec ref-key-ns))))
+            (::fields spec-def)))))
+
 (defn str->data-with-spec
   "Parses JSON response from LLM into Clojure data structure with spec-aware processing.
    
@@ -1509,50 +1545,63 @@
    (str->data-with-spec \"{\\\"type\\\": \\\"heading\\\"}\" ns-spec)
    => {:page.node/type \"heading\"}  ; Key namespaced
    
-   Throws:
-   RuntimeException if JSON cannot be parsed."
-  [text spec-def]
-  (let [[{:keys [result key-mapping keyword-fields key-ns-map warnings]} duration-ms]
-        (util/with-elapsed
-          (let [parse-result (jsonish/parse-json text)
-                raw-result (:value parse-result)
-                warnings (:warnings parse-result)
-                ;; Auto-wrap bare arrays if spec expects object with single array field
-                wrapped-result (maybe-normalize-array-result raw-result spec-def)
-                ;; Build key mapping from spec and remap keys
-                key-mapping (build-key-mapping spec-def)
-                remapped
-                (if (empty? key-mapping) wrapped-result (remap-keys wrapped-result key-mapping))
-                ;; Build keyword fields set and convert strings to keywords
-                keyword-fields (build-keyword-fields spec-def)
-                keywordized
-                (if (empty? keyword-fields) remapped (keywordize-fields remapped keyword-fields))
-                ;; Apply key namespace if configured
-                key-ns-map (collect-key-namespaces spec-def)
-                namespaced
-                (if (empty? key-ns-map) keywordized (namespace-keys keywordized key-ns-map))
-                ;; Apply spec-aware field defaults (nil :many → [], missing keys → nil)
-                main-key-ns (::key-ns spec-def)
-                result (apply-spec-field-defaults namespaced spec-def main-key-ns)]
+   `opts` - Optional map. `:partial? true` skips the shape checks, for
+   incomplete streaming results.
 
-            {:result result
-             :key-mapping key-mapping
-             :keyword-fields keyword-fields
-             :key-ns-map key-ns-map
-             :warnings warnings}))]
-    (when (seq warnings)
-      (trove/log! {:level :debug
-                   :id ::sap-warnings
-                   :data {:warnings-count (count warnings) :warnings warnings}
-                   :msg "spec-aware parse completed with warnings"}))
-    (trove/log! {:level :debug
-                 :data {:duration-ms duration-ms
-                        :warnings-count (count warnings)
-                        :key-remaps (count key-mapping)
-                        :keyword-fields (count keyword-fields)
-                        :key-ns-applied (seq key-ns-map)}
-                 :msg "Parsed JSON response with spec-aware processing"})
-    result))
+   Throws:
+   RuntimeException if JSON cannot be parsed.
+   `:svar.spec/schema-rejected` if the result is not a map, or a scalar `:one`
+   field holds a map or a vector.
+   `:svar.spec/required-field-missing` if a required `:one` field is missing or nil."
+  ([text spec-def] (str->data-with-spec text spec-def nil))
+  ([text spec-def {:keys [partial?]}]
+   (let [[{:keys [result key-mapping keyword-fields key-ns-map warnings]} duration-ms]
+         (util/with-elapsed
+           (let [parse-result (jsonish/parse-json text)
+                 raw-result (:value parse-result)
+                 warnings (:warnings parse-result)
+                 ;; Auto-wrap bare arrays if spec expects object with single array field
+                 wrapped-result (maybe-normalize-array-result raw-result spec-def)
+                 ;; Build key mapping from spec and remap keys
+                 key-mapping (build-key-mapping spec-def)
+                 remapped
+                 (if (empty? key-mapping) wrapped-result (remap-keys wrapped-result key-mapping))
+                 ;; Build keyword fields set and convert strings to keywords
+                 keyword-fields (build-keyword-fields spec-def)
+                 keywordized
+                 (if (empty? keyword-fields) remapped (keywordize-fields remapped keyword-fields))
+                 ;; Apply key namespace if configured
+                 key-ns-map (collect-key-namespaces spec-def)
+                 namespaced
+                 (if (empty? key-ns-map) keywordized (namespace-keys keywordized key-ns-map))
+                 ;; Apply spec-aware field defaults (nil :many → [], missing keys → nil)
+                 main-key-ns (::key-ns spec-def)
+                 result (apply-spec-field-defaults namespaced spec-def main-key-ns)]
+
+             {:result result
+              :key-mapping key-mapping
+              :keyword-fields keyword-fields
+              :key-ns-map key-ns-map
+              :warnings warnings}))]
+     (when (seq warnings)
+       (trove/log! {:level :debug
+                    :id ::sap-warnings
+                    :data {:warnings-count (count warnings) :warnings warnings}
+                    :msg "spec-aware parse completed with warnings"}))
+     (trove/log! {:level :debug
+                  :data {:duration-ms duration-ms
+                         :warnings-count (count warnings)
+                         :key-remaps (count key-mapping)
+                         :keyword-fields (count keyword-fields)
+                         :key-ns-applied (seq key-ns-map)}
+                  :msg "Parsed JSON response with spec-aware processing"})
+     (when-not partial?
+       (when-let [error (shape-error result spec-def (::key-ns spec-def))]
+         (throw (ex-info (schema-reject-message)
+                         (assoc error
+                           :raw-data result
+                           :message (schema-reject-message))))))
+     result)))
 
 (defn- apply-field-defaults-no-ns
   "Like apply-spec-field-defaults but forces nil key-ns on ALL recursive calls.
