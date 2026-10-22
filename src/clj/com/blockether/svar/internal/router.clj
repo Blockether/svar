@@ -2235,25 +2235,30 @@
   "Lifetime of each prompt-cache tier, in milliseconds."
   {:5m 300000 :1h 3600000})
 
+(defn- known-provider-policy
+  "Policy `k` of `provider-id`, a keyword or string, with plan-tier
+   `:provider-model-source` inheritance, or nil."
+  [provider-id k]
+  (let [id (if (string? provider-id) (keyword provider-id) provider-id)]
+    (or (get-in KNOWN_PROVIDERS [id k]) (get-in KNOWN_PROVIDERS [(provider-model-source id) k]))))
+
 (defn provider-prompt-cache
   "Prompt-cache policy svar knows for `provider-id`, with plan-tier
    `:provider-model-source` inheritance. `:strategy` is `:explicit-breakpoints`
    (the caller marks cache anchors) or `:server-continuation` (the caller keeps one
-   `open-session`). `:ttl` is the tier (`:5m` or `:1h`) and `:ttl-ms` its lifetime."
+   `open-session`). `:ttl` is the tier (`:5m` or `:1h`) and `:ttl-ms` its lifetime.
+   `provider-id` is a keyword or a string."
   [provider-id]
-  (let [policy (merge DEFAULT_PROMPT_CACHE
-                      (or (get-in KNOWN_PROVIDERS [provider-id :prompt-cache])
-                          (get-in KNOWN_PROVIDERS
-                                  [(provider-model-source provider-id) :prompt-cache])))]
+  (let [policy (merge DEFAULT_PROMPT_CACHE (known-provider-policy provider-id :prompt-cache))]
     (assoc policy :ttl-ms (get PROMPT_CACHE_TTL_MS (:ttl policy)))))
 
 (defn provider-fast-mode
   "Fast mode svar knows for `provider-id`, with plan-tier `:provider-model-source`
    inheritance, or nil. `:service-tier` is the request `service_tier` value and
-   `:cost-multiplier` scales every billed token class of a request on that tier."
+   `:cost-multiplier` scales every billed token class of a request on that tier.
+   `provider-id` is a keyword or a string."
   [provider-id]
-  (or (get-in KNOWN_PROVIDERS [provider-id :fast-mode])
-      (get-in KNOWN_PROVIDERS [(provider-model-source provider-id) :fast-mode])))
+  (known-provider-policy provider-id :fast-mode))
 
 (defn fast-mode-router
   "Put the fast service tier on the router entry of each provider in `provider-ids`

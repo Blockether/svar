@@ -259,6 +259,8 @@
   (it "declares Priority processing only for the providers that offer it"
       (expect (= {:service-tier "priority" :cost-multiplier 2.0}
                  (router/provider-fast-mode :openai-codex)))
+      (expect (= (router/provider-fast-mode :openai-codex)
+                 (router/provider-fast-mode "openai-codex")))
       (expect (nil? (router/provider-fast-mode :anthropic)))
       (expect (nil? (router/provider-fast-mode :unknown-provider))))
   (it "puts the tier only on listed providers that declare fast mode"

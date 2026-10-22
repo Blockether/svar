@@ -773,6 +773,13 @@
         (expect (= {:strategy :explicit-breakpoints :ttl :1h :ttl-ms 3600000}
                    (svar/provider-prompt-cache :anthropic)))
         (expect (= :1h (:ttl (svar/provider-prompt-cache :anthropic-coding-plan))))
+        ;; A caller can hold the id as a string, for example from persisted state.
+        (expect (= (svar/provider-prompt-cache :anthropic-coding-plan)
+                   (svar/provider-prompt-cache "anthropic-coding-plan")))
+        (expect (= :1h
+                   (get-in (svar/place-prompt-cache-breakpoints [{:role "user" :content "hi"}]
+                                                                "anthropic")
+                           [0 :content 0 :svar/cache-ttl])))
         (expect (= {:strategy :server-continuation :ttl :5m :ttl-ms 300000}
                    (svar/provider-prompt-cache :openai-codex)))
         (expect (= {:strategy :explicit-breakpoints :ttl :5m :ttl-ms 300000}
