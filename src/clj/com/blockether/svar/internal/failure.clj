@@ -32,7 +32,8 @@
 
    All predicates are pure: they take an already-lower-cased haystack plus an
    optional status, or a Throwable, and return data. No IO, no sleeping."
-  (:require [clojure.string :as str]))
+  (:require [charred.api :as json]
+            [clojure.string :as str]))
 
 ;; =============================================================================
 ;; Status codes
@@ -464,8 +465,8 @@
    failure — did anything run, and can I safely send this again?"
   #{:auth :quota-exhausted :rate-limited :transport-drop :connect-timeout :upstream-timeout
     :gateway-unavailable :model-unavailable :resource-mismatch :tool-schema-unsupported
-    :context-length-exceeded :output-budget-exhausted :stream-interrupted :invalid-request
-    :unknown})
+    :context-length-exceeded :output-budget-exhausted :content-filtered :stream-interrupted
+    :invalid-request :unknown})
 
 (defn- connect-phase-exception?
   [^Throwable e]
@@ -543,6 +544,131 @@
   [data]
   (mapv (comp classify attempt->throwable) (filter map? (:attempts data))))
 
+;; -----------------------------------------------------------------------------
+;; Content filter evidence
+;; -----------------------------------------------------------------------------
+
+(def ^:private CONTENT_FILTER_PATTERNS
+  "Lower-cased provider wording for a safety-filter rejection. The list follows
+   LiteLLM's `ContentPolicyViolationError` mapping for OpenAI, Azure and Anthropic."
+  ["content_policy_violation" "responsibleaipolicyviolation"
+   "the response was filtered due to the prompt triggering azure openai's content management"
+   "your task failed as a result of our safety system" "content_filter_policy"
+   "your request was rejected as a result of our safety system"
+   "request was rejected as a result of the safety system" "content filtering policy"])
+
+(def ^:private CONTENT_FILTER_CODES
+  "Provider error codes that name a safety-filter rejection."
+  #{"content_filter" "content_policy_violation" "ResponsibleAIPolicyViolation"})
+
+(def ^:private FILTER_RESULT_KEYS
+  "Azure keys that hold per-category filter verdicts."
+  #{"content_filter_results" "content_filter_result" "prompt_filter_results" "content_filters"})
+
+(defn- flagged-filter-categories
+  "Flagged category labels of one Azure filter result map, for example
+   `{\"hate\" {\"filtered\" true \"severity\" \"high\"} \"jailbreak\" {\"detected\" true}}`."
+  [results]
+  (when (map? results)
+    (keep (fn [[category verdict]]
+            (when (and (map? verdict)
+                       (or (true? (get verdict "filtered")) (true? (get verdict "detected"))))
+              (let [severity (get verdict "severity")]
+                (if (and (string? severity) (not= "safe" severity))
+                  (str category " (" severity ")")
+                  (str category)))))
+          results)))
+
+(defn content-filter-categories
+  "Flagged filter categories anywhere in a parsed provider payload with string
+   keys, in first-seen order, or nil. Azure puts them under
+   `content_filter_results`, `prompt_filter_results`, `content_filters` or
+   `error.inner_error.content_filter_result`."
+  [payload]
+  (letfn [(walk [x ^long depth]
+            (let [deeper (inc depth)]
+              (cond (> depth 8) nil
+                    (map? x) (mapcat (fn [[k v]]
+                                       (concat (when (contains? FILTER_RESULT_KEYS k)
+                                                 (flagged-filter-categories v))
+                                               (walk v deeper)))
+                                     x)
+                    (sequential? x) (mapcat #(walk % deeper) x)
+                    :else nil)))]
+    (not-empty (vec (distinct (walk payload 0))))))
+
+(defn- parsed-error-body
+  "The provider error body as a string-keyed map, or nil."
+  [body]
+  (cond (map? body) body
+        (and (string? body) (str/starts-with? (str/triml body) "{"))
+        (try (let [parsed (json/read-json body)]
+               (when (map? parsed) parsed))
+             (catch Exception _ nil))
+        :else nil))
+
+(defn content-filter
+  "Content-filter evidence for failure `e`, or nil.
+
+   Returns `{:reason :categories :explanation}`. `:reason` is the provider's own
+   stop reason or error code: `content_filter` (Responses `incomplete_details` or
+   a Chat finish reason), `refusal` (Anthropic `stop_reason`) or a filter error
+   code. `:categories` lists the flagged filter categories when the provider
+   names them. `:explanation` is the provider's refusal explanation."
+  [^Throwable e]
+  (let [data
+        (ex-data e)
+
+        finalization
+        (:stream-finalization data)
+
+        stop-details
+        (or (:stop-details data) (:stop-details finalization))
+
+        body
+        (parsed-error-body (:body data))
+
+        error-body
+        (if (map? (get body "error")) (get body "error") body)
+
+        inner
+        (when (map? error-body) (or (get error-body "inner_error") (get error-body "innererror")))
+
+        code
+        (some CONTENT_FILTER_CODES
+              [(get error-body "code") (when (map? inner) (get inner "code"))
+               (:provider-error-code data)])
+
+        reason
+        (cond (= :svar.llm/refusal (:type data)) "refusal"
+              (some #{"content_filter"}
+                    [(:reason data) (:incomplete-reason finalization)
+                     (:finish-reason finalization)])
+              "content_filter"
+              code code
+              (and (definitive-client-error? (:status data))
+                   (any-substring? (haystack e) CONTENT_FILTER_PATTERNS))
+              "content_policy_violation"
+              :else nil)
+
+        categories
+        (not-empty (vec (distinct (concat (some-> (get stop-details "category")
+                                                  str
+                                                  vector)
+                                          (:content-filter-categories data)
+                                          (content-filter-categories body)))))
+
+        explanation
+        (not-empty (str (get stop-details "explanation")))]
+
+    (when reason
+      (cond-> {:reason reason}
+        categories
+        (assoc :categories categories)
+
+        explanation
+        (assoc :explanation explanation)))))
+
 (defn classify
   "Classifies a provider/gateway failure into a stable, actionable shape.
 
@@ -594,6 +720,9 @@
         limit?
         (provider-limit-failure? status hay)
 
+        filter-evidence
+        (content-filter e)
+
         answer
         (fn [category retryable? reached? summary next-step]
           (cond-> (assoc base
@@ -643,6 +772,30 @@
         false true
         "the provider ended the response after exhausting its output token budget"
         "split the work into smaller requests or choose a provider/model with a larger output limit")
+      filter-evidence
+      (let [{:keys [reason categories explanation]}
+            filter-evidence
+
+            refused?
+            (= "refusal" reason)
+
+            request?
+            (definitive-client-error? status)]
+
+        (assoc (answer :content-filtered
+                       (not (or refused? request?))
+                       (not request?)
+                       (str (cond refused? "the model refused to answer"
+                                  request? "the provider's content filter rejected the request"
+                                  :else "the provider's content filter stopped the response")
+                            " ("
+                            reason
+                            ")"
+                            (when (seq categories) (str "; flagged: " (str/join ", " categories)))
+                            (when explanation (str "; " explanation)))
+                       (str "rephrase or remove the flagged content; an unchanged retry is usually "
+                            "filtered again, so switch provider/model for a false positive"))
+          :content-filter filter-evidence))
       (any-substring? hay RESOURCE_MISMATCH_PATTERNS)
       (answer
         :resource-mismatch
@@ -667,10 +820,19 @@
               "the selected model is not available on this endpoint"
               "pick a model the endpoint advertises (see its /v1/models list)")
       ;; ── transient families ────────────────────────────────────────────────
+      ;; The provider sent its terminal `response.incomplete`, so the marker was not missing.
+      (= :svar.core/stream-incomplete etype)
+      (answer :stream-interrupted
+              (not started?)
+              true
+              (str "the provider marked the response incomplete (reason: "
+                   (or (:reason data) (:incomplete-reason (:stream-finalization data)) "unknown")
+                   ")")
+              "retry; if it repeats, switch provider/model")
       (contains? WATCHDOG_TYPES etype)
       (answer :stream-interrupted
               (not started?)
-              (not started?)
+              (when started? true)
               "the stream stalled or ended before the provider's terminal marker"
               "retry; if it repeats, switch provider/model")
       (or (connect-phase-exception? e)

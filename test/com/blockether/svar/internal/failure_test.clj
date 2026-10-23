@@ -160,6 +160,127 @@
                          (err "billing") (err "timeout" {:status 504})])))))
 
 (defdescribe
+  content-filter-classification-test
+  ;; Blockether/vis#413: a Responses content_filter stop was reported as a missing terminal marker.
+  (describe
+    "a provider safety stop"
+    (it "names a Responses content_filter incomplete instead of a missing terminal marker"
+        (let [e
+              (err "Stream ended with incomplete response, reason: content_filter"
+                   {:type :svar.core/stream-incomplete
+                    :reason "content_filter"
+                    :partial-content "I'm sorry, but I cannot assist with that request."
+                    :content-acc-len 49
+                    :stream-finalization {:terminal? true
+                                          :terminal-kind :done-marker
+                                          :last-event-type "response.incomplete"
+                                          :incomplete? true
+                                          :incomplete-reason "content_filter"
+                                          :http-status 200}})
+
+              c
+              (sut/classify e)]
+
+          (expect (= :content-filtered (:category c)))
+          (expect (= {:reason "content_filter"} (:content-filter c)))
+          (expect (str/includes? (:summary c) "content_filter"))
+          (expect (not (str/includes? (:summary c) "terminal marker")))
+          (expect (true? (:reached-model? c)))
+          (expect (false? (:retryable? c)))))
+    (it "keeps a pre-output content_filter incomplete restart-safe"
+        (let [e (err "Stream ended with incomplete response, reason: content_filter"
+                     {:type :svar.core/stream-incomplete :reason "content_filter"})]
+          (expect (true? (:retryable? (sut/classify e))))
+          (expect (true? (sut/stream-recovery-safe? e)))))
+    (it "lists the categories that Azure flagged in the terminal event"
+        (let [c (sut/classify (err "Stream ended with incomplete response, reason: content_filter"
+                                   {:type :svar.core/stream-incomplete
+                                    :reason "content_filter"
+                                    :content-filter-categories ["hate (high)"]}))]
+          (expect (= ["hate (high)"] (get-in c [:content-filter :categories])))
+          (expect (str/includes? (:summary c) "flagged: hate (high)"))))
+    (it "names a Chat content_filter finish reason"
+        (let [c (sut/classify (err "The model produced neither text nor a tool call."
+                                   {:type :svar.llm/empty-content
+                                    :stream-finalization {:finish-reason "content_filter"}}))]
+          (expect (= :content-filtered (:category c)))
+          (expect (= "content_filter" (get-in c [:content-filter :reason])))))
+    (it
+      "names an Anthropic refusal with its category and explanation"
+      (let [c (sut/classify (err "The model refused"
+                                 {:type :svar.llm/refusal
+                                  :stop-details {"type" "refusal"
+                                                 "category" "cyber"
+                                                 "explanation" "The request asks for malware."}}))]
+        (expect (= :content-filtered (:category c)))
+        (expect
+          (= {:reason "refusal" :categories ["cyber"] :explanation "The request asks for malware."}
+             (:content-filter c)))
+        (expect (false? (:retryable? c)))
+        (expect (str/includes? (:summary c) "The request asks for malware."))))
+    (it "reads Azure filter verdicts from a rejected request body"
+        (let [body
+              (str
+                "{\"error\":{\"code\":\"content_filter\",\"message\":\"The response was filtered\","
+                "\"inner_error\":{\"code\":\"ResponsibleAIPolicyViolation\","
+                "\"content_filter_result\":{\"hate\":{\"filtered\":false,\"severity\":\"safe\"},"
+                "\"jailbreak\":{\"filtered\":true,\"detected\":true},"
+                "\"violence\":{\"filtered\":true,\"severity\":\"medium\"}}}}}")
+
+              c
+              (sut/classify (err "HTTP 400" {:status 400 :body body}))]
+
+          (expect (= :content-filtered (:category c)))
+          (expect (= "content_filter" (get-in c [:content-filter :reason])))
+          (expect (= ["jailbreak" "violence (medium)"] (get-in c [:content-filter :categories])))
+          (expect (false? (:reached-model? c)))
+          (expect (false? (:retryable? c)))))
+    (it
+      "matches LiteLLM's safety-system wording on a rejected request"
+      (let
+        [c
+         (sut/classify
+           (err
+             "litellm.ContentPolicyViolationError: Your request was rejected as a result of our safety system."
+             {:status 400}))]
+        (expect (= :content-filtered (:category c)))
+        (expect (= "content_policy_violation" (get-in c [:content-filter :reason]))))))
+  (describe "filter categories"
+            (it "collects Azure prompt and completion verdicts in order"
+                (expect (= ["self_harm (high)" "jailbreak"]
+                           (sut/content-filter-categories
+                             {"prompt_filter_results"
+                              [{"prompt_index" 0
+                                "content_filter_results"
+                                {"self_harm" {"filtered" true "severity" "high"}
+                                 "sexual" {"filtered" false "severity" "safe"}}}]
+                              "response" {"content_filters"
+                                          [{"blocked" true
+                                            "content_filter_results"
+                                            {"jailbreak" {"filtered" true "detected" true}}}]}}))))
+            (it "is nil when nothing was flagged"
+                (expect (nil? (sut/content-filter-categories {"content_filter_results"
+                                                              {"hate" {"filtered" false
+                                                                       "severity" "safe"}}}))))))
+
+(defdescribe stream-incomplete-classification-test
+             (it "names the incomplete reason and keeps truncation separate"
+                 (let [incomplete
+                       (sut/classify (err "Stream ended with incomplete response, reason: unknown"
+                                          {:type :svar.core/stream-incomplete :reason "unknown"}))
+
+                       truncated
+                       (sut/classify (err "Stream ended early"
+                                          {:type :svar.core/stream-truncated}))]
+
+                   (expect (= :stream-interrupted (:category incomplete)))
+                   (expect (str/includes? (:summary incomplete) "reason: unknown"))
+                   (expect (not (str/includes? (:summary incomplete) "terminal marker")))
+                   (expect (true? (:reached-model? incomplete)))
+                   (expect (str/includes? (:summary truncated) "terminal marker"))
+                   (expect (nil? (:reached-model? truncated))))))
+
+(defdescribe
   correlation-test
   (describe "request-id"
             (it "reads a header id"

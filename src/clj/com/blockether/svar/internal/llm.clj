@@ -6839,6 +6839,9 @@
                       :tool-call-count (count (:tool-calls @provider-state-atom))
                       :content-acc-len (.length content-acc)
                       :reasoning-acc-len (.length reasoning-acc)
+                      ;; Azure names the flagged filter categories in the terminal event.
+                      :content-filter-categories (failure/content-filter-categories (:chunk
+                                                                                      incomplete))
                       :partial-content (when (pos? (.length content-acc)) (str content-acc))
                       :reasoning (when (pos? (.length reasoning-acc)) (str reasoning-acc))}))))
       (when-not @terminal-event
