@@ -154,20 +154,46 @@
                              (str/includes? m "client is stopped")))))
                  (take-while some? (iterate ex-cause t)))))
 
+(defn- stale-connection-error?
+  "True when a throwable (anywhere in its cause chain) shows that the peer closed
+   the connection before it sent any response byte ('header parser received no
+   bytes'). This happens when a request reuses a pooled HTTP/1.1 connection that
+   the server closed right after its previous response. The server sent nothing,
+   so one immediate resend is safe."
+  [^Throwable t]
+  (boolean (some (fn [e]
+                   (str/includes? (str/lower-case (or (ex-message e) ""))
+                                  "header parser received no bytes"))
+                 (take-while some? (iterate ex-cause t)))))
+
 (defn- with-http-client-heal
-  "Run `(f client)` with the live shared client. On a dead-client error,
-   rebuild the client ONCE and retry. Happy path is a single try/catch."
+  "Run `(f client)` with the live shared client. Retry ONCE in two cases:
+
+   - a dead-client error: rebuild the client, then retry.
+   - a stale pooled connection that sent no response byte: retry at once with
+     the same client. The pool already dropped that connection.
+
+   A second failure goes to the caller, so the router still sees it. An
+   interrupted thread never retries. Happy path is a single try/catch."
   [f]
   (try (f (current-http-client))
        (catch Throwable t
-         (if (dead-http-client-error? t)
-           (do (trove/log!
-                 {:level :warn
-                  :id ::http-client-rebuilt
-                  :data {:error (ex-message t)}
-                  :msg "shared HttpClient was dead (selector manager closed) — rebuilt + retried"})
-               (f (reset-shared-http-client!)))
-           (throw t)))))
+         (cond (dead-http-client-error? t)
+               (do (trove/log!
+                     {:level :warn
+                      :id ::http-client-rebuilt
+                      :data {:error (ex-message t)}
+                      :msg
+                      "shared HttpClient was dead (selector manager closed) — rebuilt + retried"})
+                   (f (reset-shared-http-client!)))
+               (and (stale-connection-error? t) (not (.isInterrupted (Thread/currentThread))))
+               (do (trove/log! {:level :info
+                                :id ::stale-connection-retried
+                                :data {:error (ex-message t)}
+                                :msg
+                                "pooled connection closed before any response byte — resent once"})
+                   (f (current-http-client)))
+               :else (throw t)))))
 
 (defn shutdown-http-client!
   "Closes the shared HTTP client's virtual-thread executor.

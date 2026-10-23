@@ -10,7 +10,10 @@
   (:import (java.util.concurrent RejectedExecutionException)))
 
 (def ^:private dead? @#'sut/dead-http-client-error?)
+
 (def ^:private heal @#'sut/with-http-client-heal)
+
+(def ^:private stale? @#'sut/stale-connection-error?)
 
 (defdescribe dead-http-client-error?-test
              (describe
@@ -24,38 +27,84 @@
                    (expect (false? (dead? (ex-info "connection reset" {}))))
                    (expect (false? (dead? (ex-info "HTTP 400 bad request" {})))))))
 
-(defdescribe with-http-client-heal-test
-             (describe "rebuilds + retries on a dead client"
-                       (it "retries exactly once and returns the second result"
-                           (let [calls
-                                 (atom 0)
+(defdescribe stale-connection-error?-test
+             (it "matches a peer close before any response byte, also as a nested cause"
+                 (expect (stale? (java.io.IOException. "HTTP/1.1 header parser received no bytes")))
+                 (expect (stale? (ex-info "wrapped"
+                                          {}
+                                          (java.io.IOException.
+                                            "HTTP/1.1 header parser received no bytes")))))
+             (it "does NOT match other transport errors"
+                 (expect (false? (stale? (ex-info "connection reset" {}))))
+                 (expect (false? (stale? (ex-info "selector manager closed" {}))))))
 
-                                 r
-                                 (heal (fn [_client]
-                                         (if (= 1 (swap! calls inc))
-                                           (throw (ex-info "selector manager closed" {}))
-                                           :ok)))]
+(defdescribe
+  with-http-client-heal-test
+  (describe "rebuilds + retries on a dead client"
+            (it "retries exactly once and returns the second result"
+                (let [calls
+                      (atom 0)
 
-                             (expect (= :ok r))
-                             (expect (= 2 @calls)))))
-             (describe "does NOT retry on a normal error"
-                       (it "propagates the original exception after one call"
-                           (let [calls (atom 0)]
-                             (expect (= "boom"
-                                        (try (heal (fn [_]
-                                                     (swap! calls inc)
-                                                     (throw (ex-info "boom" {}))))
-                                             (catch Exception e (ex-message e)))))
-                             (expect (= 1 @calls)))))
-             (describe "happy path"
-                       (it "calls f once and returns its value"
-                           (let [calls
-                                 (atom 0)
+                      r
+                      (heal (fn [_client]
+                              (if (= 1 (swap! calls inc))
+                                (throw (ex-info "selector manager closed" {}))
+                                :ok)))]
 
-                                 r
-                                 (heal (fn [_]
-                                         (swap! calls inc)
-                                         :done))]
+                  (expect (= :ok r))
+                  (expect (= 2 @calls)))))
+  (describe
+    "resends once on a stale pooled connection"
+    (it "resends at once and returns the second result"
+        (let [calls
+              (atom 0)
 
-                             (expect (= :done r))
-                             (expect (= 1 @calls))))))
+              r
+              (heal (fn [_client]
+                      (if (= 1 (swap! calls inc))
+                        (throw (java.io.IOException. "HTTP/1.1 header parser received no bytes"))
+                        :ok)))]
+
+          (expect (= :ok r))
+          (expect (= 2 @calls))))
+    (it "propagates a second failure to the caller"
+        (let [calls (atom 0)]
+          (expect (= "HTTP/1.1 header parser received no bytes"
+                     (try (heal (fn [_]
+                                  (swap! calls inc)
+                                  (throw (java.io.IOException.
+                                           "HTTP/1.1 header parser received no bytes"))))
+                          (catch Exception e (ex-message e)))))
+          (expect (= 2 @calls))))
+    (it "does not resend from an interrupted thread"
+        (let [calls (atom 0)]
+          (try (.interrupt (Thread/currentThread))
+               (expect (= :propagated
+                          (try (heal (fn [_]
+                                       (swap! calls inc)
+                                       (throw (java.io.IOException.
+                                                "HTTP/1.1 header parser received no bytes"))))
+                               (catch java.io.IOException _ :propagated))))
+               (finally (Thread/interrupted)))
+          (expect (= 1 @calls)))))
+  (describe "does NOT retry on a normal error"
+            (it "propagates the original exception after one call"
+                (let [calls (atom 0)]
+                  (expect (= "boom"
+                             (try (heal (fn [_]
+                                          (swap! calls inc)
+                                          (throw (ex-info "boom" {}))))
+                                  (catch Exception e (ex-message e)))))
+                  (expect (= 1 @calls)))))
+  (describe "happy path"
+            (it "calls f once and returns its value"
+                (let [calls
+                      (atom 0)
+
+                      r
+                      (heal (fn [_]
+                              (swap! calls inc)
+                              :done))]
+
+                  (expect (= :done r))
+                  (expect (= 1 @calls))))))
