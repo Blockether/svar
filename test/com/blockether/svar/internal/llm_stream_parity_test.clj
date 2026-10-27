@@ -9,7 +9,8 @@
   (:require [babashka.http-client :as http]
             [charred.api :as json]
             [com.blockether.svar.internal.llm :as sut]
-            [lazytest.core :refer [defdescribe expect it]])
+            [lazytest.core :refer [defdescribe expect it]]
+            [taoensso.trove :as trove])
   (:import (java.io ByteArrayInputStream)
            (java.util.concurrent TimeoutException)))
 
@@ -145,4 +146,52 @@
         (expect (true? @closed?))
         (expect (= {:semantic-events 0} (select-keys (:progress (ex-data ws)) [:semantic-events])))
         (expect (pos? (:quiet-events (:progress (ex-data ws)))))
-        (expect (= :pre-first-token (:phase (ex-data ws)))))))
+        (expect (= :pre-first-token (:phase (ex-data ws))))
+        ;; A fired deadline names the liveness frames after the last progress event:
+        ;; they tell a quiet model from a dead connection.
+        (expect (= ["response.in_progress"]
+                   (keys (:quiet-since-semantic (:progress (ex-data ws))))))))
+  (it "forwards model progress without text on both transports"
+      ;; A reasoning item without a summary moves the semantic deadline but adds no
+      ;; text. The caller's stall clock must see it too: Vis saw 300 s of silence in
+      ;; CTB round m14c while Svar's 240 s deadline never fired.
+      (let [script
+            [{"type" "response.reasoning_summary_text.delta" "delta" "plan"} keepalive
+             {"type" "response.output_item.added"
+              "output_index" 1
+              "item" {"id" "rs_2" "type" "reasoning" "summary" []}} (last progress-script)]
+
+            alive
+            (fn [run]
+              (let [seen (atom [])]
+                (run script {:on-chunk #(swap! seen conj %)})
+                (mapv :reasoning (filter :thinking-alive? @seen))))]
+
+        (expect (= ["plan"] (alive sse-result)))
+        (expect (= ["plan"] (alive websocket-result)))))
+  (it "logs a WebSocket idle timeout with the frames it saw"
+      ;; The retry ladder reconnects after an idle timeout without a record of its
+      ;; own, so a turn that stalled left no Svar line in the caller's log.
+      (let [logs
+            (atom [])
+
+            frames
+            (atom 0)
+
+            error
+            (binding [trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                       (swap! logs conj
+                                         {:level level :id id :data (:data (force lazy_))}))]
+              (thrown #(receive-websocket-response!
+                         {:receive! (fn [_]
+                                      (when (< (long (swap! frames inc)) 3)
+                                        (json/write-json-str keepalive)))}
+                         {:timeout-ms 50 :url "https://example.test/codex/responses"})))
+
+            record
+            (first (filter #(= ::sut/stream-idle-timeout (:id %)) @logs))]
+
+        (expect (instance? TimeoutException error))
+        (expect (= :warn (:level record)))
+        (expect (= :websocket (get-in record [:data :transport])))
+        (expect (= {"response.in_progress" 2} (get-in record [:data :quiet-since-semantic]))))))

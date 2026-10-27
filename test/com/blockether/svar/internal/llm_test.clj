@@ -1809,7 +1809,8 @@
                 #(swap! chunks conj %))]
 
           (expect (= "ok" (:content result)))
-          (expect (= 30 (count (filter :thinking-alive? @chunks))))))
+          ;; Each ping, plus `message_start`: it also moves the semantic deadline.
+          (expect (= 31 (count (filter :thinking-alive? @chunks))))))
     (it "forwards each hidden-thinking keepalive to the ask-code! caller"
         (let [chunks
               (atom [])
@@ -1833,7 +1834,8 @@
                   :on-chunk #(swap! chunks conj %)}))]
 
           (expect (= "ok" (:content result)))
-          (expect (= 3 (count (filter :thinking-alive? @chunks))))
+          ;; Each ping, plus `message_start`: it also moves the semantic deadline.
+          (expect (= 4 (count (filter :thinking-alive? @chunks))))
           (expect (every? #(= "" (:content %)) (filter :thinking-alive? @chunks)))))
     (it "still closes a stream that only pings outside a thinking block"
         (let [error (try (complete! (concat [message-start] (repeat 30 ping) text-answer)

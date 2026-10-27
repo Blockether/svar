@@ -3809,7 +3809,8 @@
          extract-stream-delta
          http-post-stream!
          semantic-restart-safe?
-         stream-semantic-event?)
+         stream-semantic-event?
+         stream-silent-progress?)
 
 (defn responses-url
   "Builds an OpenAI Responses-style endpoint URL.
@@ -4462,6 +4463,22 @@
             (some? (get credits "balance"))
             (assoc :balance (get credits "balance"))))))))
 
+(def ^:private STREAM_PROFILE_INFO_GAP_MS
+  "Widest model silence after which a finished stream logs its progress profile at
+   `:info`, not `:debug`. A silence that came close to a deadline is the evidence
+   that a stall diagnosis needs, and callers usually log only from `:info`."
+  60000)
+
+(defn- stream-profile-log-level
+  "Log level for the progress profile of a finished stream."
+  [{:keys [max-gap-ms]}]
+  (if (>= (long (or max-gap-ms 0)) (long STREAM_PROFILE_INFO_GAP_MS)) :info :debug))
+
+(def ^:private QUIET_EVENT_TYPE_LIMIT
+  "Most distinct liveness event types one progress profile names. Later types
+   count under `:other`, so a provider cannot grow the profile without bound."
+  16)
+
 (defn- stream-progress-monitor
   "Model-progress accounting shared by BOTH stream transports.
 
@@ -4477,14 +4494,20 @@
 
    Returns:
      `:last-semantic-ns` - atom (monotonic ns) a watchdog polls.
-     `:observe!`         - (fn [semantic?]) accounts one parsed event.
+     `:observe!`         - (fn [semantic?] / [semantic? event-type]) accounts one
+                           parsed event.
      `:stalled-ms`       - (fn []) ms since the last semantic event.
      `:phase`            - (fn []) :tool-args | :text | :reasoning | :pre-first-token.
      `:profile`          - (fn []) {:ttft-ms :max-gap-ms :max-gap-phase
-                           :semantic-events :quiet-events}, counting the silence
-                           still OPEN at the call: the gap that FIRES a watchdog
-                           never gets a closing event, so a profile built from
-                           closed gaps alone can never see it."
+                           :semantic-events :quiet-events :last-semantic-type
+                           :quiet-since-semantic}, counting the silence still
+                           OPEN at the call: the gap that FIRES a watchdog never
+                           gets a closing event, so a profile built from closed
+                           gaps alone can never see it. `:last-semantic-type` is
+                           the event that last moved the deadline.
+                           `:quiet-since-semantic` counts the liveness frames
+                           after it by type: they tell a silent connection from
+                           one that only sends keepalives."
   [{:keys [^StringBuilder content-acc ^StringBuilder reasoning-acc ^StringBuilder tool-args-acc
            started-ns]}]
   (let [start-ns
@@ -4508,12 +4531,46 @@
         quiet-events
         (atom 0)
 
+        last-semantic-type
+        (atom nil)
+
+        quiet-since-semantic
+        (atom {})
+
         phase
         (fn []
           (cond (pos? (.length tool-args-acc)) :tool-args
                 (pos? (.length content-acc)) :text
                 (pos? (.length reasoning-acc)) :reasoning
-                :else :pre-first-token))]
+                :else :pre-first-token))
+
+        count-quiet-type
+        (fn [counts event-type]
+          (let [k (if (or (contains? counts event-type)
+                          (< (count counts) (long QUIET_EVENT_TYPE_LIMIT)))
+                    event-type
+                    :other)]
+            (update counts k (fnil inc 0))))
+
+        observe!
+        (fn [semantic? event-type]
+          (if semantic?
+            (let [now-ns
+                  (System/nanoTime)
+
+                  gap-ns
+                  (- now-ns (long @last-semantic-ns))]
+
+              (when (nil? @first-semantic-ns) (reset! first-semantic-ns now-ns))
+              (when (> gap-ns (long @max-gap-ns))
+                (reset! max-gap-ns gap-ns)
+                (reset! max-gap-phase (phase)))
+              (swap! semantic-events inc)
+              (reset! last-semantic-type event-type)
+              (reset! quiet-since-semantic {})
+              (reset! last-semantic-ns now-ns))
+            (do (swap! quiet-events inc)
+                (swap! quiet-since-semantic count-quiet-type event-type))))]
 
     {:last-semantic-ns last-semantic-ns
      :first-semantic-seen? (fn []
@@ -4521,21 +4578,9 @@
      :phase phase
      :stalled-ms (fn []
                    (quot (- (System/nanoTime) (long @last-semantic-ns)) 1000000))
-     :observe! (fn [semantic?]
-                 (if semantic?
-                   (let [now-ns
-                         (System/nanoTime)
-
-                         gap-ns
-                         (- now-ns (long @last-semantic-ns))]
-
-                     (when (nil? @first-semantic-ns) (reset! first-semantic-ns now-ns))
-                     (when (> gap-ns (long @max-gap-ns))
-                       (reset! max-gap-ns gap-ns)
-                       (reset! max-gap-phase (phase)))
-                     (swap! semantic-events inc)
-                     (reset! last-semantic-ns now-ns))
-                   (swap! quiet-events inc)))
+     :observe! (fn ([semantic?] (observe! semantic? nil)) ([semantic? event-type] (observe!
+                                                                                    semantic?
+                                                                                    event-type)))
      :profile (fn []
                 (let [first-ns
                       @first-semantic-ns
@@ -4556,7 +4601,9 @@
                    :max-gap-ms (quot (long (if open-widest? open-gap-ns @max-gap-ns)) 1000000)
                    :max-gap-phase (if open-widest? (phase) @max-gap-phase)
                    :semantic-events @semantic-events
-                   :quiet-events @quiet-events}))}))
+                   :quiet-events @quiet-events
+                   :last-semantic-type @last-semantic-type
+                   :quiet-since-semantic @quiet-since-semantic}))}))
 
 (def ^:private CODEX_TURN_STATE_HEADER "x-codex-turn-state")
 
@@ -4716,6 +4763,27 @@
                         :partial-content (when (pos? (.length content)) (str content))
                         :reasoning (when (pos? (.length reasoning)) (str reasoning))}))))
 
+        ;; No frame at all for the whole idle window. The retry ladder reconnects
+        ;; next, without its own record, so name the silence here like the SSE idle
+        ;; watchdog does: the profile tells a dead socket from a quiet model.
+        idle-timeout!
+        (fn [wait-ms cause]
+          (trove/log! {:level :warn
+                       :id ::stream-idle-timeout
+                       :data (log-data (assoc ((:profile progress))
+                                         :url url
+                                         :transport :websocket
+                                         :idle-timeout-ms timeout-ms
+                                         :fired-timeout-ms wait-ms
+                                         :phase ((:phase progress))
+                                         :content-acc-len (.length content)
+                                         :reasoning-acc-len (.length reasoning)
+                                         :tool-args-acc-len (.length tool-args)))
+                       :msg "stream idle, closing"})
+          (throw (or cause
+                     (TimeoutException.
+                       (str "Responses WebSocket timed out after " wait-ms "ms.")))))
+
         receive-frame!
         (fn []
           ;; A cancellation predicate is caller state, not a socket event. Poll the
@@ -4746,11 +4814,7 @@
                   (:frame outcome)
                   (cond (stalled?) (semantic-timeout!)
                         (> (long remaining) slice) (recur (- (long remaining) slice))
-                        :else (throw (or (:timeout outcome)
-                                         (TimeoutException. (str
-                                                              "Responses WebSocket timed out after "
-                                                              wait
-                                                              "ms."))))))))))]
+                        :else (idle-timeout! wait (:timeout outcome))))))))]
 
     (loop [output-items
            []
@@ -4801,24 +4865,37 @@
                   item (when (= "response.output_item.done" event-type) (get event "item"))]
 
               ((:observe! progress)
-                (stream-semantic-event? event delta content-piece reasoning-piece))
+                (stream-semantic-event? event delta content-piece reasoning-piece)
+                event-type)
               (when content-piece (.append content ^String content-piece))
               (when reasoning-piece (.append reasoning ^String reasoning-piece))
               (when tool-args-delta (.append tool-args ^String tool-args-delta))
               (when tool-call-preview (swap! tool-call-preview-acc merge tool-call-preview))
-              (when (and on-chunk
-                         (or content-delta reasoning-delta tool-args-delta tool-call-preview))
-                (on-chunk {:content (str content)
-                           :reasoning (nonblank-str (str reasoning))
-                           :tool-input (nonblank-str (str tool-args))
-                           :tool-call-preview tool-call-preview
-                           :provider-state next-provider-state
-                           :api-usage next-api-usage
-                           :done? false}))
+              ;; Forward every event that moved the semantic deadline, the same
+              ;; pieces the SSE reader forwards. A progress event without text
+              ;; arrives as `:thinking-alive?`, so the caller's stall clock and
+              ;; this watchdog measure the same silence.
+              (let [silent-progress?
+                    (stream-silent-progress? event delta content-piece reasoning-piece)]
+                (when (and on-chunk
+                           (or content-piece
+                               reasoning-piece
+                               tool-args-delta
+                               tool-call-preview
+                               silent-progress?))
+                  (on-chunk (cond-> {:content (str content)
+                                     :reasoning (nonblank-str (str reasoning))
+                                     :tool-input (nonblank-str (str tool-args))
+                                     :tool-call-preview tool-call-preview
+                                     :provider-state next-provider-state
+                                     :api-usage next-api-usage
+                                     :done? false}
+                              silent-progress?
+                              (assoc :thinking-alive? true)))))
               (when (stalled?) (semantic-timeout!))
               (if (contains? #{"response.completed" "response.incomplete"} event-type)
                 (let [profile ((:profile progress))]
-                  (trove/log! {:level :debug
+                  (trove/log! {:level (stream-profile-log-level profile)
                                :id ::stream-progress
                                :data (log-data (assoc profile
                                                  :url url
@@ -5017,10 +5094,19 @@
         prewarm?
         (and (not= false (:websocket-prewarm? opts)) (not (:prewarmed? prior)) (not continue?))
 
+        ;; The caller gets the restart as a stream event, which a caller may not
+        ;; log. Keep a record here too: without it, a turn that reconnected left no
+        ;; Svar line in the caller's log.
         restart!
-        (or (:session-restart! opts)
-            (fn [_]
-              nil))
+        (let [notify! (or (:session-restart! opts)
+                          (fn [_]
+                            nil))]
+          (fn [event]
+            (trove/log! {:level :warn
+                         :id ::websocket-session-restart
+                         :data (log-data (assoc event :transport :websocket))
+                         :msg "Responses WebSocket turn restarts on a new socket"})
+            (notify! event)))
 
         rate-limits!
         (fn [snapshot]
@@ -5436,14 +5522,17 @@
                              extract-stream-delta
                              (when on-chunk
                                (fn [{:keys [content-acc reasoning-acc tool-args-acc
-                                            tool-call-preview provider-state api-usage]}]
-                                 (on-chunk {:content content-acc
-                                            :reasoning (nonblank-str reasoning-acc)
-                                            :tool-input (nonblank-str tool-args-acc)
-                                            :tool-call-preview tool-call-preview
-                                            :provider-state provider-state
-                                            :api-usage api-usage
-                                            :done? false})))))
+                                            tool-call-preview provider-state api-usage
+                                            thinking-alive?]}]
+                                 (on-chunk (cond-> {:content content-acc
+                                                    :reasoning (nonblank-str reasoning-acc)
+                                                    :tool-input (nonblank-str tool-args-acc)
+                                                    :tool-call-preview tool-call-preview
+                                                    :provider-state provider-state
+                                                    :api-usage api-usage
+                                                    :done? false}
+                                             thinking-alive?
+                                             (assoc :thinking-alive? true)))))))
         (extract-response-data (http-post! url request-body http-headers timeout-ms)))
       (catch Exception e
         (if (stream-finalization-error? e)
@@ -5712,6 +5801,11 @@
 
 (def ^:private nonterminal-stream-statuses #{"in_progress" "queued" "running"})
 
+(def ^:private progress-only-event-types
+  "Events that prove model progress without text: the model opened a message or a
+   new output item, for example a reasoning item without a summary."
+  #{"message_start" "response.output_item.added"})
+
 (defn- stream-semantic-event?
   "True only when a parsed event advances model output or terminates the response.
    Transport notices, rate-limit snapshots and repeated provider state are liveness,
@@ -5730,10 +5824,25 @@
                  (seq reasoning-piece)
                  (seq (:tool-args-delta extracted))
                  (:tool-call-preview extracted)
-                 (contains? #{"message_start" "response.output_item.added"} event-type)
+                 (contains? progress-only-event-types event-type)
                  terminal-finish?
                  (:terminal? extracted)
                  (:incomplete? extracted)))))
+
+(defn- stream-silent-progress?
+  "True when a semantic event carries no text: a new output item, a message start
+   or a tool-call preview.
+
+   It still moves the semantic deadline here, so the caller must also see it, as a
+   chunk with `:thinking-alive?`. A caller stall clock that sees only text then
+   counts a longer silence than this watchdog. Measured (vis CTB round m14c,
+   2026-10-27): Vis saw 300 s of silence and Svar's 240 s deadline never fired."
+  [parsed extracted content-piece reasoning-piece]
+  (boolean (and (not (seq content-piece))
+                (not (seq reasoning-piece))
+                (not (seq (:tool-args-delta extracted)))
+                (or (:tool-call-preview extracted)
+                    (contains? progress-only-event-types (stream-event-type parsed))))))
 
 (defn- stream-thinking-open?
   "Whether an Anthropic thinking block is open after the parsed event, given
@@ -6651,7 +6760,8 @@
                      (swap! thinking-block-open? stream-thinking-open? parsed)
                      ((:observe! progress)
                        (or thinking-alive?
-                           (stream-semantic-event? parsed extracted content-piece reasoning-piece)))
+                           (stream-semantic-event? parsed extracted content-piece reasoning-piece))
+                       (stream-event-type parsed))
                      (when content-piece (.append content-acc content-piece))
                      (when reasoning-piece (.append reasoning-acc reasoning-piece))
                      (when tool-args-delta (.append tool-args-acc ^String tool-args-delta))
@@ -6668,7 +6778,14 @@
                                   :tool-call-preview @tool-call-preview-atom
                                   :provider-state @provider-state-atom
                                   :api-usage api-usage
-                                  :thinking-alive? thinking-alive?})))))
+                                  ;; A progress event without text keeps the caller's
+                                  ;; stall clock in step with the semantic deadline.
+                                  :thinking-alive? (or thinking-alive?
+                                                       (stream-silent-progress?
+                                                         parsed
+                                                         extracted
+                                                         content-piece
+                                                         reasoning-piece))})))))
            (dispatch-event! [event-type data-lines]
              (when-let [parsed (parse-sse-event event-type data-lines)]
                (handle-parsed! parsed)))]
@@ -6993,7 +7110,7 @@
                                                  :response response})
               :progress (progress-profile))]
 
-        (trove/log! {:level :debug
+        (trove/log! {:level (stream-profile-log-level (progress-profile))
                      :id ::stream-progress
                      :data (log-data (assoc (progress-profile)
                                        :url url

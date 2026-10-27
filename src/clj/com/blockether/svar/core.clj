@@ -403,8 +403,10 @@
 
     Hidden Anthropic thinking sends no text for minutes. A ping inside an open
     thinking block counts as model progress, so the stall check does not cut
-    long thinking. :on-chunk then gets a chunk with :thinking-alive? true and
-    no new text, so you can show that the model still works.
+    long thinking. A new output item, a message start or a tool-call preview
+    also counts. :on-chunk then gets a chunk with :thinking-alive? true and no
+    new text, so you can show that the model still works. Reset your own stall
+    clock on it, or it measures a longer silence than the stall check.
 
    A provider that rejects its credentials is re-sent on the same provider when the
    routing option :refresh-credentials answers new credentials for it. The router

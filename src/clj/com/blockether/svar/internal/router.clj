@@ -1917,10 +1917,10 @@
    liveness; semantic watches model progress. Enable per-call with e.g.
    `:semantic-timeout-ms 180000`.
 
-   NOT honored on the `:openai-compatible-responses` api-style: that
-   transport hard-disables the semantic watchdog and runs the idle watchdog
-   alone (Codex's `DEFAULT_STREAM_IDLE_TIMEOUT_MS` model). A caller value is
-   accepted there and ignored."
+   Both stream transports honor it, also a Responses session on a WebSocket.
+   Model progress is text, reasoning, tool-call input, a new output item or the
+   terminal event. Each progress event without text reaches `:on-chunk` with
+   `:thinking-alive? true`, so a caller stall clock measures the same silence."
   nil)
 
 (def DEFAULT_RETRY

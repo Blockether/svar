@@ -6,7 +6,8 @@
             [com.blockether.svar.internal.failure :as failure]
             [com.blockether.svar.internal.llm :as sut]
             [com.blockether.svar.internal.router :as router]
-            [lazytest.core :refer [defdescribe expect it]])
+            [lazytest.core :refer [defdescribe expect it]]
+            [taoensso.trove :as trove])
   (:import (java.net.http WebSocket)
            (java.util.concurrent CompletableFuture CountDownLatch TimeUnit TimeoutException)))
 
@@ -1516,28 +1517,79 @@
             (expect (= "http answer" (:content (svar/ask! session "two"))))))
         (expect (= 1 @opens))
         (expect (= [1 3] @http-inputs))))
-  (it
-    "tells a streaming caller that its turn started over"
-    ;; Every attempt streams its own cumulative text from zero. With no signal a
-    ;; consumer that appends deltas kept the text of the attempt the lost
-    ;; connection threw away.
-    (let [opens
-          (atom 0)
+  (it "tells a streaming caller that its turn started over"
+      ;; Every attempt streams its own cumulative text from zero. With no signal a
+      ;; consumer that appends deltas kept the text of the attempt the lost
+      ;; connection threw away.
+      (let [opens
+            (atom 0)
 
-          seen
-          (atom [])
+            seen
+            (atom [])
 
-          factory
-          (fn [_]
-            (let [n
-                  (swap! opens inc)
+            factory
+            (fn [_]
+              (let [n
+                    (swap! opens inc)
 
-                  receives
-                  (atom (if (= n 1)
-                          [(json/write-json-str {"type" "response.output_text.delta" "delta" "par"})
-                           (java.io.IOException. "connection lost")]
-                          [(completed-event "resp_1" "whole answer")]))]
+                    receives
+                    (atom (if (= n 1)
+                            [(json/write-json-str {"type" "response.output_text.delta"
+                                                   "delta" "par"})
+                             (java.io.IOException. "connection lost")]
+                            [(completed-event "resp_1" "whole answer")]))]
 
+                {:send! (fn [_]
+                          nil)
+                 :receive! (fn [_]
+                             (let [event (first @receives)]
+                               (swap! receives subvec 1)
+                               event))
+                 :close! (fn []
+                           nil)
+                 :abort! (fn []
+                           nil)}))]
+
+        (let [logs (atom [])]
+          (binding [trove/*log-fn* (fn [_ns _coords level id lazy_]
+                                     (swap! logs conj
+                                       {:level level :id id :data (:data (force lazy_))}))]
+            (with-redefs [sut/open-responses-websocket! factory]
+              (with-open [session (open-test-session (codex-router)
+                                                     {:routing {:provider :openai-codex
+                                                                :model "gpt-5.6"}
+                                                      :websocket-retry-delay-ms 0
+                                                      :on-chunk (fn [event]
+                                                                  (swap! seen conj event))})]
+                (expect (= "whole answer" (:content (svar/ask! session "one")))))))
+          ;; A reconnect used to leave no Svar line in the caller's log (vis CTB
+          ;; rounds m11 and m13): only the caller saw the restart event.
+          (let [record (first (filter #(= ::sut/websocket-session-restart (:id %)) @logs))]
+            (expect (= :warn (:level record)))
+            (expect (= :reconnect (get-in record [:data :reason])))))
+        (expect (= "par" (:content (first @seen))))
+        (let [restart (first (filter :restarted? @seen))]
+          (expect (= :llm.session/stream-restarted (:event/type restart)))
+          (expect (= "" (:content restart)))
+          (expect (= :reconnect (:reason restart)))
+          (expect (= 1 (:attempt restart))))))
+  (it "tells a streaming caller about model progress without text"
+      ;; A reasoning item without a summary moves the semantic deadline but adds no
+      ;; text. Vis saw 300 s of silence in CTB round m14c while Svar's 240 s
+      ;; deadline never fired, so the two stall clocks must see the same events.
+      (let [seen
+            (atom [])
+
+            receives
+            (atom [(json/write-json-str {"type" "response.reasoning_summary_text.delta"
+                                         "delta" "plan"})
+                   (json/write-json-str {"type" "response.output_item.added"
+                                         "output_index" 1
+                                         "item" {"id" "rs_2" "type" "reasoning" "summary" []}})
+                   (completed-event "resp_1" "answer")])
+
+            factory
+            (fn [_]
               {:send! (fn [_]
                         nil)
                :receive! (fn [_]
@@ -1547,21 +1599,18 @@
                :close! (fn []
                          nil)
                :abort! (fn []
-                         nil)}))]
+                         nil)})]
 
-      (with-redefs [sut/open-responses-websocket! factory]
-        (with-open [session (open-test-session (codex-router)
-                                               {:routing {:provider :openai-codex :model "gpt-5.6"}
-                                                :websocket-retry-delay-ms 0
-                                                :on-chunk (fn [event]
-                                                            (swap! seen conj event))})]
-          (expect (= "whole answer" (:content (svar/ask! session "one"))))))
-      (expect (= "par" (:content (first @seen))))
-      (let [restart (first (filter :restarted? @seen))]
-        (expect (= :llm.session/stream-restarted (:event/type restart)))
-        (expect (= "" (:content restart)))
-        (expect (= :reconnect (:reason restart)))
-        (expect (= 1 (:attempt restart))))))
+        (with-redefs [sut/open-responses-websocket! factory]
+          (with-open [session (open-test-session (codex-router)
+                                                 {:routing {:provider :openai-codex
+                                                            :model "gpt-5.6"}
+                                                  :websocket-prewarm? false
+                                                  :on-chunk (fn [event]
+                                                              (swap! seen conj event))})]
+            (expect (= "answer" (:content (svar/ask! session "one"))))))
+        (expect (= [true] (keep :thinking-alive? @seen)))
+        (expect (= "plan" (:reasoning (first (filter :thinking-alive? @seen)))))))
   (it "prewarms the first request with generate false before inference"
       (let [events
             (atom [(completed-event "resp_warm" "") (completed-event "resp_1" "first")])
