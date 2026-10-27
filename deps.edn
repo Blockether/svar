@@ -3,7 +3,7 @@
  :deps {;; Anomaly - standardized error categories
         com.blockether/anomaly    {:mvn/version "1.0.1"}
         ;; HTTP client
-        org.babashka/http-client  {:mvn/version "0.4.23"}
+        org.babashka/http-client  {:mvn/version "0.4.26"}
         ;; JSON parsing
         com.cnuernber/charred     {:mvn/version "1.038"}
         ;; Structured logging
