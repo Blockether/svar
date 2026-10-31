@@ -6123,10 +6123,19 @@
 
 (def ^:private watchdog-token-seq (java.util.concurrent.atomic.AtomicLong.))
 
+(def ^:private watchdog-lock
+  "Guards the decision to arm or stop `watchdog-clock` against a registration."
+  (Object.))
+
+(def ^:private watchdog-clock
+  "The armed periodic tick, or nil while no stream is watched."
+  (atom nil))
+
 (defn- watchdog-tick!
   "One scheduler pass: call every registered tick-fn. A fn returning falsey
    (success/fired/dead) deregisters itself. Each call is isolated so one
-   throwing task cannot starve the rest."
+   throwing task cannot starve the rest. The pass that finds the registry
+   empty stops the clock, so an idle process does not wake 20 times a second."
   []
   (doseq [^java.util.Map$Entry e
           (into [] (.entrySet ^java.util.concurrent.ConcurrentHashMap watchdog-registry))]
@@ -6134,37 +6143,43 @@
           f (.getValue e)]
 
       (when-not (try (f) (catch Throwable _ false))
-        (.remove ^java.util.concurrent.ConcurrentHashMap watchdog-registry token)))))
+        (.remove ^java.util.concurrent.ConcurrentHashMap watchdog-registry token))))
+  (locking watchdog-lock
+    (when (.isEmpty ^java.util.concurrent.ConcurrentHashMap watchdog-registry)
+      (when-let [^java.util.concurrent.ScheduledFuture clock @watchdog-clock]
+        (.cancel clock false)
+        (reset! watchdog-clock nil)))))
 
 (defonce ^:private watchdog-scheduler
   ;; Lazy single-thread daemon scheduler. Started on first registration so a
   ;; process that never streams pays nothing. Fixed 50ms tick over all
   ;; requests: one thread, wakeups flat in N (was ~20/s/request just for the
-  ;; cancel poll -> 1000/s at 50 streams).
-  (delay (let [tf
-               (reify
-                 java.util.concurrent.ThreadFactory
-                   (newThread [_ r]
-                     (doto (Thread. ^Runnable r "svar-stream-watchdog") (.setDaemon true))))
-
-               exec
-               (java.util.concurrent.Executors/newSingleThreadScheduledExecutor tf)]
-
-           (.scheduleAtFixedRate exec
-                                 ^Runnable watchdog-tick!
-                                 (long watchdog-tick-ms)
-                                 (long watchdog-tick-ms)
-                                 java.util.concurrent.TimeUnit/MILLISECONDS)
-           exec)))
+  ;; cancel poll -> 1000/s at 50 streams). `watchdog-clock` runs the tick only
+  ;; while a stream is watched.
+  (delay (let [tf (reify
+                    java.util.concurrent.ThreadFactory
+                      (newThread [_ r]
+                        (doto (Thread. ^Runnable r "svar-stream-watchdog") (.setDaemon true))))]
+           (doto (java.util.concurrent.ScheduledThreadPoolExecutor. 1 tf)
+             (.setRemoveOnCancelPolicy true)))))
 
 (defn- register-watchdog!
   "Register `tick-fn` with the shared scheduler; returns a handle token.
    `tick-fn` is invoked every tick and must return truthy to stay armed,
-   falsey to disarm (after firing or on success). Lazily boots the scheduler."
+   falsey to disarm (after firing or on success). Lazily boots the scheduler
+   and arms its clock."
   [tick-fn]
-  @watchdog-scheduler
   (let [token (.getAndIncrement ^java.util.concurrent.atomic.AtomicLong watchdog-token-seq)]
-    (.put ^java.util.concurrent.ConcurrentHashMap watchdog-registry token tick-fn)
+    (locking watchdog-lock
+      (.put ^java.util.concurrent.ConcurrentHashMap watchdog-registry token tick-fn)
+      (when-not @watchdog-clock
+        (reset! watchdog-clock (.scheduleAtFixedRate
+                                 ^java.util.concurrent.ScheduledThreadPoolExecutor
+                                 @watchdog-scheduler
+                                 ^Runnable watchdog-tick!
+                                 (long watchdog-tick-ms)
+                                 (long watchdog-tick-ms)
+                                 java.util.concurrent.TimeUnit/MILLISECONDS))))
     token))
 
 (defn- deregister-watchdog!

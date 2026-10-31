@@ -18,6 +18,7 @@
            (java.util.concurrent.atomic AtomicBoolean)))
 
 (def ^:private start-cancel-watchdog @#'sut/start-cancel-watchdog!)
+(def ^:private register-watchdog @#'sut/register-watchdog!)
 (def ^:private deregister-watchdog @#'sut/deregister-watchdog!)
 (def ^:private watchdog-registry @#'sut/watchdog-registry)
 
@@ -207,3 +208,40 @@
         (deregister-watchdog t)
         (expect (false? @cancel-fired?))
         (expect (false? (.get closed?)))))))
+
+(defn- watchdog-thread-state
+  "State of the shared watchdog thread, polled until it is `wanted` or ~2 s pass."
+  [wanted]
+  (loop [n 0]
+    (let [state (some (fn [^Thread t]
+                        (when (= "svar-stream-watchdog" (.getName t)) (.getState t)))
+                      (keys (Thread/getAllStackTraces)))]
+      (if (or (= wanted state) (>= n 100)) state (do (Thread/sleep 20) (recur (inc n)))))))
+
+(defdescribe watchdog-clock-test
+             ;; A gateway that streamed once woke this thread every 50 ms for the rest of its life.
+             (it
+               "stops ticking while no stream is watched, and ticks again at the next registration"
+               (let [ticks
+                     (atom 0)
+
+                     t
+                     (register-watchdog (fn []
+                                          (swap! ticks inc)
+                                          (< @ticks 3)))]
+
+                 (loop [n 0]
+                   (when (and (< @ticks 3) (< n 100)) (Thread/sleep 20) (recur (inc n))))
+                 (expect (= 3 @ticks))
+                 (expect (not (.containsKey ^java.util.Map watchdog-registry t)))
+                 (expect (= Thread$State/WAITING (watchdog-thread-state Thread$State/WAITING)))
+                 (let [again
+                       (promise)
+
+                       t2
+                       (register-watchdog (fn []
+                                            (deliver again true)
+                                            false))]
+
+                   (expect (true? (deref again 2000 false)))
+                   (deregister-watchdog t2)))))
