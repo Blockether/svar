@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.216] - 2026-10-31
+
+### Changed
+- perf(llm): stop the stream watchdog clock while no stream runs
+- build(deps): bump babashka http-client to 0.4.26
+- release: update version files for v0.7.215, bump to next dev version
+
+
 ## [v0.7.215] - 2026-10-27
 
 ### Changed
@@ -2902,7 +2910,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.215...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.216...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -3150,3 +3158,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.213]: https://github.com/Blockether/svar/releases/tag/v0.7.213
 [v0.7.214]: https://github.com/Blockether/svar/releases/tag/v0.7.214
 [v0.7.215]: https://github.com/Blockether/svar/releases/tag/v0.7.215
+[v0.7.216]: https://github.com/Blockether/svar/releases/tag/v0.7.216
