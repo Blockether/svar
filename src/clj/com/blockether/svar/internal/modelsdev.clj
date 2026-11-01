@@ -155,19 +155,42 @@
       (:status m)
       (assoc :status (:status m)))))
 
+(defn- normalized-provider-models
+  [catalog-map provider-id]
+  (->> (:models (get catalog-map provider-id))
+       vals
+       (map normalize-model)
+       (reduce (fn [acc m]
+                 (assoc acc (:name m) m))
+               {})))
+
+(def ^:private provider-models-cache
+  "`{:catalog catalog-map :by-id {provider-id models}}`. Normalized once per
+   provider of one catalog value; a new catalog value starts a new cache."
+  (atom {:catalog nil :by-id {}}))
+
 (defn provider-models
   "Returns a map of model-name (string) → normalized metadata for
    provider-id, pulled from the models.dev catalog.
 
    Returns {} when the provider is unknown to models.dev."
   [provider-id]
-  (let [entry (get @catalog provider-id)]
-    (->> (:models entry)
-         vals
-         (map normalize-model)
-         (reduce (fn [acc m]
-                   (assoc acc (:name m) m))
-                 {}))))
+  (let [catalog-map
+        @catalog
+
+        cached
+        @provider-models-cache]
+
+    (cond (not (contains? catalog-map provider-id)) {}
+          (and (identical? catalog-map (:catalog cached)) (contains? (:by-id cached) provider-id))
+          (get-in cached [:by-id provider-id])
+          :else (let [models (normalized-provider-models catalog-map provider-id)]
+                  (swap! provider-models-cache
+                    (fn [{:keys [by-id] :as state}]
+                      {:catalog catalog-map
+                       :by-id (assoc (if (identical? catalog-map (:catalog state)) by-id {})
+                                provider-id models)}))
+                  models))))
 
 (defn model-key
   "Provider-independent lookup key for a model id: lower-cased, without an
