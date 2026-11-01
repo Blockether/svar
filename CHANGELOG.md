@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.7.219] - 2026-11-01
+
+### Changed
+- perf(llm): reuse per-message replay and wire work across requests
+- release: update version files for v0.7.218, bump to next dev version
+
+
 ## [v0.7.218] - 2026-11-01
 
 ### Changed
@@ -2924,7 +2931,7 @@ Other additions (unchanged from prior unreleased shipping):
 - Initial commit
 
 
-[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.218...HEAD
+[Unreleased]: https://github.com/Blockether/svar/compare/v0.7.219...HEAD
 [v0.5.3]: https://github.com/Blockether/svar/releases/tag/v0.5.3
 [v0.1.1]: https://github.com/Blockether/svar/releases/tag/v0.1.1
 [v0.1.2]: https://github.com/Blockether/svar/releases/tag/v0.1.2
@@ -3175,3 +3182,4 @@ Other additions (unchanged from prior unreleased shipping):
 [v0.7.216]: https://github.com/Blockether/svar/releases/tag/v0.7.216
 [v0.7.217]: https://github.com/Blockether/svar/releases/tag/v0.7.217
 [v0.7.218]: https://github.com/Blockether/svar/releases/tag/v0.7.218
+[v0.7.219]: https://github.com/Blockether/svar/releases/tag/v0.7.219
