@@ -436,6 +436,9 @@
    Return a nonnegative input count only for a validated unchanged measured prefix
    on this exact route/account/policy; return nil otherwise. Preflight then uses the
    estimate instead of recounting that prefix. Provider usage is never overwritten.
+   `:message-token-counter` optionally replaces the local preflight count without
+   such an estimate. Svar calls it as (f model messages {:tokenizer t}). It must
+   return what `count-messages` returns; a host can cache counts for each message.
    Supported tokenizer declarations are o200k_base and cl100k_base; other names
    retain the model-name/local fallback, so all local counts remain estimates."
   llm/ask-code!)

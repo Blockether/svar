@@ -5340,10 +5340,13 @@
       the offline estimate. This is where the refinement *policy* lives —
       callers (e.g. the Anthropic `count_tokens` path) inject only the
       *transport*.
-   3. Offline `count-messages` tiktoken estimate."
+   3. Offline `count-messages` tiktoken estimate. `:message-token-counter`
+      (optional) replaces it with a host counter of the same result, called
+      as `(f model messages {:tokenizer t})`, so a host can reuse its counts."
   ([^String model messages] (check-context-limit model messages {}))
   ([^String model messages
-    {:keys [output-reserve throw? context-limits input-tokens exact-count-fn tokenizer]
+    {:keys [output-reserve throw? context-limits input-tokens exact-count-fn tokenizer
+            message-token-counter]
      :or {output-reserve DEFAULT_OUTPUT_RESERVE throw? false}
      :as opts}]
    (let
@@ -5357,7 +5360,8 @@
       (max-input-tokens model opts)
 
       offline-tokens
-      (long (or input-tokens (count-messages model messages {:tokenizer tokenizer})))
+      (long (or input-tokens
+                ((or message-token-counter count-messages) model messages {:tokenizer tokenizer})))
 
       ;; Refine near the limit: only when the cheap estimate says we're
       ;; close enough that its imprecision could change ok?/overflow.

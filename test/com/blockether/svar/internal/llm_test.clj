@@ -2000,4 +2000,35 @@
                (expect (= :custom (:provider-id @captured))) (expect (= "new-model"
                                                                         (:model @captured)))
                (expect (string? (get-in @captured [:prompt-cache-context :id])))
-               (expect (nil? (:api-key @captured)))))))))
+               (expect (nil? (:api-key @captured))))))))
+  ;; Vis report 2026-11-01: after a context fold, preflight re-tokenized the whole
+  ;; conversation (36 ms per request on the JVM) that the host had already counted.
+  (it "prices preflight with the host message counter when no estimate applies"
+      (let [calls
+            (atom [])
+
+            opts
+            {:model "new-model"
+             :provider-id :custom
+             :api-key "test"
+             :base-url "https://gateway.example.com/v1"
+             :api-style :openai-compatible-chat
+             :tokenizer "o200k_base"
+             :context 1000
+             :input-limit 900
+             :output-reserve 100
+             :messages [{:role "user" :content "short"}]
+             :message-token-counter (fn [model messages counter-opts]
+                                      (swap! calls conj [model (count messages) counter-opts])
+                                      950)}
+
+            result
+            (with-redefs-fn {#'sut/chat-completion
+                             (fn [& _]
+                               {:content "ok"
+                                :api-usage {:input-tokens 3 :output-tokens 1 :total-tokens 4}})}
+              #(try (@#'sut/ask-code!* {} opts) (catch Exception e (ex-data e))))]
+
+        (expect (= :svar.core/context-overflow (:type result)))
+        (expect (= 950 (:input-tokens result)))
+        (expect (= [["new-model" 1 {:tokenizer "o200k_base"}]] @calls)))))

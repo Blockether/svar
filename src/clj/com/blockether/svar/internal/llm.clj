@@ -8757,6 +8757,7 @@
         (cond-> {:context-limits context-limits
                  :input-limit (:input-limit opts)
                  :tokenizer (:tokenizer opts)
+                 :message-token-counter (:message-token-counter opts)
                  :input-tokens (preflight-input-tokens model
                                                        base-messages
                                                        (assoc opts :extra-body extra-body)
@@ -9772,6 +9773,7 @@
         (cond-> {:context-limits context-limits
                  :input-limit (:input-limit opts)
                  :tokenizer (:tokenizer opts)
+                 :message-token-counter (:message-token-counter opts)
                  :input-tokens (preflight-input-tokens model
                                                        in-msgs
                                                        (assoc opts :extra-body extra-body)
