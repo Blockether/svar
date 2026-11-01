@@ -89,52 +89,39 @@
 
 (def ^:private resolved-network-timeout @#'sut/resolved-network-timeout)
 
-(defn- reference-canonical-cache-value
-  "The canonical form that cache identity printed before svar 0.7.219."
-  [value]
-  (cond (map? value) [:map
-                      (vec (sort-by pr-str
-                                    (map (fn [[k v]]
-                                           [(reference-canonical-cache-value k)
-                                            (reference-canonical-cache-value v)])
-                                         value)))]
-        (set? value) [:set (vec (sort-by pr-str (map reference-canonical-cache-value value)))]
-        (sequential? value) [:seq (mapv reference-canonical-cache-value value)]
-        (keyword? value) [:keyword (namespace value) (name value)]
-        (symbol? value) [:symbol (namespace value) (name value)]
-        :else value))
-
 (defdescribe canonical-cache-sort-test
-             (it "prints each node of a deep value once, not again at each level"
-                 ;; Vis JFR profile: prompt-cache-context printed a tool schema again at
-                 ;; every map level while sorting, about 1.5 ms per request.
-                 (let [value
-                       (reduce (fn [inner n]
-                                 {(str "level-" n) inner :sibling #{n (str "s" n)}})
-                               {:leaf (vec (range 16))}
-                               (range 8))
+             (it "renders each canonical map entry or set member only once while sorting"
+                 ;; JVM gateway profiling found repeated serialization in the sort comparator.
+                 (let [entries
+                       (mapv (fn [n]
+                               [(str "key-" n) n])
+                             (range 32))
 
-                       printed
-                       (atom 0)
+                       values
+                       [(into {} entries) (set (range 32))]]
 
-                       original-pr-str
-                       pr-str
+                   (doseq [value values]
+                     (let [members (if (map? value) (mapv vec value) value)
+                           expected [(if (map? value) :map :set) (vec (sort-by pr-str members))]
+                           renders (atom 0)
+                           original-pr-str pr-str
+                           actual (with-redefs [pr-str (fn [& args]
+                                                         (swap! renders inc)
+                                                         (apply original-pr-str args))]
+                                    (@#'sut/canonical-cache-value value))]
 
-                       text
-                       (with-redefs [pr-str (fn [& args]
-                                              (let [s (apply original-pr-str args)]
-                                                (swap! printed + (count s))
-                                                s))]
-                         (@#'sut/canonical-cache-str value))]
-
-                   (expect (<= @printed (count text)))))
+                       (expect (= expected actual))
+                       (expect (= (count value) @renders))))))
              (it "preserves canonical bytes for empty, singleton and nested mixed data"
                  (doseq [value [{} #{} {:only "value"} #{"only"}
                                 {nil #{:b :a "z" 1 [1 2]}
                                  :tools [{:name "compute" :schema {"type" "object"}}]
                                  "nested" {'symbol '(true false nil) :text "Zażółć"}}]]
-                   (expect (= (pr-str (reference-canonical-cache-value value))
-                              (@#'sut/canonical-cache-str value))))))
+                   (let [expected (with-redefs-fn {#'sut/sort-cache-values
+                                                   (fn [values]
+                                                     (vec (sort-by pr-str values)))}
+                                    #(@#'sut/canonical-cache-str value))]
+                     (expect (= expected (@#'sut/canonical-cache-str value)))))))
 
 (defdescribe
   prompt-cache-context-test

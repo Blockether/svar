@@ -17,9 +17,7 @@
     (java.io BufferedReader Closeable InputStreamReader)
     (java.net URI)
     (java.net.http HttpClient HttpResponse WebSocket WebSocket$Listener WebSocketHandshakeException)
-    (java.util.concurrent CompletableFuture LinkedBlockingQueue TimeUnit TimeoutException)
-    (charred JSONWriter)
-    (com.blockether.svar WeakIdentityMap)))
+    (java.util.concurrent CompletableFuture LinkedBlockingQueue TimeUnit TimeoutException)))
 
 ;; =============================================================================
 ;; Correlation context
@@ -225,83 +223,6 @@
                         (Thread. ^Runnable shutdown-http-client! "svar-http-shutdown-hook"))
       true))
 
-;; =============================================================================
-;; Per-message request work
-;; =============================================================================
-;;
-;; A conversation grows at its tail, so each request repeats the messages of the
-;; last one. The replay passes and the wire encoding are pure functions of one
-;; message, so their result is kept by message identity. Identity keys never
-;; join two different values. Only persistent maps are cached, because a mutable
-;; map can change after its entry is made.
-
-(defn- cached-per-message
-  "Returns `(f msg)`, kept for this exact `msg` object and the extra input `k`.
-   The entry lives while `msg` lives. A result equal to `msg` itself is stored as
-   a marker, so that the entry never holds its own key."
-  [^WeakIdentityMap cache msg k f]
-  (if (instance? clojure.lang.IPersistentMap msg)
-    (let [entry
-          (.get cache msg)
-
-          hit
-          (if entry (get entry k ::miss) ::miss)]
-
-      (cond (identical? ::miss hit)
-            (let [v (f msg)]
-              (.put cache msg (assoc (or entry {}) k (if (identical? v msg) ::same v)))
-              v)
-            (identical? ::same hit) msg
-            :else hit))
-    (f msg)))
-
-(def ^:private wire-message-json
-  "Encoded JSON of each wire message that a request builder marked as reusable."
-  (WeakIdentityMap.))
-
-(def ^:private write-json-default (json/write-json-fn {}))
-
-(defn- json-str
-  "Equal to `json/write-json-str` without options, with the writer options parsed once."
-  ^String [value]
-  (let [w (java.io.StringWriter.)]
-    (write-json-default w value)
-    (.toString w)))
-
-(defn- mark-wire-messages-reusable!
-  "Lets the request encoder keep the JSON of each wire message in `wire-msgs`."
-  [wire-msgs]
-  (doseq [m wire-msgs]
-    (when (and (instance? clojure.lang.IPersistentMap m)
-               (nil? (.get ^WeakIdentityMap wire-message-json m)))
-      (.put ^WeakIdentityMap wire-message-json m ::pending)))
-  wire-msgs)
-
-(def ^:private reusable-json-writer
-  "Writes a marked wire message from its kept JSON, and every other value as
-   charred's default writer does. The bytes are the same as `json/write-json-str`."
-  (reify
-    java.util.function.BiConsumer
-      (accept [_ w value]
-        (let [hit (when (instance? clojure.lang.IPersistentMap value)
-                    (.get ^WeakIdentityMap wire-message-json value))]
-          (cond (string? hit) (.write ^java.io.Writer (.-w ^JSONWriter w) ^String hit)
-                (identical? ::pending hit) (let [encoded (json-str value)]
-                                             (.put ^WeakIdentityMap wire-message-json value encoded)
-                                             (.write ^java.io.Writer (.-w ^JSONWriter w)
-                                                     ^String encoded))
-                :else (json/default-object-writer w value))))))
-
-(def ^:private write-request-json (json/write-json-fn {:obj-fn reusable-json-writer}))
-
-(defn- request-json-str
-  "Encodes a request body as JSON. Equal to `json/write-json-str`, but a marked
-   wire message is encoded once for its whole life."
-  ^String [body]
-  (let [w (java.io.StringWriter.)]
-    (write-request-json w body)
-    (.toString w)))
-
 (defn- http-post!
   "Makes an HTTP POST request with JSON body. Reuses the shared HttpClient.
 
@@ -330,7 +251,7 @@
                                       (http/post url
                                                  {:client client
                                                   :headers headers
-                                                  :body (request-json-str body)
+                                                  :body (json/write-json-str body)
                                                   :timeout timeout-ms})))
              (catch Exception e
                (if (connection-error? e) (throw (connection-error->ex-info e url)) (throw e))))
@@ -1542,29 +1463,31 @@
   "Bump when Svar changes provider prefix shaping in a way the material below cannot express."
   1)
 
-(declare canonical-cache-text)
+(defn- sort-cache-values
+  "Render canonical sort keys once, preserving their serialized ordering."
+  [values]
+  (->> values
+       (mapv (fn [value]
+               [(pr-str value) value]))
+       (sort-by first)
+       (mapv second)))
 
-(defn- sorted-cache-text
-  "Joins the canonical text of `parts` in sorted text order, as
-   `[:tag [part ...]]`. A sort on the text equals the old sort on `pr-str`."
-  [tag parts]
-  (str "[" tag " [" (str/join " " (sort parts)) "]]"))
-
-(defn- canonical-cache-text
-  "The `pr-str` text of the order-insensitive canonical form of `value`. Each
-   node is printed once and its parent reuses that text, so a deep value is not
-   printed again at each level. The printer vars must be bound by the caller."
-  ^String [value]
-  (cond (map? value) (sorted-cache-text
-                       ":map"
-                       (map (fn [[k v]]
-                              (str "[" (canonical-cache-text k) " " (canonical-cache-text v) "]"))
-                            value))
-        (set? value) (sorted-cache-text ":set" (map canonical-cache-text value))
-        (sequential? value) (str "[:seq [" (str/join " " (map canonical-cache-text value)) "]]")
-        (keyword? value) (pr-str [:keyword (namespace value) (name value)])
-        (symbol? value) (pr-str [:symbol (namespace value) (name value)])
-        :else (pr-str value)))
+(defn- canonical-cache-value
+  "Order-insensitive canonical data for deterministic cache-context hashing."
+  [value]
+  (cond (map? value) [:map
+                      (->> value
+                           (map (fn [[k v]]
+                                  [(canonical-cache-value k) (canonical-cache-value v)]))
+                           sort-cache-values)]
+        (set? value) [:set
+                      (->> value
+                           (map canonical-cache-value)
+                           sort-cache-values)]
+        (sequential? value) [:seq (mapv canonical-cache-value value)]
+        (keyword? value) [:keyword (namespace value) (name value)]
+        (symbol? value) [:symbol (namespace value) (name value)]
+        :else value))
 
 (defn- canonical-cache-str
   "Serialize cache identity without inheriting a caller's printer limits."
@@ -1587,7 +1510,7 @@
             *print-namespace-maps*
             false]
 
-    (canonical-cache-text value)))
+    (pr-str (canonical-cache-value value))))
 
 (defn- sha256-hex
   "Lowercase SHA-256 of one canonical string."
@@ -1709,30 +1632,24 @@
   (not (or (contains? non-replayable-statuses (:stop-reason msg))
            (contains? non-replayable-statuses (:status msg)))))
 
-(defn- foreign-thinking-turn?
-  "True when `msg` is an assistant turn with a content vector whose stamped
-   `:model` differs from `target-model`."
-  [msg target-model]
-  (let [src (:model msg)]
-    (boolean (and (= "assistant"
-                     (some-> (:role msg)
-                             name))
-                  src
-                  target-model
-                  (not= src target-model)
-                  (sequential? (:content msg))))))
-
 (defn- strip-foreign-thinking
   "Drop thinking blocks from an assistant `msg` whose stamped `:model` differs
    from `target-model`. No-op when the turn has no `:model` stamp, no content
    vector, or was produced by the same model."
   [msg target-model]
-  (if (foreign-thinking-turn? msg target-model)
-    (update msg
-            :content
-            (fn [blocks]
-              (vec (remove canonical-thinking-block? (normalize-content (vec blocks))))))
-    msg))
+  (let [src (:model msg)]
+    (if (and (= "assistant"
+                (some-> (:role msg)
+                        name))
+             src
+             target-model
+             (not= src target-model)
+             (sequential? (:content msg)))
+      (update msg
+              :content
+              (fn [blocks]
+                (vec (remove canonical-thinking-block? (normalize-content (vec blocks))))))
+      msg)))
 
 (defn- content-blocks-of-type
   "The values under `key` for every `type-str` block in `msg`'s content vector."
@@ -1785,57 +1702,6 @@
           (str (normalize-id-part c) "|" i*))
         (normalize-id-part s)))))
 
-(def ^:private replay-cache
-  "Per-message results of the replay passes. See [[cached-per-message]]."
-  (WeakIdentityMap.))
-
-(defn- message-role-name
-  [m]
-  (some-> (:role m)
-          name))
-
-(defn- changed-tool-id
-  "The target-wire form of `id` when it differs from `id`, else nil."
-  [id openai?]
-  (let [n (normalize-tool-call-id id openai?)]
-    (when (and n (not= n id)) n)))
-
-(defn- message-tool-facts
-  "Tool-call facts of `m` that the replay passes read. Kept per message:
-   - `:call-ids`: ids of `tool_use` blocks of an assistant message
-   - `:result-ids`: `tool_use_id`s of `tool_result` blocks of a user message
-   - `:block-ids`: each distinct `tool_use` `:id` and `tool_result` `:tool_use_id`"
-  [m]
-  (cached-per-message
-    replay-cache
-    m
-    ::tool-facts
-    (fn [m]
-      (let [role (message-role-name m)]
-        {:call-ids (when (= "assistant" role) (vec (content-blocks-of-type m "tool_use" :id)))
-         :result-ids (when (= "user" role)
-                       (vec (content-blocks-of-type m "tool_result" :tool_use_id)))
-         :block-ids (when (sequential? (:content m))
-                      (into []
-                            (comp (keep (fn [b]
-                                          (cond (and (= "tool_use" (:type b)) (:id b)) (:id b)
-                                                (and (= "tool_result" (:type b)) (:tool_use_id b))
-                                                (:tool_use_id b)
-                                                :else nil)))
-                                  (distinct))
-                            (:content m)))}))))
-
-(defn- message-changed-call-ids
-  "The call ids of `m` whose target-wire form differs, for `openai?`. Kept per message."
-  [m fact openai?]
-  (if (empty? (:call-ids fact))
-    []
-    (cached-per-message replay-cache
-                        m
-                        (if openai? ::changed-call-ids-openai ::changed-call-ids)
-                        (fn [_]
-                          (filterv #(changed-tool-id % openai?) (:call-ids fact))))))
-
 (defn- normalize-tool-ids
   "Rewrite every assistant tool_use id AND its matching user tool_result
    tool_use_id to the target-wire-valid form via ONE shared map, so each
@@ -1843,63 +1709,31 @@
    enforces a different id format than the one the call was minted in would
    otherwise reject or silently DROP the tool_result — the 'tool call sometimes
    has no result' symptom. No-op when no id needs changing. `openai?` preserves
-   the Responses composite `call_id|item_id`. Mirrors pi-ai transformMessages.
-
-   The shared map holds the ids of assistant tool_use blocks only. A message is
-   rewritten again only when its own ids or their membership in that map change."
+   the Responses composite `call_id|item_id`. Mirrors pi-ai transformMessages."
   [messages openai?]
-  (let [messages
-        (vec messages)
+  (let [id-map (into {}
+                     (comp (filter #(= "assistant"
+                                       (some-> (:role %)
+                                               name)))
+                           (mapcat #(content-blocks-of-type % "tool_use" :id))
+                           (distinct)
+                           (keep (fn [id]
+                                   (let [n (normalize-tool-call-id id openai?)]
+                                     (when (and n (not= n id)) [id n])))))
+                     messages)]
+    (if (empty? id-map)
+      (vec messages)
+      (let [remap (fn [id]
+                    (get id-map id id))
+            fix (fn [b]
+                  (cond (and (= "tool_use" (:type b)) (:id b)) (update b :id remap)
+                        (and (= "tool_result" (:type b)) (:tool_use_id b))
+                        (update b :tool_use_id remap)
+                        :else b))]
 
-        facts
-        (mapv message-tool-facts messages)
-
-        remap-ids
-        (into #{}
-              (mapcat (fn [[m fact]]
-                        (message-changed-call-ids m fact openai?)))
-              (map vector messages facts))]
-
-    (if (empty? remap-ids)
-      messages
-      ;; A rewrite pass gives every message a content vector, as before.
-      (mapv (fn [m fact]
-              (let [remapped (filterv remap-ids (:block-ids fact))]
-                (if (empty? remapped)
-                  (if (and (sequential? (:content m)) (not (vector? (:content m))))
-                    (update m :content vec)
-                    m)
-                  (cached-per-message
-                    replay-cache
-                    m
-                    [::remapped openai? remapped]
-                    (fn [m]
-                      (let [id-map (into {}
-                                         (map (fn [id]
-                                                [id (changed-tool-id id openai?)]))
-                                         remapped)
-                            remap (fn [id]
-                                    (get id-map id id))
-                            fix (fn [b]
-                                  (cond (and (= "tool_use" (:type b)) (:id b)) (update b :id remap)
-                                        (and (= "tool_result" (:type b)) (:tool_use_id b))
-                                        (update b :tool_use_id remap)
-                                        :else b))]
-
-                        (update m :content #(mapv fix %))))))))
-            messages
-            facts))))
-
-(defn- synthetic-tool-result
-  [id]
-  {:type "tool_result"
-   :tool_use_id id
-   ;; Flag it an ERROR (pi-ai parity) so the model treats
-   ;; it as a failure, not an empty success. Anthropic
-   ;; emits `is_error: true`; OpenAI has no structured
-   ;; flag, so the text carries the signal there.
-   :is_error true
-   :content "No result: the tool call did not complete (failed or interrupted)."})
+        (mapv (fn [m]
+                (if (sequential? (:content m)) (update m :content #(mapv fix %)) m))
+              messages)))))
 
 (defn- synthesize-orphan-tool-results
   "Ensure every assistant `tool_use` has a matching `tool_result` somewhere in the
@@ -1911,71 +1745,45 @@
    results turn right after the assistant message when one exists (Anthropic
    wants all results for a turn in ONE following user message), else a fresh
    results turn. Mirrors pi-ai's `insertSyntheticToolResults`. Ids already
-   resolved ANYWHERE are left alone, so healthy turns are untouched.
-
-   A call answered by the next user message needs no global search. The set of
-   all resolved ids is built only when some call is not answered there."
+   resolved ANYWHERE are left alone, so healthy turns are untouched."
   [messages]
-  (let [ms
-        (vec messages)
+  (let [resolved
+        (->> messages
+             (mapcat #(when (= "user"
+                               (some-> (:role %)
+                                       name))
+                        (content-blocks-of-type % "tool_result" :tool_use_id)))
+             set)
 
-        n
-        (count ms)
-
-        user-result-ids
-        (fn [m]
-          (:result-ids (message-tool-facts m)))
-
-        resolved
-        (delay (into #{} (mapcat user-result-ids) ms))]
+        synth
+        (fn [id]
+          {:type "tool_result"
+           :tool_use_id id
+           ;; Flag it an ERROR (pi-ai parity) so the model treats
+           ;; it as a failure, not an empty success. Anthropic
+           ;; emits `is_error: true`; OpenAI has no structured
+           ;; flag, so the text carries the signal there.
+           :is_error true
+           :content "No result: the tool call did not complete (failed or interrupted)."})]
 
     (loop [out
-           (transient [])
+           []
 
-           i
-           0]
+           ms
+           (vec messages)]
 
-      ;; A nil or false message ends the walk, as the first-of-rest loop did before.
-      (if (and (< i n) (nth ms i))
-        (let [m
-              (nth ms i)
-
-              next-m
-              (when (< (inc i) n) (nth ms (inc i)))
-
-              call-ids
-              (:call-ids (message-tool-facts m))
-
-              orphans
-              (when (seq call-ids)
-                (let [answered (set (user-result-ids next-m))]
-                  (when-not (every? answered call-ids)
-                    (filterv #(not (contains? @resolved %)) call-ids))))]
-
+      (if-let [m (first ms)]
+        (let [orphans (when (= "assistant"
+                               (some-> (:role m)
+                                       name))
+                        (vec (remove resolved (content-blocks-of-type m "tool_use" :id))))]
           (if (seq orphans)
-            (if (result-turn? next-m)
-              (recur (-> out
-                         (conj! m)
-                         (conj! (cached-per-message
-                                  replay-cache
-                                  next-m
-                                  [::merged-orphans orphans]
-                                  (fn [r]
-                                    (update r
-                                            :content
-                                            #(into (vec %) (map synthetic-tool-result) orphans))))))
-                     (+ i 2))
-              (recur (-> out
-                         (conj! m)
-                         (conj! (cached-per-message
-                                  replay-cache
-                                  m
-                                  [::orphan-turn orphans]
-                                  (fn [_]
-                                    {:role "user" :content (mapv synthetic-tool-result orphans)}))))
-                     (inc i)))
-            (recur (conj! out m) (inc i))))
-        (persistent! out)))))
+            (if (result-turn? (second ms))
+              (recur (conj out m (update (second ms) :content #(into (vec %) (map synth) orphans)))
+                     (subvec ms 2))
+              (recur (conj out m {:role "user" :content (mapv synth orphans)}) (subvec ms 1)))
+            (recur (conj out m) (subvec ms 1))))
+        out))))
 
 (defn- sanitize-replayed-messages
   "Defensive pre-request hygiene (see comment above). Skips non-replayable
@@ -1986,18 +1794,13 @@
    any message array; `target-model` is the model the request is being built for."
   ([messages target-model] (sanitize-replayed-messages messages target-model false))
   ([messages target-model openai?]
-   (-> (into []
-             (comp (filter (fn [m]
-                             (or (not= "assistant" (message-role-name m))
-                                 (assistant-turn-replayable? m))))
-                   (map (fn [m]
-                          (if (foreign-thinking-turn? m target-model)
-                            (cached-per-message replay-cache
-                                                m
-                                                [::strip-foreign-thinking target-model]
-                                                #(strip-foreign-thinking % target-model))
-                            m))))
-             messages)
+   (-> (->> messages
+            (filterv (fn [m]
+                       (or (not= "assistant"
+                                 (some-> (:role m)
+                                         name))
+                           (assistant-turn-replayable? m))))
+            (mapv #(strip-foreign-thinking % target-model)))
        (normalize-tool-ids openai?)
        synthesize-orphan-tool-results)))
 
@@ -2080,18 +1883,12 @@
                :else (str/join "\n" (map :text sys-blocks)))
 
          non-system
-         (mark-wire-messages-reusable!
-           (into []
-                 (comp (remove system-role?)
-                       (map (fn [msg]
-                              (cached-per-message replay-cache
-                                                  msg
-                                                  ::anthropic-wire
-                                                  (fn [{:keys [role] :as msg}]
-                                                    {:role (some-> role
-                                                                   name)
-                                                     :content (anthropic-message-content msg)})))))
-                 messages))
+         (->> messages
+              (remove system-role?)
+              (mapv (fn [{:keys [role] :as msg}]
+                      {:role (some-> role
+                                     name)
+                       :content (anthropic-message-content msg)})))
 
          max-tokens
          (or (:max_tokens extra-body) 4096)
@@ -3390,15 +3187,10 @@
   [input]
   (into []
         (keep (fn [item]
-                (cached-per-message replay-cache
-                                    item
-                                    ::stateless-item
-                                    (fn [item]
-                                      (if (= "reasoning" (:type item))
-                                        (let [item* (dissoc item :id :encrypted_content)]
-                                          (when (or (seq (:summary item*)) (seq (:content item*)))
-                                            item*))
-                                        (dissoc item :id))))))
+                (if (= "reasoning" (:type item))
+                  (let [item* (dissoc item :id :encrypted_content)]
+                    (when (or (seq (:summary item*)) (seq (:content item*))) item*))
+                  (dissoc item :id))))
         input))
 
 (defn- responses-build-options
@@ -3453,18 +3245,12 @@
          ;; them by ordering, not by id, so positional faithfulness here
          ;; is what keeps the thinking session valid.
          input
-         (mark-wire-messages-reusable!
-           (cond-> (into []
-                         (comp (remove #(= "system" (:role %)))
-                               (mapcat (fn [m]
-                                         (cached-per-message
-                                           replay-cache
-                                           m
-                                           [::responses-entries explicit-cache?]
-                                           #(responses-message-input-entries % explicit-cache?)))))
-                         messages)
-             stateless-items?
-             strip-server-item-ids))
+         (cond-> (->> messages
+                      (remove #(= "system" (:role %)))
+                      (mapcat #(responses-message-input-entries % explicit-cache?))
+                      vec)
+           stateless-items?
+           strip-server-item-ids)
 
          effort
          (:reasoning_effort extra-body)
@@ -3893,80 +3679,73 @@
          ;; message per result (and is dropped entirely when it held nothing
          ;; else). Assistant `tool_use` blocks hoist to message-level
          ;; `:tool_calls`, mirroring the `reasoning_content` hoist.
-         message->wire
-         (fn [{:keys [role content] :as m}]
-           (let [normalized
-                 (normalize-content content)
-
-                 assistant?
-                 (= role "assistant")
-
-                 [thinking-blocks non-thinking]
-                 (if assistant? (openai-chat-split-thinking normalized) [nil normalized])
-
-                 tool-use-blocks
-                 (filterv tool-use? non-thinking)
-
-                 tool-result-blocks
-                 (filterv tool-result? non-thinking)
-
-                 rest-blocks
-                 (filterv #(not (or (tool-use? %) (tool-result? %))) non-thinking)
-
-                 reasoning-content
-                 (when (and (not echo-off?) (seq thinking-blocks))
-                   (openai-chat-reasoning-content thinking-blocks))
-
-                 tool-calls
-                 (when (seq tool-use-blocks)
-                   (mapv (fn [b]
-                           {:id (normalize-tool-call-id (:id b) false)
-                            :type "function"
-                            :function {:name (:name b)
-                                       :arguments (json/write-json-str (or (:input b) {}))}})
-                         tool-use-blocks))
-
-                 base
-                 (-> m
-                     (dissoc :content :model)
-                     (assoc :content (openai-content rest-blocks))
-                     (cond->
-                       (= role "system")
-                       (assoc :role "system")))
-
-                 base
-                 (cond-> base
-                   reasoning-content
-                   (assoc :reasoning_content reasoning-content)
-
-                   (seq tool-calls)
-                   (assoc :tool_calls tool-calls))
-
-                 ;; Keep the base message unless it's a pure
-                 ;; tool_result carrier (no text, no tool_calls,
-                 ;; no reasoning) — an empty user message is a
-                 ;; 400 on every OpenAI-compatible endpoint.
-                 keep-base?
-                 (or (seq rest-blocks) (seq tool-calls) reasoning-content)
-
-                 tool-msgs
-                 (mapv (fn [b]
-                         {:role "tool"
-                          :tool_call_id (normalize-tool-call-id (:tool_use_id b) false)
-                          :content (tool-result-text (:content b))})
-                       tool-result-blocks)]
-
-             (vec (concat (when keep-base? [base]) tool-msgs))))
-
          processed
-         (mark-wire-messages-reusable!
-           (into []
-                 (mapcat (fn [m]
-                           (cached-per-message replay-cache
-                                               m
-                                               (if echo-off? ::chat-wire-no-echo ::chat-wire)
-                                               message->wire)))
-                 messages))]
+         (vec
+           (mapcat
+             (fn [{:keys [role content] :as m}]
+               (let [normalized
+                     (normalize-content content)
+
+                     assistant?
+                     (= role "assistant")
+
+                     [thinking-blocks non-thinking]
+                     (if assistant? (openai-chat-split-thinking normalized) [nil normalized])
+
+                     tool-use-blocks
+                     (filterv tool-use? non-thinking)
+
+                     tool-result-blocks
+                     (filterv tool-result? non-thinking)
+
+                     rest-blocks
+                     (filterv #(not (or (tool-use? %) (tool-result? %))) non-thinking)
+
+                     reasoning-content
+                     (when (and (not echo-off?) (seq thinking-blocks))
+                       (openai-chat-reasoning-content thinking-blocks))
+
+                     tool-calls
+                     (when (seq tool-use-blocks)
+                       (mapv (fn [b]
+                               {:id (normalize-tool-call-id (:id b) false)
+                                :type "function"
+                                :function {:name (:name b)
+                                           :arguments (json/write-json-str (or (:input b) {}))}})
+                             tool-use-blocks))
+
+                     base
+                     (-> m
+                         (dissoc :content :model)
+                         (assoc :content (openai-content rest-blocks))
+                         (cond->
+                           (= role "system")
+                           (assoc :role "system")))
+
+                     base
+                     (cond-> base
+                       reasoning-content
+                       (assoc :reasoning_content reasoning-content)
+
+                       (seq tool-calls)
+                       (assoc :tool_calls tool-calls))
+
+                     ;; Keep the base message unless it's a pure
+                     ;; tool_result carrier (no text, no tool_calls,
+                     ;; no reasoning) — an empty user message is a
+                     ;; 400 on every OpenAI-compatible endpoint.
+                     keep-base?
+                     (or (seq rest-blocks) (seq tool-calls) reasoning-content)
+
+                     tool-msgs
+                     (mapv (fn [b]
+                             {:role "tool"
+                              :tool_call_id (normalize-tool-call-id (:tool_use_id b) false)
+                              :content (tool-result-text (:content b))})
+                           tool-result-blocks)]
+
+                 (vec (concat (when keep-base? [base]) tool-msgs))))
+             messages))]
 
      (cond-> {:model model :messages processed}
        (seq tools)
@@ -6682,7 +6461,7 @@
                                                  ;; turn a live token stream into one burst at the end.
                                                  :headers (assoc headers
                                                             "accept-encoding" "identity")
-                                                 :body (request-json-str body)
+                                                 :body (json/write-json-str body)
                                                  :timeout timeout-ms
                                                  :as :stream})))
             (catch clojure.lang.ExceptionInfo e
