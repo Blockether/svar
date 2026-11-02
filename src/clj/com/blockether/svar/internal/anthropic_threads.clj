@@ -232,7 +232,7 @@
                 (assoc :refused-prefixes
                   (conj (if reset? [] (vec (:refused-prefixes @state)))
                         {:prefix (comparable-messages (vec (:messages body)))
-                         :start (max 0 (- (count (:messages body)) delta-count))}))))
+                         :start (max 0 (- (count (:messages body)) (long delta-count)))}))))
             (swap! state update
               (if (= "continue" (get-in request [:thread :type])) :delta-requests :full-requests)
               (fnil inc 0))
